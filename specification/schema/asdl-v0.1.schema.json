@@ -1,0 +1,192 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ASDL v0.1",
+    "type": "object",
+    "required": [
+        "asdl",
+        "system",
+        "contracts",
+        "events",
+        "agents"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "asdl": {
+            "type": "string",
+            "const": "0.1"
+        },
+        "system": {
+            "type": "object",
+            "required": [
+                "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9_-]+$"
+                },
+                "description": {
+                    "type": "string"
+                }
+            }
+        },
+        "contracts": {
+            "type": "object",
+            "additionalProperties": {
+                "$ref": "#/definitions/contract"
+            }
+        },
+        "events": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "required": [
+                    "contract"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "contract": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "agents": {
+            "type": "object",
+            "additionalProperties": {
+                "$ref": "#/definitions/agent"
+            }
+        },
+        "execution": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": [
+                        "event-driven"
+                    ]
+                }
+            }
+        }
+    },
+    "definitions": {
+        "contract": {
+            "type": "object",
+            "oneOf": [
+                {
+                    "$ref": "#/definitions/objectContract"
+                },
+                {
+                    "$ref": "#/definitions/streamContract"
+                }
+            ]
+        },
+        "objectContract": {
+            "type": "object",
+            "required": [
+                "type",
+                "properties"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "type": {
+                    "const": "object"
+                },
+                "required": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "properties": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/property"
+                    }
+                }
+            }
+        },
+        "streamContract": {
+            "type": "object",
+            "required": [
+                "type",
+                "items"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "type": {
+                    "const": "stream"
+                },
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "$ref"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                        "$ref": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "property": {
+            "type": "object",
+            "required": [
+                "type"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "string",
+                        "number",
+                        "boolean",
+                        "object",
+                        "array"
+                    ]
+                }
+            }
+        },
+        "agent": {
+            "type": "object",
+            "required": [
+                "runtime"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "runtime": {
+                    "type": "object",
+                    "required": [
+                        "adapter"
+                    ],
+                    "additionalProperties": true,
+                    "properties": {
+                        "adapter": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "prompt": {
+                    "type": "string"
+                },
+                "subscribes_to": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "emits": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        }
+    }
+}
