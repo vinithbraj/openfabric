@@ -1,0 +1,80 @@
+asdl: "0.1"
+
+system:
+  name: hello_http_world
+
+contracts:
+
+  UserQuestion:
+    type: object
+    required: [question]
+    properties:
+      question:
+        type: string
+
+  SearchQuery:
+    type: object
+    required: [query]
+    properties:
+      query:
+        type: string
+
+  SearchResult:
+    type: object
+    required: [content]
+    properties:
+      content:
+        type: string
+
+  FinalAnswer:
+    type: object
+    required: [answer]
+    properties:
+      answer:
+        type: string
+
+events:
+
+  user.ask:
+    contract: UserQuestion
+
+  research.query:
+    contract: SearchQuery
+
+  research.result:
+    contract: SearchResult
+
+  answer.final:
+    contract: FinalAnswer
+
+agents:
+
+  planner:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8001/handle"
+    subscribes_to:
+      - user.ask
+    emits:
+      - research.query
+
+  retriever:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8002/handle"
+    subscribes_to:
+      - research.query
+    emits:
+      - research.result
+
+  synthesizer:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8003/handle"
+    subscribes_to:
+      - research.result
+    emits:
+      - answer.final
+
+execution:
+  mode: event-driven
