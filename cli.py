@@ -5,6 +5,7 @@ from runtime.engine import Engine
 
 
 def main():
+    engine = None
 
     if len(sys.argv) < 2:
         print("Usage: python cli.py <spec.yml>")
@@ -24,6 +25,9 @@ def main():
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)
+    finally:
+        if engine is not None:
+            engine.shutdown()
 
 
 if __name__ == "__main__":

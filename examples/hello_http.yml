@@ -53,6 +53,8 @@ agents:
     runtime:
       adapter: http
       endpoint: "http://localhost:8001/handle"
+      autostart:
+        app: examples.samples.planner.app:app
     subscribes_to:
       - user.ask
     emits:
@@ -62,6 +64,8 @@ agents:
     runtime:
       adapter: http
       endpoint: "http://localhost:8002/handle"
+      autostart:
+        app: examples.samples.retriever.app:app
     subscribes_to:
       - research.query
     emits:
@@ -71,6 +75,8 @@ agents:
     runtime:
       adapter: http
       endpoint: "http://localhost:8003/handle"
+      autostart:
+        app: examples.samples.synthesizer.app:app
     subscribes_to:
       - research.result
     emits:

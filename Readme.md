@@ -28,16 +28,8 @@ pip install -r requirements.txt
 python cli.py examples/hello.yml
 ```
 
-3. Run HTTP example (`hello_http.yml`) in two terminals:
-
-Terminal A:
-
-```bash
-source .venv/bin/activate
-./scripts/start_http_agents.sh
-```
-
-Terminal B:
+3. Run HTTP example (`hello_http.yml`).
+The runtime auto-starts planner/retriever/synthesizer services from the spec:
 
 ```bash
 source .venv/bin/activate

@@ -1,3 +1,10 @@
+import atexit
+import socket
+import subprocess
+import sys
+import time
+from urllib.parse import urlparse
+
 from .contracts import ContractRegistry
 from .event_bus import EventBus
 from .registry import ADAPTER_REGISTRY
@@ -10,8 +17,11 @@ class Engine:
         self.contracts = ContractRegistry(spec["contracts"])
         self.bus = EventBus()
         self.agents = {}
+        self._managed_processes = []
+        self._shutdown_registered = False
 
     def setup(self):
+        self._autostart_http_services()
 
         # Instantiate agents
         for name, config in self.spec["agents"].items():
@@ -33,6 +43,96 @@ class Engine:
             for event in agent["subscribes_to"]:
                 self.bus.subscribe(event, agent_name)
 
+    def _autostart_http_services(self):
+        for agent_name, config in self.spec["agents"].items():
+            runtime_cfg = config.get("runtime", {})
+            if runtime_cfg.get("adapter") != "http":
+                continue
+
+            autostart_cfg = runtime_cfg.get("autostart")
+            if not autostart_cfg:
+                continue
+
+            endpoint = runtime_cfg.get("endpoint")
+            parsed = urlparse(endpoint)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port
+            if port is None:
+                raise ValueError(
+                    f"HTTP agent '{agent_name}' endpoint must include an explicit port"
+                )
+
+            if self._is_port_open(host, port):
+                print(
+                    f"[BOOT] HTTP agent '{agent_name}' already reachable at {endpoint}"
+                )
+                continue
+
+            app = autostart_cfg.get("app")
+            if not app:
+                raise ValueError(
+                    f"HTTP agent '{agent_name}' autostart requires runtime.autostart.app"
+                )
+
+            module = autostart_cfg.get("module", "uvicorn")
+            bind_host = autostart_cfg.get("host", "127.0.0.1")
+            bind_port = int(autostart_cfg.get("port", port))
+            timeout = float(autostart_cfg.get("timeout_seconds", 8))
+
+            command = [
+                sys.executable,
+                "-m",
+                module,
+                app,
+                "--host",
+                bind_host,
+                "--port",
+                str(bind_port),
+            ]
+            print(f"[BOOT] starting HTTP agent '{agent_name}': {' '.join(command)}")
+            process = subprocess.Popen(command)
+            self._managed_processes.append(process)
+
+            if not self._wait_for_port(host, port, timeout, process):
+                exit_code = process.poll()
+                self.shutdown()
+                if exit_code is not None:
+                    raise RuntimeError(
+                        f"HTTP agent '{agent_name}' exited before startup "
+                        f"(code {exit_code}); endpoint {endpoint} is unavailable"
+                    )
+                raise RuntimeError(
+                    f"HTTP agent '{agent_name}' did not become reachable at {endpoint} "
+                    f"within {timeout:.1f}s"
+                )
+
+        if self._managed_processes and not self._shutdown_registered:
+            atexit.register(self.shutdown)
+            self._shutdown_registered = True
+
+    def _is_port_open(self, host: str, port: int) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return True
+        except OSError:
+            return False
+
+    def _wait_for_port(
+        self,
+        host: str,
+        port: int,
+        timeout: float,
+        process: subprocess.Popen,
+    ) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if process.poll() is not None:
+                return False
+            if self._is_port_open(host, port):
+                return True
+            time.sleep(0.1)
+        return False
+
     def emit(self, event_name: str, payload: dict, depth: int = 0):
 
         indent = "  " * depth
@@ -51,3 +151,14 @@ class Engine:
 
             for new_event, new_payload in results:
                 self.emit(new_event, new_payload, depth + 1)
+
+    def shutdown(self):
+        for process in self._managed_processes:
+            if process.poll() is not None:
+                continue
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        self._managed_processes.clear()
