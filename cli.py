@@ -12,14 +12,18 @@ def main():
 
     spec_path = sys.argv[1]
 
-    spec = load_spec(spec_path)
-    validate_semantics(spec)
+    try:
+        spec = load_spec(spec_path)
+        validate_semantics(spec)
 
-    engine = Engine(spec)
-    engine.setup()
+        engine = Engine(spec)
+        engine.setup()
 
-    # Initial trigger
-    engine.emit("user.ask", {"question": "What is Artificial Intelligence?"})
+        # Initial trigger
+        engine.emit("user.ask", {"question": "What is Artificial Intelligence?"})
+    except Exception as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -8,14 +8,22 @@ class HTTPAdapter(Adapter):
 
         endpoint = self.config["endpoint"]
 
-        response = requests.post(
-            endpoint,
-            json={
-                "event": event_name,
-                "payload": payload
-            },
-            timeout=5
-        )
+        try:
+            response = requests.post(
+                endpoint,
+                json={
+                    "event": event_name,
+                    "payload": payload
+                },
+                timeout=5
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                "HTTP adapter could not reach endpoint "
+                f"'{endpoint}'. Ensure the sample services are running on "
+                "ports 8001/8002/8003. You can start them with: "
+                "'./scripts/start_http_agents.sh'"
+            ) from exc
 
         response.raise_for_status()
 

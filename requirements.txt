@@ -1,0 +1,6 @@
+PyYAML
+jsonschema
+requests
+fastapi
+pydantic
+uvicorn

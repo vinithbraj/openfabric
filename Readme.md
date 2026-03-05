@@ -11,3 +11,35 @@ Above that is the orchestration layer — the ASDL runtime. It routes events bet
 At the top is the blueprint layer — the ASDL specification. This declarative definition describes the topology of the system, the contracts that define data shape, the event graph that governs communication, and the execution bindings that tell the runtime how to reach each agent. It is the wiring diagram of the system.
 
 Together, these layers separate structure from behavior and allow intelligent components to be composed, validated, and orchestrated without hard-coding orchestration logic into application code.
+
+Quickstart
+
+1. Create and activate virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+2. Run in-process mock example:
+
+```bash
+python cli.py examples/hello.yml
+```
+
+3. Run HTTP example (`hello_http.yml`) in two terminals:
+
+Terminal A:
+
+```bash
+source .venv/bin/activate
+./scripts/start_http_agents.sh
+```
+
+Terminal B:
+
+```bash
+source .venv/bin/activate
+python cli.py examples/hello_http.yml
+```
