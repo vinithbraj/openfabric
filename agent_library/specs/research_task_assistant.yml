@@ -1,0 +1,112 @@
+asdl: "0.1"
+
+system:
+  name: research_task_assistant
+
+contracts:
+  UserQuestion:
+    type: object
+    required: [question]
+    properties:
+      question:
+        type: string
+
+  SearchQuery:
+    type: object
+    required: [query]
+    properties:
+      query:
+        type: string
+
+  SearchResult:
+    type: object
+    required: [content]
+    properties:
+      content:
+        type: string
+
+  TaskPlan:
+    type: object
+    required: [task]
+    properties:
+      task:
+        type: string
+
+  TaskResult:
+    type: object
+    required: [detail]
+    properties:
+      detail:
+        type: string
+
+  FinalAnswer:
+    type: object
+    required: [answer]
+    properties:
+      answer:
+        type: string
+
+events:
+  user.ask:
+    contract: UserQuestion
+  research.query:
+    contract: SearchQuery
+  research.result:
+    contract: SearchResult
+  task.plan:
+    contract: TaskPlan
+  task.result:
+    contract: TaskResult
+  answer.final:
+    contract: FinalAnswer
+
+agents:
+  planner:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8101/handle"
+      autostart:
+        app: agent_library.agents.planner:app
+    subscribes_to:
+      - user.ask
+    emits:
+      - research.query
+      - task.plan
+
+  retriever:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8102/handle"
+      autostart:
+        app: agent_library.agents.retriever:app
+    subscribes_to:
+      - research.query
+    emits:
+      - research.result
+
+  calculator:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8103/handle"
+      autostart:
+        app: agent_library.agents.calculator:app
+    subscribes_to:
+      - task.plan
+    emits:
+      - task.result
+
+  synthesizer:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8104/handle"
+      autostart:
+        app: agent_library.agents.synthesizer:app
+    subscribes_to:
+      - research.result
+      - task.result
+    emits:
+      - answer.final
+
+execution:
+  mode: event-driven
+

@@ -21,7 +21,8 @@ def main():
         engine.setup()
 
         # Initial trigger
-        engine.emit("user.ask", {"question": "What is Artificial Intelligence?"})
+        # engine.emit("user.ask", {"question": "What is Artificial Intelligence?"})
+        engine.emit("user.ask", {"question": "Please sum 12 + 30 + 8"})
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)

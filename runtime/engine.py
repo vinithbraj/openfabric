@@ -43,6 +43,29 @@ class Engine:
             for event in agent["subscribes_to"]:
                 self.bus.subscribe(event, agent_name)
 
+        self._emit_system_capabilities()
+
+    def _emit_system_capabilities(self):
+        if "system.capabilities" not in self.spec.get("events", {}):
+            return
+        payload = {"agents": self._build_agent_catalog()}
+        self.emit("system.capabilities", payload)
+
+    def _build_agent_catalog(self):
+        catalog = []
+        for agent_name, config in self.spec["agents"].items():
+            runtime_cfg = config.get("runtime", {})
+            catalog.append(
+                {
+                    "name": agent_name,
+                    "adapter": runtime_cfg.get("adapter"),
+                    "endpoint": runtime_cfg.get("endpoint"),
+                    "subscribes_to": config.get("subscribes_to", []),
+                    "emits": config.get("emits", []),
+                }
+            )
+        return catalog
+
     def _autostart_http_services(self):
         for agent_name, config in self.spec["agents"].items():
             runtime_cfg = config.get("runtime", {})

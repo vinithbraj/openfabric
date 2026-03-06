@@ -1,0 +1,175 @@
+asdl: "0.1"
+
+system:
+  name: ops_assistant_llm
+
+contracts:
+  UserQuestion:
+    type: object
+    required: [question]
+    properties:
+      question:
+        type: string
+
+  FileReadRequest:
+    type: object
+    required: [path]
+    properties:
+      path:
+        type: string
+
+  FileContent:
+    type: object
+    required: [path, content]
+    properties:
+      path:
+        type: string
+      content:
+        type: string
+
+  ShellExecRequest:
+    type: object
+    required: [command]
+    properties:
+      command:
+        type: string
+
+  ShellResult:
+    type: object
+    required: [command, stdout, stderr, returncode]
+    properties:
+      command:
+        type: string
+      stdout:
+        type: string
+      stderr:
+        type: string
+      returncode:
+        type: number
+
+  NotifySend:
+    type: object
+    required: [channel, message]
+    properties:
+      channel:
+        type: string
+      message:
+        type: string
+
+  TaskResult:
+    type: object
+    required: [detail]
+    properties:
+      detail:
+        type: string
+
+  NotifyResult:
+    type: object
+    required: [detail]
+    properties:
+      detail:
+        type: string
+
+  FinalAnswer:
+    type: object
+    required: [answer]
+    properties:
+      answer:
+        type: string
+
+  SystemCapabilities:
+    type: object
+    required: [agents]
+    properties:
+      agents:
+        type: array
+
+events:
+  system.capabilities:
+    contract: SystemCapabilities
+  user.ask:
+    contract: UserQuestion
+  file.read:
+    contract: FileReadRequest
+  file.content:
+    contract: FileContent
+  shell.exec:
+    contract: ShellExecRequest
+  shell.result:
+    contract: ShellResult
+  notify.send:
+    contract: NotifySend
+  notify.result:
+    contract: NotifyResult
+  task.result:
+    contract: TaskResult
+  answer.final:
+    contract: FinalAnswer
+
+agents:
+  ops_planner:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8301/handle"
+      autostart:
+        app: agent_library.agents.llm_operations_planner:app
+    subscribes_to:
+      - system.capabilities
+      - user.ask
+    emits:
+      - file.read
+      - shell.exec
+      - notify.send
+      - task.result
+
+  filesystem:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8302/handle"
+      autostart:
+        app: agent_library.agents.filesystem:app
+    subscribes_to:
+      - file.read
+    emits:
+      - file.content
+      - task.result
+
+  shell_runner:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8303/handle"
+      autostart:
+        app: agent_library.agents.shell_runner:app
+    subscribes_to:
+      - shell.exec
+    emits:
+      - shell.result
+      - task.result
+
+  notifier:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8304/handle"
+      autostart:
+        app: agent_library.agents.notifier:app
+    subscribes_to:
+      - notify.send
+    emits:
+      - notify.result
+
+  synthesizer:
+    runtime:
+      adapter: http
+      endpoint: "http://localhost:8305/handle"
+      autostart:
+        app: agent_library.agents.synthesizer:app
+    subscribes_to:
+      - file.content
+      - shell.result
+      - notify.result
+      - task.result
+    emits:
+      - answer.final
+
+execution:
+  mode: event-driven
