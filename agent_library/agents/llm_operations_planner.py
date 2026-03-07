@@ -25,10 +25,10 @@ AGENT_METADATA = {
             "intent_tags": ["read_file", "open_file"],
         },
         {
-            "name": "plan_shell_command",
+            "name": "plan_cli_exec",
             "event": "shell.exec",
             "when": "Use for shell command execution requests.",
-            "intent_tags": ["shell_command", "file_search", "workspace_inspection"],
+            "intent_tags": ["cli_exec", "file_search", "workspace_inspection"],
         },
         {
             "name": "plan_notification",
@@ -57,6 +57,22 @@ SUPPORTED_EVENT_SCHEMAS = {
     "task.plan": '{"task":"..."}',
     "task.result": '{"detail":"..."}',
 }
+EVENT_ALIASES = {
+    "shell_command": "shell.exec",
+    "shell command": "shell.exec",
+    "shell.run": "shell.exec",
+    "run.command": "shell.exec",
+    "read_file": "file.read",
+    "file.open": "file.read",
+    "plan.task": "task.plan",
+}
+REQUIRED_PAYLOAD_KEYS = {
+    "file.read": {"path"},
+    "shell.exec": {"command"},
+    "notify.send": {"channel", "message"},
+    "task.plan": {"task"},
+    "task.result": {"detail"},
+}
 DEFAULT_ALLOWED_EVENTS = set(SUPPORTED_EVENT_SCHEMAS.keys())
 CAPABILITIES = {"agents": [], "available_events": sorted(DEFAULT_ALLOWED_EVENTS)}
 
@@ -78,6 +94,34 @@ def _extract_filepath(question: str):
 def _extract_command(question: str):
     match = re.search(r"(?:run|execute)\s+`([^`]+)`", question)
     return match.group(1) if match else None
+
+
+def _extract_find_command(question: str):
+    question_lc = question.lower()
+    if not any(token in question_lc for token in ("find", "search", "locate")):
+        return None
+    if "file" not in question_lc:
+        return None
+
+    name_match = re.search(
+        r"(?:named|called)\s+['\"]?([a-zA-Z0-9._-]+)['\"]?",
+        question,
+        re.IGNORECASE,
+    )
+    if name_match:
+        filename = name_match.group(1)
+        return f"find . -iname '*{filename}*'"
+
+    token_match = re.search(
+        r"(?:for|matching)\s+['\"]?([a-zA-Z0-9._-]+)['\"]?",
+        question,
+        re.IGNORECASE,
+    )
+    if token_match:
+        token = token_match.group(1)
+        return f"find . -iname '*{token}*'"
+
+    return "find . -type f"
 
 
 def _extract_task_plan(question: str):
@@ -115,6 +159,10 @@ def _fallback_plan(question: str, allowed_events) -> List[Dict[str, Any]]:
     command = _extract_command(question)
     if command and "shell.exec" in allowed_events:
         emits.append({"event": "shell.exec", "payload": {"command": command}})
+
+    discover_command = _extract_find_command(question)
+    if discover_command and "shell.exec" in allowed_events:
+        emits.append({"event": "shell.exec", "payload": {"command": discover_command}})
 
     task = _extract_task_plan(question)
     if task and "task.plan" in allowed_events:
@@ -201,15 +249,19 @@ def _format_discovered_agents(capabilities: dict) -> str:
 
 
 def _build_prompt(question: str, allowed_events, capabilities: dict) -> str:
+    allowed_event_names = ", ".join(sorted(allowed_events))
     return (
         "You are a strict planning agent for an operations assistant.\n"
         "Return ONLY JSON with this exact shape: "
         '{"emits":[{"event":"...","payload":{...}}]}.\n'
+        f"Valid event names are EXACTLY: {allowed_event_names}.\n"
+        "Never use method names or intent tags as event values.\n"
         "Discovered runtime agents and responsibilities:\n"
         f"{_format_discovered_agents(capabilities)}\n"
         "Allowed events and payload schemas:\n"
         f"{_format_allowed_event_schemas(allowed_events)}\n"
         "Follow method routing hints: prefer methods whose intent_tags/examples match the request and avoid anti_patterns.\n"
+        "Only include notify.send when the user explicitly asks to notify/alert/remind.\n"
         "Prefer actionable tool events when relevant. Do not invent extra keys.\n"
         f'User request: "{question}"'
     )
@@ -217,10 +269,74 @@ def _build_prompt(question: str, allowed_events, capabilities: dict) -> str:
 
 def _extract_json_object(text: str):
     start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
+    if start == -1:
         return None
+    end = text.rfind("}")
+    if end == -1 or end < start:
+        return text[start:]
     return text[start : end + 1]
+
+
+def _repair_json_blob(blob: str):
+    # Apply conservative repairs for common LLM formatting mistakes.
+    repaired = blob.strip()
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+
+    normalized_chars = []
+    stack = []
+    in_string = False
+    escaped = False
+    for ch in repaired:
+        if escaped:
+            normalized_chars.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            normalized_chars.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            normalized_chars.append(ch)
+            in_string = not in_string
+            continue
+        if in_string:
+            normalized_chars.append(ch)
+            continue
+        if ch in "{[":
+            normalized_chars.append(ch)
+            stack.append(ch)
+        elif ch == "}":
+            if stack and stack[-1] == "{":
+                normalized_chars.append(ch)
+                stack.pop()
+            else:
+                continue
+        elif ch == "]":
+            if stack and stack[-1] == "[":
+                normalized_chars.append(ch)
+                stack.pop()
+            else:
+                continue
+        else:
+            normalized_chars.append(ch)
+
+    repaired = "".join(normalized_chars)
+    closing = {"{": "}", "[": "]"}
+    while stack:
+        repaired += closing[stack.pop()]
+    return repaired
+
+
+def _parse_planner_json(content: str):
+    json_blob = _extract_json_object(content)
+    if not json_blob:
+        return None, None
+    for candidate in (json_blob, _repair_json_blob(json_blob)):
+        try:
+            return json_blob, json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return json_blob, None
 
 
 def _validate_emits(raw: Any, allowed_events) -> List[Dict[str, Any]]:
@@ -230,16 +346,59 @@ def _validate_emits(raw: Any, allowed_events) -> List[Dict[str, Any]]:
     if not isinstance(emits, list):
         return []
 
+    method_aliases = {}
+    for agent in CAPABILITIES.get("agents", []):
+        for method in agent.get("methods", []):
+            if not isinstance(method, dict):
+                continue
+            method_name = method.get("name")
+            method_event = method.get("event")
+            if isinstance(method_name, str) and isinstance(method_event, str):
+                method_aliases[method_name] = method_event
+
     valid: List[Dict[str, Any]] = []
     for item in emits:
         if not isinstance(item, dict):
             continue
         event = item.get("event")
         payload = item.get("payload")
+        if isinstance(event, str):
+            event = EVENT_ALIASES.get(event, event)
+            event = method_aliases.get(event, event)
+        if not isinstance(payload, dict):
+            continue
+        payload = _normalize_payload(event, payload)
+        required_keys = REQUIRED_PAYLOAD_KEYS.get(event, set())
+        if not required_keys.issubset(set(payload.keys())):
+            continue
         if event not in allowed_events or not isinstance(payload, dict):
             continue
         valid.append({"event": event, "payload": payload})
     return valid
+
+
+def _normalize_payload(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(payload)
+    if event == "shell.exec":
+        if "command" not in normalized and isinstance(normalized.get("cmd"), str):
+            normalized["command"] = normalized["cmd"]
+    elif event == "task.plan":
+        if "task" not in normalized:
+            operation = normalized.get("operation")
+            operands = normalized.get("operands")
+            if isinstance(operation, str) and isinstance(operands, list):
+                tokens = [str(item) for item in operands]
+                normalized["task"] = f"{operation} {' '.join(tokens)}".strip()
+    elif event == "file.read":
+        path = normalized.get("path")
+        if isinstance(path, str) and path.startswith("/"):
+            normalized["path"] = path.lstrip("/")
+    elif event == "notify.send":
+        if "channel" not in normalized:
+            normalized["channel"] = "console"
+        if "message" not in normalized and isinstance(normalized.get("detail"), str):
+            normalized["message"] = normalized["detail"]
+    return normalized
 
 
 def _prefer_calculator_for_arithmetic(question: str, emits: List[Dict[str, Any]], allowed_events) -> List[Dict[str, Any]]:
@@ -251,14 +410,35 @@ def _prefer_calculator_for_arithmetic(question: str, emits: List[Dict[str, Any]]
     return [{"event": "task.plan", "payload": {"task": task}}]
 
 
+def _prune_unrequested_notify(question: str, emits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    question_lc = question.lower()
+    asked_notify = any(token in question_lc for token in ("notify", "alert", "remind"))
+    if asked_notify:
+        return emits
+    has_non_notify = any(item.get("event") != "notify.send" for item in emits)
+    if not has_non_notify:
+        return emits
+    return [item for item in emits if item.get("event") != "notify.send"]
+
+
 def _llm_plan(question: str, allowed_events, capabilities):
-    base_url = os.getenv("LLM_OPS_BASE_URL", "https://api.openai.com/v1")
-    api_key = os.getenv("LLM_OPS_API_KEY")
-    model = os.getenv("LLM_OPS_MODEL", "gpt-4o-mini")
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL")
+    model = os.getenv("LLM_OPS_MODEL")
     timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "10"))
 
     if not api_key:
         raise RuntimeError("LLM_OPS_API_KEY is not set")
+
+    # If a real OpenAI key is present, prefer OpenAI endpoint over local defaults.
+    if api_key.startswith("sk-") and api_key.lower() != "dummy":
+        base_url = "https://api.openai.com/v1"
+        if not model:
+            model = "gpt-4.1"
+    elif not base_url:
+        base_url = "https://api.openai.com/v1"
+    if not model:
+        model = "gpt-4o-mini"
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -285,14 +465,17 @@ def _llm_plan(question: str, allowed_events, capabilities):
     content = data["choices"][0]["message"]["content"]
     _debug_log("Raw LLM response content:")
     _debug_log(content)
-    json_blob = _extract_json_object(content)
+    json_blob, parsed = _parse_planner_json(content)
     if not json_blob:
         _debug_log("No JSON object found in LLM response content.")
         return []
     _debug_log("Extracted JSON object from LLM response:")
     _debug_log(json_blob)
-    parsed = json.loads(json_blob)
+    if parsed is None:
+        _debug_log("Could not parse planner JSON after repair attempts.")
+        return []
     valid_emits = _validate_emits(parsed, allowed_events)
+    valid_emits = _prune_unrequested_notify(question, valid_emits)
     valid_emits = _prefer_calculator_for_arithmetic(question, valid_emits, allowed_events)
     _debug_log("Validated emits from LLM response:")
     _debug_log(json.dumps(valid_emits, indent=2))
@@ -326,7 +509,20 @@ def handle_event(req: EventRequest):
         emits = _llm_plan(question, allowed_events, CAPABILITIES)
         if emits:
             return {"emits": emits}
-    except Exception:
-        pass
+        _debug_log("LLM planning returned no valid emits.")
+    except Exception as exc:
+        _debug_log(f"LLM planning failed. Error: {type(exc).__name__}: {exc}")
 
-    return {"emits": _fallback_plan(question, allowed_events)}
+    if "task.result" in allowed_events:
+        return {
+            "emits": [
+                {
+                    "event": "task.result",
+                    "payload": {
+                        "detail": "Planner could not produce a valid LLM plan. "
+                        "Check LLM response format and retry."
+                    },
+                }
+            ]
+        }
+    return {"emits": []}

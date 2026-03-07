@@ -15,7 +15,7 @@ AGENT_METADATA = {
             "when": "Use for reading/opening files from user request.",
         },
         {
-            "name": "plan_shell_command",
+            "name": "plan_cli_exec",
             "event": "shell.exec",
             "when": "Use for shell command execution requests.",
         },
