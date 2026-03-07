@@ -1,6 +1,6 @@
+import re
 import shlex
 import subprocess
-import re
 
 from fastapi import FastAPI
 
@@ -48,11 +48,7 @@ def handle_event(req: EventRequest):
         }
 
     if not command.strip():
-        return {
-            "emits": [
-                {"event": "task.result", "payload": {"detail": "Empty command rejected"}}
-            ]
-        }
+        return {"emits": [{"event": "task.result", "payload": {"detail": "Empty command rejected"}}]}
 
     try:
         completed = subprocess.run(
