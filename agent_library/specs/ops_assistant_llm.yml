@@ -56,6 +56,13 @@ contracts:
       message:
         type: string
 
+  TaskPlan:
+    type: object
+    required: [task]
+    properties:
+      task:
+        type: string
+
   TaskResult:
     type: object
     required: [detail]
@@ -83,6 +90,34 @@ contracts:
     properties:
       agents:
         type: array
+        items:
+          type: object
+          required: [name, description, methods, adapter, endpoint, subscribes_to, emits]
+          properties:
+            name:
+              type: string
+            description:
+              type: string
+            methods:
+              type: array
+              items:
+                type: object
+                required: [name, event]
+                properties:
+                  name:
+                    type: string
+                  event:
+                    type: string
+                  when:
+                    type: string
+            adapter:
+              type: string
+            endpoint:
+              type: string
+            subscribes_to:
+              type: array
+            emits:
+              type: array
 
 events:
   system.capabilities:
@@ -101,6 +136,8 @@ events:
     contract: NotifySend
   notify.result:
     contract: NotifyResult
+  task.plan:
+    contract: TaskPlan
   task.result:
     contract: TaskResult
   answer.final:
@@ -108,9 +145,27 @@ events:
 
 agents:
   ops_planner:
+    description: "LLM planning agent that maps user requests into allowed tool events."
+    methods:
+      - name: plan_file_read
+        event: file.read
+        when: "Use for reading/opening files from user request."
+      - name: plan_shell_command
+        event: shell.exec
+        when: "Use for shell command execution requests."
+      - name: plan_notification
+        event: notify.send
+        when: "Use for notify/alert requests."
+      - name: plan_arithmetic_task
+        event: task.plan
+        when: "Use for arithmetic operations such as add/subtract/multiply/divide."
+      - name: planner_fallback
+        event: task.result
+        when: "Use only when no actionable tool event applies."
     runtime:
       adapter: http
-      endpoint: "http://localhost:8301/handle"
+      endpoint: "http://127.0.0.1:8301/handle"
+      timeout_seconds: 30
       autostart:
         app: agent_library.agents.llm_operations_planner:app
     subscribes_to:
@@ -120,12 +175,18 @@ agents:
       - file.read
       - shell.exec
       - notify.send
+      - task.plan
       - task.result
 
   filesystem:
+    description: "Reads workspace files and returns file contents."
+    methods:
+      - name: read_workspace_file
+        event: file.read
+        when: "Reads a relative file path from workspace and emits file content."
     runtime:
       adapter: http
-      endpoint: "http://localhost:8302/handle"
+      endpoint: "http://127.0.0.1:8302/handle"
       autostart:
         app: agent_library.agents.filesystem:app
     subscribes_to:
@@ -135,11 +196,16 @@ agents:
       - task.result
 
   shell_runner:
+    description: "Executes bash commands and returns stdout/stderr/exit status."
+    methods:
+      - name: execute_bash_command
+        event: shell.exec
+        when: "Runs bash command strings and emits shell execution result."
     runtime:
       adapter: http
-      endpoint: "http://localhost:8303/handle"
+      endpoint: "http://127.0.0.1:8303/handle"
       autostart:
-        app: agent_library.agents.shell_runner:app
+        app: agent_library.agents.bash_executor:app
     subscribes_to:
       - shell.exec
     emits:
@@ -147,9 +213,14 @@ agents:
       - task.result
 
   notifier:
+    description: "Sends notification messages to configured channels."
+    methods:
+      - name: send_notification
+        event: notify.send
+        when: "Sends notification payloads to configured notification channel."
     runtime:
       adapter: http
-      endpoint: "http://localhost:8304/handle"
+      endpoint: "http://127.0.0.1:8304/handle"
       autostart:
         app: agent_library.agents.notifier:app
     subscribes_to:
@@ -157,10 +228,40 @@ agents:
     emits:
       - notify.result
 
-  synthesizer:
+  calculator:
+    description: "Performs arithmetic tasks from task plans and emits task results."
+    methods:
+      - name: compute_basic_math
+        event: task.plan
+        when: "Computes add/subtract/multiply/divide from natural-language task plans."
     runtime:
       adapter: http
-      endpoint: "http://localhost:8305/handle"
+      endpoint: "http://127.0.0.1:8306/handle"
+      autostart:
+        app: agent_library.agents.calculator:app
+    subscribes_to:
+      - task.plan
+    emits:
+      - task.result
+
+  synthesizer:
+    description: "Builds final user-facing answers from tool results."
+    methods:
+      - name: synthesize_file_result
+        event: file.content
+        when: "Converts file content into final answer."
+      - name: synthesize_shell_result
+        event: shell.result
+        when: "Converts shell execution result into final answer."
+      - name: synthesize_notify_result
+        event: notify.result
+        when: "Converts notify result into final answer."
+      - name: synthesize_task_result
+        event: task.result
+        when: "Converts generic task result into final answer."
+    runtime:
+      adapter: http
+      endpoint: "http://127.0.0.1:8305/handle"
       autostart:
         app: agent_library.agents.synthesizer:app
     subscribes_to:

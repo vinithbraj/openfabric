@@ -62,6 +62,7 @@ events:
 
 agents:
   planner:
+    description: "Plans whether a request should trigger research, task execution, or both."
     runtime:
       adapter: http
       endpoint: "http://localhost:8101/handle"
@@ -74,6 +75,7 @@ agents:
       - task.plan
 
   retriever:
+    description: "Fetches research content for research queries."
     runtime:
       adapter: http
       endpoint: "http://localhost:8102/handle"
@@ -85,6 +87,7 @@ agents:
       - research.result
 
   calculator:
+    description: "Performs arithmetic tasks from task plans."
     runtime:
       adapter: http
       endpoint: "http://localhost:8103/handle"
@@ -96,6 +99,7 @@ agents:
       - task.result
 
   synthesizer:
+    description: "Builds final user-facing answers from research and task results."
     runtime:
       adapter: http
       endpoint: "http://localhost:8104/handle"
@@ -109,4 +113,3 @@ agents:
 
 execution:
   mode: event-driven
-

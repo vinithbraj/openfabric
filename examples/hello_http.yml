@@ -50,6 +50,7 @@ events:
 agents:
 
   planner:
+    description: "Creates a research query from user questions."
     runtime:
       adapter: http
       endpoint: "http://localhost:8001/handle"
@@ -61,6 +62,7 @@ agents:
       - research.query
 
   retriever:
+    description: "Returns research content for a query."
     runtime:
       adapter: http
       endpoint: "http://localhost:8002/handle"
@@ -72,6 +74,7 @@ agents:
       - research.result
 
   synthesizer:
+    description: "Turns research results into a final answer."
     runtime:
       adapter: http
       endpoint: "http://localhost:8003/handle"

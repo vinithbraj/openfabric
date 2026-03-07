@@ -99,6 +99,7 @@ events:
 
 agents:
   ops_planner:
+    description: "Rule-based planner for file, shell, and notification operations."
     runtime:
       adapter: http
       endpoint: "http://localhost:8201/handle"
@@ -113,6 +114,7 @@ agents:
       - task.result
 
   filesystem:
+    description: "Reads workspace files and returns file contents."
     runtime:
       adapter: http
       endpoint: "http://localhost:8202/handle"
@@ -125,6 +127,7 @@ agents:
       - task.result
 
   shell_runner:
+    description: "Executes allowlisted shell commands and returns stdout/stderr/exit status."
     runtime:
       adapter: http
       endpoint: "http://localhost:8203/handle"
@@ -137,6 +140,7 @@ agents:
       - task.result
 
   notifier:
+    description: "Sends notification messages to configured channels."
     runtime:
       adapter: http
       endpoint: "http://localhost:8204/handle"
@@ -148,6 +152,7 @@ agents:
       - notify.result
 
   synthesizer:
+    description: "Builds final user-facing answers from tool results."
     runtime:
       adapter: http
       endpoint: "http://localhost:8205/handle"
@@ -163,4 +168,3 @@ agents:
 
 execution:
   mode: event-driven
-
