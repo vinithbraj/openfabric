@@ -18,6 +18,38 @@ def validate_semantics(spec: dict):
     # Validate agent subscriptions and emissions
     for agent_name, agent in agents.items():
         runtime_cfg = agent.get("runtime", {})
+        description = agent.get("description")
+        methods = agent.get("methods", [])
+
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError(
+                f"Agent '{agent_name}' is missing a non-empty 'description'"
+            )
+        if not isinstance(methods, list):
+            raise ValueError(
+                f"Agent '{agent_name}' must define 'methods' as a list"
+            )
+        for idx, method in enumerate(methods):
+            if not isinstance(method, dict):
+                raise ValueError(
+                    f"Agent '{agent_name}' method at index {idx} must be an object"
+                )
+            if not method.get("name") or not isinstance(method.get("name"), str):
+                raise ValueError(
+                    f"Agent '{agent_name}' method at index {idx} is missing string 'name'"
+                )
+            if not method.get("event") or not isinstance(method.get("event"), str):
+                raise ValueError(
+                    f"Agent '{agent_name}' method at index {idx} is missing string 'event'"
+                )
+            if method["event"] not in events:
+                raise ValueError(
+                    f"Agent '{agent_name}' method '{method['name']}' references undefined event '{method['event']}'"
+                )
+            if "when" in method and not isinstance(method["when"], str):
+                raise ValueError(
+                    f"Agent '{agent_name}' method '{method['name']}' has non-string 'when'"
+                )
 
         for event in agent.get("subscribes_to", []):
             if event not in events:

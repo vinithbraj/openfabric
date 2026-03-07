@@ -7,6 +7,7 @@ class HTTPAdapter(Adapter):
     def handle(self, event_name, payload):
 
         endpoint = self.config["endpoint"]
+        timeout_seconds = float(self.config.get("timeout_seconds", 30))
 
         try:
             response = requests.post(
@@ -15,7 +16,7 @@ class HTTPAdapter(Adapter):
                     "event": event_name,
                     "payload": payload
                 },
-                timeout=5
+                timeout=timeout_seconds
             )
         except requests.RequestException as exc:
             raise RuntimeError(

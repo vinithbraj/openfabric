@@ -15,13 +15,19 @@ class ContractRegistry:
         if contract["type"] != "object":
             raise ValueError("Only object contracts supported in v0.1")
 
-        schema = {
-            "type": "object",
-            "required": contract.get("required", []),
-            "properties": {
-                k: {"type": v["type"]}
-                for k, v in contract["properties"].items()
-            }
-        }
+        schema = self._build_object_schema(contract)
 
         validate(instance=payload, schema=schema)
+
+    def _build_object_schema(self, contract: dict) -> dict:
+        schema = {"type": "object"}
+        for key in (
+            "required",
+            "properties",
+            "additionalProperties",
+            "minProperties",
+            "maxProperties",
+        ):
+            if key in contract:
+                schema[key] = contract[key]
+        return schema

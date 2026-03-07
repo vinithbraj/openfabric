@@ -58,6 +58,8 @@ class Engine:
             catalog.append(
                 {
                     "name": agent_name,
+                    "description": config.get("description", ""),
+                    "methods": config.get("methods", []),
                     "adapter": runtime_cfg.get("adapter"),
                     "endpoint": runtime_cfg.get("endpoint"),
                     "subscribes_to": config.get("subscribes_to", []),
