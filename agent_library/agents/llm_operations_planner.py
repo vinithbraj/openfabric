@@ -10,6 +10,46 @@ from agent_library.common import EventRequest, EventResponse
 
 app = FastAPI()
 
+AGENT_METADATA = {
+    "description": "LLM planning agent that maps user requests into allowed tool events.",
+    "routing_notes": [
+        "Choose exactly the tool event that best matches user intent.",
+        "For file discovery/search/list intents, prefer shell.exec with a find/ls command.",
+        "Use file.read only when the user asks to open/read a specific file path.",
+    ],
+    "methods": [
+        {
+            "name": "plan_file_read",
+            "event": "file.read",
+            "when": "Use for reading/opening files from user request.",
+            "intent_tags": ["read_file", "open_file"],
+        },
+        {
+            "name": "plan_shell_command",
+            "event": "shell.exec",
+            "when": "Use for shell command execution requests.",
+            "intent_tags": ["shell_command", "file_search", "workspace_inspection"],
+        },
+        {
+            "name": "plan_notification",
+            "event": "notify.send",
+            "when": "Use for notify/alert requests.",
+            "intent_tags": ["notify", "alert"],
+        },
+        {
+            "name": "plan_arithmetic_task",
+            "event": "task.plan",
+            "when": "Use for arithmetic operations such as add/subtract/multiply/divide.",
+            "intent_tags": ["math", "arithmetic"],
+        },
+        {
+            "name": "planner_fallback",
+            "event": "task.result",
+            "when": "Use only when no actionable tool event applies.",
+        },
+    ],
+}
+
 SUPPORTED_EVENT_SCHEMAS = {
     "file.read": '{"path":"relative/file/path"}',
     "shell.exec": '{"command":"..."}',
@@ -121,6 +161,12 @@ def _format_discovered_agents(capabilities: dict) -> str:
         if not name:
             continue
         description = item.get("description", "").strip() or "No description provided."
+        routing_notes = item.get("routing_notes", [])
+        notes_text = ""
+        if isinstance(routing_notes, list) and routing_notes:
+            safe_notes = [note for note in routing_notes if isinstance(note, str)]
+            if safe_notes:
+                notes_text = f" Routing notes: {' | '.join(safe_notes)}."
         method_list = item.get("methods", [])
         if isinstance(method_list, list) and method_list:
             method_parts = []
@@ -133,11 +179,24 @@ def _format_discovered_agents(capabilities: dict) -> str:
                 method_text = f"{method_name} -> {method_event}"
                 if method_when:
                     method_text += f" ({method_when})"
+                extras = []
+                for key in sorted(method.keys()):
+                    if key in {"name", "event", "when"}:
+                        continue
+                    value = method.get(key)
+                    if isinstance(value, str):
+                        extras.append(f"{key}: {value}")
+                    elif isinstance(value, list):
+                        list_items = [item for item in value if isinstance(item, str)]
+                        if list_items:
+                            extras.append(f"{key}: {', '.join(list_items)}")
+                if extras:
+                    method_text += f" [{'; '.join(extras)}]"
                 method_parts.append(method_text)
             methods_text = "; ".join(method_parts) if method_parts else "No methods provided."
         else:
             methods_text = "No methods provided."
-        lines.append(f"- {name}: {description} Methods: {methods_text}")
+        lines.append(f"- {name}: {description}{notes_text} Methods: {methods_text}")
     return "\n".join(lines) if lines else "- unknown: No discovered agents"
 
 
@@ -150,6 +209,7 @@ def _build_prompt(question: str, allowed_events, capabilities: dict) -> str:
         f"{_format_discovered_agents(capabilities)}\n"
         "Allowed events and payload schemas:\n"
         f"{_format_allowed_event_schemas(allowed_events)}\n"
+        "Follow method routing hints: prefer methods whose intent_tags/examples match the request and avoid anti_patterns.\n"
         "Prefer actionable tool events when relevant. Do not invent extra keys.\n"
         f'User request: "{question}"'
     )

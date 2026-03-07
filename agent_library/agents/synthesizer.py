@@ -4,6 +4,32 @@ from agent_library.common import EventRequest, EventResponse
 
 app = FastAPI()
 
+AGENT_METADATA = {
+    "description": "Builds final user-facing answers from tool results.",
+    "methods": [
+        {
+            "name": "synthesize_file_result",
+            "event": "file.content",
+            "when": "Converts file content into final answer.",
+        },
+        {
+            "name": "synthesize_shell_result",
+            "event": "shell.result",
+            "when": "Converts shell execution result into final answer.",
+        },
+        {
+            "name": "synthesize_notify_result",
+            "event": "notify.result",
+            "when": "Converts notify result into final answer.",
+        },
+        {
+            "name": "synthesize_task_result",
+            "event": "task.result",
+            "when": "Converts generic task result into final answer.",
+        },
+    ],
+}
+
 
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):

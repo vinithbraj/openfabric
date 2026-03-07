@@ -4,6 +4,14 @@ from agent_library.common import EventRequest, EventResponse
 
 app = FastAPI()
 
+AGENT_METADATA = {
+    "description": "Plans whether a request should trigger research, task execution, or both.",
+    "methods": [
+        {"name": "plan_research", "event": "research.query"},
+        {"name": "plan_task", "event": "task.plan"},
+    ],
+}
+
 
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
@@ -17,4 +25,3 @@ def handle_event(req: EventRequest):
         }
 
     return {"emits": []}
-

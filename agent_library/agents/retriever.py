@@ -4,6 +4,13 @@ from agent_library.common import EventRequest, EventResponse
 
 app = FastAPI()
 
+AGENT_METADATA = {
+    "description": "Fetches research content for research queries.",
+    "methods": [
+        {"name": "lookup_research", "event": "research.query"},
+    ],
+}
+
 
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
@@ -19,4 +26,3 @@ def handle_event(req: EventRequest):
         }
 
     return {"emits": []}
-

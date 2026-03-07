@@ -6,6 +6,32 @@ from agent_library.common import EventRequest, EventResponse
 
 app = FastAPI()
 
+AGENT_METADATA = {
+    "description": "Rule-based planner for file, shell, and notification operations.",
+    "methods": [
+        {
+            "name": "plan_file_read",
+            "event": "file.read",
+            "when": "Use for reading/opening files from user request.",
+        },
+        {
+            "name": "plan_shell_command",
+            "event": "shell.exec",
+            "when": "Use for shell command execution requests.",
+        },
+        {
+            "name": "plan_notification",
+            "event": "notify.send",
+            "when": "Use for notify/alert requests.",
+        },
+        {
+            "name": "planner_fallback",
+            "event": "task.result",
+            "when": "Use only when no actionable tool event applies.",
+        },
+    ],
+}
+
 
 def _extract_filepath(question: str):
     match = re.search(r"(?:read|open)\s+([./a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", question)
@@ -61,4 +87,3 @@ def handle_event(req: EventRequest):
         )
 
     return {"emits": emits}
-

@@ -6,6 +6,24 @@ from agent_library.common import EventRequest, EventResponse
 
 app = FastAPI()
 
+AGENT_METADATA = {
+    "description": "Performs arithmetic tasks from task plans and emits task results.",
+    "routing_notes": [
+        "Use for arithmetic word problems and math expressions.",
+        "Do not use for filesystem or shell operations.",
+    ],
+    "methods": [
+        {
+            "name": "compute_basic_math",
+            "event": "task.plan",
+            "when": "Computes add/subtract/multiply/divide from natural-language task plans.",
+            "intent_tags": ["math", "arithmetic"],
+            "examples": ["add 12 and 30", "what is 144 / 12"],
+            "anti_patterns": ["find files named vinith", "read README.md"],
+        }
+    ],
+}
+
 
 def _normalize_number(value: float):
     return int(value) if value.is_integer() else value

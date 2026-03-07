@@ -3,6 +3,7 @@ import socket
 import subprocess
 import sys
 import time
+from importlib import import_module
 from urllib.parse import urlparse
 
 from .contracts import ContractRegistry
@@ -55,11 +56,13 @@ class Engine:
         catalog = []
         for agent_name, config in self.spec["agents"].items():
             runtime_cfg = config.get("runtime", {})
+            metadata = self._load_agent_metadata(runtime_cfg)
             catalog.append(
                 {
                     "name": agent_name,
-                    "description": config.get("description", ""),
-                    "methods": config.get("methods", []),
+                    "description": metadata.get("description", config.get("description", "")),
+                    "methods": metadata.get("methods", config.get("methods", [])),
+                    "routing_notes": metadata.get("routing_notes", []),
                     "adapter": runtime_cfg.get("adapter"),
                     "endpoint": runtime_cfg.get("endpoint"),
                     "subscribes_to": config.get("subscribes_to", []),
@@ -67,6 +70,61 @@ class Engine:
                 }
             )
         return catalog
+
+    def _load_agent_metadata(self, runtime_cfg: dict):
+        autostart_cfg = runtime_cfg.get("autostart", {})
+        app_ref = autostart_cfg.get("app")
+        if not isinstance(app_ref, str) or ":" not in app_ref:
+            return {}
+
+        module_name = app_ref.split(":", 1)[0]
+        try:
+            module = import_module(module_name)
+        except Exception:
+            return {}
+
+        raw = getattr(module, "AGENT_METADATA", None)
+        if not isinstance(raw, dict):
+            return {}
+
+        metadata = {}
+        description = raw.get("description")
+        if isinstance(description, str):
+            metadata["description"] = description
+
+        routing_notes = raw.get("routing_notes")
+        if isinstance(routing_notes, list):
+            safe_notes = [item for item in routing_notes if isinstance(item, str)]
+            if safe_notes:
+                metadata["routing_notes"] = safe_notes
+
+        methods = raw.get("methods")
+        if isinstance(methods, list):
+            valid_methods = []
+            for method in methods:
+                if not isinstance(method, dict):
+                    continue
+                name = method.get("name")
+                event = method.get("event")
+                when = method.get("when")
+                if not isinstance(name, str) or not isinstance(event, str):
+                    continue
+                entry = {"name": name, "event": event}
+                if isinstance(when, str):
+                    entry["when"] = when
+                for key, value in method.items():
+                    if key in {"name", "event", "when"}:
+                        continue
+                    if isinstance(value, str):
+                        entry[key] = value
+                    elif isinstance(value, list):
+                        safe_list = [item for item in value if isinstance(item, str)]
+                        if safe_list:
+                            entry[key] = safe_list
+                valid_methods.append(entry)
+            metadata["methods"] = valid_methods
+
+        return metadata
 
     def _autostart_http_services(self):
         for agent_name, config in self.spec["agents"].items():

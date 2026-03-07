@@ -18,13 +18,10 @@ def validate_semantics(spec: dict):
     # Validate agent subscriptions and emissions
     for agent_name, agent in agents.items():
         runtime_cfg = agent.get("runtime", {})
-        description = agent.get("description")
         methods = agent.get("methods", [])
 
-        if not isinstance(description, str) or not description.strip():
-            raise ValueError(
-                f"Agent '{agent_name}' is missing a non-empty 'description'"
-            )
+        if methods is None:
+            methods = []
         if not isinstance(methods, list):
             raise ValueError(
                 f"Agent '{agent_name}' must define 'methods' as a list"

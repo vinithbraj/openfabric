@@ -8,6 +8,27 @@ from agent_library.common import EventRequest, EventResponse
 
 app = FastAPI()
 
+AGENT_METADATA = {
+    "description": "Executes bash commands and returns stdout/stderr/exit status.",
+    "routing_notes": [
+        "Use for command-line operations such as search, list, grep, and process inspection.",
+        "Preferred for file discovery intents that mention find/search/list files.",
+    ],
+    "methods": [
+        {
+            "name": "execute_bash_command",
+            "event": "shell.exec",
+            "when": "Runs bash command strings and emits shell execution result.",
+            "intent_tags": ["shell_command", "file_search", "workspace_inspection"],
+            "examples": [
+                "run `find . -iname \"*vinith*\"`",
+                "execute `ls -la agent_library/agents`",
+            ],
+            "anti_patterns": ["read a specific file's contents"],
+        }
+    ],
+}
+
 BLOCKED_PATTERNS = [
     r"\brm\s+-rf\s+/\b",
     r"\bmkfs\b",
