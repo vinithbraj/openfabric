@@ -104,14 +104,14 @@ def handle_event(req: EventRequest):
         task = req.payload["task"]
         result = _compute_basic_math(task)
 
-        if result is not None:
-            kind, value = result
-            if kind == "error":
-                detail = str(value)
-            else:
-                detail = f"Computed {kind} from task: {value}"
+        if result is None:
+            return {"emits": []}
+
+        kind, value = result
+        if kind == "error":
+            detail = str(value)
         else:
-            detail = "No executable arithmetic tool action detected"
+            detail = f"Computed {kind} from task: {value}"
 
         return {"emits": [{"event": "task.result", "payload": {"detail": detail}}]}
 

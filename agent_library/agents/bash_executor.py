@@ -17,8 +17,8 @@ AGENT_METADATA = {
     "methods": [
         {
             "name": "execute_bash_command",
-            "event": "shell.exec",
-            "when": "Runs bash command strings and emits shell execution result.",
+            "event": "task.plan",
+            "when": "Runs bash command strings derived from task plans and emits shell execution result.",
             "intent_tags": ["cli_exec", "file_search", "workspace_inspection"],
             "examples": [
                 "run `find . -iname \"*vinith*\"`",
@@ -43,12 +43,42 @@ def _is_blocked(command: str) -> bool:
     return any(re.search(pattern, command_lc) for pattern in BLOCKED_PATTERNS)
 
 
+def _extract_command_from_task(task: str):
+    explicit = re.search(r"(?:run|execute)\s+`([^`]+)`", task, re.IGNORECASE)
+    if explicit:
+        return explicit.group(1)
+
+    plain = re.search(r"(?:run|execute)\s+(.+)$", task, re.IGNORECASE)
+    if plain:
+        return plain.group(1).strip()
+
+    task_lc = task.lower()
+    if ("find" in task_lc or "search" in task_lc or "locate" in task_lc) and "file" in task_lc:
+        name_match = re.search(r"(?:named|called)\s+['\"]?([a-zA-Z0-9._-]+)['\"]?", task, re.IGNORECASE)
+        if name_match:
+            token = name_match.group(1)
+            return f"find . -iname '*{token}*'"
+        return "find . -type f"
+
+    if "list files" in task_lc or "show files" in task_lc:
+        return "find . -type f"
+
+    return None
+
+
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
-    if req.event != "shell.exec":
+    if req.event == "shell.exec":
+        command = req.payload["command"]
+    elif req.event == "task.plan":
+        task = req.payload.get("task", "")
+        if not isinstance(task, str):
+            return {"emits": []}
+        command = _extract_command_from_task(task)
+        if not command:
+            return {"emits": []}
+    else:
         return {"emits": []}
-
-    command = req.payload["command"]
     if _is_blocked(command):
         return {
             "emits": [

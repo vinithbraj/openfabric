@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from fastapi import FastAPI
 
@@ -15,8 +16,8 @@ AGENT_METADATA = {
     "methods": [
         {
             "name": "read_workspace_file",
-            "event": "file.read",
-            "when": "Reads a relative file path from workspace and emits file content.",
+            "event": "task.plan",
+            "when": "Reads a relative file path from task plans and emits file content.",
             "intent_tags": ["read_file", "open_file"],
             "examples": ["read agent_library/agents/calculator.py", "open README.md"],
             "anti_patterns": ["find files named vinith", "list all files containing foo"],
@@ -25,12 +26,30 @@ AGENT_METADATA = {
 }
 
 
+def _extract_filepath(task: str):
+    match = re.search(r"(?:read|open|show|cat)\s+([./a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9]+)?)", task)
+    if match:
+        return match.group(1)
+
+    direct_path = re.search(r"\b([./][a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)\b", task)
+    if direct_path:
+        return direct_path.group(1)
+    return None
+
+
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
-    if req.event != "file.read":
+    if req.event == "file.read":
+        raw_path = req.payload["path"]
+    elif req.event == "task.plan":
+        task = req.payload.get("task", "")
+        if not isinstance(task, str):
+            return {"emits": []}
+        raw_path = _extract_filepath(task)
+        if not raw_path:
+            return {"emits": []}
+    else:
         return {"emits": []}
-
-    raw_path = req.payload["path"]
     base = Path(".").resolve()
     target = (base / raw_path).resolve()
 

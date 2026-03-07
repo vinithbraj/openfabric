@@ -145,23 +145,14 @@ events:
 
 agents:
   ops_planner:
-    description: "LLM planning agent that maps user requests into allowed tool events."
+    description: "LLM planner that decides if a request is processable and broadcasts task plans."
     methods:
-      - name: plan_file_read
-        event: file.read
-        when: "Use for reading/opening files from user request."
-      - name: plan_shell_command
-        event: shell.exec
-        when: "Use for shell command execution requests."
-      - name: plan_notification
-        event: notify.send
-        when: "Use for notify/alert requests."
-      - name: plan_arithmetic_task
+      - name: assess_processable_request
         event: task.plan
-        when: "Use for arithmetic operations such as add/subtract/multiply/divide."
-      - name: planner_fallback
+        when: "Broadcast when request can be processed by at least one capability."
+      - name: reject_unprocessable_request
         event: task.result
-        when: "Use only when no actionable tool event applies."
+        when: "Emit when request is not processable by discovered capabilities."
     runtime:
       adapter: http
       endpoint: "http://127.0.0.1:8301/handle"
@@ -172,9 +163,6 @@ agents:
       - system.capabilities
       - user.ask
     emits:
-      - file.read
-      - shell.exec
-      - notify.send
       - task.plan
       - task.result
 
@@ -182,8 +170,8 @@ agents:
     description: "Reads workspace files and returns file contents."
     methods:
       - name: read_workspace_file
-        event: file.read
-        when: "Reads a relative file path from workspace and emits file content."
+        event: task.plan
+        when: "Reads a relative file path from task plans and emits file content."
     runtime:
       adapter: http
       endpoint: "http://127.0.0.1:8302/handle"
@@ -191,6 +179,7 @@ agents:
         app: agent_library.agents.filesystem:app
     subscribes_to:
       - file.read
+      - task.plan
     emits:
       - file.content
       - task.result
@@ -199,8 +188,8 @@ agents:
     description: "Executes bash commands and returns stdout/stderr/exit status."
     methods:
       - name: execute_bash_command
-        event: shell.exec
-        when: "Runs bash command strings and emits shell execution result."
+        event: task.plan
+        when: "Runs bash command strings derived from task plans and emits shell execution result."
     runtime:
       adapter: http
       endpoint: "http://127.0.0.1:8303/handle"
@@ -208,6 +197,7 @@ agents:
         app: agent_library.agents.bash_executor:app
     subscribes_to:
       - shell.exec
+      - task.plan
     emits:
       - shell.result
       - task.result
@@ -216,8 +206,8 @@ agents:
     description: "Sends notification messages to configured channels."
     methods:
       - name: send_notification
-        event: notify.send
-        when: "Sends notification payloads to configured notification channel."
+        event: task.plan
+        when: "Sends notification payloads derived from task plans."
     runtime:
       adapter: http
       endpoint: "http://127.0.0.1:8304/handle"
@@ -225,6 +215,7 @@ agents:
         app: agent_library.agents.notifier:app
     subscribes_to:
       - notify.send
+      - task.plan
     emits:
       - notify.result
 

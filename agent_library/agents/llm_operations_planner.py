@@ -11,67 +11,31 @@ from agent_library.common import EventRequest, EventResponse
 app = FastAPI()
 
 AGENT_METADATA = {
-    "description": "LLM planning agent that maps user requests into allowed tool events.",
+    "description": "LLM planner that decides whether a request is processable by discovered system capabilities.",
     "routing_notes": [
-        "Choose exactly the tool event that best matches user intent.",
-        "For file discovery/search/list intents, prefer shell.exec with a find/ls command.",
-        "Use file.read only when the user asks to open/read a specific file path.",
+        "Only decide if request is processable by discovered capabilities.",
+        "If processable, emit task.plan with original task for broadcast execution.",
+        "If not processable, emit task.result with reason.",
     ],
     "methods": [
         {
-            "name": "plan_file_read",
-            "event": "file.read",
-            "when": "Use for reading/opening files from user request.",
-            "intent_tags": ["read_file", "open_file"],
-        },
-        {
-            "name": "plan_cli_exec",
-            "event": "shell.exec",
-            "when": "Use for shell command execution requests.",
-            "intent_tags": ["cli_exec", "file_search", "workspace_inspection"],
-        },
-        {
-            "name": "plan_notification",
-            "event": "notify.send",
-            "when": "Use for notify/alert requests.",
-            "intent_tags": ["notify", "alert"],
-        },
-        {
-            "name": "plan_arithmetic_task",
+            "name": "assess_processable_request",
             "event": "task.plan",
-            "when": "Use for arithmetic operations such as add/subtract/multiply/divide.",
-            "intent_tags": ["math", "arithmetic"],
+            "when": "When request can be handled by at least one discovered agent capability.",
+            "intent_tags": ["processable", "capability_match"],
         },
         {
-            "name": "planner_fallback",
+            "name": "reject_unprocessable_request",
             "event": "task.result",
-            "when": "Use only when no actionable tool event applies.",
+            "when": "When request cannot be handled by discovered capabilities.",
+            "intent_tags": ["unprocessable"],
         },
     ],
 }
 
 SUPPORTED_EVENT_SCHEMAS = {
-    "file.read": '{"path":"relative/file/path"}',
-    "shell.exec": '{"command":"..."}',
-    "notify.send": '{"channel":"console","message":"..."}',
     "task.plan": '{"task":"..."}',
     "task.result": '{"detail":"..."}',
-}
-EVENT_ALIASES = {
-    "shell_command": "shell.exec",
-    "shell command": "shell.exec",
-    "shell.run": "shell.exec",
-    "run.command": "shell.exec",
-    "read_file": "file.read",
-    "file.open": "file.read",
-    "plan.task": "task.plan",
-}
-REQUIRED_PAYLOAD_KEYS = {
-    "file.read": {"path"},
-    "shell.exec": {"command"},
-    "notify.send": {"channel", "message"},
-    "task.plan": {"task"},
-    "task.result": {"detail"},
 }
 DEFAULT_ALLOWED_EVENTS = set(SUPPORTED_EVENT_SCHEMAS.keys())
 CAPABILITIES = {"agents": [], "available_events": sorted(DEFAULT_ALLOWED_EVENTS)}
@@ -84,122 +48,6 @@ def _debug_enabled() -> bool:
 def _debug_log(message: str):
     if _debug_enabled():
         print(f"[LLM_OPS_DEBUG] {message}")
-
-
-def _extract_filepath(question: str):
-    match = re.search(r"(?:read|open)\s+([./a-zA-Z0-9_-]+\.[a-zA-Z0-9]+)", question)
-    return match.group(1) if match else None
-
-
-def _extract_command(question: str):
-    match = re.search(r"(?:run|execute)\s+`([^`]+)`", question)
-    return match.group(1) if match else None
-
-
-def _extract_find_command(question: str):
-    question_lc = question.lower()
-    if not any(token in question_lc for token in ("find", "search", "locate")):
-        return None
-    if "file" not in question_lc:
-        return None
-
-    name_match = re.search(
-        r"(?:named|called)\s+['\"]?([a-zA-Z0-9._-]+)['\"]?",
-        question,
-        re.IGNORECASE,
-    )
-    if name_match:
-        filename = name_match.group(1)
-        return f"find . -iname '*{filename}*'"
-
-    token_match = re.search(
-        r"(?:for|matching)\s+['\"]?([a-zA-Z0-9._-]+)['\"]?",
-        question,
-        re.IGNORECASE,
-    )
-    if token_match:
-        token = token_match.group(1)
-        return f"find . -iname '*{token}*'"
-
-    return "find . -type f"
-
-
-def _extract_task_plan(question: str):
-    numbers = re.findall(r"-?\d+(?:\.\d+)?", question)
-    question_lc = question.lower()
-    has_arithmetic_intent = any(
-        token in question_lc
-        for token in (
-            "sum",
-            "add",
-            "plus",
-            "subtract",
-            "minus",
-            "multiply",
-            "multipy",
-            "mutiply",
-            "times",
-            "divide",
-            "divided by",
-        )
-    ) or any(symbol in question for symbol in ("+", "-", "*", "/"))
-    if len(numbers) >= 2 and has_arithmetic_intent:
-        return question
-    return None
-
-
-def _fallback_plan(question: str, allowed_events) -> List[Dict[str, Any]]:
-    question_lc = question.lower()
-    emits: List[Dict[str, Any]] = []
-
-    filepath = _extract_filepath(question)
-    if filepath and "file.read" in allowed_events:
-        emits.append({"event": "file.read", "payload": {"path": filepath}})
-
-    command = _extract_command(question)
-    if command and "shell.exec" in allowed_events:
-        emits.append({"event": "shell.exec", "payload": {"command": command}})
-
-    discover_command = _extract_find_command(question)
-    if discover_command and "shell.exec" in allowed_events:
-        emits.append({"event": "shell.exec", "payload": {"command": discover_command}})
-
-    task = _extract_task_plan(question)
-    if task and "task.plan" in allowed_events:
-        emits.append({"event": "task.plan", "payload": {"task": task}})
-
-    if ("notify" in question_lc or "alert" in question_lc) and "notify.send" in allowed_events:
-        emits.append(
-            {
-                "event": "notify.send",
-                "payload": {
-                    "channel": "console",
-                    "message": f"Notification requested: {question}",
-                },
-            }
-        )
-
-    if not emits and "task.result" in allowed_events:
-        emits.append(
-            {
-                "event": "task.result",
-                "payload": {
-                    "detail": "No operations detected. Use phrases like "
-                    "'read <file>', 'run `<command>`', or 'notify ...'."
-                },
-            }
-        )
-
-    return emits or [{"event": "task.result", "payload": {"detail": "No available tools to execute the request."}}]
-
-
-def _format_allowed_event_schemas(allowed_events):
-    lines = []
-    for event in sorted(allowed_events):
-        schema = SUPPORTED_EVENT_SCHEMAS.get(event)
-        if schema:
-            lines.append(f"- {event} -> {schema}")
-    return "\n".join(lines) if lines else '- task.result -> {"detail":"No tools available"}'
 
 
 def _format_discovered_agents(capabilities: dict) -> str:
@@ -248,21 +96,17 @@ def _format_discovered_agents(capabilities: dict) -> str:
     return "\n".join(lines) if lines else "- unknown: No discovered agents"
 
 
-def _build_prompt(question: str, allowed_events, capabilities: dict) -> str:
-    allowed_event_names = ", ".join(sorted(allowed_events))
+def _build_prompt(question: str, capabilities: dict) -> str:
     return (
-        "You are a strict planning agent for an operations assistant.\n"
-        "Return ONLY JSON with this exact shape: "
-        '{"emits":[{"event":"...","payload":{...}}]}.\n'
-        f"Valid event names are EXACTLY: {allowed_event_names}.\n"
-        "Never use method names or intent tags as event values.\n"
+        "You are a strict planner for an operations assistant.\n"
+        "Your only job is to decide whether a user request is processable by discovered capabilities.\n"
+        "Return ONLY JSON with this exact shape:\n"
+        '{"processable":true|false,"reason":"short reason"}\n'
+        "No markdown, no prose, no extra keys.\n"
         "Discovered runtime agents and responsibilities:\n"
         f"{_format_discovered_agents(capabilities)}\n"
-        "Allowed events and payload schemas:\n"
-        f"{_format_allowed_event_schemas(allowed_events)}\n"
-        "Follow method routing hints: prefer methods whose intent_tags/examples match the request and avoid anti_patterns.\n"
-        "Only include notify.send when the user explicitly asks to notify/alert/remind.\n"
-        "Prefer actionable tool events when relevant. Do not invent extra keys.\n"
+        "Mark processable=true when at least one agent capability clearly applies.\n"
+        "Mark processable=false when none apply.\n"
         f'User request: "{question}"'
     )
 
@@ -339,89 +183,19 @@ def _parse_planner_json(content: str):
     return json_blob, None
 
 
-def _validate_emits(raw: Any, allowed_events) -> List[Dict[str, Any]]:
+def _parse_decision(raw: Any):
     if not isinstance(raw, dict):
-        return []
-    emits = raw.get("emits", [])
-    if not isinstance(emits, list):
-        return []
-
-    method_aliases = {}
-    for agent in CAPABILITIES.get("agents", []):
-        for method in agent.get("methods", []):
-            if not isinstance(method, dict):
-                continue
-            method_name = method.get("name")
-            method_event = method.get("event")
-            if isinstance(method_name, str) and isinstance(method_event, str):
-                method_aliases[method_name] = method_event
-
-    valid: List[Dict[str, Any]] = []
-    for item in emits:
-        if not isinstance(item, dict):
-            continue
-        event = item.get("event")
-        payload = item.get("payload")
-        if isinstance(event, str):
-            event = EVENT_ALIASES.get(event, event)
-            event = method_aliases.get(event, event)
-        if not isinstance(payload, dict):
-            continue
-        payload = _normalize_payload(event, payload)
-        required_keys = REQUIRED_PAYLOAD_KEYS.get(event, set())
-        if not required_keys.issubset(set(payload.keys())):
-            continue
-        if event not in allowed_events or not isinstance(payload, dict):
-            continue
-        valid.append({"event": event, "payload": payload})
-    return valid
+        return None
+    processable = raw.get("processable")
+    reason = raw.get("reason", "")
+    if not isinstance(processable, bool):
+        return None
+    if not isinstance(reason, str):
+        reason = ""
+    return {"processable": processable, "reason": reason.strip()}
 
 
-def _normalize_payload(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    normalized = dict(payload)
-    if event == "shell.exec":
-        if "command" not in normalized and isinstance(normalized.get("cmd"), str):
-            normalized["command"] = normalized["cmd"]
-    elif event == "task.plan":
-        if "task" not in normalized:
-            operation = normalized.get("operation")
-            operands = normalized.get("operands")
-            if isinstance(operation, str) and isinstance(operands, list):
-                tokens = [str(item) for item in operands]
-                normalized["task"] = f"{operation} {' '.join(tokens)}".strip()
-    elif event == "file.read":
-        path = normalized.get("path")
-        if isinstance(path, str) and path.startswith("/"):
-            normalized["path"] = path.lstrip("/")
-    elif event == "notify.send":
-        if "channel" not in normalized:
-            normalized["channel"] = "console"
-        if "message" not in normalized and isinstance(normalized.get("detail"), str):
-            normalized["message"] = normalized["detail"]
-    return normalized
-
-
-def _prefer_calculator_for_arithmetic(question: str, emits: List[Dict[str, Any]], allowed_events) -> List[Dict[str, Any]]:
-    task = _extract_task_plan(question)
-    if not task or "task.plan" not in allowed_events:
-        return emits
-
-    # For arithmetic user intent, force calculator path even if LLM suggests shell commands.
-    return [{"event": "task.plan", "payload": {"task": task}}]
-
-
-def _prune_unrequested_notify(question: str, emits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    question_lc = question.lower()
-    asked_notify = any(token in question_lc for token in ("notify", "alert", "remind"))
-    if asked_notify:
-        return emits
-    has_non_notify = any(item.get("event") != "notify.send" for item in emits)
-    if not has_non_notify:
-        return emits
-    return [item for item in emits if item.get("event") != "notify.send"]
-
-
-def _llm_plan(question: str, allowed_events, capabilities):
+def _llm_decide(question: str, capabilities):
     api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("LLM_OPS_BASE_URL")
     model = os.getenv("LLM_OPS_MODEL")
@@ -442,7 +216,7 @@ def _llm_plan(question: str, allowed_events, capabilities):
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    user_prompt = _build_prompt(question, allowed_events, capabilities)
+    user_prompt = _build_prompt(question, capabilities)
     messages = [
         {"role": "system", "content": "You produce strict JSON only."},
         {"role": "user", "content": user_prompt},
@@ -468,18 +242,19 @@ def _llm_plan(question: str, allowed_events, capabilities):
     json_blob, parsed = _parse_planner_json(content)
     if not json_blob:
         _debug_log("No JSON object found in LLM response content.")
-        return []
+        return None
     _debug_log("Extracted JSON object from LLM response:")
     _debug_log(json_blob)
     if parsed is None:
         _debug_log("Could not parse planner JSON after repair attempts.")
-        return []
-    valid_emits = _validate_emits(parsed, allowed_events)
-    valid_emits = _prune_unrequested_notify(question, valid_emits)
-    valid_emits = _prefer_calculator_for_arithmetic(question, valid_emits, allowed_events)
-    _debug_log("Validated emits from LLM response:")
-    _debug_log(json.dumps(valid_emits, indent=2))
-    return valid_emits
+        return None
+    decision = _parse_decision(parsed)
+    if decision is None:
+        _debug_log("Parsed planner JSON missing valid processable/reason fields.")
+        return None
+    _debug_log("Planner decision:")
+    _debug_log(json.dumps(decision, indent=2))
+    return decision
 
 
 def _derive_available_events(agents: List[Dict[str, Any]]) -> List[str]:
@@ -506,10 +281,15 @@ def handle_event(req: EventRequest):
     question = req.payload["question"]
     allowed_events = set(CAPABILITIES.get("available_events", DEFAULT_ALLOWED_EVENTS))
     try:
-        emits = _llm_plan(question, allowed_events, CAPABILITIES)
-        if emits:
-            return {"emits": emits}
-        _debug_log("LLM planning returned no valid emits.")
+        decision = _llm_decide(question, CAPABILITIES)
+        if decision is not None:
+            if decision["processable"] and "task.plan" in allowed_events:
+                return {"emits": [{"event": "task.plan", "payload": {"task": question}}]}
+            if "task.result" in allowed_events:
+                reason = decision["reason"] or "No matching capability found."
+                return {"emits": [{"event": "task.result", "payload": {"detail": reason}}]}
+            return {"emits": []}
+        _debug_log("LLM planner decision was invalid.")
     except Exception as exc:
         _debug_log(f"LLM planning failed. Error: {type(exc).__name__}: {exc}")
 
@@ -519,8 +299,8 @@ def handle_event(req: EventRequest):
                 {
                     "event": "task.result",
                     "payload": {
-                        "detail": "Planner could not produce a valid LLM plan. "
-                        "Check LLM response format and retry."
+                        "detail": "Planner could not determine if the request is processable. "
+                        "Check LLM connectivity/response format and retry."
                     },
                 }
             ]
