@@ -9,6 +9,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Sends notification messages to configured channels.",
+    "capability_domains": ["notification", "alerting"],
+    "action_verbs": ["notify", "alert", "remind", "send"],
+    "side_effect_policy": "allow_non_destructive_side_effects",
+    "safety_enforced_by_agent": True,
     "routing_notes": [
         "Use for explicit notify/alert/remind intents.",
     ],

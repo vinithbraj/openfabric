@@ -1,4 +1,5 @@
 import sys
+from runtime.console import log_error
 from runtime.loader import load_spec
 from runtime.semantic_validator import validate_semantics
 from runtime.engine import Engine
@@ -8,7 +9,7 @@ def main():
     engine = None
 
     if len(sys.argv) < 2:
-        print("Usage: python cli.py <spec.yml> [question]")
+        log_error("Usage: python cli.py <spec.yml> [question]")
         sys.exit(1)
 
     spec_path = sys.argv[1]
@@ -41,7 +42,7 @@ def main():
 
             engine.emit("user.ask", {"question": user_input})
     except Exception as exc:
-        print(f"Error: {exc}")
+        log_error(f"{exc}")
         sys.exit(1)
     finally:
         if engine is not None:

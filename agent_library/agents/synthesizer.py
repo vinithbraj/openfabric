@@ -6,6 +6,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Builds final user-facing answers from tool results.",
+    "capability_domains": ["response_synthesis", "final_answer"],
+    "action_verbs": ["summarize", "format", "respond"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "methods": [
         {
             "name": "synthesize_file_result",
@@ -29,6 +33,22 @@ AGENT_METADATA = {
         },
     ],
 }
+
+
+def _format_shell_answer(command: str, returncode: int, stdout: str, stderr: str) -> str:
+    clean_stdout = (stdout or "").strip()
+    clean_stderr = (stderr or "").strip()
+    status = "success" if returncode == 0 else "failure"
+    lines = [
+        "Shell execution result",
+        f"- command: {command}",
+        f"- exit_code: {returncode} ({status})",
+        "- stdout:",
+        clean_stdout or "<empty>",
+        "- stderr:",
+        clean_stderr or "<empty>",
+    ]
+    return "\n".join(lines)
 
 
 @app.post("/handle", response_model=EventResponse)
@@ -72,10 +92,7 @@ def handle_event(req: EventRequest):
         stdout = req.payload["stdout"]
         stderr = req.payload["stderr"]
         returncode = req.payload["returncode"]
-        answer = (
-            f"Shell command '{command}' finished with code {returncode}. "
-            f"stdout: {stdout or '<empty>'}; stderr: {stderr or '<empty>'}"
-        )
+        answer = _format_shell_answer(command, returncode, stdout, stderr)
         return {"emits": [{"event": "answer.final", "payload": {"answer": answer}}]}
 
     if req.event == "notify.result":

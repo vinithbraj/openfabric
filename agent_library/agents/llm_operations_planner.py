@@ -7,11 +7,16 @@ import requests
 from fastapi import FastAPI
 
 from agent_library.common import EventRequest, EventResponse
+from runtime.console import log_debug
 
 app = FastAPI()
 
 AGENT_METADATA = {
     "description": "LLM planner that decides whether a request is processable by discovered system capabilities.",
+    "capability_domains": ["planning", "routing", "operations"],
+    "action_verbs": ["plan", "route", "assess"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "routing_notes": [
         "Only decide if request is processable by discovered capabilities.",
         "If processable, emit task.plan with original task for broadcast execution.",
@@ -47,7 +52,7 @@ def _debug_enabled() -> bool:
 
 def _debug_log(message: str):
     if _debug_enabled():
-        print(f"[LLM_OPS_DEBUG] {message}")
+        log_debug("LLM_OPS_DEBUG", message)
 
 
 def _format_discovered_agents(capabilities: dict) -> str:
@@ -57,56 +62,52 @@ def _format_discovered_agents(capabilities: dict) -> str:
         if not name:
             continue
         description = item.get("description", "").strip() or "No description provided."
-        routing_notes = item.get("routing_notes", [])
-        notes_text = ""
-        if isinstance(routing_notes, list) and routing_notes:
-            safe_notes = [note for note in routing_notes if isinstance(note, str)]
-            if safe_notes:
-                notes_text = f" Routing notes: {' | '.join(safe_notes)}."
+        domains = item.get("capability_domains", [])
+        verbs = item.get("action_verbs", [])
+        domain_text = ", ".join(entry for entry in domains if isinstance(entry, str)) if isinstance(domains, list) else ""
+        verb_text = ", ".join(entry for entry in verbs if isinstance(entry, str)) if isinstance(verbs, list) else ""
+        methods = []
         method_list = item.get("methods", [])
-        if isinstance(method_list, list) and method_list:
-            method_parts = []
+        if isinstance(method_list, list):
             for method in method_list:
                 if not isinstance(method, dict):
                     continue
-                method_name = method.get("name", "unnamed_method")
-                method_event = method.get("event", "unknown_event")
-                method_when = method.get("when", "").strip()
-                method_text = f"{method_name} -> {method_event}"
-                if method_when:
-                    method_text += f" ({method_when})"
-                extras = []
-                for key in sorted(method.keys()):
-                    if key in {"name", "event", "when"}:
-                        continue
-                    value = method.get(key)
-                    if isinstance(value, str):
-                        extras.append(f"{key}: {value}")
-                    elif isinstance(value, list):
-                        list_items = [item for item in value if isinstance(item, str)]
-                        if list_items:
-                            extras.append(f"{key}: {', '.join(list_items)}")
-                if extras:
-                    method_text += f" [{'; '.join(extras)}]"
-                method_parts.append(method_text)
-            methods_text = "; ".join(method_parts) if method_parts else "No methods provided."
-        else:
-            methods_text = "No methods provided."
-        lines.append(f"- {name}: {description}{notes_text} Methods: {methods_text}")
+                method_name = method.get("name")
+                method_event = method.get("event")
+                if isinstance(method_name, str) and isinstance(method_event, str):
+                    methods.append(f"{method_name}->{method_event}")
+        method_text = ", ".join(methods) if methods else "none"
+        lines.append(
+            f"- {name}: {description} Domains[{domain_text or 'none'}] "
+            f"Verbs[{verb_text or 'none'}] Methods[{method_text}]"
+        )
     return "\n".join(lines) if lines else "- unknown: No discovered agents"
 
 
 def _build_prompt(question: str, capabilities: dict) -> str:
     return (
-        "You are a strict planner for an operations assistant.\n"
-        "Your only job is to decide whether a user request is processable by discovered capabilities.\n"
-        "Return ONLY JSON with this exact shape:\n"
-        '{"processable":true|false,"reason":"short reason"}\n'
-        "No markdown, no prose, no extra keys.\n"
-        "Discovered runtime agents and responsibilities:\n"
+        "You are the routing planner for an operations assistant.\n"
+        "Task: decide whether the request is processable by at least one discovered agent capability.\n"
+        "Output JSON only with exact keys: "
+        '{"processable":true|false,"confidence":0..1,"reason":"short reason"}\n'
+        "No markdown, no extra keys, no prose outside JSON.\n"
+        "Decision policy:\n"
+        "1) processable=true if any discovered agent can attempt the request.\n"
+        "2) For operational shell requests (find/list/search/grep/git/commit/ps/ports), default to processable=true "
+        "when shell capabilities exist.\n"
+        "3) Tolerate minor typos and informal phrasing.\n"
+        "4) Do NOT mark false only because the request might fail at execution time.\n"
+        "5) processable=false only when no discovered capability can attempt it.\n"
+        "Calibration examples:\n"
+        '- "find all files with extension sh in the current directory" -> {"processable":true,"confidence":0.96,"reason":"shell file search"}\n'
+        '- "grep TODO in this repo" -> {"processable":true,"confidence":0.95,"reason":"shell text search"}\n'
+        '- "add 12 and 30" -> {"processable":true,"confidence":0.98,"reason":"calculator"}\n'
+        '- "open Readme.md" -> {"processable":true,"confidence":0.97,"reason":"filesystem read"}\n'
+        '- "commit all git changes" -> {"processable":true,"confidence":0.95,"reason":"shell git commit capability"}\n'
+        '- "book a flight to NYC" -> {"processable":false,"confidence":0.98,"reason":"no travel booking capability"}\n'
+        "Discovered runtime agents:\n"
         f"{_format_discovered_agents(capabilities)}\n"
-        "Mark processable=true when at least one agent capability clearly applies.\n"
-        "Mark processable=false when none apply.\n"
+        "Choose confidence based on capability match clarity.\n"
         f'User request: "{question}"'
     )
 
@@ -187,12 +188,16 @@ def _parse_decision(raw: Any):
     if not isinstance(raw, dict):
         return None
     processable = raw.get("processable")
+    confidence = raw.get("confidence")
     reason = raw.get("reason", "")
     if not isinstance(processable, bool):
         return None
+    if not isinstance(confidence, (int, float)):
+        return None
+    confidence = max(0.0, min(1.0, float(confidence)))
     if not isinstance(reason, str):
         reason = ""
-    return {"processable": processable, "reason": reason.strip()}
+    return {"processable": processable, "confidence": confidence, "reason": reason.strip()}
 
 
 def _llm_decide(question: str, capabilities):
@@ -234,7 +239,11 @@ def _llm_decide(question: str, capabilities):
     }
 
     response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
-    response.raise_for_status()
+    if not response.ok:
+        _debug_log(f"Planner LLM HTTP error status: {response.status_code}")
+        _debug_log("Planner LLM HTTP error body:")
+        _debug_log(response.text[:4000])
+        response.raise_for_status()
     data = response.json()
     content = data["choices"][0]["message"]["content"]
     _debug_log("Raw LLM response content:")

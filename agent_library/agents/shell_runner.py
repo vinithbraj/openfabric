@@ -1,41 +1,124 @@
+import re
+import json
+import os
 import shlex
 import subprocess
-import re
+from typing import Any
 
 from fastapi import FastAPI
+import requests
 
 from agent_library.common import EventRequest, EventResponse
+from runtime.console import log_debug, log_raw
 
 app = FastAPI()
 
 AGENT_METADATA = {
-    "description": "Executes bash commands and returns stdout/stderr/exit status.",
+    "description": "Executes safe bash commands from natural-language operations requests.",
+    "capability_domains": ["shell", "operations", "workspace_inspection", "service_control", "file_search"],
+    "action_verbs": [
+        "run",
+        "execute",
+        "list",
+        "find",
+        "search",
+        "grep",
+        "inspect",
+        "count",
+        "show",
+        "start",
+        "stop",
+        "restart",
+        "stage",
+        "commit",
+        "push",
+    ],
+    "side_effect_policy": "allow_mutating_commands_with_safety_checks",
+    "safety_enforced_by_agent": True,
     "routing_notes": [
-        "Use for command-line operations such as search, list, grep, and process inspection.",
-        "Preferred for file discovery intents that mention find/search/list files.",
+        "Use for command-line operations such as search, list, grep, and process inspection in the workspace.",
+        "Can also satisfy read/open/locate source-code requests using safe read-only shell commands.",
+        "Handle natural-language Docker requests (list/logs/start/stop/restart/inspect) using docker CLI commands.",
+        "Handle natural-language git workflow requests, including stage and commit in the current repository.",
+        "Can derive shell commands from natural-language task plans using an LLM preprocessing step.",
+        "If a task does not map to shell capabilities, emit nothing for task.plan.",
     ],
     "methods": [
         {
-            "name": "execute_bash_command",
+            "name": "execute_explicit_command",
             "event": "shell.exec",
-            "when": "Runs bash command strings and emits shell execution result.",
-            "intent_tags": ["cli_exec", "file_search", "workspace_inspection"],
+            "when": "Runs explicitly provided shell command strings.",
+            "intent_tags": ["cli_exec"],
+            "risk_level": "medium",
             "examples": [
-                "run `find . -iname \"*vinith*\"`",
-                "execute `ls -la agent_library/agents`",
+                "find . -iname \"*vinith*\"",
+                "ls -la agent_library/agents",
             ],
             "anti_patterns": ["read a specific file's contents"],
+        },
+        {
+            "name": "execute_llm_derived_command",
+            "event": "task.plan",
+            "when": "Derives a shell command from natural language and executes it when safely processable.",
+            "intent_tags": ["cli_exec", "file_search", "workspace_inspection"],
+            "risk_level": "medium",
+            "examples": [
+                "list files under agent_library",
+                "find python files containing FastAPI",
+                "find all files with extension sh in current directory",
+                "show listening ports",
+                "open Readme.md",
+                "where is calculator agent implemented",
+                "show running docker containers",
+                "restart container named web",
+                "commit all git changes with message 'update shell prompt'",
+            ],
+            "anti_patterns": ["delete system files", "install packages globally"],
         }
     ],
 }
 
+SHELL_CAPABILITIES = {
+    "allowed_operations": [
+        "list files and directories in current workspace",
+        "search file names and file contents (find, rg, grep, ls, cat, head, tail, wc, sort)",
+        "read specific files by relative path (cat, head, tail, sed -n)",
+        "inspect git/workspace state (git status, git branch, git log --oneline)",
+        "perform explicit git staging/commit operations in current repository when user requests it",
+        "show process/network basics (ps, pgrep, netstat/ss) when read-only",
+        "manage local developer services and containers when explicitly requested (e.g., docker ps/stop/start/restart)",
+        "derive common file-extension searches (e.g., .sh, .py, .md) with find",
+        "locate implementation files/functions with rg/find",
+        "inspect docker objects (docker ps, docker images, docker logs, docker inspect, docker compose ps)",
+    ],
+    "disallowed_operations": [
+        "destructive commands (rm, mkfs, dd, reboot/shutdown)",
+        "privileged execution (sudo)",
+        "commands that modify system configuration outside workspace",
+        "fork bombs or process-kill-all patterns",
+    ],
+}
+
 BLOCKED_PATTERNS = [
-    r"\brm\s+-rf\s+/\b",
+    r"\brm\s+-rf\b",
+    r"\brm\s+-fr\b",
     r"\bmkfs\b",
     r"\bshutdown\b",
     r"\breboot\b",
     r"\bdd\s+if=",
+    r"\bsudo\b",
+    r":\(\)\s*{\s*:\|:&\s*};:",
+    r">\s*/dev/sd[a-z]",
 ]
+
+
+def _debug_enabled() -> bool:
+    return os.getenv("LLM_OPS_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_log(message: str):
+    if _debug_enabled():
+        log_debug("SHELL_DEBUG", message)
 
 
 def _is_blocked(command: str) -> bool:
@@ -43,12 +126,222 @@ def _is_blocked(command: str) -> bool:
     return any(re.search(pattern, command_lc) for pattern in BLOCKED_PATTERNS)
 
 
-@app.post("/handle", response_model=EventResponse)
-def handle_event(req: EventRequest):
-    if req.event != "shell.exec":
-        return {"emits": []}
+def _extract_json_object(text: str):
+    start = text.find("{")
+    if start == -1:
+        return None
+    end = text.rfind("}")
+    if end == -1 or end < start:
+        return text[start:]
+    return text[start : end + 1]
 
-    command = req.payload["command"]
+
+def _repair_json_blob(blob: str):
+    repaired = blob.strip()
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+
+    normalized_chars = []
+    stack = []
+    in_string = False
+    escaped = False
+    for ch in repaired:
+        if escaped:
+            normalized_chars.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            normalized_chars.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            normalized_chars.append(ch)
+            in_string = not in_string
+            continue
+        if in_string:
+            normalized_chars.append(ch)
+            continue
+        if ch in "{[":
+            normalized_chars.append(ch)
+            stack.append(ch)
+        elif ch == "}":
+            if stack and stack[-1] == "{":
+                normalized_chars.append(ch)
+                stack.pop()
+            else:
+                continue
+        elif ch == "]":
+            if stack and stack[-1] == "[":
+                normalized_chars.append(ch)
+                stack.pop()
+            else:
+                continue
+        else:
+            normalized_chars.append(ch)
+
+    repaired = "".join(normalized_chars)
+    closing = {"{": "}", "[": "]"}
+    while stack:
+        repaired += closing[stack.pop()]
+    return repaired
+
+
+def _parse_json(content: str):
+    json_blob = _extract_json_object(content)
+    if not json_blob:
+        return None
+    for candidate in (json_blob, _repair_json_blob(json_blob)):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _build_preprocess_prompt(task: str):
+    return (
+        "You are a shell-command planner for developer operations requests.\n"
+        "Do NOT execute commands. Convert the user request into one safe shell command when possible.\n"
+        "Return JSON only.\n"
+        "Capabilities and limits:\n"
+        f"{json.dumps(SHELL_CAPABILITIES, indent=2)}\n"
+        "Output shape (exact keys):\n"
+        '{"processable":true|false,"command":"shell command or null","reason":"short reason"}\n'
+        "Rules:\n"
+        "- Prefer processable=true for shell-suitable requests "
+        "(find/list/search/grep/git/ps/ports/docker/read/open/locate implementation).\n"
+        "- If processable=true, command must be one non-empty bash command string.\n"
+        "- If processable=false, set command=null.\n"
+        "- Use workspace-scoped commands by default.\n"
+        "- Interpret 'current directory' as '.'.\n"
+        "- Interpret 'files with extension sh' as name pattern '*.sh'.\n"
+        "- 'open/read/show <file>' should usually map to cat/head/tail/sed if path appears valid.\n"
+        "- 'where is X implemented' should usually map to rg/find over repository paths.\n"
+        "- For Docker natural-language requests, map directly to docker CLI equivalents.\n"
+        "- For git commit requests, map to explicit git commands in current repo.\n"
+        "- If user asks 'commit all changes' and no message is provided, use a neutral message like "
+        "'update files'.\n"
+        "- Example mappings: 'running containers' -> docker ps, 'all containers' -> docker ps -a,\n"
+        "  'images' -> docker images, 'logs for <name>' -> docker logs --tail 200 <name>,\n"
+        "  'restart <name>' -> docker restart <name>, 'stop all running containers' -> docker stop $(docker ps -q).\n"
+        "- Example git mappings: 'commit all git changes' -> git add -A && git commit -m \"update files\".\n"
+        "  'commit only staged changes with message fix parser' -> git commit -m \"fix parser\".\n"
+        "- Tolerate minor typos and shorthand (e.g., 'directoryt', 'pls', 'u').\n"
+        "- Never output dangerous commands: rm -rf, mkfs, dd if=, shutdown, reboot, sudo.\n"
+        "- No markdown. No extra keys.\n"
+        "Examples:\n"
+        '{"processable":true,"command":"find . -type f -name \\"*.sh\\"","reason":"file extension search"}\n'
+        '{"processable":true,"command":"rg -n \\"FastAPI\\" agent_library","reason":"content search"}\n'
+        '{"processable":true,"command":"cat Readme.md","reason":"read file request"}\n'
+        '{"processable":true,"command":"rg -n \\"calculator\\\" agent_library/agents","reason":"locate implementation"}\n'
+        '{"processable":true,"command":"docker ps","reason":"running containers"}\n'
+        '{"processable":true,"command":"docker logs --tail 200 vllm","reason":"container logs request"}\n'
+        '{"processable":true,"command":"git status","reason":"git inspection"}\n'
+        '{"processable":true,"command":"git add -A && git commit -m \\"update files\\"","reason":"commit all changes"}\n'
+        '{"processable":true,"command":"ss -ltnp","reason":"list listening ports"}\n'
+        '{"processable":false,"command":null,"reason":"not a shell-operational task"}\n'
+        f'User request: "{task}"'
+    )
+
+
+def _llm_preprocess(task: str):
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL")
+    model = os.getenv("LLM_OPS_MODEL")
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "10"))
+
+    if not api_key:
+        raise RuntimeError("LLM_OPS_API_KEY is not set")
+
+    if api_key.startswith("sk-") and api_key.lower() != "dummy":
+        base_url = "https://api.openai.com/v1"
+        if not model:
+            model = "gpt-4.1"
+    elif not base_url:
+        base_url = "https://api.openai.com/v1"
+    if not model:
+        model = "gpt-4o-mini"
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    user_prompt = _build_preprocess_prompt(task)
+    messages = [
+        {"role": "system", "content": "You produce strict JSON only."},
+        {"role": "user", "content": user_prompt},
+    ]
+    payload = {"model": model, "messages": messages, "temperature": 0}
+
+    _debug_log("Constructed shell preprocessing prompt:")
+    _debug_log(user_prompt)
+
+    response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+    response.raise_for_status()
+    data = response.json()
+    content = data["choices"][0]["message"]["content"]
+    log_raw("SHELL_LLM_RAW", content)
+    _debug_log("Raw preprocessing response:")
+    _debug_log(content)
+    return _parse_json(content)
+
+
+def _parse_decision(raw: Any):
+    if not isinstance(raw, dict):
+        return None
+
+    processable = raw.get("processable")
+    command = raw.get("command")
+    reason = raw.get("reason", "")
+
+    if not isinstance(processable, bool):
+        return None
+    if command is not None and not isinstance(command, str):
+        return None
+    if not isinstance(reason, str):
+        reason = ""
+
+    if not processable:
+        return {"processable": False, "command": None, "reason": reason.strip()}
+
+    if not command or not command.strip():
+        return None
+    return {"processable": True, "command": command.strip(), "reason": reason.strip()}
+
+
+def _looks_like_shell_command(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    token = text.strip().split()[0].lower()
+    common_commands = {
+        "ls",
+        "find",
+        "rg",
+        "grep",
+        "cat",
+        "head",
+        "tail",
+        "pwd",
+        "echo",
+        "wc",
+        "sort",
+        "uniq",
+        "git",
+        "docker",
+        "ps",
+        "pgrep",
+        "ss",
+        "netstat",
+    }
+    return token in common_commands or text.strip().startswith("./")
+
+
+def _derive_command_from_task(task: str):
+    decision_raw = _llm_preprocess(task)
+    decision = _parse_decision(decision_raw)
+    if decision is None or not decision["processable"]:
+        return None
+    return decision["command"]
+
+
+def _execute_command(command: str):
     if _is_blocked(command):
         return {
             "emits": [
@@ -105,3 +398,36 @@ def handle_event(req: EventRequest):
             }
         ]
     }
+
+
+@app.post("/handle", response_model=EventResponse)
+def handle_event(req: EventRequest):
+    command = None
+    if req.event == "shell.exec":
+        command_raw = req.payload.get("command")
+        if not isinstance(command_raw, str):
+            return {"emits": []}
+        if _looks_like_shell_command(command_raw):
+            command = command_raw.strip()
+        else:
+            try:
+                command = _derive_command_from_task(command_raw)
+            except Exception as exc:
+                _debug_log(f"Shell preprocessing failed for shell.exec: {type(exc).__name__}: {exc}")
+                return {"emits": []}
+            if not command:
+                return {"emits": []}
+    elif req.event == "task.plan":
+        task = req.payload.get("task")
+        if not isinstance(task, str):
+            return {"emits": []}
+        try:
+            command = _derive_command_from_task(task)
+        except Exception as exc:
+            _debug_log(f"Shell preprocessing failed for task.plan: {type(exc).__name__}: {exc}")
+            return {"emits": []}
+        if not command:
+            return {"emits": []}
+    else:
+        return {"emits": []}
+    return _execute_command(command)

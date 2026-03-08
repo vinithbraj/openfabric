@@ -6,6 +6,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Fetches research content for research queries.",
+    "capability_domains": ["research", "knowledge_lookup"],
+    "action_verbs": ["search", "lookup", "retrieve"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "methods": [
         {"name": "lookup_research", "event": "research.query"},
     ],

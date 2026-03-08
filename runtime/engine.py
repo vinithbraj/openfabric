@@ -3,9 +3,11 @@ import socket
 import subprocess
 import sys
 import time
+from typing import Any
 from importlib import import_module
 from urllib.parse import urlparse
 
+from .console import log_boot, log_event, log_event_handler
 from .contracts import ContractRegistry
 from .event_bus import EventBus
 from .registry import ADAPTER_REGISTRY
@@ -57,18 +59,21 @@ class Engine:
         for agent_name, config in self.spec["agents"].items():
             runtime_cfg = config.get("runtime", {})
             metadata = self._load_agent_metadata(runtime_cfg)
-            catalog.append(
-                {
-                    "name": agent_name,
-                    "description": metadata.get("description", config.get("description", "")),
-                    "methods": metadata.get("methods", config.get("methods", [])),
-                    "routing_notes": metadata.get("routing_notes", []),
-                    "adapter": runtime_cfg.get("adapter"),
-                    "endpoint": runtime_cfg.get("endpoint"),
-                    "subscribes_to": config.get("subscribes_to", []),
-                    "emits": config.get("emits", []),
-                }
-            )
+            entry = {
+                "name": agent_name,
+                "description": metadata.get("description", config.get("description", "")),
+                "methods": metadata.get("methods", config.get("methods", [])),
+                "routing_notes": metadata.get("routing_notes", []),
+                "adapter": runtime_cfg.get("adapter"),
+                "endpoint": runtime_cfg.get("endpoint"),
+                "subscribes_to": config.get("subscribes_to", []),
+                "emits": config.get("emits", []),
+            }
+            for key, value in metadata.items():
+                if key in {"description", "methods", "routing_notes"}:
+                    continue
+                entry[key] = value
+            catalog.append(entry)
         return catalog
 
     def _load_agent_metadata(self, runtime_cfg: dict):
@@ -86,6 +91,23 @@ class Engine:
         raw = getattr(module, "AGENT_METADATA", None)
         if not isinstance(raw, dict):
             return {}
+
+        def _sanitize_metadata_value(value: Any):
+            if isinstance(value, (str, bool, int, float)):
+                return value
+            if isinstance(value, list):
+                sanitized = [item for item in value if isinstance(item, (str, bool, int, float))]
+                return sanitized if sanitized else None
+            if isinstance(value, dict):
+                sanitized = {}
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        continue
+                    nested = _sanitize_metadata_value(item)
+                    if nested is not None:
+                        sanitized[key] = nested
+                return sanitized if sanitized else None
+            return None
 
         metadata = {}
         description = raw.get("description")
@@ -124,6 +146,13 @@ class Engine:
                 valid_methods.append(entry)
             metadata["methods"] = valid_methods
 
+        for key, value in raw.items():
+            if key in {"description", "routing_notes", "methods"}:
+                continue
+            sanitized = _sanitize_metadata_value(value)
+            if sanitized is not None:
+                metadata[key] = sanitized
+
         return metadata
 
     def _autostart_http_services(self):
@@ -146,9 +175,7 @@ class Engine:
                 )
 
             if self._is_port_open(host, port):
-                print(
-                    f"[BOOT] HTTP agent '{agent_name}' already reachable at {endpoint}"
-                )
+                log_boot(f"HTTP agent '{agent_name}' already reachable at {endpoint}")
                 continue
 
             app = autostart_cfg.get("app")
@@ -172,7 +199,7 @@ class Engine:
                 "--port",
                 str(bind_port),
             ]
-            print(f"[BOOT] starting HTTP agent '{agent_name}': {' '.join(command)}")
+            log_boot(f"starting HTTP agent '{agent_name}': {' '.join(command)}")
             process = subprocess.Popen(command)
             self._managed_processes.append(process)
 
@@ -217,9 +244,7 @@ class Engine:
         return False
 
     def emit(self, event_name: str, payload: dict, depth: int = 0):
-
-        indent = "  " * depth
-        print(f"{indent}[EVENT] {event_name} -> {payload}")
+        log_event(event_name, payload, depth)
 
         contract_name = self.spec["events"][event_name]["contract"]
         self.contracts.validate_payload(contract_name, payload)
@@ -227,7 +252,7 @@ class Engine:
         subscribers = self.bus.get_subscribers(event_name)
 
         for agent_name in subscribers:
-            print(f"{indent}  ↳ handled by: {agent_name}")
+            log_event_handler(agent_name, depth)
 
             agent = self.agents[agent_name]
             results = agent["adapter"].handle(event_name, payload)

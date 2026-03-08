@@ -43,6 +43,17 @@ In `specs/ops_assistant_llm.yml`, runtime emits `system.capabilities` at setup.
 `llm_operations_planner` subscribes to this event and dynamically restricts planning
 to tools/events that are actually available in the current ASDL topology.
 
+Agent metadata contract for capability routing
+
+Agents can expose richer `AGENT_METADATA` keys to improve planner matching:
+
+- `capability_domains`: high-level domains (for example `shell`, `filesystem`, `notification`)
+- `action_verbs`: verbs the agent can perform (for example `read`, `execute`, `notify`)
+- `side_effect_policy`: behavior class (`read_only`, `allow_non_destructive_side_effects`, etc.)
+- `safety_enforced_by_agent`: whether the agent applies its own runtime safety checks
+
+These fields are published in `system.capabilities` and consumed by `llm_operations_planner`.
+
 Reuse pattern
 
 1. Add a new agent module under `agent_library/agents/`.

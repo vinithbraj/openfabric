@@ -8,6 +8,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Rule-based planner for file, shell, and notification operations.",
+    "capability_domains": ["planning", "routing", "operations"],
+    "action_verbs": ["plan", "route", "dispatch"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "methods": [
         {
             "name": "plan_file_read",

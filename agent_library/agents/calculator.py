@@ -7,11 +7,16 @@ from fastapi import FastAPI
 import requests
 
 from agent_library.common import EventRequest, EventResponse
+from runtime.console import log_debug, log_raw
 
 app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Performs basic calculator operations from task plans using LLM-selected function invocation.",
+    "capability_domains": ["math", "arithmetic"],
+    "action_verbs": ["add", "subtract", "multiply", "divide", "compute", "calculate"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "routing_notes": [
         "Only handle arithmetic requests that map to add/subtract/multiply/divide.",
         "Use an LLM preprocessing step to choose the calculator function and operands.",
@@ -59,7 +64,7 @@ def _debug_enabled() -> bool:
 
 def _debug_log(message: str):
     if _debug_enabled():
-        print(f"[CALC_DEBUG] {message}")
+        log_debug("CALC_DEBUG", message)
 
 
 def _normalize_number(value: float):
@@ -202,7 +207,7 @@ def _llm_preprocess(task: str):
     response.raise_for_status()
     data = response.json()
     content = data["choices"][0]["message"]["content"]
-    print(f"[CALC_LLM_RAW] {content}")
+    log_raw("CALC_LLM_RAW", content)
     _debug_log("Raw preprocessing response:")
     _debug_log(content)
     return _parse_json(content)
