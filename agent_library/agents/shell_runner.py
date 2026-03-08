@@ -14,6 +14,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Executes safe bash commands from explicit shell input or LLM-derived task plans.",
+    "capability_domains": ["shell", "operations", "workspace_inspection", "service_control"],
+    "action_verbs": ["run", "execute", "list", "find", "search", "inspect", "start", "stop", "restart"],
+    "side_effect_policy": "allow_mutating_commands_with_safety_checks",
+    "safety_enforced_by_agent": True,
     "routing_notes": [
         "Use for command-line operations such as search, list, grep, and process inspection in the workspace.",
         "Can derive shell commands from natural-language task plans using an LLM preprocessing step.",
@@ -25,6 +29,7 @@ AGENT_METADATA = {
             "event": "shell.exec",
             "when": "Runs explicitly provided shell command strings.",
             "intent_tags": ["cli_exec"],
+            "risk_level": "medium",
             "examples": [
                 "find . -iname \"*vinith*\"",
                 "ls -la agent_library/agents",
@@ -36,6 +41,7 @@ AGENT_METADATA = {
             "event": "task.plan",
             "when": "Derives a shell command from natural language and executes it when safely processable.",
             "intent_tags": ["cli_exec", "file_search", "workspace_inspection"],
+            "risk_level": "medium",
             "examples": ["list files under agent_library", "find python files containing FastAPI"],
             "anti_patterns": ["delete system files", "install packages globally"],
         }
@@ -48,6 +54,7 @@ SHELL_CAPABILITIES = {
         "search file names and file contents (find, rg, ls, cat, head, tail, wc, sort)",
         "inspect git/workspace state (git status, git branch, git log --oneline)",
         "show process/network basics (ps, pgrep, netstat/ss) when read-only",
+        "manage local developer services and containers when explicitly requested (e.g., docker ps/stop/start/restart)",
     ],
     "disallowed_operations": [
         "destructive commands (rm, mkfs, dd, reboot/shutdown)",
@@ -173,6 +180,7 @@ def _build_preprocess_prompt(task: str):
         "Valid examples:\n"
         '{"processable":true,"command":"find . -type f","reason":"list files request"}\n'
         '{"processable":true,"command":"rg -n \\"FastAPI\\" agent_library","reason":"content search request"}\n'
+        '{"processable":true,"command":"docker stop $(docker ps -q)","reason":"explicit request to stop running containers"}\n'
         '{"processable":false,"command":null,"reason":"requires destructive or privileged action"}\n'
         f'User request: "{task}"'
     )

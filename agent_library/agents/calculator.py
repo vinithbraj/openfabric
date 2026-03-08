@@ -12,6 +12,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Performs basic calculator operations from task plans using LLM-selected function invocation.",
+    "capability_domains": ["math", "arithmetic"],
+    "action_verbs": ["add", "subtract", "multiply", "divide", "compute", "calculate"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "routing_notes": [
         "Only handle arithmetic requests that map to add/subtract/multiply/divide.",
         "Use an LLM preprocessing step to choose the calculator function and operands.",

@@ -6,6 +6,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Builds final user-facing answers from tool results.",
+    "capability_domains": ["response_synthesis", "final_answer"],
+    "action_verbs": ["summarize", "format", "respond"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "methods": [
         {
             "name": "synthesize_file_result",

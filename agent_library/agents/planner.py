@@ -6,6 +6,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Plans whether a request should trigger research, task execution, or both.",
+    "capability_domains": ["planning", "routing"],
+    "action_verbs": ["plan", "route", "dispatch"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "methods": [
         {"name": "plan_research", "event": "research.query"},
         {"name": "plan_task", "event": "task.plan"},

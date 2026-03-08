@@ -12,6 +12,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "LLM planner that decides whether a request is processable by discovered system capabilities.",
+    "capability_domains": ["planning", "routing", "operations"],
+    "action_verbs": ["plan", "route", "assess"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "routing_notes": [
         "Only decide if request is processable by discovered capabilities.",
         "If processable, emit task.plan with original task for broadcast execution.",
@@ -63,6 +67,18 @@ def _format_discovered_agents(capabilities: dict) -> str:
             safe_notes = [note for note in routing_notes if isinstance(note, str)]
             if safe_notes:
                 notes_text = f" Routing notes: {' | '.join(safe_notes)}."
+        extra_text_parts = []
+        for key in ("capability_domains", "action_verbs", "side_effect_policy", "safety_enforced_by_agent"):
+            value = item.get(key)
+            if isinstance(value, str):
+                extra_text_parts.append(f"{key}: {value}")
+            elif isinstance(value, bool):
+                extra_text_parts.append(f"{key}: {str(value).lower()}")
+            elif isinstance(value, list):
+                safe_items = [entry for entry in value if isinstance(entry, str)]
+                if safe_items:
+                    extra_text_parts.append(f"{key}: {', '.join(safe_items)}")
+        extras_text = f" Metadata: {'; '.join(extra_text_parts)}." if extra_text_parts else ""
         method_list = item.get("methods", [])
         if isinstance(method_list, list) and method_list:
             method_parts = []
@@ -92,7 +108,7 @@ def _format_discovered_agents(capabilities: dict) -> str:
             methods_text = "; ".join(method_parts) if method_parts else "No methods provided."
         else:
             methods_text = "No methods provided."
-        lines.append(f"- {name}: {description}{notes_text} Methods: {methods_text}")
+        lines.append(f"- {name}: {description}{notes_text}{extras_text} Methods: {methods_text}")
     return "\n".join(lines) if lines else "- unknown: No discovered agents"
 
 
@@ -101,11 +117,13 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "You are a strict planner for an operations assistant.\n"
         "Your only job is to decide whether a user request is processable by discovered capabilities.\n"
         "Return ONLY JSON with this exact shape:\n"
-        '{"processable":true|false,"reason":"short reason"}\n'
+        '{"processable":true|false,"confidence":0..1,"reason":"short reason"}\n'
         "No markdown, no prose, no extra keys.\n"
         "Discovered runtime agents and responsibilities:\n"
         f"{_format_discovered_agents(capabilities)}\n"
-        "Mark processable=true when at least one agent capability clearly applies.\n"
+        "Mark processable=true when at least one agent capability can attempt the task.\n"
+        "If an agent can execute requests safely with in-agent validation, prefer processable=true.\n"
+        "Use confidence near 1 for clear matches and lower values for ambiguous matches.\n"
         "Mark processable=false when none apply.\n"
         f'User request: "{question}"'
     )
@@ -187,12 +205,16 @@ def _parse_decision(raw: Any):
     if not isinstance(raw, dict):
         return None
     processable = raw.get("processable")
+    confidence = raw.get("confidence")
     reason = raw.get("reason", "")
     if not isinstance(processable, bool):
         return None
+    if not isinstance(confidence, (int, float)):
+        return None
+    confidence = max(0.0, min(1.0, float(confidence)))
     if not isinstance(reason, str):
         reason = ""
-    return {"processable": processable, "reason": reason.strip()}
+    return {"processable": processable, "confidence": confidence, "reason": reason.strip()}
 
 
 def _llm_decide(question: str, capabilities):
@@ -234,7 +256,11 @@ def _llm_decide(question: str, capabilities):
     }
 
     response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
-    response.raise_for_status()
+    if not response.ok:
+        _debug_log(f"Planner LLM HTTP error status: {response.status_code}")
+        _debug_log("Planner LLM HTTP error body:")
+        _debug_log(response.text[:4000])
+        response.raise_for_status()
     data = response.json()
     content = data["choices"][0]["message"]["content"]
     _debug_log("Raw LLM response content:")

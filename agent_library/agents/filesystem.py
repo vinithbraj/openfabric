@@ -9,6 +9,10 @@ app = FastAPI()
 
 AGENT_METADATA = {
     "description": "Reads workspace files and returns file contents.",
+    "capability_domains": ["filesystem", "file_reading", "workspace_inspection"],
+    "action_verbs": ["read", "open", "show", "cat"],
+    "side_effect_policy": "read_only",
+    "safety_enforced_by_agent": True,
     "routing_notes": [
         "Use only for opening or reading a specific file path.",
         "Do not use for search/discovery tasks like find, locate, or list files.",
