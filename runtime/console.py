@@ -82,6 +82,17 @@ def log_boot(message: str):
 def log_event(event_name: str, payload: dict, depth: int = 0):
     indent = "  " * depth
     event_text = _paint(event_name, "blue", bold=True)
+    if event_name == "answer.final" and isinstance(payload, dict) and isinstance(payload.get("answer"), str):
+        print(f"{indent}{_tag('EVENT', 'blue')} {event_text} ->")
+        extra_payload = {key: value for key, value in payload.items() if key != "answer"}
+        if extra_payload:
+            extra_text = _paint(_format_payload(extra_payload), "gray")
+            print(f"{indent}  {_paint('meta:', 'gray')} {extra_text}")
+        print(f"{indent}  {_paint('answer:', 'gray')}")
+        for line in payload["answer"].splitlines():
+            print(f"{indent}    {_paint(line, 'gray')}")
+        return
+
     payload_text = _paint(_format_payload(payload), "gray")
     print(f"{indent}{_tag('EVENT', 'blue')} {event_text} -> {payload_text}")
 

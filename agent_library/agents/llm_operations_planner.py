@@ -93,7 +93,7 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "No markdown, no extra keys, no prose outside JSON.\n"
         "Decision policy:\n"
         "1) processable=true if any discovered agent can attempt the request.\n"
-        "2) For operational shell requests (find/list/search/grep/git/ps/ports), default to processable=true "
+        "2) For operational shell requests (find/list/search/grep/git/commit/ps/ports), default to processable=true "
         "when shell capabilities exist.\n"
         "3) Tolerate minor typos and informal phrasing.\n"
         "4) Do NOT mark false only because the request might fail at execution time.\n"
@@ -103,6 +103,7 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         '- "grep TODO in this repo" -> {"processable":true,"confidence":0.95,"reason":"shell text search"}\n'
         '- "add 12 and 30" -> {"processable":true,"confidence":0.98,"reason":"calculator"}\n'
         '- "open Readme.md" -> {"processable":true,"confidence":0.97,"reason":"filesystem read"}\n'
+        '- "commit all git changes" -> {"processable":true,"confidence":0.95,"reason":"shell git commit capability"}\n'
         '- "book a flight to NYC" -> {"processable":false,"confidence":0.98,"reason":"no travel booking capability"}\n'
         "Discovered runtime agents:\n"
         f"{_format_discovered_agents(capabilities)}\n"

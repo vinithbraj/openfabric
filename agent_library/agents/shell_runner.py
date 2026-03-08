@@ -29,11 +29,17 @@ AGENT_METADATA = {
         "start",
         "stop",
         "restart",
+        "stage",
+        "commit",
+        "push",
     ],
     "side_effect_policy": "allow_mutating_commands_with_safety_checks",
     "safety_enforced_by_agent": True,
     "routing_notes": [
         "Use for command-line operations such as search, list, grep, and process inspection in the workspace.",
+        "Can also satisfy read/open/locate source-code requests using safe read-only shell commands.",
+        "Handle natural-language Docker requests (list/logs/start/stop/restart/inspect) using docker CLI commands.",
+        "Handle natural-language git workflow requests, including stage and commit in the current repository.",
         "Can derive shell commands from natural-language task plans using an LLM preprocessing step.",
         "If a task does not map to shell capabilities, emit nothing for task.plan.",
     ],
@@ -61,6 +67,11 @@ AGENT_METADATA = {
                 "find python files containing FastAPI",
                 "find all files with extension sh in current directory",
                 "show listening ports",
+                "open Readme.md",
+                "where is calculator agent implemented",
+                "show running docker containers",
+                "restart container named web",
+                "commit all git changes with message 'update shell prompt'",
             ],
             "anti_patterns": ["delete system files", "install packages globally"],
         }
@@ -71,10 +82,14 @@ SHELL_CAPABILITIES = {
     "allowed_operations": [
         "list files and directories in current workspace",
         "search file names and file contents (find, rg, grep, ls, cat, head, tail, wc, sort)",
+        "read specific files by relative path (cat, head, tail, sed -n)",
         "inspect git/workspace state (git status, git branch, git log --oneline)",
+        "perform explicit git staging/commit operations in current repository when user requests it",
         "show process/network basics (ps, pgrep, netstat/ss) when read-only",
         "manage local developer services and containers when explicitly requested (e.g., docker ps/stop/start/restart)",
         "derive common file-extension searches (e.g., .sh, .py, .md) with find",
+        "locate implementation files/functions with rg/find",
+        "inspect docker objects (docker ps, docker images, docker logs, docker inspect, docker compose ps)",
     ],
     "disallowed_operations": [
         "destructive commands (rm, mkfs, dd, reboot/shutdown)",
@@ -192,19 +207,36 @@ def _build_preprocess_prompt(task: str):
         "Output shape (exact keys):\n"
         '{"processable":true|false,"command":"shell command or null","reason":"short reason"}\n'
         "Rules:\n"
-        "- Prefer processable=true for shell-suitable requests (find/list/search/grep/git/ps/ports/docker status).\n"
+        "- Prefer processable=true for shell-suitable requests "
+        "(find/list/search/grep/git/ps/ports/docker/read/open/locate implementation).\n"
         "- If processable=true, command must be one non-empty bash command string.\n"
         "- If processable=false, set command=null.\n"
         "- Use workspace-scoped commands by default.\n"
         "- Interpret 'current directory' as '.'.\n"
         "- Interpret 'files with extension sh' as name pattern '*.sh'.\n"
+        "- 'open/read/show <file>' should usually map to cat/head/tail/sed if path appears valid.\n"
+        "- 'where is X implemented' should usually map to rg/find over repository paths.\n"
+        "- For Docker natural-language requests, map directly to docker CLI equivalents.\n"
+        "- For git commit requests, map to explicit git commands in current repo.\n"
+        "- If user asks 'commit all changes' and no message is provided, use a neutral message like "
+        "'update files'.\n"
+        "- Example mappings: 'running containers' -> docker ps, 'all containers' -> docker ps -a,\n"
+        "  'images' -> docker images, 'logs for <name>' -> docker logs --tail 200 <name>,\n"
+        "  'restart <name>' -> docker restart <name>, 'stop all running containers' -> docker stop $(docker ps -q).\n"
+        "- Example git mappings: 'commit all git changes' -> git add -A && git commit -m \"update files\".\n"
+        "  'commit only staged changes with message fix parser' -> git commit -m \"fix parser\".\n"
         "- Tolerate minor typos and shorthand (e.g., 'directoryt', 'pls', 'u').\n"
         "- Never output dangerous commands: rm -rf, mkfs, dd if=, shutdown, reboot, sudo.\n"
         "- No markdown. No extra keys.\n"
         "Examples:\n"
         '{"processable":true,"command":"find . -type f -name \\"*.sh\\"","reason":"file extension search"}\n'
         '{"processable":true,"command":"rg -n \\"FastAPI\\" agent_library","reason":"content search"}\n'
+        '{"processable":true,"command":"cat Readme.md","reason":"read file request"}\n'
+        '{"processable":true,"command":"rg -n \\"calculator\\\" agent_library/agents","reason":"locate implementation"}\n'
+        '{"processable":true,"command":"docker ps","reason":"running containers"}\n'
+        '{"processable":true,"command":"docker logs --tail 200 vllm","reason":"container logs request"}\n'
         '{"processable":true,"command":"git status","reason":"git inspection"}\n'
+        '{"processable":true,"command":"git add -A && git commit -m \\"update files\\"","reason":"commit all changes"}\n'
         '{"processable":true,"command":"ss -ltnp","reason":"list listening ports"}\n'
         '{"processable":false,"command":null,"reason":"not a shell-operational task"}\n'
         f'User request: "{task}"'
@@ -292,6 +324,7 @@ def _looks_like_shell_command(text: str) -> bool:
         "sort",
         "uniq",
         "git",
+        "docker",
         "ps",
         "pgrep",
         "ss",

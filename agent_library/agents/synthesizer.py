@@ -35,6 +35,22 @@ AGENT_METADATA = {
 }
 
 
+def _format_shell_answer(command: str, returncode: int, stdout: str, stderr: str) -> str:
+    clean_stdout = (stdout or "").strip()
+    clean_stderr = (stderr or "").strip()
+    status = "success" if returncode == 0 else "failure"
+    lines = [
+        "Shell execution result",
+        f"- command: {command}",
+        f"- exit_code: {returncode} ({status})",
+        "- stdout:",
+        clean_stdout or "<empty>",
+        "- stderr:",
+        clean_stderr or "<empty>",
+    ]
+    return "\n".join(lines)
+
+
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
     if req.event == "research.result":
@@ -76,10 +92,7 @@ def handle_event(req: EventRequest):
         stdout = req.payload["stdout"]
         stderr = req.payload["stderr"]
         returncode = req.payload["returncode"]
-        answer = (
-            f"Shell command '{command}' finished with code {returncode}. "
-            f"stdout: {stdout or '<empty>'}; stderr: {stderr or '<empty>'}"
-        )
+        answer = _format_shell_answer(command, returncode, stdout, stderr)
         return {"emits": [{"event": "answer.final", "payload": {"answer": answer}}]}
 
     if req.event == "notify.result":
