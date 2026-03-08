@@ -9,13 +9,27 @@ from fastapi import FastAPI
 import requests
 
 from agent_library.common import EventRequest, EventResponse
+from runtime.console import log_debug, log_raw
 
 app = FastAPI()
 
 AGENT_METADATA = {
-    "description": "Executes safe bash commands from explicit shell input or LLM-derived task plans.",
-    "capability_domains": ["shell", "operations", "workspace_inspection", "service_control"],
-    "action_verbs": ["run", "execute", "list", "find", "search", "inspect", "start", "stop", "restart"],
+    "description": "Executes safe bash commands from natural-language operations requests.",
+    "capability_domains": ["shell", "operations", "workspace_inspection", "service_control", "file_search"],
+    "action_verbs": [
+        "run",
+        "execute",
+        "list",
+        "find",
+        "search",
+        "grep",
+        "inspect",
+        "count",
+        "show",
+        "start",
+        "stop",
+        "restart",
+    ],
     "side_effect_policy": "allow_mutating_commands_with_safety_checks",
     "safety_enforced_by_agent": True,
     "routing_notes": [
@@ -42,7 +56,12 @@ AGENT_METADATA = {
             "when": "Derives a shell command from natural language and executes it when safely processable.",
             "intent_tags": ["cli_exec", "file_search", "workspace_inspection"],
             "risk_level": "medium",
-            "examples": ["list files under agent_library", "find python files containing FastAPI"],
+            "examples": [
+                "list files under agent_library",
+                "find python files containing FastAPI",
+                "find all files with extension sh in current directory",
+                "show listening ports",
+            ],
             "anti_patterns": ["delete system files", "install packages globally"],
         }
     ],
@@ -51,10 +70,11 @@ AGENT_METADATA = {
 SHELL_CAPABILITIES = {
     "allowed_operations": [
         "list files and directories in current workspace",
-        "search file names and file contents (find, rg, ls, cat, head, tail, wc, sort)",
+        "search file names and file contents (find, rg, grep, ls, cat, head, tail, wc, sort)",
         "inspect git/workspace state (git status, git branch, git log --oneline)",
         "show process/network basics (ps, pgrep, netstat/ss) when read-only",
         "manage local developer services and containers when explicitly requested (e.g., docker ps/stop/start/restart)",
+        "derive common file-extension searches (e.g., .sh, .py, .md) with find",
     ],
     "disallowed_operations": [
         "destructive commands (rm, mkfs, dd, reboot/shutdown)",
@@ -83,7 +103,7 @@ def _debug_enabled() -> bool:
 
 def _debug_log(message: str):
     if _debug_enabled():
-        print(f"[SHELL_DEBUG] {message}")
+        log_debug("SHELL_DEBUG", message)
 
 
 def _is_blocked(command: str) -> bool:
@@ -164,24 +184,29 @@ def _parse_json(content: str):
 
 def _build_preprocess_prompt(task: str):
     return (
-        "You are a strict shell-command preprocessor.\n"
-        "Do NOT execute commands. Do NOT explain. Only decide if a safe shell command can be formed.\n"
-        "Map the request to exactly one shell command when possible.\n"
+        "You are a shell-command planner for developer operations requests.\n"
+        "Do NOT execute commands. Convert the user request into one safe shell command when possible.\n"
+        "Return JSON only.\n"
         "Capabilities and limits:\n"
         f"{json.dumps(SHELL_CAPABILITIES, indent=2)}\n"
-        "Return ONLY JSON with this exact shape:\n"
+        "Output shape (exact keys):\n"
         '{"processable":true|false,"command":"shell command or null","reason":"short reason"}\n'
         "Rules:\n"
-        "- If unprocessable, set processable=false and command=null.\n"
-        "- If processable, set processable=true with a single non-empty shell command string.\n"
-        "- Prefer read-only, workspace-scoped commands.\n"
-        "- Never output dangerous commands (rm -rf, mkfs, dd, reboot, shutdown, sudo).\n"
-        "- Never include markdown or extra keys.\n"
-        "Valid examples:\n"
-        '{"processable":true,"command":"find . -type f","reason":"list files request"}\n'
-        '{"processable":true,"command":"rg -n \\"FastAPI\\" agent_library","reason":"content search request"}\n'
-        '{"processable":true,"command":"docker stop $(docker ps -q)","reason":"explicit request to stop running containers"}\n'
-        '{"processable":false,"command":null,"reason":"requires destructive or privileged action"}\n'
+        "- Prefer processable=true for shell-suitable requests (find/list/search/grep/git/ps/ports/docker status).\n"
+        "- If processable=true, command must be one non-empty bash command string.\n"
+        "- If processable=false, set command=null.\n"
+        "- Use workspace-scoped commands by default.\n"
+        "- Interpret 'current directory' as '.'.\n"
+        "- Interpret 'files with extension sh' as name pattern '*.sh'.\n"
+        "- Tolerate minor typos and shorthand (e.g., 'directoryt', 'pls', 'u').\n"
+        "- Never output dangerous commands: rm -rf, mkfs, dd if=, shutdown, reboot, sudo.\n"
+        "- No markdown. No extra keys.\n"
+        "Examples:\n"
+        '{"processable":true,"command":"find . -type f -name \\"*.sh\\"","reason":"file extension search"}\n'
+        '{"processable":true,"command":"rg -n \\"FastAPI\\" agent_library","reason":"content search"}\n'
+        '{"processable":true,"command":"git status","reason":"git inspection"}\n'
+        '{"processable":true,"command":"ss -ltnp","reason":"list listening ports"}\n'
+        '{"processable":false,"command":null,"reason":"not a shell-operational task"}\n'
         f'User request: "{task}"'
     )
 
@@ -220,7 +245,7 @@ def _llm_preprocess(task: str):
     response.raise_for_status()
     data = response.json()
     content = data["choices"][0]["message"]["content"]
-    print(f"[SHELL_LLM_RAW] {content}")
+    log_raw("SHELL_LLM_RAW", content)
     _debug_log("Raw preprocessing response:")
     _debug_log(content)
     return _parse_json(content)

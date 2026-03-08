@@ -7,6 +7,7 @@ from typing import Any
 from importlib import import_module
 from urllib.parse import urlparse
 
+from .console import log_boot, log_event, log_event_handler
 from .contracts import ContractRegistry
 from .event_bus import EventBus
 from .registry import ADAPTER_REGISTRY
@@ -174,9 +175,7 @@ class Engine:
                 )
 
             if self._is_port_open(host, port):
-                print(
-                    f"[BOOT] HTTP agent '{agent_name}' already reachable at {endpoint}"
-                )
+                log_boot(f"HTTP agent '{agent_name}' already reachable at {endpoint}")
                 continue
 
             app = autostart_cfg.get("app")
@@ -200,7 +199,7 @@ class Engine:
                 "--port",
                 str(bind_port),
             ]
-            print(f"[BOOT] starting HTTP agent '{agent_name}': {' '.join(command)}")
+            log_boot(f"starting HTTP agent '{agent_name}': {' '.join(command)}")
             process = subprocess.Popen(command)
             self._managed_processes.append(process)
 
@@ -245,9 +244,7 @@ class Engine:
         return False
 
     def emit(self, event_name: str, payload: dict, depth: int = 0):
-
-        indent = "  " * depth
-        print(f"{indent}[EVENT] {event_name} -> {payload}")
+        log_event(event_name, payload, depth)
 
         contract_name = self.spec["events"][event_name]["contract"]
         self.contracts.validate_payload(contract_name, payload)
@@ -255,7 +252,7 @@ class Engine:
         subscribers = self.bus.get_subscribers(event_name)
 
         for agent_name in subscribers:
-            print(f"{indent}  ↳ handled by: {agent_name}")
+            log_event_handler(agent_name, depth)
 
             agent = self.agents[agent_name]
             results = agent["adapter"].handle(event_name, payload)
