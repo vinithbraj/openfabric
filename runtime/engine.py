@@ -481,6 +481,21 @@ class Engine:
             return {"detail": payload.get("detail", ""), "result": payload.get("result")}
         return payload
 
+    def _step_failure_error(self, event_name: str, payload: dict):
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("status") == "failed":
+            return payload.get("error") or payload.get("detail") or "Step failed."
+        result = payload.get("result")
+        if isinstance(result, dict) and result.get("ok") is False:
+            return payload.get("error") or payload.get("detail") or "Step failed."
+        if event_name == "shell.result" and payload.get("returncode") not in (0, None):
+            stderr = payload.get("stderr")
+            if isinstance(stderr, str) and stderr.strip():
+                return stderr.strip()
+            return f"Command exited with status {payload.get('returncode')}."
+        return None
+
     def _execute_workflow_steps(self, steps: list, payload: dict, context: dict, depth: int):
         records = []
         final_results = []
@@ -628,6 +643,44 @@ class Engine:
             primary_event, primary_payload = step_results[0]
             primary_value = self._extract_result_value(primary_event, primary_payload, step_payload)
             result_summary = self._step_result_summary(primary_event, primary_payload)
+            failure_error = self._step_failure_error(primary_event, primary_payload)
+            if failure_error:
+                self._emit_step_progress(
+                    "failed",
+                    step_id,
+                    step_payload,
+                    depth + 1,
+                    message=failure_error,
+                    event=primary_event,
+                    duration_ms=duration_ms,
+                    result=result_summary,
+                    error=failure_error,
+                    sql=primary_payload.get("sql") if isinstance(primary_payload, dict) else None,
+                )
+                records.append(
+                    {
+                        "id": step_id,
+                        "task": step_payload.get("task", ""),
+                        "target_agent": step_payload.get("target_agent"),
+                        "status": "failed",
+                        "event": primary_event,
+                        "duration_ms": duration_ms,
+                        "payload": primary_payload,
+                        "result": primary_value,
+                        "error": failure_error,
+                        "emitted": [
+                            {"event": event_name, "payload": event_payload}
+                            for event_name, event_payload in step_results
+                        ],
+                    }
+                )
+                return {
+                    "status": "failed",
+                    "steps": records,
+                    "result": primary_value,
+                    "error": failure_error,
+                    "final_results": step_results,
+                }
             self._emit_step_progress(
                 "completed",
                 step_id,

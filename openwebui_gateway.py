@@ -149,6 +149,21 @@ def _is_openwebui_auxiliary_prompt(question: str) -> bool:
     return any(marker in normalized for marker in auxiliary_markers)
 
 
+def _is_openwebui_followup_prompt(question: str) -> bool:
+    normalized = question.strip().lower()
+    if '"follow_ups"' not in normalized and "follow_ups" not in normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "follow-up questions",
+            "follow-up prompts",
+            "follow_ups",
+            "suggest 3-5 relevant",
+        )
+    )
+
+
 def _upstream_chat_completion(request: ChatCompletionRequest):
     api_key, base_url, upstream_model, timeout_seconds = _llm_config()
     payload = request.model_dump()
@@ -215,10 +230,10 @@ def _truncate_progress(value: str, limit: int = 600) -> str:
     return value[: limit - 3].rstrip() + "..."
 
 
-def _trace_block(lines: list[str]) -> str:
+def _trace_block(lines: list[str], *, separator: bool = True) -> str:
     clean_lines = [line.rstrip() for line in lines if line is not None]
-    quoted = [f"> {line}" if line else ">" for line in clean_lines]
-    return "\n".join(quoted).rstrip() + "\n"
+    suffix = "\n\n---\n\n" if separator else "\n\n"
+    return "\n".join(clean_lines).rstrip() + suffix
 
 
 def _agent_label(agent: Any) -> str:
@@ -255,12 +270,24 @@ def _format_stats(stats: Any) -> str | None:
     return ", ".join(parts) if parts else None
 
 
+def _compact_fields(*items: tuple[str, Any]) -> str:
+    parts = []
+    for label, value in items:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        parts.append(f"**{label}:** {value}")
+    return " · ".join(parts)
+
+
 def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
-    indent = "  " * depth
     if event_name == "user.ask":
-        return _trace_block(["planning workflow..."])
+        return _trace_block(["**Planning workflow...**"], separator=False)
     if event_name == "plan.progress":
-        lines = [f"{indent}{payload.get('message', 'Plan ready.')}".rstrip()]
+        lines = [
+            f"**Plan:** {payload.get('message', 'Plan ready.')}".rstrip(),
+        ]
         steps = payload.get("steps", [])
         if isinstance(steps, list):
             for step in steps:
@@ -271,33 +298,19 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                     continue
                 target = step.get("target_agent")
                 lines.append(
-                    f"{indent}- **Step** `{step.get('id', 'step')}`"
-                    f" | **Agent** {_agent_label(target)}"
-                    f" | **Task** {_task_label(task)}"
+                    f"- `{step.get('id', 'step')}` via {_agent_label(target)}: {_task_label(task)}"
                 )
                 command = step.get("command")
                 if isinstance(command, str) and command.strip():
-                    lines.append(f"{indent}  command: `{_truncate_progress(command, 220)}`")
+                    lines.append(f"  Command: `{_truncate_progress(command, 220)}`")
         return _trace_block(lines)
     if event_name == "task.plan":
         step_id = payload.get("step_id")
         target = payload.get("target_agent")
         task = payload.get("task", "")
         if step_id or target:
-            label = f"{step_id or 'step'}"
-            lines = [
-                f"{indent}**Running** `{label}`"
-                f" | **Agent** {_agent_label(target)}"
-                f" | **Task** {_task_label(task)}"
-            ]
-            command = payload.get("command")
-            if isinstance(command, str) and command.strip():
-                lines.append(f"{indent}command: `{_truncate_progress(command, 220)}`")
-            sql = payload.get("sql")
-            if isinstance(sql, str) and sql.strip():
-                lines.append(f"{indent}sql: `{_truncate_progress(sql, 220)}`")
-            return _trace_block(lines)
-        return _trace_block([f"{indent}Planning: {task}"])
+            return None
+        return _trace_block([f"**Planning:** {task}"])
     if event_name == "step.progress":
         stage = payload.get("stage", "")
         step_id = payload.get("step_id", "step")
@@ -305,74 +318,84 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
         task = payload.get("task", "")
         if stage == "started":
             lines = [
-                f"{indent}**Starting** `{step_id}`"
-                f" | **Agent** {_agent_label(target)}"
-                f" | **Task** {_task_label(task)}"
+                f"**Running `{step_id}`** · {_agent_label(target)}",
+                f"Task: {_task_label(task)}",
             ]
             command = payload.get("command")
             if isinstance(command, str) and command.strip():
-                lines.append(f"{indent}command: `{_truncate_progress(command, 260)}`")
+                lines.append(f"Command: `{_truncate_progress(command, 260)}`")
             sql = payload.get("sql")
             if isinstance(sql, str) and sql.strip():
-                lines.append(f"{indent}sql: `{_truncate_progress(sql, 300)}`")
+                lines.append(f"SQL: `{_truncate_progress(sql, 300)}`")
             return _trace_block(lines)
         if stage == "completed":
-            lines = [
-                f"{indent}**Completed** `{step_id}`"
-                f" | **Agent** {_agent_label(target)}"
-            ]
+            lines = [f"**Completed `{step_id}`** · {_agent_label(target)}"]
             duration = _duration_label(payload.get("duration_ms"))
-            if duration:
-                lines.append(f"{indent}duration: `{duration}`")
             result = payload.get("result")
             sql = payload.get("sql")
+            row_count = None
+            stats_line = None
             if isinstance(result, dict):
                 detail = result.get("detail")
                 if isinstance(detail, str) and detail.strip():
-                    lines.append(f"{indent}detail: `{_truncate_progress(detail, 260)}`")
+                    lines.append(f"Detail: `{_truncate_progress(detail, 260)}`")
                 command = result.get("command")
                 if isinstance(command, str) and command.strip():
-                    lines.append(f"{indent}command: `{_truncate_progress(command, 260)}`")
+                    lines.append(f"Command: `{_truncate_progress(command, 260)}`")
                 stdout = result.get("stdout")
                 if isinstance(stdout, str) and stdout.strip():
-                    lines.append(f"{indent}output: `{_truncate_progress(stdout, 320)}`")
+                    lines.append(f"Output: `{_truncate_progress(stdout, 320)}`")
                 stderr = result.get("stderr")
                 if isinstance(stderr, str) and stderr.strip():
-                    lines.append(f"{indent}stderr: `{_truncate_progress(stderr, 220)}`")
+                    lines.append(f"Stderr: `{_truncate_progress(stderr, 220)}`")
                 row_count = result.get("row_count")
-                if row_count is not None:
-                    lines.append(f"{indent}rows: `{row_count}`")
+                stats_line = _format_stats(result.get("stats"))
+                nested_result = result.get("result")
+                if not stats_line and isinstance(nested_result, dict):
+                    stats_line = _format_stats(nested_result.get("stats"))
+                if not sql:
+                    sql = result.get("sql")
+            summary = _compact_fields(
+                ("Duration", f"`{duration}`" if duration else None),
+                ("Rows", f"`{row_count}`" if row_count is not None else None),
+            )
+            if summary:
+                lines.append(summary)
+            if stats_line:
+                lines.append(f"**Timing:** {stats_line}")
+            if isinstance(sql, str) and sql.strip():
+                lines.append(f"**SQL:** `{_truncate_progress(sql, 360)}`")
+            return _trace_block(lines)
+        if stage == "failed":
+            error = payload.get("error") or payload.get("message") or "Step failed."
+            lines = [
+                f"**Failed `{step_id}`** · {_agent_label(target)}",
+                f"**Error:** {error}",
+            ]
+            duration = _duration_label(payload.get("duration_ms"))
+            if duration:
+                lines.append(f"**Duration:** `{duration}`")
+            result = payload.get("result")
+            if isinstance(result, dict):
+                detail = result.get("detail")
+                if isinstance(detail, str) and detail.strip():
+                    lines.append(f"**Detail:** `{_truncate_progress(detail, 260)}`")
                 stats_line = _format_stats(result.get("stats"))
                 nested_result = result.get("result")
                 if not stats_line and isinstance(nested_result, dict):
                     stats_line = _format_stats(nested_result.get("stats"))
                 if stats_line:
-                    lines.append(f"{indent}stats: {stats_line}")
-                if not sql:
-                    sql = result.get("sql")
-            if isinstance(sql, str) and sql.strip():
-                lines.append(f"{indent}sql: `{_truncate_progress(sql, 360)}`")
-            return _trace_block(lines)
-        if stage == "failed":
-            error = payload.get("error") or payload.get("message") or "Step failed."
-            lines = [
-                f"{indent}**Failed** `{step_id}`"
-                f" | **Agent** {_agent_label(target)}"
-                f" | **Error** {error}"
-            ]
-            duration = _duration_label(payload.get("duration_ms"))
-            if duration:
-                lines.append(f"{indent}duration: `{duration}`")
+                    lines.append(f"**Timing:** {stats_line}")
             return _trace_block(lines)
     if event_name == "shell.result":
         command = payload.get("command", "")
         returncode = payload.get("returncode")
         stdout = payload.get("stdout", "")
-        lines = [f"{indent}Completed shell command with exit code {returncode}."]
+        lines = [f"**Shell command completed** · exit `{returncode}`"]
         if isinstance(command, str) and command.strip():
-            lines.append(f"{indent}command: `{_truncate_progress(command, 220)}`")
+            lines.append(f"Command: `{_truncate_progress(command, 220)}`")
         if isinstance(stdout, str) and stdout.strip():
-            lines.append(f"{indent}output: `{_truncate_progress(stdout, 300)}`")
+            lines.append(f"Output: `{_truncate_progress(stdout, 300)}`")
         return _trace_block(lines)
     if event_name == "sql.result":
         sql = payload.get("sql", "")
@@ -380,20 +403,23 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
         row_count = None
         if isinstance(result, dict):
             row_count = result.get("row_count")
-        lines = [f"{indent}Completed SQL query" + (f" with {row_count} row(s)." if row_count is not None else ".")]
+        lines = [
+            f"**SQL query completed**"
+            + (f" with `{row_count}` row(s)." if row_count is not None else ".")
+        ]
         if isinstance(sql, str) and sql.strip():
-            lines.append(f"{indent}sql: `{_truncate_progress(sql, 300)}`")
+            lines.append(f"SQL: `{_truncate_progress(sql, 300)}`")
         stats_line = _format_stats(payload.get("stats"))
         if stats_line:
-            lines.append(f"{indent}stats: {stats_line}")
+            lines.append(f"Timing: {stats_line}")
         return _trace_block(lines)
     if event_name in {"file.content", "notify.result"}:
-        return _trace_block([f"{indent}Completed {event_name}."])
+        return _trace_block([f"Completed {event_name}."])
     if event_name == "task.result":
         return None
     if event_name == "workflow.result":
         status = payload.get("status", "unknown")
-        return _trace_block([f"{indent}Workflow {status}."]) + "\n"
+        return _trace_block([f"**Workflow {status}.**"], separator=False)
     return None
 
 
@@ -457,6 +483,43 @@ def _stream_response(question: str, model: str):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+def _static_stream_response(answer: str, model: str):
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+
+    def event(data: dict) -> str:
+        return f"data: {json.dumps(data, ensure_ascii=True)}\n\n"
+
+    def generate():
+        yield event(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                ],
+            }
+        )
+        if answer:
+            yield event(_stream_chunk(completion_id, created, model, answer))
+        yield event(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                ],
+            }
+        )
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model": model_id}
@@ -484,6 +547,12 @@ def chat_completions(request: ChatCompletionRequest):
 
     question = _question_from_messages(request.messages)
     selected_model = request.model or model_id
+
+    if _is_openwebui_followup_prompt(question):
+        empty_followups = '{"follow_ups":[]}'
+        if request.stream:
+            return _static_stream_response(empty_followups, selected_model)
+        return _chat_response(empty_followups, selected_model)
 
     if _is_openwebui_auxiliary_prompt(question):
         return _upstream_chat_completion(request)

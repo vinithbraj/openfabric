@@ -122,6 +122,7 @@ def _extract_sql_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[st
                 {
                     "step": step,
                     "sql": payload.get("sql") or result.get("sql"),
+                    "queries": result.get("queries"),
                     "columns": result.get("columns", []),
                     "rows": result.get("rows", []),
                     "row_count": result.get("row_count"),
@@ -136,6 +137,7 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
     rows = result.get("rows", [])
     row_count = result.get("row_count")
     sql = result.get("sql", "")
+    queries = result.get("queries")
     limit = result.get("limit")
 
     lines = []
@@ -155,7 +157,17 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
     else:
         lines.append(json.dumps(result, indent=2, ensure_ascii=True))
 
-    if isinstance(sql, str) and sql.strip():
+    if isinstance(queries, list) and queries:
+        lines.extend(["", "**SQL used**"])
+        for index, query in enumerate(queries, start=1):
+            if not isinstance(query, dict):
+                continue
+            query_sql = query.get("sql")
+            if not isinstance(query_sql, str) or not query_sql.strip():
+                continue
+            label = query.get("label") or f"Query {index}"
+            lines.extend(["", f"{index}. {label}", "", "```sql", query_sql.strip(), "```"])
+    elif isinstance(sql, str) and sql.strip():
         lines.extend(["", "**SQL used**", "", "```sql", sql.strip(), "```"])
     return "\n".join(lines).strip()
 
@@ -262,6 +274,7 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                     compact_sql_results.append(
                         {
                             "sql": payload.get("sql") or result.get("sql"),
+                            "queries": result.get("queries"),
                             "columns": result.get("columns"),
                             "rows": result.get("rows"),
                             "row_count": result.get("row_count"),
@@ -383,6 +396,10 @@ def _llm_synthesize(req: EventRequest) -> str | None:
 
 
 def _synthesize(req: EventRequest) -> str:
+    if req.event == "task.result":
+        detail = req.payload.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
     try:
         answer = _llm_synthesize(req)
         if answer:

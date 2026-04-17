@@ -153,6 +153,10 @@ contracts:
     properties:
       detail:
         type: string
+      status:
+        type: string
+      error:
+        type: string
       result: {}
 
   PlanProgress:

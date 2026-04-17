@@ -41,6 +41,7 @@ AGENT_METADATA = {
 SUPPORTED_EVENT_SCHEMAS = {
     "task.plan": '{"task":"...","steps":[{"id":"step1","target_agent":"shell_runner","task":"...","command":"docker ps","result_mode":"stdout_first_line"}]}',
     "task.result": '{"detail":"..."}',
+    "plan.progress": '{"stage":"planned","message":"...","steps":[...],"presentation":{...}}',
 }
 DEFAULT_ALLOWED_EVENTS = set(SUPPORTED_EVENT_SCHEMAS.keys())
 CAPABILITIES = {"agents": [], "available_events": sorted(DEFAULT_ALLOWED_EVENTS)}
@@ -77,9 +78,22 @@ def _format_discovered_agents(capabilities: dict) -> str:
                 if isinstance(method_name, str) and isinstance(method_event, str):
                     methods.append(f"{method_name} emits event {method_event}")
         method_text = ", ".join(methods) if methods else "none"
+        metadata = []
+        database_name = item.get("database_name")
+        if isinstance(database_name, str) and database_name.strip():
+            metadata.append(f"database_name={database_name.strip()}")
+        database_aliases = item.get("database_aliases")
+        if isinstance(database_aliases, list):
+            aliases = ", ".join(alias for alias in database_aliases if isinstance(alias, str) and alias.strip())
+            if aliases:
+                metadata.append(f"database_aliases=[{aliases}]")
+        template_agent = item.get("template_agent")
+        if isinstance(template_agent, str) and template_agent.strip():
+            metadata.append(f"template_agent={template_agent.strip()}")
+        metadata_text = f" Metadata[{'; '.join(metadata)}]" if metadata else ""
         lines.append(
             f"- {name}: {description} Domains[{domain_text or 'none'}] "
-            f"Verbs[{verb_text or 'none'}] Methods[{method_text}]"
+            f"Verbs[{verb_text or 'none'}] Methods[{method_text}]{metadata_text}"
         )
     return "\n".join(lines) if lines else "- unknown: No discovered agents"
 
@@ -106,17 +120,18 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "9) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
         "10) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
         "11) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
-        "12) When using shell_runner, prefer explicit command for deterministic operations like docker ps, docker logs, rg, find, ls, git status.\n"
-        "13) When using sql_runner, do not invent SQL unless it is clearly requested or needed; sql_runner can introspect schema and generate safe read-only SQL itself.\n"
-        "14) Do not invent nonexistent specialized agents; use discovered agents only.\n"
-        "15) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
-        "16) For Open WebUI, prefer format=markdown_table when the user asks for a table/list/comparison/status report with rows and columns.\n"
-        "17) Set include_internal_steps=false unless the user explicitly asks for workflow details, commands, debug output, SQL query text, or how it was done.\n"
-        "18) If the user asks about available capabilities, tools, agents, supported operations, or what this system can do, answer from discovered capabilities with task.result; do not call shell_runner.\n"
-        "19) Capability metadata is descriptive, not executable. Never put method names, event names, arrows, or capability labels in shell commands.\n"
-        "20) Tolerate minor typos and informal phrasing.\n"
-        "21) Do NOT mark false only because the request might fail at execution time.\n"
-        "22) processable=false only when no discovered capability can attempt it; in that case steps=[].\n"
+        "12) For SQL/database questions, normally emit exactly one sql_runner step containing the full user request. Put formatting/display instructions in presentation, not separate sql_runner steps.\n"
+        "13) When using shell_runner, prefer explicit command for deterministic operations like docker ps, docker logs, rg, find, ls, git status.\n"
+        "14) When using sql_runner, do not invent SQL unless it is clearly requested or needed; sql_runner can introspect schema and generate safe read-only SQL itself.\n"
+        "15) Do not invent nonexistent specialized agents; use discovered agents only.\n"
+        "16) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
+        "17) For Open WebUI, prefer format=markdown_table when the user asks for a table/list/comparison/status report with rows and columns.\n"
+        "18) Set include_internal_steps=false unless the user explicitly asks for workflow details, commands, debug output, SQL query text, or how it was done.\n"
+        "19) If the user asks about available capabilities, tools, agents, supported operations, or what this system can do, answer from discovered capabilities with task.result; do not call shell_runner.\n"
+        "20) Capability metadata is descriptive, not executable. Never put method names, event names, arrows, or capability labels in shell commands.\n"
+        "21) Tolerate minor typos and informal phrasing.\n"
+        "22) Do NOT mark false only because the request might fail at execution time.\n"
+        "23) processable=false only when no discovered capability can attempt it; in that case steps=[].\n"
         "Calibration examples:\n"
         '- "find all files with extension sh in the current directory" -> {"processable":true,"reason":"shell file search","steps":[{"id":"step1","target_agent":"shell_runner","task":"find all files with extension sh in the current directory","command":"find . -type f -name \\"*.sh\\""}],"presentation":{"task":"List matching files clearly.","format":"bullets","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "list all running docker containers" -> {"processable":true,"reason":"docker container listing","steps":[{"id":"step1","target_agent":"shell_runner","task":"list all running docker containers","command":"docker ps"}],"presentation":{"task":"Show running containers in a concise Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
@@ -372,6 +387,9 @@ def _derive_available_events(agents: List[Dict[str, Any]]) -> List[str]:
         for event in agent.get("subscribes_to", []):
             if event in SUPPORTED_EVENT_SCHEMAS and event != "user.ask":
                 available.add(event)
+        for event in agent.get("emits", []):
+            if event in SUPPORTED_EVENT_SCHEMAS:
+                available.add(event)
     return sorted(available or DEFAULT_ALLOWED_EVENTS)
 
 
@@ -397,6 +415,12 @@ def _agent_search_blob(agent: Dict[str, Any]) -> str:
         " ".join(entry for entry in agent.get("action_verbs", []) if isinstance(entry, str)),
         " ".join(entry for entry in agent.get("routing_notes", []) if isinstance(entry, str)),
     ]
+    for key in ("database_name", "database_aliases", "argument_name", "template_agent"):
+        value = agent.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, list):
+            parts.append(" ".join(entry for entry in value if isinstance(entry, str)))
     methods = agent.get("methods", [])
     if isinstance(methods, list):
         for method in methods:
@@ -411,6 +435,62 @@ def _agent_search_blob(agent: Dict[str, Any]) -> str:
                 if isinstance(values, list):
                     parts.append(" ".join(entry for entry in values if isinstance(entry, str)))
     return " ".join(part for part in parts if part)
+
+
+def _agent_family(name: str) -> str:
+    if name.startswith("sql_runner"):
+        return "sql_runner"
+    return name
+
+
+def _has_agent_family(capabilities: dict, family: str) -> bool:
+    return any(
+        isinstance(agent, dict)
+        and isinstance(agent.get("name"), str)
+        and _agent_family(agent["name"]) == family
+        and "task.plan" in agent.get("subscribes_to", [])
+        for agent in capabilities.get("agents", [])
+    )
+
+
+def _configured_database_tokens(capabilities: dict) -> set[str]:
+    tokens = set()
+    for agent in capabilities.get("agents", []):
+        if not isinstance(agent, dict):
+            continue
+        for key in ("database_name", "database_aliases", "argument_name"):
+            value = agent.get(key)
+            if isinstance(value, str):
+                tokens.update(_tokenize(value))
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        tokens.update(_tokenize(item))
+    return tokens
+
+
+def _looks_like_sql_question(question: str, capabilities: dict) -> bool:
+    tokens = _tokenize(question)
+    sql_tokens = {
+        "sql",
+        "database",
+        "db",
+        "schema",
+        "schemas",
+        "table",
+        "tables",
+        "column",
+        "columns",
+        "query",
+        "queries",
+        "join",
+        "relationships",
+    }
+    if tokens & sql_tokens:
+        return True
+    if tokens & _configured_database_tokens(capabilities):
+        return True
+    return False
 
 
 def _select_target_agent(question: str, capabilities: dict) -> str | None:
@@ -440,7 +520,7 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
 
     if any(token in question_tokens for token in {"docker", "container", "containers", "git", "grep", "rg", "find", "list", "logs", "restart", "stop", "start", "ps", "ports"}):
         priority_boosts["shell_runner"] += 10
-    if any(token in question_tokens for token in {"sql", "database", "db", "schema", "schemas", "table", "tables", "column", "columns", "query", "queries", "join", "relationships"}):
+    if _looks_like_sql_question(question, capabilities):
         priority_boosts["sql_runner"] += 12
     if re.search(r"\b(add|subtract|multiply|divide|calculate|compute|sum)\b", question_lc) or len(re.findall(r"\b\d+(?:\.\d+)?\b", question_lc)) >= 2:
         priority_boosts["shell_runner"] += 10
@@ -453,7 +533,7 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
         name = agent["name"]
         blob_tokens = _tokenize(_agent_search_blob(agent))
         score = len(question_tokens & blob_tokens)
-        score += priority_boosts.get(name, 0)
+        score += priority_boosts.get(_agent_family(name), 0)
         if score > best_score:
             best_score = score
             best_name = name
@@ -688,6 +768,32 @@ def _fallback_steps(question: str, capabilities: dict):
     return steps
 
 
+def _sql_fallback_steps(question: str, capabilities: dict):
+    if not _looks_like_sql_question(question, capabilities):
+        return []
+    target_agent = _select_target_agent(question, capabilities)
+    if not target_agent or _agent_family(target_agent) != "sql_runner":
+        return []
+    return [{"id": "step1", "target_agent": target_agent, "task": question.strip()}]
+
+
+def _collapse_sql_steps(question: str, steps: list[dict], capabilities: dict):
+    if not _looks_like_sql_question(question, capabilities):
+        return steps
+    if not steps:
+        return _sql_fallback_steps(question, capabilities)
+    has_sql_step = any(
+        isinstance(step, dict)
+        and isinstance(step.get("target_agent"), str)
+        and _agent_family(step["target_agent"]) == "sql_runner"
+        for step in steps
+    )
+    if has_sql_step:
+        collapsed = _sql_fallback_steps(question, capabilities)
+        return collapsed or steps
+    return steps
+
+
 def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: dict):
     valid_names = _agent_names_with_task_plan(capabilities)
     normalized = []
@@ -818,6 +924,38 @@ def _plan_progress_payload(question: str, steps: list, presentation: dict):
     }
 
 
+def _sql_plan_emits(question: str, allowed_events: set[str]):
+    sql_steps = _sql_fallback_steps(question, CAPABILITIES)
+    if not sql_steps or "task.plan" not in allowed_events:
+        return None
+    presentation = _normalize_presentation(
+        question,
+        {
+            "task": "Show the query result as a readable Markdown table and include the SQL used.",
+            "format": "markdown_table",
+            "audience": "openwebui",
+            "include_context": True,
+            "include_internal_steps": False,
+        },
+    )
+    payload = {
+        "task": question,
+        "steps": sql_steps,
+        "presentation": presentation,
+        "target_agent": sql_steps[0]["target_agent"],
+    }
+    emits = []
+    if "plan.progress" in allowed_events:
+        emits.append(
+            {
+                "event": "plan.progress",
+                "payload": _plan_progress_payload(question, sql_steps, presentation),
+            }
+        )
+    emits.append({"event": "task.plan", "payload": payload})
+    return emits
+
+
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
     if req.event == "system.capabilities":
@@ -851,6 +989,7 @@ def handle_event(req: EventRequest):
                 steps = _normalize_steps(question, decision.get("steps", []), CAPABILITIES)
                 if not steps:
                     steps = _fallback_steps(question, CAPABILITIES)
+                steps = _collapse_sql_steps(question, steps, CAPABILITIES)
                 payload = {"task": question}
                 if steps:
                     payload["steps"] = steps
@@ -872,6 +1011,9 @@ def handle_event(req: EventRequest):
                     )
                 emits.append({"event": "task.plan", "payload": payload})
                 return {"emits": emits}
+            emits = _sql_plan_emits(question, allowed_events)
+            if emits is not None:
+                return {"emits": emits}
             if "task.result" in allowed_events:
                 reason = decision["reason"] or "No matching capability found."
                 return {"emits": [{"event": "task.result", "payload": {"detail": reason}}]}
@@ -879,6 +1021,10 @@ def handle_event(req: EventRequest):
         _debug_log("LLM planner decision was invalid.")
     except Exception as exc:
         _debug_log(f"LLM planning failed. Error: {type(exc).__name__}: {exc}")
+
+    emits = _sql_plan_emits(question, allowed_events)
+    if emits is not None:
+        return {"emits": emits}
 
     if "task.result" in allowed_events:
         return {

@@ -309,8 +309,9 @@ def _schema_summary(schema: dict) -> str:
         lines.append(f"- {table.get('schema')}.{table.get('name')}: {columns}")
         for fk in table.get("foreign_keys", []):
             lines.append(
-                "  FK {column} -> {table}.{column_ref}".format(
+                "  FK {column} -> {schema}.{table}.{column_ref}".format(
                     column=fk.get("column"),
+                    schema=fk.get("references_schema"),
                     table=fk.get("references_table"),
                     column_ref=fk.get("references_column"),
                 )
@@ -318,15 +319,47 @@ def _schema_summary(schema: dict) -> str:
     return "\n".join(lines)
 
 
-def _extract_json_object(text: str):
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return None
-    return text[start : end + 1]
+def _extract_json_values(text: str) -> list[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    values = []
+    for match in re.finditer(r"{", text):
+        try:
+            value, _end = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            values.append(value)
+    return values
 
 
-def _llm_sql(task: str, schema: dict) -> str | None:
+def _sql_query_specs_from_json(values: list[dict[str, Any]]) -> list[dict[str, str]]:
+    specs = []
+    for value in values:
+        queries = value.get("queries")
+        if isinstance(queries, list):
+            for index, item in enumerate(queries, start=1):
+                if not isinstance(item, dict):
+                    continue
+                sql = item.get("sql")
+                if isinstance(sql, str) and sql.strip():
+                    label = item.get("label") or item.get("name") or item.get("reason") or f"query {index}"
+                    specs.append({"label": str(label), "sql": sql.strip()})
+        sql = value.get("sql")
+        if isinstance(sql, str) and sql.strip():
+            label = value.get("label") or value.get("name") or value.get("reason") or f"query {len(specs) + 1}"
+            specs.append({"label": str(label), "sql": sql.strip()})
+    deduped = []
+    seen = set()
+    for spec in specs:
+        key = spec["sql"]
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(spec)
+    return deduped
+
+
+def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
     api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("LLM_OPS_BASE_URL")
     model = os.getenv("LLM_OPS_MODEL")
@@ -344,10 +377,15 @@ def _llm_sql(task: str, schema: dict) -> str | None:
 
     prompt = (
         "You generate read-only SQL for a configured database.\n"
-        "Return JSON only: {\"sql\":\"...\",\"reason\":\"...\"}\n"
+        "Return JSON only. For one query return {\"sql\":\"...\",\"reason\":\"...\"}. "
+        "When the user explicitly asks for separate queries, return {\"queries\":[{\"label\":\"...\",\"sql\":\"...\",\"reason\":\"...\"}]}.\n"
         "Rules:\n"
-        "- Generate exactly one read-only query.\n"
+        "- Generate one read-only query unless the user explicitly asks for separate queries.\n"
+        "- If multiple queries are requested, put all query objects inside one top-level JSON object under the queries array.\n"
         "- Use only tables and columns present in the schema.\n"
+        "- Use schema-qualified table names exactly as shown in the schema, for example schema_name.table_name.\n"
+        "- Never refer to a table by bare name when the schema summary shows it as schema.table.\n"
+        "- Use foreign-key relationships from the schema for joins.\n"
         "- Prefer SELECT or WITH queries. Do not generate mutating SQL.\n"
         "- Add a reasonable LIMIT unless the user asks for aggregation only.\n"
         "- Use the SQL dialect from the schema.\n"
@@ -371,12 +409,7 @@ def _llm_sql(task: str, schema: dict) -> str | None:
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"]
     log_raw("SQL_LLM_RAW", content)
-    blob = _extract_json_object(content)
-    if not blob:
-        return None
-    parsed = json.loads(blob)
-    sql = parsed.get("sql")
-    return sql.strip() if isinstance(sql, str) and sql.strip() else None
+    return _sql_query_specs_from_json(_extract_json_values(content))
 
 
 def _read_only_sql(sql: str) -> bool:
@@ -395,6 +428,46 @@ def _execute_sql(conn, sql: str, limit: int):
         cursor.execute(sql)
         columns, rows = _rows_from_cursor(cursor, limit)
     return {"sql": sql, "columns": columns, "rows": rows, "row_count": len(rows), "limit": limit}
+
+
+def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int):
+    if len(query_specs) == 1:
+        return _execute_sql(conn, query_specs[0]["sql"], limit)
+
+    query_results = []
+    rows = []
+    scalar_rows = True
+    for index, spec in enumerate(query_specs, start=1):
+        label = spec.get("label") or f"query {index}"
+        result = _execute_sql(conn, spec["sql"], limit)
+        query_results.append({"label": label, **result})
+
+        result_rows = result.get("rows", [])
+        columns = result.get("columns", [])
+        if len(result_rows) == 1 and len(columns) == 1:
+            rows.append({"query": label, "value": result_rows[0].get(columns[0])})
+        else:
+            scalar_rows = False
+            rows.append(
+                {
+                    "query": label,
+                    "row_count": result.get("row_count", 0),
+                    "result": json.dumps(result_rows, ensure_ascii=True),
+                }
+            )
+
+    if scalar_rows:
+        columns = ["query", "value"]
+    else:
+        columns = ["query", "row_count", "result"]
+    return {
+        "sql": "\n\n".join(item["sql"] for item in query_results),
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "limit": limit,
+        "queries": query_results,
+    }
 
 
 def _is_schema_request(task: str) -> bool:
@@ -448,6 +521,8 @@ def handle_event(req: EventRequest):
                     "event": "task.result",
                     "payload": {
                         "detail": "SQL agent is not configured. Set SQL_AGENT_DSN or SQL_DATABASE_URL.",
+                        "status": "failed",
+                        "error": "SQL agent is not configured. Set SQL_AGENT_DSN or SQL_DATABASE_URL.",
                         "result": None,
                     },
                 }
@@ -480,13 +555,13 @@ def handle_event(req: EventRequest):
                     ]
                 }
             if isinstance(provided_sql, str) and provided_sql.strip():
-                sql = provided_sql
+                query_specs = [{"label": "provided SQL", "sql": provided_sql.strip()}]
                 stats["sql_generation_ms"] = 0
             else:
                 started = time.perf_counter()
-                sql = _llm_sql(task, schema)
+                query_specs = _llm_sql_queries(task, schema)
                 stats["sql_generation_ms"] = _elapsed_ms(started)
-            if not sql:
+            if not query_specs:
                 stats["total_ms"] = _elapsed_ms(total_started)
                 return {
                     "emits": [
@@ -494,15 +569,18 @@ def handle_event(req: EventRequest):
                             "event": "task.result",
                             "payload": {
                                 "detail": "Could not generate a SQL query.",
-                                "result": {"stats": stats},
+                                "status": "failed",
+                                "error": "Could not generate a SQL query.",
+                                "result": {"ok": False, "stats": stats},
                             },
                         }
                     ]
                 }
             started = time.perf_counter()
-            result = _execute_sql(conn, sql, _row_limit())
+            result = _execute_sql_queries(conn, query_specs, _row_limit())
             stats["query_ms"] = _elapsed_ms(started)
             stats["total_ms"] = _elapsed_ms(total_started)
+            sql = result.get("sql", "")
             return {
                 "emits": [
                     {
@@ -526,7 +604,9 @@ def handle_event(req: EventRequest):
                     "event": "task.result",
                     "payload": {
                         "detail": f"SQL task failed: {type(exc).__name__}: {exc}",
-                        "result": {"stats": stats} if stats else None,
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "result": {"ok": False, "stats": stats} if stats else None,
                     },
                 }
             ]
