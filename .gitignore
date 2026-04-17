@@ -4,6 +4,7 @@ runtime/adapters/__pycache__
 examples/samples/planner/__pycache__/app.cpython-314.pyc
 
 .venv/
+.codex
 __pycache__/
 **/__pycache__/
 *.pyc
