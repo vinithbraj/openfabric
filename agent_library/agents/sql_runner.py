@@ -472,7 +472,22 @@ def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int):
 
 def _is_schema_request(task: str) -> bool:
     task_lc = task.lower()
-    return any(token in task_lc for token in ("schema", "schemas", "tables", "columns", "relationships", "foreign key", "foreign keys", "describe database"))
+    return any(
+        token in task_lc
+        for token in (
+            "schema",
+            "schemas",
+            "tables",
+            "columns",
+            "relationship",
+            "relationships",
+            "relation",
+            "relations",
+            "foreign key",
+            "foreign keys",
+            "describe database",
+        )
+    )
 
 
 def _is_sql_task(task: str) -> bool:

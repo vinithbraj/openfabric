@@ -22,4 +22,5 @@ PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 exec "$PYTHON_BIN" openwebui_gateway.py \
   --host "$HOST" \
   --port "$PORT" \
-  --timeout "$TIMEOUT"
+  --timeout "$TIMEOUT" \
+  "$@"

@@ -77,28 +77,16 @@ def _clean_terminal_output(value: Any) -> str:
     return text.strip()
 
 
-def _details_block(summary: str, body_lines: list[str]) -> str:
-    return "\n".join(
-        [
-            f"<details><summary>{summary}</summary>",
-            "",
-            *body_lines,
-            "",
-            "</details>",
-        ]
-    )
-
-
 def _command_output_details(command: str, stdout: str, stderr: str, returncode: int | None = None) -> str:
     clean_stdout = _clean_terminal_output(stdout) or "<empty>"
-    clean_stderr = _clean_terminal_output(stderr) or "<empty>"
-    body = []
+    clean_stderr = _clean_terminal_output(stderr)
+    body = ["Command and output", ""]
     if returncode is not None:
-        body.extend(["**Exit code**", "", f"`{returncode}`", ""])
-    body.extend(["**Command**", "", "```bash", command.strip(), "```", ""])
-    body.extend(["**Stdout**", "", "```text", clean_stdout, "```", ""])
-    body.extend(["**Stderr**", "", "```text", clean_stderr, "```"])
-    return _details_block("Command and output", body)
+        body.extend([f"Exit code: {returncode}", ""])
+    body.extend(["Command:", "", command.strip(), "", "Output:", "", clean_stdout])
+    if clean_stderr:
+        body.extend(["", "Error output:", "", clean_stderr])
+    return "\n".join(["```", "\n".join(body), "```"])
 
 
 def _format_shell_answer(command: str, returncode: int, stdout: str, stderr: str) -> str:
@@ -269,7 +257,7 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
             )
         )
     if shell_details:
-        lines.extend(["", _details_block("Command details", shell_details)])
+        lines.extend(["", "**Command details**", "", *shell_details])
 
     return "\n".join(lines)
 
@@ -399,8 +387,8 @@ def _build_prompt(req: EventRequest) -> str:
         "- Never end with commentary such as 'This is a concise answer' or 'This is formatted as Markdown'.\n"
         "- If include_internal_steps is false, use command outputs only as source data and hide implementation details.\n"
         "- If include_internal_steps is true, include a compact 'How it was done' section after the answer.\n"
-        "- When including command, stdout, stderr, logs, or raw execution details, put them inside a collapsed HTML details block: <details><summary>Command and output</summary> ... fenced code blocks ... </details>.\n"
-        "- Do not put the primary user answer inside a details block; only raw command/output details should be collapsible.\n"
+        "- Never output HTML details, summary, or collapsible blocks.\n"
+        "- If command, stdout, stderr, logs, or raw execution details are needed, use one plain fenced Markdown block and no HTML tags.\n"
         "- If the workflow failed or partially failed, include the failed step task and the exact error message from that step.\n"
         "- If there are completed steps before a failure, show any useful partial result first, then mention what failed.\n"
         "- If a failed step references unavailable previous results, say which dependency was missing.\n"

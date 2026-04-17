@@ -59,9 +59,55 @@ def _agent_color(name: str) -> str:
 
 def _format_payload(payload) -> str:
     try:
-        return json.dumps(payload, ensure_ascii=True)
+        return json.dumps(_compact_payload(payload), ensure_ascii=True)
     except TypeError:
         return str(payload)
+
+
+def _full_event_logs_enabled() -> bool:
+    return os.getenv("OPENFABRIC_FULL_EVENT_LOGS", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _truncate_text(value: str, limit: int = 240) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
+
+
+def _compact_payload(value):
+    if _full_event_logs_enabled():
+        return value
+    if isinstance(value, list):
+        return [_compact_payload(item) for item in value]
+    if not isinstance(value, dict):
+        if isinstance(value, str):
+            return _truncate_text(value)
+        return value
+
+    compact = {}
+    for key, item in value.items():
+        if key in {"stdout", "stderr"} and isinstance(item, str):
+            compact[key] = {
+                "chars": len(item),
+                "excerpt": _truncate_text(item.replace("\b", ""), 180) if item else "",
+            }
+            continue
+        if key == "emitted" and isinstance(item, list):
+            compact[key] = f"<{len(item)} emitted event(s)>"
+            continue
+        if key == "result" and isinstance(item, str):
+            compact[key] = {
+                "chars": len(item),
+                "excerpt": _truncate_text(item.replace("\b", ""), 180) if item else "",
+            }
+            continue
+        compact[key] = _compact_payload(item)
+    return compact
 
 
 def _tag(label: str, color: str) -> str:

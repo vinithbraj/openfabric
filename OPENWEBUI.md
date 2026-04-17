@@ -64,6 +64,32 @@ questions, chat titles, and tags. The gateway detects those housekeeping prompts
 and forwards them directly to the backing LLM instead of routing them through
 the OpenFabric planner.
 
+## Context And Progress
+
+By default, the gateway routes only the latest user message to the planner. It
+strips prior Open WebUI chat context so old assistant messages and previous
+tasks do not leak into a new execution.
+
+Enable prior chat context only when you want follow-up requests to resolve
+references from the same Open WebUI conversation:
+
+```bash
+ENABLE_CONTEXT=1 bash scripts/start_openwebui_gateway.sh
+```
+
+The same behavior is also available when running the Python entrypoint directly:
+
+```bash
+bash scripts/start_openwebui_gateway.sh --enable-context
+```
+
+Planner progress is streamed by default, including planning, step start,
+completion, and workflow status messages. To hide those progress phases:
+
+```bash
+OPENFABRIC_GATEWAY_STREAM_PROGRESS=0 bash scripts/start_openwebui_gateway.sh
+```
+
 ## SQL Agent
 
 The active planner includes read-only SQL agents. Configure the database URL
@@ -109,3 +135,28 @@ arguments:
 Each entry instantiates a separate `sql_runner_<name>` agent with its own port,
 DSN, and capability metadata. The planner sees the database name in
 `system.capabilities` and can route requests to the matching SQL agent.
+
+## Command Output Display
+
+The gateway appends shell command details as one preformatted Markdown block so
+raw terminal output is preserved without HTML:
+
+````markdown
+```
+Command and output
+
+Exit code: 0
+
+Command:
+
+docker ps -a
+
+Output:
+
+...
+```
+````
+
+Open WebUI may render raw HTML literally, so the gateway does not emit HTML
+collapsible-section tags. Standard Markdown has no portable collapsed-by-default
+block.
