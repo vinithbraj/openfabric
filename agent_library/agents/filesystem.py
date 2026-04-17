@@ -3,7 +3,7 @@ import re
 
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, task_plan_context
 
 app = FastAPI()
 
@@ -30,6 +30,26 @@ AGENT_METADATA = {
 }
 
 
+def _needs_decomposition(detail: str):
+    return {
+        "emits": [
+            {
+                "event": "task.result",
+                "payload": {
+                    "detail": detail,
+                    "status": "needs_decomposition",
+                    "error": detail,
+                    "replan_hint": {
+                        "reason": detail,
+                        "failure_class": "needs_decomposition",
+                        "suggested_capabilities": ["shell_runner", "filesystem"],
+                    },
+                },
+            }
+        ]
+    }
+
+
 def _extract_filepath(task: str):
     match = re.search(r"(?:read|open|show|cat)\s+([./a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9]+)?)", task)
     if match:
@@ -46,11 +66,14 @@ def handle_event(req: EventRequest):
     if req.event == "file.read":
         raw_path = req.payload["path"]
     elif req.event == "task.plan":
-        task = req.payload.get("task", "")
-        if not isinstance(task, str):
+        plan_context = task_plan_context(req.payload)
+        task = plan_context.classification_task
+        if not task:
             return {"emits": []}
         raw_path = _extract_filepath(task)
         if not raw_path:
+            if plan_context.targets("filesystem"):
+                return _needs_decomposition("Filesystem agent needs a specific file path to read.")
             return {"emits": []}
     else:
         return {"emits": []}

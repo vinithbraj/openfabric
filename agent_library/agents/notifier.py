@@ -3,7 +3,7 @@ import re
 
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, task_plan_context
 
 app = FastAPI()
 
@@ -28,6 +28,26 @@ AGENT_METADATA = {
 }
 
 
+def _needs_decomposition(detail: str):
+    return {
+        "emits": [
+            {
+                "event": "task.result",
+                "payload": {
+                    "detail": detail,
+                    "status": "needs_decomposition",
+                    "error": detail,
+                    "replan_hint": {
+                        "reason": detail,
+                        "failure_class": "needs_decomposition",
+                        "suggested_capabilities": ["notifier", "shell_runner"],
+                    },
+                },
+            }
+        ]
+    }
+
+
 def _extract_message_from_task(task: str):
     match = re.search(
         r"(?:notify|alert|remind)(?:\s+me)?(?:\s+to)?\s+(.+)$",
@@ -45,14 +65,17 @@ def handle_event(req: EventRequest):
         channel = req.payload["channel"]
         message = req.payload["message"]
     elif req.event == "task.plan":
-        task = req.payload.get("task", "")
-        if not isinstance(task, str):
+        plan_context = task_plan_context(req.payload)
+        task = plan_context.classification_task
+        if not task:
             return {"emits": []}
         task_lc = task.lower()
         if not any(token in task_lc for token in ("notify", "alert", "remind")):
+            if plan_context.targets("notifier"):
+                return _needs_decomposition("Notifier agent needs an explicit notify/alert/remind instruction.")
             return {"emits": []}
         channel = "console"
-        message = _extract_message_from_task(task)
+        message = _extract_message_from_task(plan_context.execution_task)
     else:
         return {"emits": []}
     timestamp = datetime.now(timezone.utc).isoformat()

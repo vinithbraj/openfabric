@@ -138,6 +138,8 @@ contracts:
               type: string
             result_mode:
               type: string
+            replan_budget:
+              type: number
             depends_on:
               type: array
               items:
@@ -158,6 +160,80 @@ contracts:
       error:
         type: string
       result: {}
+      replan_hint:
+        type: object
+        properties:
+          reason:
+            type: string
+          failure_class:
+            type: string
+          partial_result: {}
+          missing_information:
+            type: array
+            items:
+              type: string
+          suggested_capabilities:
+            type: array
+            items:
+              type: string
+
+  PlannerReplanRequest:
+    type: object
+    required: [task, step_id, reason]
+    properties:
+      task:
+        type: string
+      step_id:
+        type: string
+      original_task:
+        type: string
+      target_agent:
+        type: string
+      reason:
+        type: string
+      failure_class:
+        type: string
+      event:
+        type: string
+      error:
+        type: string
+      available_context:
+        type: object
+      partial_result: {}
+      presentation:
+        type: object
+
+  PlannerReplanResult:
+    type: object
+    required: [replace_step_id, steps]
+    properties:
+      replace_step_id:
+        type: string
+      reason:
+        type: string
+      steps:
+        type: array
+        items:
+          type: object
+
+  ClarificationRequired:
+    type: object
+    required: [task, detail]
+    properties:
+      task:
+        type: string
+      step_id:
+        type: string
+      detail:
+        type: string
+      question:
+        type: string
+      missing_information:
+        type: array
+        items:
+          type: string
+      available_context:
+        type: object
 
   PlanProgress:
     type: object
@@ -292,6 +368,12 @@ events:
     contract: TaskPlan
   task.result:
     contract: TaskResult
+  planner.replan.request:
+    contract: PlannerReplanRequest
+  planner.replan.result:
+    contract: PlannerReplanResult
+  clarification.required:
+    contract: ClarificationRequired
   plan.progress:
     contract: PlanProgress
   step.progress:
@@ -314,6 +396,9 @@ agents:
       - name: reject_unprocessable_request
         event: task.result
         when: "Emit when request is not processable by discovered capabilities."
+      - name: decompose_failed_step
+        event: planner.replan.result
+        when: "Emit a replacement subplan when an executing step requests further breakdown."
     runtime:
       adapter: http
       endpoint: "http://127.0.0.1:8301/handle"
@@ -323,10 +408,12 @@ agents:
     subscribes_to:
       - system.capabilities
       - user.ask
+      - planner.replan.request
     emits:
       - plan.progress
       - task.plan
       - task.result
+      - planner.replan.result
 
   shell_runner:
     description: "Executes bash commands and returns stdout/stderr/exit status."
@@ -405,6 +492,9 @@ agents:
       - name: synthesize_workflow_result
         event: workflow.result
         when: "Converts aggregated multi-step workflow results into final answer."
+      - name: synthesize_clarification_required
+        event: clarification.required
+        when: "Converts clarification requests into a user-facing follow-up question."
     runtime:
       adapter: http
       endpoint: "http://127.0.0.1:8305/handle"
@@ -417,6 +507,7 @@ agents:
       - notify.result
       - task.result
       - workflow.result
+      - clarification.required
     emits:
       - answer.final
 

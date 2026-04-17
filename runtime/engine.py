@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+import hashlib
 from typing import Any
 from importlib import import_module
 from urllib.parse import urlparse
@@ -416,8 +417,17 @@ class Engine:
         if not steps:
             return
 
-        context = {"original_task": payload.get("task", "")}
+        context = {
+            "original_task": payload.get("task", ""),
+            "__step_results__": [],
+            "__step_results_by_id__": {},
+        }
         workflow = self._execute_workflow_steps(steps, payload, context, depth)
+        clarification = workflow.get("clarification")
+        if workflow["status"] == "needs_clarification" and isinstance(clarification, dict):
+            if "clarification.required" in self.spec.get("events", {}):
+                self.emit("clarification.required", clarification, depth + 1)
+                return
         if "workflow.result" in self.spec.get("events", {}):
             result_payload = {
                 "task": payload.get("task", ""),
@@ -496,123 +506,348 @@ class Engine:
             return f"Command exited with status {payload.get('returncode')}."
         return None
 
+    def _step_requests_replan(self, event_name: str, payload: dict):
+        if not isinstance(payload, dict):
+            return False
+        status = payload.get("status")
+        return event_name == "task.result" and status in {"needs_decomposition", "needs_clarification"}
+
+    def _record_context_value(self, context: dict, step_id: str, primary_event: str, primary_payload: Any, primary_value: Any):
+        context["prev"] = primary_value
+        context[step_id] = primary_value
+        context[f"{step_id}.event"] = primary_event
+        context[f"{step_id}.detail"] = primary_payload.get("detail", "") if isinstance(primary_payload, dict) else ""
+        context[f"{step_id}.result"] = primary_payload.get("result", primary_value) if isinstance(primary_payload, dict) else primary_value
+
+    def _merge_child_context(self, context: dict, child_context: dict):
+        for key, value in child_context.items():
+            if key == "original_task":
+                continue
+            context[key] = value
+
+    def _structured_step_result(
+        self,
+        step_id: str,
+        step_payload: dict,
+        primary_event: str | None,
+        primary_payload: Any,
+        primary_value: Any,
+        status: str,
+        duration_ms: float,
+    ):
+        detail = primary_payload.get("detail", "") if isinstance(primary_payload, dict) else ""
+        return {
+            "step_id": step_id,
+            "task": step_payload.get("task", ""),
+            "target_agent": step_payload.get("target_agent", ""),
+            "status": status,
+            "event": primary_event or "",
+            "detail": detail,
+            "value": primary_value,
+            "result": primary_payload.get("result", primary_value) if isinstance(primary_payload, dict) else primary_value,
+            "summary": self._step_result_summary(primary_event or "", primary_payload) if primary_event and isinstance(primary_payload, dict) else primary_value,
+            "duration_ms": duration_ms,
+        }
+
+    def _record_step_result(self, context: dict, step_result: dict):
+        results = context.setdefault("__step_results__", [])
+        if isinstance(results, list):
+            results.append(step_result)
+        index = context.setdefault("__step_results_by_id__", {})
+        if isinstance(index, dict):
+            index[step_result.get("step_id")] = step_result
+
+    def _prior_step_results(self, context: dict):
+        results = context.get("__step_results__", [])
+        return [item for item in results if isinstance(item, dict)] if isinstance(results, list) else []
+
+    def _dependency_results(self, context: dict, raw_step: dict):
+        depends_on = raw_step.get("depends_on")
+        if not isinstance(depends_on, list) or not depends_on:
+            prior = self._prior_step_results(context)
+            return [prior[-1]] if prior else []
+        index = context.get("__step_results_by_id__", {})
+        if not isinstance(index, dict):
+            return []
+        results = []
+        for item in depends_on:
+            if isinstance(item, str) and isinstance(index.get(item), dict):
+                results.append(index[item])
+        return results
+
+    def _ready_to_run(self, raw_step: dict, completed_ids: set[str]):
+        depends_on = raw_step.get("depends_on")
+        if not isinstance(depends_on, list) or not depends_on:
+            return True
+        return all(isinstance(item, str) and item in completed_ids for item in depends_on)
+
+    def _replan_signature(self, step_payload: dict, error: str):
+        blob = json.dumps(
+            {
+                "task": step_payload.get("task"),
+                "target_agent": step_payload.get("target_agent"),
+                "command": step_payload.get("command"),
+                "sql": step_payload.get("sql"),
+                "error": error,
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+        )
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+    def _request_replan(
+        self,
+        step_id: str,
+        step_payload: dict,
+        workflow_payload: dict,
+        primary_event: str | None,
+        primary_payload: Any,
+        error: str,
+        context: dict,
+        depth: int,
+    ):
+        if "planner.replan.request" not in self.spec.get("events", {}):
+            return None
+        replan_payload = {
+            "task": step_payload.get("task", ""),
+            "step_id": step_id,
+            "original_task": workflow_payload.get("task", context.get("original_task", "")),
+            "target_agent": step_payload.get("target_agent", ""),
+            "reason": error,
+            "failure_class": "needs_decomposition" if self._step_requests_replan(primary_event or "", primary_payload) else "execution_failed",
+            "event": primary_event or "",
+            "available_context": {
+                key: value
+                for key, value in context.items()
+                if key != "original_task" and not key.endswith(".event")
+            },
+            "presentation": workflow_payload.get("presentation", {}),
+        }
+        if isinstance(primary_payload, dict):
+            if primary_payload.get("error"):
+                replan_payload["error"] = primary_payload.get("error")
+            if primary_payload.get("replan_hint") is not None:
+                replan_payload["partial_result"] = primary_payload.get("replan_hint")
+            elif primary_payload.get("result") is not None:
+                replan_payload["partial_result"] = primary_payload.get("result")
+        contract_name = self.spec["events"]["planner.replan.request"]["contract"]
+        self.contracts.validate_payload(contract_name, replan_payload)
+        log_event("planner.replan.request", replan_payload, depth + 1)
+        emitted = self._invoke_subscribers("planner.replan.request", replan_payload, depth + 1)
+        replan_result = None
+        auxiliary = []
+        for event_name, event_payload in emitted:
+            if event_name == "planner.replan.result":
+                replan_result = event_payload
+            else:
+                auxiliary.append((event_name, event_payload))
+        for event_name, event_payload in auxiliary:
+            self.emit(event_name, event_payload, depth + 1)
+        return replan_result
+
+    def _build_clarification_payload(
+        self,
+        step_id: str,
+        step_payload: dict,
+        workflow_payload: dict,
+        primary_payload: Any,
+        error: str,
+        context: dict,
+    ):
+        detail = error or "More information is required to continue."
+        question = None
+        missing_information = []
+        if isinstance(primary_payload, dict):
+            question = primary_payload.get("question")
+            replan_hint = primary_payload.get("replan_hint")
+            if isinstance(replan_hint, dict):
+                hint_question = replan_hint.get("question")
+                if isinstance(hint_question, str) and hint_question.strip():
+                    question = hint_question.strip()
+                hint_missing = replan_hint.get("missing_information")
+                if isinstance(hint_missing, list):
+                    missing_information = [item for item in hint_missing if isinstance(item, str) and item.strip()]
+        if not isinstance(question, str) or not question.strip():
+            if missing_information:
+                question = "I need a bit more information to continue: " + "; ".join(missing_information)
+            else:
+                question = detail
+        clarification = {
+            "task": workflow_payload.get("task", context.get("original_task", "")),
+            "step_id": step_id,
+            "detail": detail,
+            "question": question,
+            "available_context": {
+                key: value
+                for key, value in context.items()
+                if key != "original_task" and not key.endswith(".event")
+            },
+        }
+        if missing_information:
+            clarification["missing_information"] = missing_information
+        return clarification
+
+    def _execute_single_workflow_step(
+        self,
+        raw_step: dict,
+        workflow_payload: dict,
+        context: dict,
+        depth: int,
+    ):
+        step_id = raw_step.get("id") or "step"
+        nested_steps = raw_step.get("steps")
+        if isinstance(nested_steps, list) and nested_steps:
+            nested_context = dict(context)
+            nested_payload = {
+                "task": raw_step.get("task", workflow_payload.get("task", "")),
+                "step_id": step_id,
+                "presentation": workflow_payload.get("presentation", {}),
+            }
+            log_event("task.plan", nested_payload, depth + 1)
+            nested = self._execute_workflow_steps(nested_steps, nested_payload, nested_context, depth + 1)
+            return {
+                "kind": "nested",
+                "step_id": step_id,
+                "task": raw_step.get("task", workflow_payload.get("task", "")),
+                "target_agent": raw_step.get("target_agent"),
+                "nested": nested,
+                "nested_context": nested_context,
+            }
+
+        step_payload = {
+            key: value
+            for key, value in raw_step.items()
+            if key not in {"id", "depends_on", "steps", "replan_budget"}
+        }
+        step_payload = self._resolve_templates(step_payload, context)
+        step_payload.setdefault("task", workflow_payload.get("task", ""))
+        step_payload["step_id"] = step_id
+        step_payload["original_task"] = workflow_payload.get("task", context.get("original_task", ""))
+        prior_step_results = self._prior_step_results(context)
+        dependency_results = self._dependency_results(context, raw_step)
+        if prior_step_results:
+            step_payload["prior_step_results"] = prior_step_results
+            step_payload["previous_step_result"] = prior_step_results[-1]
+        if dependency_results:
+            step_payload["dependency_results"] = dependency_results
+        unresolved_keys = self._unresolved_template_keys(step_payload)
+        if unresolved_keys:
+            error = (
+                f"Plan step '{step_id}' referenced unavailable result(s): "
+                f"{', '.join(sorted(set(unresolved_keys)))}."
+            )
+            return {
+                "kind": "leaf",
+                "step_id": step_id,
+                "task": step_payload.get("task", ""),
+                "target_agent": step_payload.get("target_agent"),
+                "step_payload": step_payload,
+                "status": "failed",
+                "duration_ms": 0,
+                "error": error,
+                "unresolved": True,
+            }
+
+        log_event("task.plan", step_payload, depth + 1)
+        contract_name = self.spec["events"]["task.plan"]["contract"]
+        self.contracts.validate_payload(contract_name, step_payload)
+        self._emit_step_progress(
+            "started",
+            step_id,
+            step_payload,
+            depth + 1,
+            message=f"Starting step {step_id}: {step_payload.get('task', '')}",
+        )
+
+        step_started = time.perf_counter()
+        step_results = self._invoke_subscribers("task.plan", step_payload, depth + 1)
+        duration_ms = round((time.perf_counter() - step_started) * 1000, 2)
+        if not step_results:
+            primary_event = None
+            primary_payload = None
+            primary_value = None
+            result_summary = None
+            failure_error = f"Plan step '{step_id}' produced no result."
+        else:
+            primary_event, primary_payload = step_results[0]
+            primary_value = self._extract_result_value(primary_event, primary_payload, step_payload)
+            result_summary = self._step_result_summary(primary_event, primary_payload)
+            failure_error = self._step_failure_error(primary_event, primary_payload)
+
+        return {
+            "kind": "leaf",
+            "step_id": step_id,
+            "task": step_payload.get("task", ""),
+            "target_agent": step_payload.get("target_agent"),
+            "step_payload": step_payload,
+            "status": "completed" if not failure_error and not self._step_requests_replan(primary_event or "", primary_payload) else "failed",
+            "duration_ms": duration_ms,
+            "primary_event": primary_event,
+            "primary_payload": primary_payload,
+            "primary_value": primary_value,
+            "result_summary": result_summary,
+            "failure_error": failure_error,
+            "step_results": step_results,
+        }
+
     def _execute_workflow_steps(self, steps: list, payload: dict, context: dict, depth: int):
         records = []
         final_results = []
         final_value = None
+        pending = [step for step in steps if isinstance(step, dict)]
+        completed_ids: set[str] = set()
 
-        for index, raw_step in enumerate(steps, start=1):
-            if not isinstance(raw_step, dict):
-                continue
-
-            step_id = raw_step.get("id") or f"step{index}"
-            nested_steps = raw_step.get("steps")
-            if isinstance(nested_steps, list) and nested_steps:
-                nested_context = dict(context)
-                nested_payload = {
-                    "task": raw_step.get("task", payload.get("task", "")),
-                    "step_id": step_id,
+        while pending:
+            ready_index = next(
+                (index for index, item in enumerate(pending) if self._ready_to_run(item, completed_ids)),
+                None,
+            )
+            if ready_index is None:
+                error = "Workflow is blocked by unresolved or cyclic depends_on references."
+                return {
+                    "status": "failed",
+                    "steps": records,
+                    "result": final_value,
+                    "error": error,
+                    "final_results": final_results,
                 }
-                log_event("task.plan", nested_payload, depth + 1)
-                nested = self._execute_workflow_steps(
-                    nested_steps,
-                    nested_payload,
-                    nested_context,
-                    depth + 1,
-                )
-                context.update(
-                    {
-                        key: value
-                        for key, value in nested_context.items()
-                        if key not in context or key not in {"original_task"}
-                    }
-                )
+            raw_step = pending.pop(ready_index)
+            outcome = self._execute_single_workflow_step(raw_step, payload, context, depth)
+            step_id = outcome["step_id"]
+            if outcome["kind"] == "nested":
+                nested = outcome["nested"]
+                self._merge_child_context(context, outcome["nested_context"])
                 final_results = nested.get("final_results", [])
                 final_value = nested.get("result")
-                context["prev"] = final_value
-                context[step_id] = final_value
+                self._record_context_value(context, step_id, "task.result", {"result": final_value}, final_value)
+                completed_ids.add(step_id)
                 records.append(
                     {
                         "id": step_id,
-                        "task": raw_step.get("task", payload.get("task", "")),
+                        "task": outcome["task"],
+                        "target_agent": outcome.get("target_agent"),
                         "status": nested["status"],
                         "steps": nested["steps"],
                         "result": final_value,
                     }
                 )
                 if nested["status"] != "completed":
-                    return {
+                    result = {
                         "status": nested["status"],
                         "steps": records,
                         "result": final_value,
                         "error": nested.get("error"),
                         "final_results": final_results,
                     }
+                    if nested.get("clarification"):
+                        result["clarification"] = nested["clarification"]
+                    return result
                 continue
 
-            step_payload = {
-                key: value
-                for key, value in raw_step.items()
-                if key not in {"id", "depends_on", "steps"}
-            }
-            step_payload = self._resolve_templates(step_payload, context)
-            step_payload.setdefault("task", payload.get("task", ""))
-            step_payload["step_id"] = step_id
-            step_payload["original_task"] = payload.get("task", context.get("original_task", ""))
-            unresolved_keys = self._unresolved_template_keys(step_payload)
-            if unresolved_keys:
-                error = (
-                    f"Plan step '{step_id}' referenced unavailable result(s): "
-                    f"{', '.join(sorted(set(unresolved_keys)))}."
-                )
-                self._emit_step_progress(
-                    "failed",
-                    step_id,
-                    step_payload,
-                    depth + 1,
-                    message=error,
-                    error=error,
-                    duration_ms=0,
-                )
-                records.append(
-                    {
-                        "id": step_id,
-                        "task": step_payload.get("task", ""),
-                        "target_agent": step_payload.get("target_agent"),
-                        "status": "failed",
-                        "error": error,
-                        "duration_ms": 0,
-                        "context": {
-                            "available_results": sorted(
-                                key for key in context.keys() if key != "original_task"
-                            )
-                        },
-                    }
-                )
-                return {
-                    "status": "failed",
-                    "steps": records,
-                    "result": final_value,
-                    "error": error,
-                    "final_results": [],
-                }
-
-            log_event("task.plan", step_payload, depth + 1)
-            contract_name = self.spec["events"]["task.plan"]["contract"]
-            self.contracts.validate_payload(contract_name, step_payload)
-            self._emit_step_progress(
-                "started",
-                step_id,
-                step_payload,
-                depth + 1,
-                message=f"Starting step {step_id}: {step_payload.get('task', '')}",
-            )
-
-            step_started = time.perf_counter()
-            step_results = self._invoke_subscribers("task.plan", step_payload, depth + 1)
-            duration_ms = round((time.perf_counter() - step_started) * 1000, 2)
-            if not step_results:
-                error = f"Plan step '{step_id}' produced no result."
+            step_payload = outcome["step_payload"]
+            duration_ms = outcome.get("duration_ms", 0)
+            if outcome.get("unresolved"):
+                error = outcome["error"]
                 self._emit_step_progress(
                     "failed",
                     step_id,
@@ -640,21 +875,29 @@ class Engine:
                     "final_results": [],
                 }
 
-            primary_event, primary_payload = step_results[0]
-            primary_value = self._extract_result_value(primary_event, primary_payload, step_payload)
-            result_summary = self._step_result_summary(primary_event, primary_payload)
-            failure_error = self._step_failure_error(primary_event, primary_payload)
-            if failure_error:
+            primary_event = outcome.get("primary_event")
+            primary_payload = outcome.get("primary_payload")
+            primary_value = outcome.get("primary_value")
+            result_summary = outcome.get("result_summary")
+            step_results = outcome.get("step_results") or []
+            failure_error = outcome.get("failure_error")
+
+            if failure_error or self._step_requests_replan(primary_event or "", primary_payload):
+                error = failure_error or (
+                    primary_payload.get("detail")
+                    if isinstance(primary_payload, dict)
+                    else None
+                ) or "Step failed."
                 self._emit_step_progress(
                     "failed",
                     step_id,
                     step_payload,
                     depth + 1,
-                    message=failure_error,
+                    message=error,
                     event=primary_event,
                     duration_ms=duration_ms,
                     result=result_summary,
-                    error=failure_error,
+                    error=error,
                     sql=primary_payload.get("sql") if isinstance(primary_payload, dict) else None,
                 )
                 records.append(
@@ -662,25 +905,43 @@ class Engine:
                         "id": step_id,
                         "task": step_payload.get("task", ""),
                         "target_agent": step_payload.get("target_agent"),
-                        "status": "failed",
+                        "status": "needs_clarification" if self._step_requests_replan(primary_event or "", primary_payload) else "failed",
                         "event": primary_event,
                         "duration_ms": duration_ms,
                         "payload": primary_payload,
                         "result": primary_value,
-                        "error": failure_error,
+                        "error": error,
                         "emitted": [
                             {"event": event_name, "payload": event_payload}
                             for event_name, event_payload in step_results
                         ],
                     }
                 )
+                if isinstance(primary_payload, dict) and primary_payload.get("status") == "needs_clarification":
+                    clarification = self._build_clarification_payload(
+                        step_id,
+                        step_payload,
+                        payload,
+                        primary_payload,
+                        error,
+                        context,
+                    )
+                    return {
+                        "status": "needs_clarification",
+                        "steps": records,
+                        "result": primary_value,
+                        "error": error,
+                        "clarification": clarification,
+                        "final_results": step_results,
+                    }
                 return {
                     "status": "failed",
                     "steps": records,
                     "result": primary_value,
-                    "error": failure_error,
+                    "error": error,
                     "final_results": step_results,
                 }
+
             self._emit_step_progress(
                 "completed",
                 step_id,
@@ -692,11 +953,20 @@ class Engine:
                 result=result_summary,
                 sql=primary_payload.get("sql") if isinstance(primary_payload, dict) else None,
             )
-            context["prev"] = primary_value
-            context[step_id] = primary_value
-            context[f"{step_id}.event"] = primary_event
-            context[f"{step_id}.detail"] = primary_payload.get("detail", "") if isinstance(primary_payload, dict) else ""
-            context[f"{step_id}.result"] = primary_payload.get("result", primary_value) if isinstance(primary_payload, dict) else primary_value
+            self._record_context_value(context, step_id, primary_event, primary_payload, primary_value)
+            self._record_step_result(
+                context,
+                self._structured_step_result(
+                    step_id,
+                    step_payload,
+                    primary_event,
+                    primary_payload,
+                    primary_value,
+                    "completed",
+                    duration_ms,
+                ),
+            )
+            completed_ids.add(step_id)
             final_results = step_results
             final_value = primary_value
             records.append(

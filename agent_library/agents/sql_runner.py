@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlparse
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, task_plan_context
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -510,19 +510,39 @@ def _is_sql_task(task: str) -> bool:
     )
 
 
+def _needs_decomposition(detail: str):
+    return {
+        "emits": [
+            {
+                "event": "task.result",
+                "payload": {
+                    "detail": detail,
+                    "status": "needs_decomposition",
+                    "error": detail,
+                    "replan_hint": {
+                        "reason": detail,
+                        "failure_class": "needs_decomposition",
+                        "suggested_capabilities": ["sql_runner"],
+                    },
+                },
+            }
+        ]
+    }
+
+
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
     if req.event == "sql.query":
         task = str(req.payload.get("question") or req.payload.get("query") or "")
+        classification_task = task
+        execution_task = task
         provided_sql = req.payload.get("sql")
     elif req.event == "task.plan":
-        task = req.payload.get("task", "")
-        original_task = req.payload.get("original_task")
-        if isinstance(original_task, str) and original_task.strip():
-            task = f"{task}\nOriginal user request: {original_task.strip()}"
-        target_agent = req.payload.get("target_agent")
-        explicitly_targeted = isinstance(target_agent, str) and target_agent.startswith("sql_runner")
-        if not isinstance(task, str) or (not explicitly_targeted and not _is_sql_task(task)):
+        plan_context = task_plan_context(req.payload)
+        classification_task = plan_context.classification_task
+        execution_task = plan_context.execution_task
+        explicitly_targeted = plan_context.targets("sql_runner")
+        if not classification_task or (not explicitly_targeted and not _is_sql_task(classification_task)):
             return {"emits": []}
         provided_sql = req.payload.get("sql")
     else:
@@ -554,7 +574,7 @@ def handle_event(req: EventRequest):
             started = time.perf_counter()
             schema = _introspect(dialect, conn)
             stats["schema_ms"] = _elapsed_ms(started)
-            if _is_schema_request(task) and not provided_sql:
+            if _is_schema_request(classification_task) and not provided_sql:
                 stats["total_ms"] = _elapsed_ms(total_started)
                 return {
                     "emits": [
@@ -574,7 +594,7 @@ def handle_event(req: EventRequest):
                 stats["sql_generation_ms"] = 0
             else:
                 started = time.perf_counter()
-                query_specs = _llm_sql_queries(task, schema)
+                query_specs = _llm_sql_queries(execution_task, schema)
                 stats["sql_generation_ms"] = _elapsed_ms(started)
             if not query_specs:
                 stats["total_ms"] = _elapsed_ms(total_started)
@@ -584,9 +604,14 @@ def handle_event(req: EventRequest):
                             "event": "task.result",
                             "payload": {
                                 "detail": "Could not generate a SQL query.",
-                                "status": "failed",
+                                "status": "needs_decomposition",
                                 "error": "Could not generate a SQL query.",
                                 "result": {"ok": False, "stats": stats},
+                                "replan_hint": {
+                                    "reason": "Could not generate a SQL query.",
+                                    "failure_class": "needs_decomposition",
+                                    "suggested_capabilities": ["sql_runner"],
+                                },
                             },
                         }
                     ]

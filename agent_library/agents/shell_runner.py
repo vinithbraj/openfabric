@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import FastAPI
 import requests
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, task_plan_context
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -152,6 +152,26 @@ METADATA_COMMAND_PATTERNS = [
     r"^[a-zA-Z_][\w.-]*\s*->\s*[a-zA-Z_][\w.-]*$",
     r"^[a-zA-Z_][\w.-]*\s+emits\s+event\s+[a-zA-Z_][\w.-]*$",
 ]
+
+
+def _needs_decomposition(detail: str):
+    return {
+        "emits": [
+            {
+                "event": "task.result",
+                "payload": {
+                    "detail": detail,
+                    "status": "needs_decomposition",
+                    "error": detail,
+                    "replan_hint": {
+                        "reason": detail,
+                        "failure_class": "needs_decomposition",
+                        "suggested_capabilities": ["shell_runner"],
+                    },
+                },
+            }
+        ]
+    }
 
 
 def _debug_enabled() -> bool:
@@ -518,18 +538,20 @@ def handle_event(req: EventRequest):
         if isinstance(command_raw, str) and command_raw.strip():
             command = command_raw.strip()
             return _execute_command(command)
-        task = req.payload.get("task")
-        if not isinstance(task, str):
+        plan_context = task_plan_context(req.payload)
+        task = plan_context.classification_task
+        execution_task = plan_context.execution_task
+        if not task:
             return {"emits": []}
         if _is_introspection_request(task):
             return {"emits": []}
         try:
-            command = _derive_command_from_task(task)
+            command = _derive_command_from_task(execution_task)
         except Exception as exc:
             _debug_log(f"Shell preprocessing failed for task.plan: {type(exc).__name__}: {exc}")
-            return {"emits": []}
+            return _needs_decomposition(f"Shell agent could not derive a safe command: {type(exc).__name__}: {exc}")
         if not command:
-            return {"emits": []}
+            return _needs_decomposition("Shell agent needs the task broken into smaller executable operations.")
     else:
         return {"emits": []}
     return _execute_command(command)

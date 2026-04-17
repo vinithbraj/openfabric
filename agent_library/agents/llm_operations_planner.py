@@ -21,6 +21,7 @@ AGENT_METADATA = {
         "Only decide if request is processable by discovered capabilities.",
         "If processable, emit task.plan with original task and the best target agent for focused execution.",
         "If not processable, emit task.result with reason.",
+        "When an executing step fails or requests decomposition, emit planner.replan.result with a smaller replacement subplan.",
     ],
     "methods": [
         {
@@ -35,6 +36,12 @@ AGENT_METADATA = {
             "when": "When request cannot be handled by discovered capabilities.",
             "intent_tags": ["unprocessable"],
         },
+        {
+            "name": "decompose_failed_step",
+            "event": "planner.replan.result",
+            "when": "When a running step requests further decomposition or clarification.",
+            "intent_tags": ["replan", "decomposition"],
+        },
     ],
 }
 
@@ -42,6 +49,7 @@ SUPPORTED_EVENT_SCHEMAS = {
     "task.plan": '{"task":"...","steps":[{"id":"step1","target_agent":"shell_runner","task":"...","command":"docker ps","result_mode":"stdout_first_line"}]}',
     "task.result": '{"detail":"..."}',
     "plan.progress": '{"stage":"planned","message":"...","steps":[...],"presentation":{...}}',
+    "planner.replan.result": '{"replace_step_id":"step1","reason":"...","steps":[{"id":"step1_1","target_agent":"shell_runner","task":"..."}]}',
 }
 DEFAULT_ALLOWED_EVENTS = set(SUPPORTED_EVENT_SCHEMAS.keys())
 CAPABILITIES = {"agents": [], "available_events": sorted(DEFAULT_ALLOWED_EVENTS)}
@@ -115,13 +123,19 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "   You may also use stdout_last_line or json_field:<key> when that is a better fit.\n"
         "6) target_agent MUST be one discovered runtime agent name that can handle task.plan; never use ops_planner or synthesizer.\n"
         "7) Break chained requests into multiple atomic steps. Do not combine unrelated actions into one step. Use nested steps for grouped subtasks.\n"
+        "7a) Rewrite each step as a direct, concrete instruction for the target agent. Do not simply copy long stretches of the user's wording.\n"
+        "7b) Each step should be self-contained, operational, and phrased so another LLM can execute it without guessing.\n"
         "8) If a later step depends on an earlier step result, reference it with {{prev}} for the immediately previous result "
         "or {{step_id}} for a specific earlier step.\n"
+        "8a) If a step uses information learned or produced by an earlier step, you MUST set depends_on to that earlier step id.\n"
+        "8b) Prefer explicit dependency chains over implied ordering.\n"
         "9) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
         "10) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
         "11) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
-        "12) For SQL/database questions, normally emit exactly one sql_runner step containing the full user request. Put formatting/display instructions in presentation, not separate sql_runner steps.\n"
+        "12) For simple SQL/database questions, one sql_runner step is fine. For complex SQL tasks, decompose into concrete sql_runner steps such as inspect schema, sample values, determine join path, and run the final query.\n"
+        "12a) When you emit multiple SQL steps, each later SQL step should clearly state what it is trying to learn or produce, and it must declare depends_on when it uses earlier findings.\n"
         "13) When using shell_runner, prefer explicit command for deterministic operations like docker ps, docker logs, rg, find, ls, git status.\n"
+        "13a) For shell checks that control later steps, make the command return an exact machine-readable result rather than relying on ambiguous substring matches.\n"
         "14) When using sql_runner, do not invent SQL unless it is clearly requested or needed; sql_runner can introspect schema and generate safe read-only SQL itself.\n"
         "15) Do not invent nonexistent specialized agents; use discovered agents only.\n"
         "16) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
@@ -138,8 +152,8 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         '- "list running containers and tell me how long they have been running" -> {"processable":true,"reason":"docker uptime listing","steps":[{"id":"step1","target_agent":"shell_runner","task":"list running containers with uptime status","command":"docker ps --format \\"table {{.Names}}\\\\t{{.Status}}\\\\t{{.Image}}\\""}],"presentation":{"task":"Render container names, images, and runtime status as a Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "show the last 50 log lines for vllm" -> {"processable":true,"reason":"docker logs request","steps":[{"id":"step1","target_agent":"shell_runner","task":"show the last 50 log lines for vllm","command":"docker logs --tail 50 vllm"}]}\n'
         '- "find the vllm container id and then show the last 50 log lines" -> {"processable":true,"reason":"two-step shell workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the vllm container id","command":"docker ps --filter name=vllm --format \\"{{.ID}}\\"","result_mode":"stdout_first_line"},{"id":"step2","target_agent":"shell_runner","task":"show the last 50 log lines for container {{prev}}","command":"docker logs --tail 50 {{prev}}"}]}\n'
-        '- "show listening ports and then grep for 8000" -> {"processable":true,"reason":"ports inspection workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"show listening ports","command":"ss -ltnp"},{"id":"step2","target_agent":"shell_runner","task":"filter step1 for 8000","command":"printf \\"%s\\\\n\\" \\"{{step1}}\\" | grep 8000"}]}\n'
-        '- "find the newest log file and then show the last 20 lines" -> {"processable":true,"reason":"file discovery workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the newest log file","command":"find . -type f -name \\"*.log\\" -printf \\"%T@ %p\\\\n\\" | sort -nr | head -n 1 | cut -d\\" \\" -f2-","result_mode":"stdout_first_line"},{"id":"step2","target_agent":"shell_runner","task":"show the last 20 lines of {{prev}}","command":"tail -n 20 {{prev}}"}]}\n'
+        '- "show listening ports and then grep for 8000" -> {"processable":true,"reason":"ports inspection workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"show listening ports","command":"ss -ltnp"},{"id":"step2","target_agent":"shell_runner","task":"filter step1 for 8000","command":"printf \\"%s\\\\n\\" \\"{{step1}}\\" | grep 8000","depends_on":["step1"]}]}\n'
+        '- "find the newest log file and then show the last 20 lines" -> {"processable":true,"reason":"file discovery workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the newest log file","command":"find . -type f -name \\"*.log\\" -printf \\"%T@ %p\\\\n\\" | sort -nr | head -n 1 | cut -d\\" \\" -f2-","result_mode":"stdout_first_line"},{"id":"step2","target_agent":"shell_runner","task":"show the last 20 lines of {{prev}}","command":"tail -n 20 {{prev}}","depends_on":["step1"]}]}\n'
         '- "show git status and current branch" -> {"processable":true,"reason":"multi-step git inspection","steps":[{"id":"step1","target_agent":"shell_runner","task":"show git status","command":"git status --short"},{"id":"step2","target_agent":"shell_runner","task":"show current branch","command":"git branch --show-current","result_mode":"stdout_first_line"}]}\n'
         '- "find python files mentioning FastAPI" -> {"processable":true,"reason":"code search","steps":[{"id":"step1","target_agent":"shell_runner","task":"find python files mentioning FastAPI","command":"rg -n \\"FastAPI\\" --glob \\"*.py\\" ."}]}\n'
         '- "show database schema and relationships" -> {"processable":true,"reason":"SQL schema introspection","steps":[{"id":"step1","target_agent":"sql_runner","task":"show database schema and relationships"}],"presentation":{"task":"Summarize schemas, tables, columns, and relationships clearly.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
@@ -147,11 +161,35 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         '- "add 12 and 30" -> {"processable":true,"reason":"shell arithmetic","steps":[{"id":"step1","target_agent":"shell_runner","task":"add 12 and 30","command":"printf \\"%s\\\\n\\" \\"$((12 + 30))\\""}],"presentation":{"task":"Give the numeric result directly.","format":"plain","audience":"openwebui","include_context":false,"include_internal_steps":false}}\n'
         '- "open Readme.md" -> {"processable":true,"reason":"shell file read","steps":[{"id":"step1","target_agent":"shell_runner","task":"open Readme.md","command":"cat Readme.md"}]}\n'
         '- "create a file named vinith.txt with Hello world and return the path" -> {"processable":true,"reason":"shell file write","steps":[{"id":"step1","target_agent":"shell_runner","task":"create vinith.txt with Hello world and return the path","command":"printf \\"%s\\\\n\\" \\"Hello world\\" > vinith.txt && realpath vinith.txt","result_mode":"stdout_last_line"}],"presentation":{"task":"Return the created file path directly.","format":"plain","audience":"openwebui","include_context":false,"include_internal_steps":false}}\n'
-        '- "add 1 and 2 and then multiply by 230 and then divide by 2" -> {"processable":true,"reason":"multi-step shell arithmetic","steps":[{"id":"step1","target_agent":"shell_runner","task":"add 1 and 2","command":"printf \\"%s\\\\n\\" \\"$((1 + 2))\\"","result_mode":"stdout_stripped"},{"id":"step2","target_agent":"shell_runner","task":"multiply {{prev}} by 230","command":"printf \\"%s\\\\n\\" \\"$(({{prev}} * 230))\\"","result_mode":"stdout_stripped"},{"id":"step3","target_agent":"shell_runner","task":"divide {{prev}} by 2","command":"printf \\"%s\\\\n\\" \\"$(({{prev}} / 2))\\"","result_mode":"stdout_stripped"}]}\n'
+        '- "add 1 and 2 and then multiply by 230 and then divide by 2" -> {"processable":true,"reason":"multi-step shell arithmetic","steps":[{"id":"step1","target_agent":"shell_runner","task":"add 1 and 2","command":"printf \\"%s\\\\n\\" \\"$((1 + 2))\\"","result_mode":"stdout_stripped"},{"id":"step2","target_agent":"shell_runner","task":"multiply {{prev}} by 230","command":"printf \\"%s\\\\n\\" \\"$(({{prev}} * 230))\\"","result_mode":"stdout_stripped","depends_on":["step1"]},{"id":"step3","target_agent":"shell_runner","task":"divide {{prev}} by 2","command":"printf \\"%s\\\\n\\" \\"$(({{prev}} / 2))\\"","result_mode":"stdout_stripped","depends_on":["step2"]}]}\n'
         '- "book a flight to NYC" -> {"processable":false,"reason":"no travel booking capability","steps":[]}\n'
         "Discovered runtime agents:\n"
         f"{_format_discovered_agents(capabilities)}\n"
         f'User request: "{question}"'
+    )
+
+
+def _build_replan_prompt(payload: dict, capabilities: dict) -> str:
+    return (
+        "You are the routing planner for an operations assistant.\n"
+        "Task: replace one failed or blocked execution step with a smaller dependency-aware subplan.\n"
+        "Output JSON only with exact keys: "
+        '{"replace_step_id":"step id","reason":"short reason","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","command":"optional shell command","result_mode":"optional capture mode","depends_on":["optional_step_id"],"steps":[{"id":"step1_1","task":"optional nested substep"}]}]}\n'
+        "Rules:\n"
+        "1) Return a non-empty replacement steps array.\n"
+        "2) Break the failed task into smaller atomic steps that can be attempted by discovered agents.\n"
+        "3) Use depends_on when a step requires outputs from earlier steps.\n"
+        "3a) Steps without depends_on may run in parallel, so mark sequential steps explicitly.\n"
+        "4) Use only discovered runtime agent names that can handle task.plan; never use ops_planner or synthesizer.\n"
+        "5) Replace only the failed step, not the full workflow.\n"
+        "6) Prefer diagnostic or introspection subtasks before repeating the same failed action.\n"
+        "7) For SQL/database/schema/table/column/relationship/data questions, prefer sql_runner.\n"
+        "8) For shell/machine/workspace/container/process/repo operations, prefer shell_runner and explicit commands when possible.\n"
+        "9) Tolerate minor typos and informal phrasing.\n"
+        "Discovered runtime agents:\n"
+        f"{_format_discovered_agents(capabilities)}\n"
+        "Replan request JSON:\n"
+        f"{json.dumps(payload, indent=2)}"
     )
 
 
@@ -252,6 +290,28 @@ def _parse_decision(raw: Any):
     }
 
 
+def _parse_replan_decision(raw: Any):
+    if not isinstance(raw, dict):
+        return None
+    replace_step_id = raw.get("replace_step_id")
+    reason = raw.get("reason", "")
+    steps = raw.get("steps", [])
+    if not isinstance(replace_step_id, str) or not replace_step_id.strip():
+        return None
+    if not isinstance(reason, str):
+        reason = ""
+    if not isinstance(steps, list):
+        return None
+    normalized_steps = _parse_steps(steps)
+    if normalized_steps is None or not normalized_steps:
+        return None
+    return {
+        "replace_step_id": replace_step_id.strip(),
+        "reason": reason.strip(),
+        "steps": normalized_steps,
+    }
+
+
 def _parse_presentation(raw: Any):
     if not isinstance(raw, dict):
         return {}
@@ -278,6 +338,7 @@ def _parse_steps(steps: list):
         task = step.get("task")
         command = step.get("command")
         result_mode = step.get("result_mode")
+        replan_budget = step.get("replan_budget")
         nested_steps = step.get("steps")
         depends_on = step.get("depends_on")
         if not isinstance(step_id, str) or not step_id.strip():
@@ -298,6 +359,10 @@ def _parse_steps(steps: list):
             if not isinstance(result_mode, str) or not result_mode.strip():
                 return None
             normalized_step["result_mode"] = result_mode.strip()
+        if replan_budget is not None:
+            if not isinstance(replan_budget, (int, float)):
+                return None
+            normalized_step["replan_budget"] = max(0, int(replan_budget))
         if depends_on is not None:
             if not isinstance(depends_on, list) or not all(isinstance(item, str) for item in depends_on):
                 return None
@@ -377,6 +442,52 @@ def _llm_decide(question: str, capabilities):
         _debug_log("Parsed planner JSON missing valid processable/reason fields.")
         return None
     _debug_log("Planner decision:")
+    _debug_log(json.dumps(decision, indent=2))
+    return decision
+
+
+def _llm_replan(payload: dict, capabilities: dict):
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL")
+    model = os.getenv("LLM_OPS_MODEL")
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
+
+    if not api_key:
+        raise RuntimeError("LLM_OPS_API_KEY is not set")
+
+    if api_key.startswith("sk-") and api_key.lower() != "dummy":
+        base_url = "https://api.openai.com/v1"
+        if not model:
+            model = "gpt-4.1"
+    elif not base_url:
+        base_url = "https://api.openai.com/v1"
+    if not model:
+        model = "gpt-4o-mini"
+
+    response = requests.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You produce strict JSON only."},
+                {"role": "user", "content": _build_replan_prompt(payload, capabilities)},
+            ],
+            "temperature": 0,
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+    _debug_log("Raw replan LLM response content:")
+    _debug_log(content)
+    json_blob, parsed = _parse_planner_json(content)
+    if not json_blob or parsed is None:
+        return None
+    decision = _parse_replan_decision(parsed)
+    if decision is None:
+        return None
+    _debug_log("Planner replan decision:")
     _debug_log(json.dumps(decision, indent=2))
     return decision
 
@@ -782,19 +893,6 @@ def _sql_fallback_steps_for_task(planning_question: str, task_question: str, cap
 
 
 def _collapse_sql_steps(question: str, steps: list[dict], capabilities: dict):
-    if not _looks_like_sql_question(question, capabilities):
-        return steps
-    if not steps:
-        return _sql_fallback_steps(question, capabilities)
-    has_sql_step = any(
-        isinstance(step, dict)
-        and isinstance(step.get("target_agent"), str)
-        and _agent_family(step["target_agent"]) == "sql_runner"
-        for step in steps
-    )
-    if has_sql_step:
-        collapsed = _sql_fallback_steps(question, capabilities)
-        return collapsed or steps
     return steps
 
 
@@ -969,6 +1067,26 @@ def _sql_plan_emits(question: str, allowed_events: set[str], task_question: str 
     return emits
 
 
+def _fallback_replan_steps(payload: dict, capabilities: dict):
+    task = str(payload.get("task") or "").strip()
+    if not task:
+        return []
+    steps = _fallback_steps(task, capabilities)
+    if not steps:
+        return []
+    failed_task = str(payload.get("task") or "").strip().lower()
+    if len(steps) == 1:
+        only = steps[0]
+        if (
+            str(only.get("task") or "").strip().lower() == failed_task
+            and not only.get("steps")
+            and not only.get("depends_on")
+            and not only.get("command")
+        ):
+            return []
+    return steps
+
+
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
     if req.event == "system.capabilities":
@@ -977,6 +1095,59 @@ def handle_event(req: EventRequest):
             CAPABILITIES["agents"] = agents
             CAPABILITIES["available_events"] = _derive_available_events(agents)
         return {"emits": []}
+
+    if req.event == "planner.replan.request":
+        allowed_events = set(CAPABILITIES.get("available_events", DEFAULT_ALLOWED_EVENTS))
+        if "planner.replan.result" not in allowed_events:
+            return {"emits": []}
+        replace_step_id = str(req.payload.get("step_id") or "").strip()
+        if not replace_step_id:
+            return {"emits": []}
+        steps = []
+        try:
+            decision = _llm_replan(req.payload, CAPABILITIES)
+            if decision is not None and decision["replace_step_id"] == replace_step_id:
+                steps = _normalize_steps(str(req.payload.get("task") or ""), decision.get("steps", []), CAPABILITIES)
+        except Exception as exc:
+            _debug_log(f"Planner replan failed. Error: {type(exc).__name__}: {exc}")
+        if not steps:
+            steps = _fallback_replan_steps(req.payload, CAPABILITIES)
+        if not steps:
+            return {
+                "emits": [
+                    {
+                        "event": "task.result",
+                        "payload": {
+                            "detail": req.payload.get("reason") or "Planner could not further decompose the failed step.",
+                            "status": "failed",
+                            "error": req.payload.get("error") or req.payload.get("reason"),
+                        },
+                    }
+                ]
+            }
+        emits = []
+        if "plan.progress" in allowed_events:
+            emits.append(
+                {
+                    "event": "plan.progress",
+                    "payload": _plan_progress_payload(
+                        str(req.payload.get("task") or ""),
+                        steps,
+                        req.payload.get("presentation", {}),
+                    ),
+                }
+            )
+        emits.append(
+            {
+                "event": "planner.replan.result",
+                "payload": {
+                    "replace_step_id": replace_step_id,
+                    "reason": str(req.payload.get("reason") or "Replanned failed step."),
+                    "steps": steps,
+                },
+            }
+        )
+        return {"emits": emits}
 
     if req.event != "user.ask":
         return {"emits": []}
@@ -1003,8 +1174,7 @@ def handle_event(req: EventRequest):
                 steps = _normalize_steps(current_question, decision.get("steps", []), CAPABILITIES)
                 if not steps:
                     steps = _fallback_steps(current_question, CAPABILITIES)
-                steps = _collapse_sql_steps(question, steps, CAPABILITIES)
-                if _looks_like_sql_question(question, CAPABILITIES):
+                if not steps and _looks_like_sql_question(question, CAPABILITIES):
                     steps = _sql_fallback_steps_for_task(question, current_question, CAPABILITIES) or steps
                 payload = {"task": current_question}
                 if steps:

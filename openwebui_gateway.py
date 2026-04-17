@@ -34,6 +34,7 @@ SYNTHESIZER_EVENTS = {
     "shell.result",
     "sql.result",
     "notify.result",
+    "clarification.required",
     "workflow.result",
 }
 
@@ -531,10 +532,10 @@ def _stream_synthesis_parts(
     req = EventRequest(event=event_name, payload=_payload_for_synthesis(event_name, payload))
     if cancel_event is not None and cancel_event.is_set():
         return
-    if event_name == "task.result":
-        detail = payload.get("detail")
-        if isinstance(detail, str) and detail.strip():
-            yield from _text_stream_parts(detail.strip(), chunk_size=24)
+    if event_name in {"task.result", "clarification.required"}:
+        direct_answer = _fallback_synthesis_answer(req)
+        if isinstance(direct_answer, str) and direct_answer.strip():
+            yield from _text_stream_parts(direct_answer.strip(), chunk_size=32)
             return
 
     api_key, base_url, synthesis_model, timeout_seconds = _synthesis_llm_config()
@@ -562,6 +563,7 @@ def _stream_synthesis_parts(
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0.2,
+                "max_tokens": 400,
                 "stream": True,
             },
             timeout=timeout_seconds,
@@ -846,6 +848,15 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             if isinstance(sql, str) and sql.strip():
                 lines.append(f"SQL: `{_truncate_progress(sql, 300)}`")
             return _trace_block(lines)
+        if stage == "replanning":
+            lines = [
+                f"**Replanning `{step_id}`** · {_agent_label(target)}",
+                f"Task: {_task_label(task)}",
+            ]
+            error = payload.get("error")
+            if isinstance(error, str) and error.strip():
+                lines.append(f"Reason: `{_truncate_progress(error, 260)}`")
+            return _trace_block(lines)
         if stage == "completed":
             lines = [f"**Completed `{step_id}`** · {_agent_label(target)}"]
             duration = _duration_label(payload.get("duration_ms"))
@@ -931,6 +942,9 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
         return _trace_block([f"Completed {event_name}."])
     if event_name == "task.result":
         return None
+    if event_name == "clarification.required":
+        question = payload.get("question") or payload.get("detail") or "More information is required."
+        return _trace_block([f"**Clarification needed.** {question}"], separator=False)
     if event_name == "workflow.result":
         status = payload.get("status", "unknown")
         return _trace_block([f"**Workflow {status}.**"], separator=False)

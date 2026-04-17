@@ -48,6 +48,11 @@ AGENT_METADATA = {
             "event": "workflow.result",
             "when": "Converts aggregated multi-step workflow results into final answer.",
         },
+        {
+            "name": "synthesize_clarification_required",
+            "event": "clarification.required",
+            "when": "Converts clarification requests into a user-facing follow-up question.",
+        },
     ],
 }
 
@@ -292,6 +297,22 @@ def _fallback_answer(req: EventRequest) -> str:
     if req.event == "workflow.result":
         return _format_workflow_answer(req.payload)
 
+    if req.event == "clarification.required":
+        question = req.payload.get("question")
+        detail = req.payload.get("detail")
+        missing_information = req.payload.get("missing_information")
+        lines = []
+        if isinstance(detail, str) and detail.strip():
+            lines.append(detail.strip())
+        if isinstance(question, str) and question.strip():
+            lines.extend(["", question.strip()] if lines else [question.strip()])
+        if isinstance(missing_information, list):
+            items = [item.strip() for item in missing_information if isinstance(item, str) and item.strip()]
+            if items:
+                lines.extend(["", "Needed to continue:"])
+                lines.extend([f"- {item}" for item in items])
+        return "\n".join(lines).strip()
+
     if req.event == "notify.result":
         detail = req.payload["detail"]
         return f"Notification: {detail}"
@@ -348,6 +369,16 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             "sql": req.payload.get("sql"),
             "schema": req.payload.get("schema"),
             "result": req.payload.get("result"),
+        }
+    if req.event == "clarification.required":
+        return {
+            "event": req.event,
+            "task": req.payload.get("task"),
+            "step_id": req.payload.get("step_id"),
+            "detail": req.payload.get("detail"),
+            "question": req.payload.get("question"),
+            "missing_information": req.payload.get("missing_information"),
+            "available_context": req.payload.get("available_context"),
         }
     return {
         "event": req.event,
@@ -432,6 +463,7 @@ def _llm_synthesize(req: EventRequest) -> str | None:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
+            "max_tokens": 400,
         },
         timeout=timeout_seconds,
     )
@@ -451,6 +483,10 @@ def _synthesize(req: EventRequest) -> str:
         detail = req.payload.get("detail")
         if isinstance(detail, str) and detail.strip():
             return detail.strip()
+    if req.event == "clarification.required":
+        question = req.payload.get("question")
+        if isinstance(question, str) and question.strip():
+            return _fallback_answer(req)
     try:
         answer = _llm_synthesize(req)
         if answer:
@@ -462,7 +498,7 @@ def _synthesize(req: EventRequest) -> str:
 
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
-    if req.event not in {"research.result", "task.result", "file.content", "shell.result", "sql.result", "notify.result", "workflow.result"}:
+    if req.event not in {"research.result", "task.result", "file.content", "shell.result", "sql.result", "notify.result", "workflow.result", "clarification.required"}:
         return {"emits": []}
     answer = _synthesize(req)
     return {"emits": [{"event": "answer.final", "payload": {"answer": answer}}]}

@@ -4,9 +4,8 @@ set -euo pipefail
 export HF_HOME="${HF_HOME:-$HOME/models/data}"
 
 python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-Coder-14B-Instruct-AWQ \
-  --quantization awq \
+  --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
   --tensor-parallel-size 1 \
-  --gpu-memory-utilization 0.8 \
-  --max-model-len 4096 \
+  --gpu-memory-utilization 0.80 \
+  --max-model-len 2096 \
   --port 8000
