@@ -356,6 +356,11 @@ class Engine:
             return payload.get("result", payload.get("detail", ""))
         if event_name == "shell.result":
             stdout = payload.get("stdout", "")
+            if result_mode == "json":
+                try:
+                    return json.loads(stdout)
+                except (json.JSONDecodeError, TypeError):
+                    return stdout
             if result_mode == "stdout_first_line":
                 lines = [line.strip() for line in stdout.splitlines() if line.strip()]
                 return lines[0] if lines else ""
@@ -370,10 +375,7 @@ class Engine:
                     try:
                         parsed = json.loads(stdout)
                         if isinstance(parsed, dict) and field_name in parsed:
-                            value = parsed[field_name]
-                            if value is None:
-                                return ""
-                            return str(value)
+                            return parsed[field_name]
                     except (json.JSONDecodeError, TypeError):
                         return stdout
             return stdout
@@ -570,7 +572,7 @@ class Engine:
             return {"detail": payload.get("detail", ""), "result": payload.get("result")}
         return payload
 
-    def _step_failure_error(self, event_name: str, payload: dict):
+    def _step_failure_error(self, event_name: str, payload: dict, step_payload: dict | None = None):
         if not isinstance(payload, dict):
             return None
         if payload.get("status") == "failed":
@@ -579,6 +581,10 @@ class Engine:
         if isinstance(result, dict) and result.get("ok") is False:
             return payload.get("error") or payload.get("detail") or "Step failed."
         if event_name == "shell.result" and payload.get("returncode") not in (0, None):
+            instruction = step_payload.get("instruction") if isinstance(step_payload, dict) else None
+            allowed = instruction.get("allow_returncodes") if isinstance(instruction, dict) else None
+            if isinstance(allowed, list) and payload.get("returncode") in allowed:
+                return None
             stderr = payload.get("stderr")
             if isinstance(stderr, str) and stderr.strip():
                 return stderr.strip()
@@ -615,7 +621,7 @@ class Engine:
         duration_ms: float,
     ):
         detail = primary_payload.get("detail", "") if isinstance(primary_payload, dict) else ""
-        return {
+        envelope = {
             "step_id": step_id,
             "task": step_payload.get("task", ""),
             "target_agent": step_payload.get("target_agent", ""),
@@ -627,6 +633,19 @@ class Engine:
             "summary": self._step_result_summary(primary_event or "", primary_payload) if primary_event and isinstance(primary_payload, dict) else primary_value,
             "duration_ms": duration_ms,
         }
+        if primary_event == "shell.result" and isinstance(primary_payload, dict):
+            envelope["command"] = primary_payload.get("command")
+            envelope["returncode"] = primary_payload.get("returncode")
+            envelope["stdout"] = primary_payload.get("stdout")
+            envelope["stderr"] = primary_payload.get("stderr")
+        if primary_event == "sql.result" and isinstance(primary_payload, dict):
+            envelope["sql"] = primary_payload.get("sql")
+            result = primary_payload.get("result")
+            if isinstance(result, dict):
+                envelope["row_count"] = result.get("row_count")
+                envelope["columns"] = result.get("columns")
+                envelope["rows"] = result.get("rows")
+        return envelope
 
     def _record_step_result(self, context: dict, step_result: dict):
         results = context.setdefault("__step_results__", [])
@@ -862,7 +881,7 @@ class Engine:
             primary_event, primary_payload = step_results[0]
             primary_value = self._extract_result_value(primary_event, primary_payload, step_payload)
             result_summary = self._step_result_summary(primary_event, primary_payload)
-            failure_error = self._step_failure_error(primary_event, primary_payload)
+            failure_error = self._step_failure_error(primary_event, primary_payload, step_payload)
 
         return {
             "kind": "leaf",

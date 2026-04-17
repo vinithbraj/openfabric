@@ -120,7 +120,8 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "3) Each step MUST have id and task. Leaf steps MUST have target_agent. Group steps may omit target_agent when they contain nested steps.\n"
         "4) Every leaf step MUST include an instruction object with an agent-native operation and inputs.\n"
         "5) For shell_runner use instruction.operation=run_command with fields such as command and capture.\n"
-        "   Example capture objects: {\"mode\":\"stdout_first_line\"}, {\"mode\":\"stdout_stripped\"}, {\"mode\":\"json_field\",\"field\":\"envs\"}.\n"
+        "   Example capture objects: {\"mode\":\"stdout_first_line\"}, {\"mode\":\"stdout_stripped\"}, {\"mode\":\"json\"}, {\"mode\":\"json_field\",\"field\":\"envs\"}.\n"
+        "   For conditional checks, prefer machine-readable JSON output and set allow_returncodes when a nonzero exit code is expected and should not fail the workflow.\n"
         "6) For sql_runner use instruction.operation values like inspect_schema, query_from_request, execute_sql, or sample_rows.\n"
         "7) For filesystem use instruction.operation=read_file with a path.\n"
         "8) For notifier use instruction.operation=send_notification with channel/message.\n"
@@ -137,6 +138,7 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "19) For simple SQL/database questions, one sql_runner step is fine. For complex SQL tasks, decompose into concrete sql_runner steps such as inspect schema, sample values, determine join path, and run the final query.\n"
         "20) When you emit multiple SQL steps, each later SQL step should clearly state what it is trying to learn or produce, and it must declare depends_on when it uses earlier findings.\n"
         "21) When using shell_runner, prefer explicit machine-readable commands for deterministic checks.\n"
+        "21a) For existence checks, avoid substring grep against broad human-readable output. Use exact or JSON-based checks.\n"
         "22) When using sql_runner, do not invent shell commands or fake CLI syntax for SQL agents.\n"
         "23) Do not invent nonexistent specialized agents; use discovered agents only.\n"
         "24) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
@@ -875,6 +877,14 @@ def _normalize_agent_instruction(target_agent: str, task: str, instruction: dict
                     **shell_instruction,
                     "capture": {"mode": derived_mode},
                 }
+        env_name = _extract_conda_env_name(task, shell_instruction.get("command"))
+        if env_name and _is_conda_env_existence_task(task, shell_instruction.get("command")):
+            shell_instruction = {
+                **shell_instruction,
+                "command": _build_conda_env_exists_command(env_name),
+                "capture": {"mode": "json"},
+                "allow_returncodes": [0, 1],
+            }
         return shell_instruction
 
     if target_agent == "filesystem":
@@ -900,6 +910,42 @@ def _looks_like_metadata_command(command: str) -> bool:
             r"^[a-zA-Z_][\w.-]*\s*->\s*[a-zA-Z_][\w.-]*$",
             r"^[a-zA-Z_][\w.-]*\s+emits\s+event\s+[a-zA-Z_][\w.-]*$",
         )
+    )
+
+
+def _extract_conda_env_name(task: str, command: str | None = None) -> str | None:
+    candidates = [task]
+    if isinstance(command, str) and command.strip():
+        candidates.append(command)
+    patterns = (
+        r"\bconda environment named\s+([A-Za-z0-9._-]+)\b",
+        r"\benv(?:ironment)? named\s+([A-Za-z0-9._-]+)\b",
+        r"\b-n\s+([A-Za-z0-9._-]+)\b",
+    )
+    for text in candidates:
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _is_conda_env_existence_task(task: str, command: str | None = None) -> bool:
+    haystacks = [task.lower()]
+    if isinstance(command, str):
+        haystacks.append(command.lower())
+    return any("conda" in text and "env" in text and "exist" in text for text in haystacks)
+
+
+def _build_conda_env_exists_command(env_name: str) -> str:
+    return (
+        "conda env list --json | "
+        "python3 -c "
+        f"'import json,sys,os; name={json.dumps(env_name)}; "
+        "envs=json.load(sys.stdin).get(\"envs\", []); "
+        "exists=any(os.path.basename(path.rstrip(\"/\")) == name for path in envs); "
+        "print(json.dumps({\"exists\": exists, \"name\": name})); "
+        "raise SystemExit(0 if exists else 1)'"
     )
 
 
