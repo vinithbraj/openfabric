@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import copy
 import json
 import os
@@ -10,7 +11,7 @@ import uuid
 from typing import Any, Iterator
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import requests
@@ -37,6 +38,10 @@ SYNTHESIZER_EVENTS = {
 }
 
 
+class ClientCancelled(Exception):
+    pass
+
+
 class ChatMessage(BaseModel):
     role: str
     content: Any = ""
@@ -59,15 +64,19 @@ class PlannerGateway:
     def shutdown(self):
         self.engine.shutdown()
 
-    def ask(self, question: str, on_event=None, disable_synthesizer: bool = False) -> str:
+    def ask(self, question: str, on_event=None, disable_synthesizer: bool = False, should_cancel=None) -> str:
         collected: list[tuple[str, dict]] = []
         original_emit = self.engine.emit
         disabled_subscribers: dict[str, list[str]] = {}
 
         def collecting_emit(event_name: str, payload: dict, depth: int = 0):
+            if should_cancel is not None and should_cancel():
+                raise ClientCancelled("Client disconnected.")
             collected.append((event_name, payload))
             if on_event is not None:
                 on_event(event_name, payload, depth)
+            if should_cancel is not None and should_cancel():
+                raise ClientCancelled("Client disconnected.")
             return original_emit(event_name, payload, depth)
 
         with self.lock:
@@ -83,6 +92,8 @@ class PlannerGateway:
                             if agent_name != SYNTHESIZER_AGENT_NAME
                         ]
             try:
+                if should_cancel is not None and should_cancel():
+                    raise ClientCancelled("Client disconnected.")
                 self.engine.emit("user.ask", {"question": question})
             finally:
                 self.engine.emit = original_emit
@@ -287,7 +298,7 @@ def _is_openwebui_followup_prompt(question: str) -> bool:
     )
 
 
-def _upstream_chat_completion(request: ChatCompletionRequest):
+def _upstream_chat_completion(request: ChatCompletionRequest, client_request: Request):
     api_key, base_url, upstream_model, timeout_seconds = _llm_config()
     payload = request.model_dump()
     payload["model"] = upstream_model
@@ -305,8 +316,47 @@ def _upstream_chat_completion(request: ChatCompletionRequest):
         raise HTTPException(status_code=502, detail=f"Upstream LLM request failed: {exc}") from exc
 
     if request.stream:
+        cancel_event = threading.Event()
+        chunks: queue.Queue[bytes | None] = queue.Queue()
+
+        def read_upstream():
+            try:
+                for chunk in response.iter_content(chunk_size=None):
+                    if cancel_event.is_set():
+                        break
+                    if chunk:
+                        chunks.put(chunk)
+            finally:
+                response.close()
+                chunks.put(None)
+
+        async def generate():
+            reader = threading.Thread(target=read_upstream, daemon=True)
+            reader.start()
+            disconnected = False
+            try:
+                while True:
+                    if await client_request.is_disconnected():
+                        disconnected = True
+                        cancel_event.set()
+                        response.close()
+                        break
+                    try:
+                        item = chunks.get(timeout=0.1)
+                    except queue.Empty:
+                        await asyncio.sleep(0.05)
+                        continue
+                    if item is None:
+                        break
+                    yield item
+            finally:
+                cancel_event.set()
+                response.close()
+            if disconnected:
+                return
+
         return StreamingResponse(
-            response.iter_content(chunk_size=None),
+            generate(),
             media_type=response.headers.get("content-type", "text/event-stream"),
             headers=_streaming_headers(),
         )
@@ -472,8 +522,15 @@ def _payload_for_synthesis(event_name: str, payload: dict) -> dict:
     return sanitized
 
 
-def _stream_synthesis_parts(event_name: str, payload: dict) -> Iterator[str]:
+def _stream_synthesis_parts(
+    event_name: str,
+    payload: dict,
+    cancel_event: threading.Event | None = None,
+    response_holder: dict[str, Any] | None = None,
+) -> Iterator[str]:
     req = EventRequest(event=event_name, payload=_payload_for_synthesis(event_name, payload))
+    if cancel_event is not None and cancel_event.is_set():
+        return
     if event_name == "task.result":
         detail = payload.get("detail")
         if isinstance(detail, str) and detail.strip():
@@ -492,6 +549,7 @@ def _stream_synthesis_parts(event_name: str, payload: dict) -> Iterator[str]:
         "- Never output HTML collapsible-section tags.\n"
     )
     yielded = False
+    response = None
 
     try:
         response = requests.post(
@@ -509,8 +567,13 @@ def _stream_synthesis_parts(event_name: str, payload: dict) -> Iterator[str]:
             timeout=timeout_seconds,
             stream=True,
         )
+        if response_holder is not None:
+            response_holder["response"] = response
         response.raise_for_status()
         for raw_line in response.iter_lines(decode_unicode=True):
+            if cancel_event is not None and cancel_event.is_set():
+                response.close()
+                return
             if not raw_line:
                 continue
             line = raw_line.strip()
@@ -541,6 +604,15 @@ def _stream_synthesis_parts(event_name: str, payload: dict) -> Iterator[str]:
     except Exception:
         if yielded:
             return
+        if cancel_event is not None and cancel_event.is_set():
+            return
+    finally:
+        if response_holder is not None:
+            response_holder["response"] = None
+        try:
+            response.close()
+        except Exception:
+            pass
 
     yield from _text_stream_parts(_fallback_synthesis_answer(req), chunk_size=48)
 
@@ -865,10 +937,12 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
     return None
 
 
-def _stream_response(question: str, model: str):
+def _stream_response(client_request: Request, question: str, model: str):
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     events: queue.Queue[dict | None] = queue.Queue()
+    cancel_event = threading.Event()
+    response_holder: dict[str, Any] = {"response": None}
 
     def run_planner():
         final_answer_streamed = False
@@ -899,8 +973,17 @@ def _stream_response(question: str, model: str):
                     and event_name in SYNTHESIZER_EVENTS
                     and isinstance(payload, dict)
                 ):
-                    for part in _stream_synthesis_parts(event_name, payload):
+                    for part in _stream_synthesis_parts(
+                        event_name,
+                        payload,
+                        cancel_event=cancel_event,
+                        response_holder=response_holder,
+                    ):
+                        if cancel_event.is_set():
+                            break
                         events.put(_stream_chunk(completion_id, created, model, part))
+                    if cancel_event.is_set():
+                        raise ClientCancelled("Client disconnected.")
                     shell_details = _shell_details_for_event(event_name, payload)
                     if shell_details:
                         events.put(
@@ -913,23 +996,53 @@ def _stream_response(question: str, model: str):
                         )
                     final_answer_streamed = True
 
-            answer = gateway.ask(question, on_event=on_event, disable_synthesizer=True)
+            answer = gateway.ask(
+                question,
+                on_event=on_event,
+                disable_synthesizer=True,
+                should_cancel=cancel_event.is_set,
+            )
             if not final_answer_streamed:
                 put_text(answer)
+        except ClientCancelled:
+            pass
         except Exception as exc:
             put_text(f"Error: {type(exc).__name__}: {exc}")
         finally:
+            response = response_holder.get("response")
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
             events.put(None)
 
-    def generate():
+    async def generate():
         worker = threading.Thread(target=run_planner, daemon=True)
         worker.start()
         yield _sse_event(_stream_role_chunk(completion_id, created, model))
+        disconnected = False
         while True:
-            item = events.get()
+            if await client_request.is_disconnected():
+                disconnected = True
+                cancel_event.set()
+                response = response_holder.get("response")
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                break
+            try:
+                item = events.get(timeout=0.1)
+            except queue.Empty:
+                await asyncio.sleep(0.05)
+                continue
             if item is None:
                 break
             yield _sse_event(item)
+        if disconnected:
+            return
         yield _sse_event(_stream_stop_chunk(completion_id, created, model))
         yield "data: [DONE]\n\n"
 
@@ -980,7 +1093,7 @@ def models():
 
 
 @app.post("/v1/chat/completions")
-def chat_completions(request: ChatCompletionRequest):
+def chat_completions(request: ChatCompletionRequest, client_request: Request):
     if gateway is None:
         raise HTTPException(status_code=503, detail="Planner gateway is not ready.")
 
@@ -994,12 +1107,12 @@ def chat_completions(request: ChatCompletionRequest):
         return _chat_response(empty_followups, selected_model)
 
     if _is_openwebui_auxiliary_prompt(question):
-        return _upstream_chat_completion(request)
+        return _upstream_chat_completion(request, client_request)
 
     planner_question = _planner_question_from_messages(request.messages)
 
     if request.stream:
-        return _stream_response(planner_question, selected_model)
+        return _stream_response(client_request, planner_question, selected_model)
     answer = gateway.ask(planner_question)
     return _chat_response(answer, selected_model)
 
