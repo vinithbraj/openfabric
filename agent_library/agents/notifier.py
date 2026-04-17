@@ -66,16 +66,28 @@ def handle_event(req: EventRequest):
         message = req.payload["message"]
     elif req.event == "task.plan":
         plan_context = task_plan_context(req.payload)
-        task = plan_context.classification_task
-        if not task:
-            return {"emits": []}
-        task_lc = task.lower()
-        if not any(token in task_lc for token in ("notify", "alert", "remind")):
-            if plan_context.targets("notifier"):
-                return _needs_decomposition("Notifier agent needs an explicit notify/alert/remind instruction.")
-            return {"emits": []}
-        channel = "console"
-        message = _extract_message_from_task(plan_context.execution_task)
+        instruction = req.payload.get("instruction")
+        if isinstance(instruction, dict) and instruction.get("operation") == "send_notification":
+            channel = instruction.get("channel", "console")
+            message = instruction.get("message")
+            if not isinstance(message, str) or not message.strip():
+                if plan_context.targets("notifier"):
+                    return _needs_decomposition("Notifier agent needs an explicit message to send.")
+                return {"emits": []}
+            message = message.strip()
+            if not isinstance(channel, str) or not channel.strip():
+                channel = "console"
+        else:
+            task = plan_context.classification_task
+            if not task:
+                return {"emits": []}
+            task_lc = task.lower()
+            if not any(token in task_lc for token in ("notify", "alert", "remind")):
+                if plan_context.targets("notifier"):
+                    return _needs_decomposition("Notifier agent needs an explicit notify/alert/remind instruction.")
+                return {"emits": []}
+            channel = "console"
+            message = _extract_message_from_task(plan_context.execution_task)
     else:
         return {"emits": []}
     timestamp = datetime.now(timezone.utc).isoformat()

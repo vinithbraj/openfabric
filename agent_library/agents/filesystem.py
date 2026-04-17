@@ -67,14 +67,23 @@ def handle_event(req: EventRequest):
         raw_path = req.payload["path"]
     elif req.event == "task.plan":
         plan_context = task_plan_context(req.payload)
-        task = plan_context.classification_task
-        if not task:
-            return {"emits": []}
-        raw_path = _extract_filepath(task)
-        if not raw_path:
-            if plan_context.targets("filesystem"):
-                return _needs_decomposition("Filesystem agent needs a specific file path to read.")
-            return {"emits": []}
+        instruction = req.payload.get("instruction")
+        if isinstance(instruction, dict) and instruction.get("operation") == "read_file":
+            raw_path = instruction.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                if plan_context.targets("filesystem"):
+                    return _needs_decomposition("Filesystem agent needs a specific file path to read.")
+                return {"emits": []}
+            raw_path = raw_path.strip()
+        else:
+            task = plan_context.classification_task
+            if not task:
+                return {"emits": []}
+            raw_path = _extract_filepath(task)
+            if not raw_path:
+                if plan_context.targets("filesystem"):
+                    return _needs_decomposition("Filesystem agent needs a specific file path to read.")
+                return {"emits": []}
     else:
         return {"emits": []}
     base = Path(".").resolve()

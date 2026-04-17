@@ -463,7 +463,6 @@ def _llm_synthesize(req: EventRequest) -> str | None:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
-            "max_tokens": 400,
         },
         timeout=timeout_seconds,
     )

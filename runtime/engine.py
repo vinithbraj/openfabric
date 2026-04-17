@@ -343,6 +343,15 @@ class Engine:
         if not isinstance(payload, dict):
             return payload
         result_mode = step_payload.get("result_mode") if isinstance(step_payload, dict) else None
+        instruction = step_payload.get("instruction") if isinstance(step_payload, dict) else None
+        capture = instruction.get("capture") if isinstance(instruction, dict) else None
+        if result_mode is None and isinstance(capture, dict):
+            if capture.get("mode") == "json_field":
+                field_name = capture.get("field")
+                if isinstance(field_name, str) and field_name.strip():
+                    result_mode = f"json_field:{field_name.strip()}"
+            else:
+                result_mode = capture.get("mode")
         if event_name == "task.result":
             return payload.get("result", payload.get("detail", ""))
         if event_name == "shell.result":
@@ -411,6 +420,76 @@ class Engine:
         if isinstance(value, dict):
             return {key: self._resolve_templates(item, context) for key, item in value.items()}
         return value
+
+    def _resolve_reference_path(self, path: str, context: dict):
+        if not isinstance(path, str) or not path.strip():
+            return None
+        parts = [part for part in path.split(".") if part]
+        if not parts:
+            return None
+        step_results = context.get("__step_results_by_id__", {})
+        head = parts[0]
+        if isinstance(step_results, dict) and head in step_results:
+            current = step_results[head]
+        elif head in context:
+            current = context[head]
+        else:
+            return None
+        for part in parts[1:]:
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif isinstance(current, list) and part.isdigit():
+                index = int(part)
+                if 0 <= index < len(current):
+                    current = current[index]
+                else:
+                    return None
+            else:
+                return None
+        return current
+
+    def _resolve_references(self, value: Any, context: dict):
+        if isinstance(value, dict):
+            if set(value.keys()) == {"$from"}:
+                return self._resolve_reference_path(value.get("$from"), context)
+            return {key: self._resolve_references(item, context) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_references(item, context) for item in value]
+        return value
+
+    def _evaluate_when(self, when: Any, context: dict):
+        if when is None:
+            return True
+        if not isinstance(when, dict):
+            return bool(when)
+        left = self._resolve_references({"$from": when.get("$from")}, context) if "$from" in when else None
+        if "equals" in when:
+            return left == self._resolve_references(when.get("equals"), context)
+        if "not_equals" in when:
+            return left != self._resolve_references(when.get("not_equals"), context)
+        if "contains" in when:
+            right = self._resolve_references(when.get("contains"), context)
+            if isinstance(left, (list, str)):
+                return right in left
+            return False
+        if "not_contains" in when:
+            right = self._resolve_references(when.get("not_contains"), context)
+            if isinstance(left, (list, str)):
+                return right not in left
+            return True
+        if "truthy" in when:
+            return bool(left) is bool(when.get("truthy"))
+        if "falsy" in when:
+            return (not bool(left)) is bool(when.get("falsy"))
+        if "gt" in when:
+            return left > self._resolve_references(when.get("gt"), context)
+        if "gte" in when:
+            return left >= self._resolve_references(when.get("gte"), context)
+        if "lt" in when:
+            return left < self._resolve_references(when.get("lt"), context)
+        if "lte" in when:
+            return left <= self._resolve_references(when.get("lte"), context)
+        return bool(left)
 
     def _execute_task_plan(self, payload: dict, depth: int):
         steps = payload.get("steps", [])
@@ -717,9 +796,10 @@ class Engine:
         step_payload = {
             key: value
             for key, value in raw_step.items()
-            if key not in {"id", "depends_on", "steps", "replan_budget"}
+            if key not in {"id", "depends_on", "steps", "replan_budget", "when"}
         }
         step_payload = self._resolve_templates(step_payload, context)
+        step_payload = self._resolve_references(step_payload, context)
         step_payload.setdefault("task", workflow_payload.get("task", ""))
         step_payload["step_id"] = step_id
         step_payload["original_task"] = workflow_payload.get("task", context.get("original_task", ""))
@@ -730,6 +810,16 @@ class Engine:
             step_payload["previous_step_result"] = prior_step_results[-1]
         if dependency_results:
             step_payload["dependency_results"] = dependency_results
+        if not self._evaluate_when(raw_step.get("when"), context):
+            return {
+                "kind": "skipped",
+                "step_id": step_id,
+                "task": step_payload.get("task", ""),
+                "target_agent": step_payload.get("target_agent"),
+                "step_payload": step_payload,
+                "status": "skipped",
+                "duration_ms": 0,
+            }
         unresolved_keys = self._unresolved_template_keys(step_payload)
         if unresolved_keys:
             error = (
@@ -814,6 +904,34 @@ class Engine:
             raw_step = pending.pop(ready_index)
             outcome = self._execute_single_workflow_step(raw_step, payload, context, depth)
             step_id = outcome["step_id"]
+            if outcome["kind"] == "skipped":
+                step_payload = outcome["step_payload"]
+                self._record_step_result(
+                    context,
+                    {
+                        "step_id": step_id,
+                        "task": step_payload.get("task", ""),
+                        "target_agent": step_payload.get("target_agent", ""),
+                        "status": "skipped",
+                        "event": "",
+                        "detail": "Condition evaluated to false.",
+                        "value": None,
+                        "result": None,
+                        "summary": None,
+                        "duration_ms": 0,
+                    },
+                )
+                completed_ids.add(step_id)
+                records.append(
+                    {
+                        "id": step_id,
+                        "task": step_payload.get("task", ""),
+                        "target_agent": step_payload.get("target_agent"),
+                        "status": "skipped",
+                        "result": None,
+                    }
+                )
+                continue
             if outcome["kind"] == "nested":
                 nested = outcome["nested"]
                 self._merge_child_context(context, outcome["nested_context"])

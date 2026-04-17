@@ -563,7 +563,6 @@ def _stream_synthesis_parts(
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0.2,
-                "max_tokens": 400,
                 "stream": True,
             },
             timeout=timeout_seconds,

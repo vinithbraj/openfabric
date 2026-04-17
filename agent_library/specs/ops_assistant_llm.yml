@@ -134,16 +134,18 @@ contracts:
               type: string
             task:
               type: string
+            instruction:
+              type: object
             command:
               type: string
             result_mode:
               type: string
-            replan_budget:
-              type: number
             depends_on:
               type: array
               items:
                 type: string
+            when:
+              type: object
             steps:
               type: array
               items:

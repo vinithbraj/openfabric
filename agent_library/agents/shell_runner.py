@@ -534,11 +534,12 @@ def handle_event(req: EventRequest):
             if not command:
                 return {"emits": []}
     elif req.event == "task.plan":
-        command_raw = req.payload.get("command")
-        if isinstance(command_raw, str) and command_raw.strip():
-            command = command_raw.strip()
-            return _execute_command(command)
         plan_context = task_plan_context(req.payload)
+        instruction = req.payload.get("instruction")
+        if isinstance(instruction, dict) and instruction.get("operation") == "run_command":
+            command_raw = instruction.get("command")
+            if isinstance(command_raw, str) and command_raw.strip():
+                return _execute_command(command_raw.strip())
         task = plan_context.classification_task
         execution_task = plan_context.execution_task
         if not task:

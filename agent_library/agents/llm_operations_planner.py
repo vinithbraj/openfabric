@@ -46,7 +46,7 @@ AGENT_METADATA = {
 }
 
 SUPPORTED_EVENT_SCHEMAS = {
-    "task.plan": '{"task":"...","steps":[{"id":"step1","target_agent":"shell_runner","task":"...","command":"docker ps","result_mode":"stdout_first_line"}]}',
+    "task.plan": '{"task":"...","steps":[{"id":"step1","target_agent":"shell_runner","task":"...","instruction":{"operation":"run_command","command":"docker ps","capture":{"mode":"stdout_first_line"}}}]}',
     "task.result": '{"detail":"..."}',
     "plan.progress": '{"stage":"planned","message":"...","steps":[...],"presentation":{...}}',
     "planner.replan.result": '{"replace_step_id":"step1","reason":"...","steps":[{"id":"step1_1","target_agent":"shell_runner","task":"..."}]}',
@@ -112,56 +112,49 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "Task: decide whether the request is processable by at least one discovered agent capability and, when processable, "
         "produce the best execution plan and presentation intent.\n"
         "Output JSON only with exact keys: "
-        '{"processable":true|false,"reason":"short reason","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","command":"optional shell command","result_mode":"optional capture mode","steps":[{"id":"step1_1","task":"optional nested substep"}]}],"presentation":{"task":"how to present the result","format":"markdown|markdown_table|json|bullets|plain","audience":"openwebui","include_context":true|false,"include_internal_steps":true|false}}\n'
+        '{"processable":true|false,"reason":"short reason","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","instruction":{"operation":"agent_specific_operation"},"depends_on":["optional_step_id"],"when":{"$from":"optional.path","equals":"optional value"},"steps":[{"id":"step1_1","task":"optional nested substep"}]}],"presentation":{"task":"how to present the result","format":"markdown|markdown_table|json|bullets|plain","audience":"openwebui","include_context":true|false,"include_internal_steps":true|false}}\n'
         "No markdown, no extra keys, no prose outside JSON.\n"
         "Decision policy:\n"
         "1) processable=true if any discovered agent can attempt the request.\n"
         "2) For processable=true, steps MUST be a non-empty ordered list.\n"
         "3) Each step MUST have id and task. Leaf steps MUST have target_agent. Group steps may omit target_agent when they contain nested steps.\n"
-        "4) command is optional and should be included for shell_runner when you can specify one safe atomic bash command exactly.\n"
-        "5) result_mode is optional. Use stdout_first_line for shell steps that should pass only the first non-empty line to later steps.\n"
-        "   You may also use stdout_last_line or json_field:<key> when that is a better fit.\n"
-        "6) target_agent MUST be one discovered runtime agent name that can handle task.plan; never use ops_planner or synthesizer.\n"
-        "7) Break chained requests into multiple atomic steps. Do not combine unrelated actions into one step. Use nested steps for grouped subtasks.\n"
-        "7a) Rewrite each step as a direct, concrete instruction for the target agent. Do not simply copy long stretches of the user's wording.\n"
-        "7b) Each step should be self-contained, operational, and phrased so another LLM can execute it without guessing.\n"
-        "8) If a later step depends on an earlier step result, reference it with {{prev}} for the immediately previous result "
-        "or {{step_id}} for a specific earlier step.\n"
-        "8a) If a step uses information learned or produced by an earlier step, you MUST set depends_on to that earlier step id.\n"
-        "8b) Prefer explicit dependency chains over implied ordering.\n"
-        "9) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
-        "10) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
-        "11) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
-        "12) For simple SQL/database questions, one sql_runner step is fine. For complex SQL tasks, decompose into concrete sql_runner steps such as inspect schema, sample values, determine join path, and run the final query.\n"
-        "12a) When you emit multiple SQL steps, each later SQL step should clearly state what it is trying to learn or produce, and it must declare depends_on when it uses earlier findings.\n"
-        "13) When using shell_runner, prefer explicit command for deterministic operations like docker ps, docker logs, rg, find, ls, git status.\n"
-        "13a) For shell checks that control later steps, make the command return an exact machine-readable result rather than relying on ambiguous substring matches.\n"
-        "14) When using sql_runner, do not invent SQL unless it is clearly requested or needed; sql_runner can introspect schema and generate safe read-only SQL itself.\n"
-        "15) Do not invent nonexistent specialized agents; use discovered agents only.\n"
-        "16) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
-        "17) For Open WebUI, prefer format=markdown_table when the user asks for a table/list/comparison/status report with rows and columns.\n"
-        "18) Set include_internal_steps=false unless the user explicitly asks for workflow details, commands, debug output, SQL query text, or how it was done.\n"
-        "19) If the user asks about available capabilities, tools, agents, supported operations, or what this system can do, answer from discovered capabilities with task.result; do not call shell_runner.\n"
-        "20) Capability metadata is descriptive, not executable. Never put method names, event names, arrows, or capability labels in shell commands.\n"
-        "21) Tolerate minor typos and informal phrasing.\n"
-        "22) Do NOT mark false only because the request might fail at execution time.\n"
-        "23) processable=false only when no discovered capability can attempt it; in that case steps=[].\n"
+        "4) Every leaf step MUST include an instruction object with an agent-native operation and inputs.\n"
+        "5) For shell_runner use instruction.operation=run_command with fields such as command and capture.\n"
+        "   Example capture objects: {\"mode\":\"stdout_first_line\"}, {\"mode\":\"stdout_stripped\"}, {\"mode\":\"json_field\",\"field\":\"envs\"}.\n"
+        "6) For sql_runner use instruction.operation values like inspect_schema, query_from_request, execute_sql, or sample_rows.\n"
+        "7) For filesystem use instruction.operation=read_file with a path.\n"
+        "8) For notifier use instruction.operation=send_notification with channel/message.\n"
+        "9) target_agent MUST be one discovered runtime agent name that can handle task.plan; never use ops_planner or synthesizer.\n"
+        "10) Break chained requests into multiple atomic steps. Do not combine unrelated actions into one step. Use nested steps for grouped subtasks.\n"
+        "11) Rewrite each step as a direct, concrete instruction for the target agent. Do not simply copy long stretches of the user's wording.\n"
+        "12) Each step should be self-contained, operational, and phrased so another LLM can execute it without guessing.\n"
+        "13) If a later step depends on an earlier step result, set depends_on and use a when condition or instruction inputs that reference prior results.\n"
+        "14) References to previous step data must use objects of the form {\"$from\":\"step_id.field.path\"}. Do not splice raw prose into commands.\n"
+        "15) when is optional. Use it for conditional execution such as {\"$from\":\"step1.returncode\",\"not_equals\":0}.\n"
+        "16) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
+        "17) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
+        "18) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
+        "19) For simple SQL/database questions, one sql_runner step is fine. For complex SQL tasks, decompose into concrete sql_runner steps such as inspect schema, sample values, determine join path, and run the final query.\n"
+        "20) When you emit multiple SQL steps, each later SQL step should clearly state what it is trying to learn or produce, and it must declare depends_on when it uses earlier findings.\n"
+        "21) When using shell_runner, prefer explicit machine-readable commands for deterministic checks.\n"
+        "22) When using sql_runner, do not invent shell commands or fake CLI syntax for SQL agents.\n"
+        "23) Do not invent nonexistent specialized agents; use discovered agents only.\n"
+        "24) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
+        "24a) NEVER create execution steps for presentation, summarization, formatting, synthesis, or making output readable. That happens after execution in the synthesizer layer and must not appear in steps.\n"
+        "25) For Open WebUI, prefer format=markdown_table when the user asks for a table/list/comparison/status report with rows and columns.\n"
+        "26) Set include_internal_steps=false unless the user explicitly asks for workflow details, commands, debug output, SQL query text, or how it was done.\n"
+        "27) If the user asks about available capabilities, tools, agents, supported operations, or what this system can do, answer from discovered capabilities with task.result; do not call shell_runner.\n"
+        "28) Capability metadata is descriptive, not executable. Never turn method names, event names, or capability labels into shell commands.\n"
+        "29) Tolerate minor typos and informal phrasing.\n"
+        "30) Do NOT mark false only because the request might fail at execution time.\n"
+        "31) processable=false only when no discovered capability can attempt it; in that case steps=[].\n"
         "Calibration examples:\n"
-        '- "find all files with extension sh in the current directory" -> {"processable":true,"reason":"shell file search","steps":[{"id":"step1","target_agent":"shell_runner","task":"find all files with extension sh in the current directory","command":"find . -type f -name \\"*.sh\\""}],"presentation":{"task":"List matching files clearly.","format":"bullets","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
-        '- "list all running docker containers" -> {"processable":true,"reason":"docker container listing","steps":[{"id":"step1","target_agent":"shell_runner","task":"list all running docker containers","command":"docker ps"}],"presentation":{"task":"Show running containers in a concise Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
-        '- "list running containers and tell me how long they have been running" -> {"processable":true,"reason":"docker uptime listing","steps":[{"id":"step1","target_agent":"shell_runner","task":"list running containers with uptime status","command":"docker ps --format \\"table {{.Names}}\\\\t{{.Status}}\\\\t{{.Image}}\\""}],"presentation":{"task":"Render container names, images, and runtime status as a Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
-        '- "show the last 50 log lines for vllm" -> {"processable":true,"reason":"docker logs request","steps":[{"id":"step1","target_agent":"shell_runner","task":"show the last 50 log lines for vllm","command":"docker logs --tail 50 vllm"}]}\n'
-        '- "find the vllm container id and then show the last 50 log lines" -> {"processable":true,"reason":"two-step shell workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the vllm container id","command":"docker ps --filter name=vllm --format \\"{{.ID}}\\"","result_mode":"stdout_first_line"},{"id":"step2","target_agent":"shell_runner","task":"show the last 50 log lines for container {{prev}}","command":"docker logs --tail 50 {{prev}}"}]}\n'
-        '- "show listening ports and then grep for 8000" -> {"processable":true,"reason":"ports inspection workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"show listening ports","command":"ss -ltnp"},{"id":"step2","target_agent":"shell_runner","task":"filter step1 for 8000","command":"printf \\"%s\\\\n\\" \\"{{step1}}\\" | grep 8000","depends_on":["step1"]}]}\n'
-        '- "find the newest log file and then show the last 20 lines" -> {"processable":true,"reason":"file discovery workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the newest log file","command":"find . -type f -name \\"*.log\\" -printf \\"%T@ %p\\\\n\\" | sort -nr | head -n 1 | cut -d\\" \\" -f2-","result_mode":"stdout_first_line"},{"id":"step2","target_agent":"shell_runner","task":"show the last 20 lines of {{prev}}","command":"tail -n 20 {{prev}}","depends_on":["step1"]}]}\n'
-        '- "show git status and current branch" -> {"processable":true,"reason":"multi-step git inspection","steps":[{"id":"step1","target_agent":"shell_runner","task":"show git status","command":"git status --short"},{"id":"step2","target_agent":"shell_runner","task":"show current branch","command":"git branch --show-current","result_mode":"stdout_first_line"}]}\n'
-        '- "find python files mentioning FastAPI" -> {"processable":true,"reason":"code search","steps":[{"id":"step1","target_agent":"shell_runner","task":"find python files mentioning FastAPI","command":"rg -n \\"FastAPI\\" --glob \\"*.py\\" ."}]}\n'
-        '- "show database schema and relationships" -> {"processable":true,"reason":"SQL schema introspection","steps":[{"id":"step1","target_agent":"sql_runner","task":"show database schema and relationships"}],"presentation":{"task":"Summarize schemas, tables, columns, and relationships clearly.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
-        '- "which customers spent the most money last month" -> {"processable":true,"reason":"SQL database question","steps":[{"id":"step1","target_agent":"sql_runner","task":"which customers spent the most money last month"}],"presentation":{"task":"Show the query results as a readable Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
-        '- "add 12 and 30" -> {"processable":true,"reason":"shell arithmetic","steps":[{"id":"step1","target_agent":"shell_runner","task":"add 12 and 30","command":"printf \\"%s\\\\n\\" \\"$((12 + 30))\\""}],"presentation":{"task":"Give the numeric result directly.","format":"plain","audience":"openwebui","include_context":false,"include_internal_steps":false}}\n'
-        '- "open Readme.md" -> {"processable":true,"reason":"shell file read","steps":[{"id":"step1","target_agent":"shell_runner","task":"open Readme.md","command":"cat Readme.md"}]}\n'
-        '- "create a file named vinith.txt with Hello world and return the path" -> {"processable":true,"reason":"shell file write","steps":[{"id":"step1","target_agent":"shell_runner","task":"create vinith.txt with Hello world and return the path","command":"printf \\"%s\\\\n\\" \\"Hello world\\" > vinith.txt && realpath vinith.txt","result_mode":"stdout_last_line"}],"presentation":{"task":"Return the created file path directly.","format":"plain","audience":"openwebui","include_context":false,"include_internal_steps":false}}\n'
-        '- "add 1 and 2 and then multiply by 230 and then divide by 2" -> {"processable":true,"reason":"multi-step shell arithmetic","steps":[{"id":"step1","target_agent":"shell_runner","task":"add 1 and 2","command":"printf \\"%s\\\\n\\" \\"$((1 + 2))\\"","result_mode":"stdout_stripped"},{"id":"step2","target_agent":"shell_runner","task":"multiply {{prev}} by 230","command":"printf \\"%s\\\\n\\" \\"$(({{prev}} * 230))\\"","result_mode":"stdout_stripped","depends_on":["step1"]},{"id":"step3","target_agent":"shell_runner","task":"divide {{prev}} by 2","command":"printf \\"%s\\\\n\\" \\"$(({{prev}} / 2))\\"","result_mode":"stdout_stripped","depends_on":["step2"]}]}\n'
+        '- "find all files with extension sh in the current directory" -> {"processable":true,"reason":"shell file search","steps":[{"id":"step1","target_agent":"shell_runner","task":"find all files with extension sh in the current directory","instruction":{"operation":"run_command","command":"find . -type f -name \\"*.sh\\"","capture":{"mode":"stdout_stripped"}}}],"presentation":{"task":"List matching files clearly.","format":"bullets","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
+        '- "list all running docker containers" -> {"processable":true,"reason":"docker container listing","steps":[{"id":"step1","target_agent":"shell_runner","task":"list all running docker containers","instruction":{"operation":"run_command","command":"docker ps","capture":{"mode":"stdout_stripped"}}}],"presentation":{"task":"Show running containers in a concise Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
+        '- "find the newest log file and then show the last 20 lines" -> {"processable":true,"reason":"file discovery workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the newest log file","instruction":{"operation":"run_command","command":"find . -type f -name \\"*.log\\" -printf \\"%T@ %p\\\\n\\" | sort -nr | head -n 1 | cut -d\\" \\" -f2-","capture":{"mode":"stdout_first_line"}}},{"id":"step2","target_agent":"shell_runner","task":"show the last 20 lines of the newest log file","instruction":{"operation":"run_command","command":{"$from":"step1.value"}},"depends_on":["step1"]}]}\n'
+        '- "show database schema and relationships" -> {"processable":true,"reason":"SQL schema introspection","steps":[{"id":"step1","target_agent":"sql_runner","task":"inspect the database schema and relationships","instruction":{"operation":"inspect_schema","focus":"tables, columns, and relationships"}}],"presentation":{"task":"Summarize schemas, tables, columns, and relationships clearly.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
+        '- "which customers spent the most money last month" -> {"processable":true,"reason":"SQL database question","steps":[{"id":"step1","target_agent":"sql_runner","task":"query which customers spent the most money last month","instruction":{"operation":"query_from_request","question":"which customers spent the most money last month"}}],"presentation":{"task":"Show the query results as a readable Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
+        '- "open Readme.md" -> {"processable":true,"reason":"file read","steps":[{"id":"step1","target_agent":"filesystem","task":"read Readme.md","instruction":{"operation":"read_file","path":"Readme.md"}}]}\n'
         '- "book a flight to NYC" -> {"processable":false,"reason":"no travel booking capability","steps":[]}\n'
         "Discovered runtime agents:\n"
         f"{_format_discovered_agents(capabilities)}\n"
@@ -338,9 +331,10 @@ def _parse_steps(steps: list):
         task = step.get("task")
         command = step.get("command")
         result_mode = step.get("result_mode")
-        replan_budget = step.get("replan_budget")
+        instruction = step.get("instruction")
         nested_steps = step.get("steps")
         depends_on = step.get("depends_on")
+        when = step.get("when")
         if not isinstance(step_id, str) or not step_id.strip():
             return None
         if not isinstance(task, str) or not task.strip():
@@ -351,22 +345,33 @@ def _parse_steps(steps: list):
         }
         if isinstance(target_agent, str) and target_agent.strip():
             normalized_step["target_agent"] = target_agent.strip()
-        if command is not None:
+        if instruction is not None:
+            if not isinstance(instruction, dict) or not instruction:
+                return None
+            normalized_step["instruction"] = instruction
+        elif command is not None:
             if not isinstance(command, str) or not command.strip():
                 return None
-            normalized_step["command"] = command.strip()
-        if result_mode is not None:
-            if not isinstance(result_mode, str) or not result_mode.strip():
-                return None
-            normalized_step["result_mode"] = result_mode.strip()
-        if replan_budget is not None:
-            if not isinstance(replan_budget, (int, float)):
-                return None
-            normalized_step["replan_budget"] = max(0, int(replan_budget))
+            shell_instruction = {"operation": "run_command", "command": command.strip()}
+            if result_mode is not None:
+                if not isinstance(result_mode, str) or not result_mode.strip():
+                    return None
+                if result_mode.startswith("json_field:"):
+                    shell_instruction["capture"] = {
+                        "mode": "json_field",
+                        "field": result_mode.split(":", 1)[1].strip(),
+                    }
+                else:
+                    shell_instruction["capture"] = {"mode": result_mode.strip()}
+            normalized_step["instruction"] = shell_instruction
         if depends_on is not None:
             if not isinstance(depends_on, list) or not all(isinstance(item, str) for item in depends_on):
                 return None
             normalized_step["depends_on"] = [item for item in depends_on if item.strip()]
+        if when is not None:
+            if not isinstance(when, dict) or not when:
+                return None
+            normalized_step["when"] = when
         if nested_steps is not None:
             if not isinstance(nested_steps, list):
                 return None
@@ -375,6 +380,8 @@ def _parse_steps(steps: list):
                 return None
             normalized_step["steps"] = normalized_nested
         if "target_agent" not in normalized_step and not normalized_step.get("steps"):
+            return None
+        if "target_agent" in normalized_step and "instruction" not in normalized_step and not normalized_step.get("steps"):
             return None
         normalized_steps.append(normalized_step)
     return normalized_steps
@@ -512,6 +519,20 @@ def _agent_names_with_task_plan(capabilities: dict) -> set[str]:
         if isinstance(name, str) and isinstance(subscribes_to, list) and "task.plan" in subscribes_to:
             names.add(name)
     return names
+
+
+def _extract_agent_invocation(command: str, valid_names: set[str]):
+    if not isinstance(command, str):
+        return None, None
+    stripped = command.strip()
+    if not stripped:
+        return None, None
+    parts = stripped.split(None, 1)
+    head = parts[0]
+    tail = parts[1].strip() if len(parts) > 1 else ""
+    if head in valid_names:
+        return head, tail
+    return None, None
 
 
 def _tokenize(text: str) -> set[str]:
@@ -773,6 +794,104 @@ def _derive_presentation(question: str) -> dict:
     return presentation
 
 
+def _planner_is_schema_request(task: str) -> bool:
+    task_lc = task.lower()
+    return any(
+        token in task_lc
+        for token in (
+            "schema",
+            "schemas",
+            "table",
+            "tables",
+            "column",
+            "columns",
+            "relationship",
+            "relationships",
+            "relation",
+            "relations",
+            "foreign key",
+            "foreign keys",
+            "describe database",
+            "inspect the database schema",
+        )
+    )
+
+
+PRESENTATION_ONLY_PATTERNS = [
+    r"\bsynthesi[sz]e\b",
+    r"\bsummariz(?:e|ing|ation)\b",
+    r"\bformat\b",
+    r"\brender\b",
+    r"\breadable format\b",
+    r"\bmake (?:the )?result readable\b",
+    r"\bpresent the result\b",
+    r"\bconvert .* to markdown\b",
+]
+
+
+def _is_presentation_only_task(task: str) -> bool:
+    task_lc = task.lower().strip()
+    if not task_lc:
+        return False
+    return any(re.search(pattern, task_lc) for pattern in PRESENTATION_ONLY_PATTERNS)
+
+
+def _normalize_agent_instruction(target_agent: str, task: str, instruction: dict | None, command: str | None, index: int):
+    family = _agent_family(target_agent)
+    if family == "sql_runner":
+        if _is_presentation_only_task(task):
+            return None
+        if isinstance(instruction, dict) and instruction:
+            op = instruction.get("operation")
+            if op in {"inspect_schema", "query_from_request", "execute_sql", "sample_rows"}:
+                return instruction
+        if isinstance(command, str) and command.strip():
+            stripped = command.strip()
+            if stripped.lower().startswith(("select ", "with ", "show ", "describe ", "explain ")):
+                return {"operation": "execute_sql", "sql": stripped}
+        if _planner_is_schema_request(task):
+            return {"operation": "inspect_schema", "focus": task}
+        return {"operation": "query_from_request", "question": task}
+
+    if target_agent == "shell_runner":
+        shell_instruction = instruction if isinstance(instruction, dict) and instruction.get("operation") == "run_command" else None
+        if shell_instruction is None:
+            if isinstance(command, str) and command.strip():
+                stripped = command.strip()
+                if _looks_like_metadata_command(stripped):
+                    return None
+                shell_instruction = {"operation": "run_command", "command": stripped}
+            else:
+                derived = _derive_shell_command(task, index)
+                if derived:
+                    shell_instruction = {"operation": "run_command", "command": derived}
+        if not isinstance(shell_instruction, dict):
+            return None
+        capture = shell_instruction.get("capture")
+        if not isinstance(capture, dict):
+            derived_mode = _derive_shell_result_mode(task, shell_instruction.get("command"))
+            if derived_mode:
+                shell_instruction = {
+                    **shell_instruction,
+                    "capture": {"mode": derived_mode},
+                }
+        return shell_instruction
+
+    if target_agent == "filesystem":
+        if _is_presentation_only_task(task):
+            return None
+        if isinstance(instruction, dict) and instruction.get("operation") == "read_file":
+            return instruction
+        return {"operation": "read_file"}
+
+    if target_agent == "notifier":
+        if isinstance(instruction, dict) and instruction.get("operation") == "send_notification":
+            return instruction
+        return {"operation": "send_notification"}
+
+    return instruction if isinstance(instruction, dict) and instruction else None
+
+
 def _looks_like_metadata_command(command: str) -> bool:
     command = command.strip()
     return any(
@@ -889,7 +1008,17 @@ def _sql_fallback_steps_for_task(planning_question: str, task_question: str, cap
     target_agent = _select_target_agent(planning_question, capabilities)
     if not target_agent or _agent_family(target_agent) != "sql_runner":
         return []
-    return [{"id": "step1", "target_agent": target_agent, "task": task_question.strip()}]
+    return [
+        {
+            "id": "step1",
+            "target_agent": target_agent,
+            "task": task_question.strip(),
+            "instruction": {
+                "operation": "query_from_request",
+                "question": task_question.strip(),
+            },
+        }
+    ]
 
 
 def _collapse_sql_steps(question: str, steps: list[dict], capabilities: dict):
@@ -927,6 +1056,14 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
         target_agent = step.get("target_agent")
         task = step.get("task", "").strip()
         command = step.get("command")
+        instruction = step.get("instruction")
+        invoked_agent = None
+        invoked_tail = None
+        if isinstance(command, str):
+            invoked_agent, invoked_tail = _extract_agent_invocation(command, valid_names)
+            if invoked_agent:
+                target_agent = invoked_agent
+                command = invoked_tail
         referenced_keys = set(re.findall(r"\{\{([a-zA-Z0-9_.-]+)\}\}", json.dumps(step)))
         missing_refs = {
             key
@@ -939,32 +1076,42 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             target_agent = _select_target_agent(task or question, capabilities)
         if not target_agent or target_agent in {"ops_planner", "synthesizer"}:
             continue
+        if _is_presentation_only_task(task or question):
+            continue
         normalized_step = {
             "id": step.get("id") or f"step{index}",
             "target_agent": target_agent,
             "task": task or question,
         }
-        if target_agent == "shell_runner":
-            if isinstance(command, str) and command.strip():
-                command = command.strip()
-                if not _looks_like_metadata_command(command):
-                    normalized_step["command"] = command
-            else:
-                derived = _derive_shell_command(normalized_step["task"], index)
-                if derived:
-                    normalized_step["command"] = derived
-            result_mode = step.get("result_mode")
-            if isinstance(result_mode, str) and result_mode.strip():
-                normalized_step["result_mode"] = result_mode.strip()
-            else:
-                derived_mode = _derive_shell_result_mode(normalized_step["task"], normalized_step.get("command"))
-                if derived_mode:
-                    normalized_step["result_mode"] = derived_mode
+        result_mode = step.get("result_mode")
+        if target_agent == "shell_runner" and isinstance(instruction, dict) and isinstance(result_mode, str) and result_mode.strip():
+            normalized_instruction = dict(instruction)
+            if normalized_instruction.get("operation") == "run_command" and not isinstance(normalized_instruction.get("capture"), dict):
+                mode = result_mode.strip()
+                normalized_instruction["capture"] = (
+                    {"mode": "json_field", "field": mode.split(":", 1)[1].strip()}
+                    if mode.startswith("json_field:")
+                    else {"mode": mode}
+                )
+            instruction = normalized_instruction
+        normalized_instruction = _normalize_agent_instruction(
+            target_agent,
+            normalized_step["task"],
+            instruction if isinstance(instruction, dict) else None,
+            command if isinstance(command, str) else None,
+            index,
+        )
+        if not isinstance(normalized_instruction, dict) or not normalized_instruction:
+            continue
+        normalized_step["instruction"] = normalized_instruction
         depends_on = step.get("depends_on")
         if isinstance(depends_on, list):
             clean_depends_on = [item for item in depends_on if isinstance(item, str) and item.strip()]
             if clean_depends_on:
                 normalized_step["depends_on"] = clean_depends_on
+        when = step.get("when")
+        if isinstance(when, dict) and when:
+            normalized_step["when"] = when
         normalized.append(normalized_step)
         available_step_ids.add(normalized_step["id"])
     return normalized
@@ -1009,6 +1156,11 @@ def _flatten_plan_steps(steps: list, prefix: str = "") -> list[dict]:
         if isinstance(target_agent, str) and target_agent:
             item["target_agent"] = target_agent
         command = step.get("command")
+        instruction = step.get("instruction")
+        if not isinstance(command, str) and isinstance(instruction, dict):
+            maybe_command = instruction.get("command")
+            if isinstance(maybe_command, str):
+                command = maybe_command
         if isinstance(command, str) and command:
             item["command"] = command
         flattened.append(item)

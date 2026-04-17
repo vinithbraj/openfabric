@@ -537,11 +537,13 @@ def handle_event(req: EventRequest):
         classification_task = task
         execution_task = task
         provided_sql = req.payload.get("sql")
+        instruction = {"operation": "query_from_request", "question": task}
     elif req.event == "task.plan":
         plan_context = task_plan_context(req.payload)
         classification_task = plan_context.classification_task
         execution_task = plan_context.execution_task
         explicitly_targeted = plan_context.targets("sql_runner")
+        instruction = req.payload.get("instruction") if isinstance(req.payload.get("instruction"), dict) else {}
         if not classification_task or (not explicitly_targeted and not _is_sql_task(classification_task)):
             return {"emits": []}
         provided_sql = req.payload.get("sql")
@@ -574,7 +576,8 @@ def handle_event(req: EventRequest):
             started = time.perf_counter()
             schema = _introspect(dialect, conn)
             stats["schema_ms"] = _elapsed_ms(started)
-            if _is_schema_request(classification_task) and not provided_sql:
+            operation = instruction.get("operation") if isinstance(instruction, dict) else None
+            if operation == "inspect_schema" or (_is_schema_request(classification_task) and not provided_sql):
                 stats["total_ms"] = _elapsed_ms(total_started)
                 return {
                     "emits": [
@@ -589,12 +592,20 @@ def handle_event(req: EventRequest):
                         }
                     ]
                 }
+            if operation == "execute_sql":
+                provided_sql = instruction.get("sql")
+            elif operation == "sample_rows":
+                table = instruction.get("table")
+                limit = instruction.get("limit", 5)
+                if isinstance(table, str) and table.strip():
+                    provided_sql = f"SELECT * FROM {table.strip()} LIMIT {int(limit) if isinstance(limit, (int, float)) else 5}"
             if isinstance(provided_sql, str) and provided_sql.strip():
                 query_specs = [{"label": "provided SQL", "sql": provided_sql.strip()}]
                 stats["sql_generation_ms"] = 0
             else:
                 started = time.perf_counter()
-                query_specs = _llm_sql_queries(execution_task, schema)
+                query_task = instruction.get("question") if isinstance(instruction, dict) and isinstance(instruction.get("question"), str) else execution_task
+                query_specs = _llm_sql_queries(query_task, schema)
                 stats["sql_generation_ms"] = _elapsed_ms(started)
             if not query_specs:
                 stats["total_ms"] = _elapsed_ms(total_started)
