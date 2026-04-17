@@ -33,7 +33,8 @@ LLM planner environment
 - `LLM_OPS_API_KEY` (required for LLM mode)
 - `LLM_OPS_BASE_URL` (default: `https://api.openai.com/v1`)
 - `LLM_OPS_MODEL` (default: `gpt-4o-mini`)
-- `LLM_OPS_TIMEOUT_SECONDS` (default: `10`)
+- `LLM_OPS_SYNTH_MODEL` (optional override for final-answer synthesis; defaults to `LLM_OPS_MODEL`)
+- `LLM_OPS_TIMEOUT_SECONDS` (default: `300`)
 
 If LLM config/request fails, it falls back to deterministic planning.
 

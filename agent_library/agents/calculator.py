@@ -146,6 +146,7 @@ def _build_preprocess_prompt(task: str):
     return (
         "You are a strict calculator preprocessor.\n"
         "Do NOT solve math. Do NOT compute results. Do NOT infer missing numbers from world knowledge.\n"
+        "Treat the request as a single atomic calculator step, not a multi-step workflow.\n"
         "Your job is only to map text to a calculator function and explicit numeric operands found in the request.\n"
         "Decide if the request can be handled ONLY by these calculator functions:\n"
         f"{json.dumps(CALCULATOR_CAPABILITIES, indent=2)}\n"
@@ -157,6 +158,7 @@ def _build_preprocess_prompt(task: str):
         "- Use only numeric operands explicitly present in the user request.\n"
         "- If the request has words like 'times two', convert only explicit number words one..ten to digits.\n"
         "- If fewer than two explicit operands are available, mark unprocessable.\n"
+        "- If the request contains multiple chained operations, mark unprocessable instead of guessing.\n"
         "- Never call external knowledge (e.g., planet sizes, constants not stated by user).\n"
         "- operands MUST be a JSON array of bare numbers only, for example [50,5].\n"
         "- Never return operands as objects, strings, or nested arrays.\n"
@@ -177,7 +179,7 @@ def _llm_preprocess(task: str):
     api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("LLM_OPS_BASE_URL")
     model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "10"))
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
 
     if not api_key:
         raise RuntimeError("LLM_OPS_API_KEY is not set")
@@ -317,4 +319,5 @@ def handle_event(req: EventRequest):
 
     kind, value = _execute(decision["function"], decision["operands"])
     detail = _format_result(decision["function"], decision["operands"], kind, value)
-    return {"emits": [{"event": "task.result", "payload": {"detail": detail}}]}
+    result_value = value if kind != "error" else None
+    return {"emits": [{"event": "task.result", "payload": {"detail": detail, "result": result_value}}]}

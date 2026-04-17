@@ -7,3 +7,5 @@ examples/samples/planner/__pycache__/app.cpython-314.pyc
 __pycache__/
 **/__pycache__/
 *.pyc
+services/postgres/postgres_data/
+services/postgres/pgadmin_data/

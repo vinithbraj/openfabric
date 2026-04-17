@@ -1,27 +1,38 @@
+import argparse
 import sys
+
 from runtime.console import log_error
 from runtime.loader import load_spec
 from runtime.semantic_validator import validate_semantics
 from runtime.engine import Engine
 
 
+def _build_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("spec_path", help="Path to the ASDL spec file")
+    parser.add_argument("question", nargs="*", help="Optional one-shot question")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        dest="timeout_seconds",
+        help="Global timeout override in seconds for HTTP agent calls and autostart readiness",
+    )
+    return parser
+
+
 def main():
     engine = None
-
-    if len(sys.argv) < 2:
-        log_error("Usage: python cli.py <spec.yml> [question]")
-        sys.exit(1)
-
-    spec_path = sys.argv[1]
-    question = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
+    parser = _build_parser()
+    args = parser.parse_args()
 
     try:
-        spec = load_spec(spec_path)
+        spec = load_spec(args.spec_path)
         validate_semantics(spec)
 
-        engine = Engine(spec)
+        engine = Engine(spec, global_timeout_seconds=args.timeout_seconds)
         engine.setup()
 
+        question = " ".join(args.question).strip() if args.question else None
         if question:
             engine.emit("user.ask", {"question": question})
             return

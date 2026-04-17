@@ -14,34 +14,72 @@ from runtime.console import log_debug, log_raw
 app = FastAPI()
 
 AGENT_METADATA = {
-    "description": "Executes safe bash commands from natural-language operations requests.",
-    "capability_domains": ["shell", "operations", "workspace_inspection", "service_control", "file_search"],
+    "description": (
+        "General-purpose local shell executor for safe machine, workspace, filesystem, "
+        "repository, process, service, container, network, build, test, arithmetic, "
+        "and text/data transformation operations."
+    ),
+    "capability_domains": [
+        "general_shell",
+        "machine_operations",
+        "workspace_operations",
+        "filesystem_operations",
+        "process_management",
+        "service_control",
+        "network_inspection",
+        "container_operations",
+        "repository_operations",
+        "build_and_test",
+        "package_management",
+        "text_processing",
+        "data_transformation",
+        "arithmetic",
+    ],
     "action_verbs": [
         "run",
         "execute",
+        "inspect",
         "list",
         "find",
         "search",
+        "read",
+        "write",
+        "create",
+        "append",
+        "copy",
+        "move",
+        "rename",
+        "delete",
         "grep",
-        "inspect",
         "count",
+        "filter",
+        "sort",
+        "transform",
+        "calculate",
+        "compute",
         "show",
         "start",
         "stop",
         "restart",
+        "test",
+        "build",
+        "install",
+        "check",
+        "diagnose",
+        "monitor",
         "stage",
         "commit",
         "push",
     ],
-    "side_effect_policy": "allow_mutating_commands_with_safety_checks",
+    "side_effect_policy": "general_machine_operations_with_safety_checks",
     "safety_enforced_by_agent": True,
     "routing_notes": [
-        "Use for command-line operations such as search, list, grep, and process inspection in the workspace.",
-        "Can also satisfy read/open/locate source-code requests using safe read-only shell commands.",
-        "Handle natural-language Docker requests (list/logs/start/stop/restart/inspect) using docker CLI commands.",
-        "Handle natural-language git workflow requests, including stage and commit in the current repository.",
+        "Use for any request that can be expressed as safe local shell commands.",
+        "Covers workspace and filesystem operations, process and network inspection, services, containers, repositories, builds, tests, package commands, arithmetic, and text/data transformations.",
+        "Prefer workspace-scoped commands and explicit user intent for mutating operations.",
+        "Reject destructive, privileged, ambiguous, or unsafe commands according to runtime safety checks.",
         "Can derive shell commands from natural-language task plans using an LLM preprocessing step.",
-        "If a task does not map to shell capabilities, emit nothing for task.plan.",
+        "If a task cannot be mapped to a safe local shell command, emit nothing for task.plan.",
     ],
     "methods": [
         {
@@ -60,7 +98,7 @@ AGENT_METADATA = {
             "name": "execute_llm_derived_command",
             "event": "task.plan",
             "when": "Derives a shell command from natural language and executes it when safely processable.",
-            "intent_tags": ["cli_exec", "file_search", "workspace_inspection"],
+            "intent_tags": ["cli_exec", "machine_operations", "workspace_operations", "data_transformation"],
             "risk_level": "medium",
             "examples": [
                 "list files under agent_library",
@@ -68,7 +106,8 @@ AGENT_METADATA = {
                 "find all files with extension sh in current directory",
                 "show listening ports",
                 "open Readme.md",
-                "where is calculator agent implemented",
+                "calculate 2+3*5",
+                "create file vinith.txt with Hello world",
                 "show running docker containers",
                 "restart container named web",
                 "commit all git changes with message 'update shell prompt'",
@@ -80,16 +119,14 @@ AGENT_METADATA = {
 
 SHELL_CAPABILITIES = {
     "allowed_operations": [
-        "list files and directories in current workspace",
-        "search file names and file contents (find, rg, grep, ls, cat, head, tail, wc, sort)",
-        "read specific files by relative path (cat, head, tail, sed -n)",
-        "inspect git/workspace state (git status, git branch, git log --oneline)",
-        "perform explicit git staging/commit operations in current repository when user requests it",
-        "show process/network basics (ps, pgrep, netstat/ss) when read-only",
-        "manage local developer services and containers when explicitly requested (e.g., docker ps/stop/start/restart)",
-        "derive common file-extension searches (e.g., .sh, .py, .md) with find",
-        "locate implementation files/functions with rg/find",
-        "inspect docker objects (docker ps, docker images, docker logs, docker inspect, docker compose ps)",
+        "execute safe local shell commands that satisfy explicit user intent",
+        "inspect, read, create, overwrite, append, copy, move, and rename workspace files when explicitly requested",
+        "search, filter, sort, count, aggregate, and transform text/data with standard shell tools",
+        "perform arithmetic and lightweight data calculations with shell tools such as awk, bc, python -c, printf, and expr",
+        "inspect and manage local processes, ports, services, and containers when explicitly requested",
+        "inspect and operate on the current repository, including git status, branch, log, stage, commit, and push",
+        "run project-local build, test, lint, package, and diagnostic commands",
+        "inspect system state with read-only commands such as ps, pgrep, ss, netstat, df, du, env, uname, and date",
     ],
     "disallowed_operations": [
         "destructive commands (rm, mkfs, dd, reboot/shutdown)",
@@ -111,6 +148,11 @@ BLOCKED_PATTERNS = [
     r">\s*/dev/sd[a-z]",
 ]
 
+METADATA_COMMAND_PATTERNS = [
+    r"^[a-zA-Z_][\w.-]*\s*->\s*[a-zA-Z_][\w.-]*$",
+    r"^[a-zA-Z_][\w.-]*\s+emits\s+event\s+[a-zA-Z_][\w.-]*$",
+]
+
 
 def _debug_enabled() -> bool:
     return os.getenv("LLM_OPS_DEBUG", "").lower() in {"1", "true", "yes", "on"}
@@ -124,6 +166,39 @@ def _debug_log(message: str):
 def _is_blocked(command: str) -> bool:
     command_lc = command.lower()
     return any(re.search(pattern, command_lc) for pattern in BLOCKED_PATTERNS)
+
+
+def _looks_like_metadata_not_command(command: str) -> bool:
+    command = command.strip()
+    return any(re.search(pattern, command, flags=re.IGNORECASE) for pattern in METADATA_COMMAND_PATTERNS)
+
+
+def _is_introspection_request(text: str) -> bool:
+    text_lc = text.lower()
+    if not re.search(r"\b(you|your|system|agent|agents|tool|tools|capabilit\w*|supported|available|introspect|introspection)\b", text_lc):
+        return False
+    return any(
+        phrase in text_lc
+        for phrase in (
+            "capabilities",
+            "capability",
+            "introspect",
+            "introspection",
+            "what can you do",
+            "available tools",
+            "available agents",
+            "list your tools",
+            "list tools",
+            "list agents",
+            "supported operations",
+            "available operations",
+            "what tools",
+            "what agents",
+            "show tools",
+            "show agents",
+            "show capabilities",
+        )
+    )
 
 
 def _extract_json_object(text: str):
@@ -199,25 +274,31 @@ def _parse_json(content: str):
 
 def _build_preprocess_prompt(task: str):
     return (
-        "You are a shell-command planner for developer operations requests.\n"
-        "Do NOT execute commands. Convert the user request into one safe shell command when possible.\n"
+        "You are a general-purpose local shell-command planner.\n"
+        "Do NOT execute commands. Convert the user request into one safe local shell command when possible.\n"
         "Return JSON only.\n"
         "Capabilities and limits:\n"
         f"{json.dumps(SHELL_CAPABILITIES, indent=2)}\n"
         "Output shape (exact keys):\n"
         '{"processable":true|false,"command":"shell command or null","reason":"short reason"}\n'
         "Rules:\n"
-        "- Prefer processable=true for shell-suitable requests "
-        "(find/list/search/grep/git/ps/ports/docker/read/open/locate implementation).\n"
+        "- Prefer processable=true whenever the request can be satisfied by a safe local shell command.\n"
+        "- Shell-suitable requests include OS, workspace, filesystem, process, network, service, container, repository, build/test, package, arithmetic, and text/data transformation tasks.\n"
         "- If processable=true, command must be one non-empty bash command string.\n"
         "- If processable=false, set command=null.\n"
         "- Use workspace-scoped commands by default.\n"
+        "- Use standard local tools directly when they fit; examples include sh/bash, printf, awk, sed, grep, rg, find, sort, uniq, wc, cat, head, tail, xargs, python -c, git, docker, ps, ss, date, du, df, make, npm, pytest, and project-local scripts.\n"
         "- Interpret 'current directory' as '.'.\n"
         "- Interpret 'files with extension sh' as name pattern '*.sh'.\n"
         "- 'open/read/show <file>' should usually map to cat/head/tail/sed if path appears valid.\n"
+        "- Explicit create/write/save file requests in the workspace may use printf/tee/redirection with a relative path.\n"
+        "- If the user asks to create a file with content and return its path, write the file and print its absolute path.\n"
         "- 'where is X implemented' should usually map to rg/find over repository paths.\n"
         "- For Docker natural-language requests, map directly to docker CLI equivalents.\n"
+        "- Interpret 'running docker containers' or 'running dockers' as docker ps.\n"
+        "- Interpret 'all docker containers' as docker ps -a.\n"
         "- For git commit requests, map to explicit git commands in current repo.\n"
+        "- For arithmetic or formula requests, produce a shell command that prints only the answer.\n"
         "- If user asks 'commit all changes' and no message is provided, use a neutral message like "
         "'update files'.\n"
         "- Example mappings: 'running containers' -> docker ps, 'all containers' -> docker ps -a,\n"
@@ -232,7 +313,8 @@ def _build_preprocess_prompt(task: str):
         '{"processable":true,"command":"find . -type f -name \\"*.sh\\"","reason":"file extension search"}\n'
         '{"processable":true,"command":"rg -n \\"FastAPI\\" agent_library","reason":"content search"}\n'
         '{"processable":true,"command":"cat Readme.md","reason":"read file request"}\n'
-        '{"processable":true,"command":"rg -n \\"calculator\\\" agent_library/agents","reason":"locate implementation"}\n'
+        '{"processable":true,"command":"printf \\"%s\\\\n\\" \\"Hello world\\" > vinith.txt && realpath vinith.txt","reason":"create file and return path"}\n'
+        '{"processable":true,"command":"printf \\"%s\\\\n\\" \\"$((2 + 3 * 5))\\"","reason":"arithmetic"}\n'
         '{"processable":true,"command":"docker ps","reason":"running containers"}\n'
         '{"processable":true,"command":"docker logs --tail 200 vllm","reason":"container logs request"}\n'
         '{"processable":true,"command":"git status","reason":"git inspection"}\n'
@@ -247,7 +329,7 @@ def _llm_preprocess(task: str):
     api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("LLM_OPS_BASE_URL")
     model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "10"))
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
 
     if not api_key:
         raise RuntimeError("LLM_OPS_API_KEY is not set")
@@ -334,6 +416,8 @@ def _looks_like_shell_command(text: str) -> bool:
 
 
 def _derive_command_from_task(task: str):
+    if _is_introspection_request(task):
+        return None
     decision_raw = _llm_preprocess(task)
     decision = _parse_decision(decision_raw)
     if decision is None or not decision["processable"]:
@@ -342,6 +426,16 @@ def _derive_command_from_task(task: str):
 
 
 def _execute_command(command: str):
+    if _looks_like_metadata_not_command(command):
+        return {
+            "emits": [
+                {
+                    "event": "task.result",
+                    "payload": {"detail": "Rejected descriptive capability metadata because it is not an executable shell command."},
+                }
+            ]
+        }
+
     if _is_blocked(command):
         return {
             "emits": [
@@ -407,6 +501,8 @@ def handle_event(req: EventRequest):
         command_raw = req.payload.get("command")
         if not isinstance(command_raw, str):
             return {"emits": []}
+        if _is_introspection_request(command_raw):
+            return {"emits": []}
         if _looks_like_shell_command(command_raw):
             command = command_raw.strip()
         else:
@@ -418,8 +514,14 @@ def handle_event(req: EventRequest):
             if not command:
                 return {"emits": []}
     elif req.event == "task.plan":
+        command_raw = req.payload.get("command")
+        if isinstance(command_raw, str) and command_raw.strip():
+            command = command_raw.strip()
+            return _execute_command(command)
         task = req.payload.get("task")
         if not isinstance(task, str):
+            return {"emits": []}
+        if _is_introspection_request(task):
             return {"emits": []}
         try:
             command = _derive_command_from_task(task)

@@ -3,6 +3,23 @@ asdl: "0.1"
 system:
   name: ops_assistant_llm
 
+arguments:
+  agents:
+    sql_runner:
+      - name: mydb
+        port: 8307
+        description: "Read-only SQL database agent for the Postgres database 'mydb'."
+        env:
+          SQL_AGENT_DSN: "${SQL_DATABASE_URL:-postgresql://admin:admin123@127.0.0.1:5432/mydb}"
+          SQL_AGENT_NAME: "mydb"
+        metadata:
+          database_name: "mydb"
+          database_aliases:
+            - "mydb"
+          routing_notes:
+            - "Use this SQL agent for requests that mention database 'mydb'."
+            - "Use this SQL agent for schema introspection and read-only data questions for mydb."
+
 contracts:
   UserQuestion:
     type: object
@@ -47,6 +64,30 @@ contracts:
       returncode:
         type: number
 
+  SqlQuery:
+    type: object
+    properties:
+      question:
+        type: string
+      query:
+        type: string
+      sql:
+        type: string
+
+  SqlResult:
+    type: object
+    required: [detail]
+    properties:
+      detail:
+        type: string
+      sql:
+        type: string
+      schema:
+        type: object
+      stats:
+        type: object
+      result: {}
+
   NotifySend:
     type: object
     required: [channel, message]
@@ -62,12 +103,97 @@ contracts:
     properties:
       task:
         type: string
+      step_id:
+        type: string
+      original_task:
+        type: string
+      target_agent:
+        type: string
+      presentation:
+        type: object
+        properties:
+          task:
+            type: string
+          format:
+            type: string
+          audience:
+            type: string
+          include_context:
+            type: boolean
+          include_internal_steps:
+            type: boolean
+      steps:
+        type: array
+        items:
+          type: object
+          required: [id, task]
+          properties:
+            id:
+              type: string
+            target_agent:
+              type: string
+            task:
+              type: string
+            command:
+              type: string
+            result_mode:
+              type: string
+            depends_on:
+              type: array
+              items:
+                type: string
+            steps:
+              type: array
+              items:
+                type: object
 
   TaskResult:
     type: object
     required: [detail]
     properties:
       detail:
+        type: string
+      result: {}
+
+  PlanProgress:
+    type: object
+    required: [stage, message]
+    properties:
+      stage:
+        type: string
+      message:
+        type: string
+      steps:
+        type: array
+        items:
+          type: object
+      presentation:
+        type: object
+
+  StepProgress:
+    type: object
+    required: [stage, step_id, message]
+    properties:
+      stage:
+        type: string
+      step_id:
+        type: string
+      target_agent:
+        type: string
+      task:
+        type: string
+      message:
+        type: string
+      command:
+        type: string
+      sql:
+        type: string
+      event:
+        type: string
+      duration_ms:
+        type: number
+      result: {}
+      error:
         type: string
 
   NotifyResult:
@@ -76,6 +202,24 @@ contracts:
     properties:
       detail:
         type: string
+
+  WorkflowResult:
+    type: object
+    required: [task, status, steps]
+    properties:
+      task:
+        type: string
+      status:
+        type: string
+      steps:
+        type: array
+        items:
+          type: object
+      result: {}
+      error:
+        type: string
+      presentation:
+        type: object
 
   FinalAnswer:
     type: object
@@ -132,6 +276,10 @@ events:
     contract: ShellExecRequest
   shell.result:
     contract: ShellResult
+  sql.query:
+    contract: SqlQuery
+  sql.result:
+    contract: SqlResult
   notify.send:
     contract: NotifySend
   notify.result:
@@ -140,6 +288,12 @@ events:
     contract: TaskPlan
   task.result:
     contract: TaskResult
+  plan.progress:
+    contract: PlanProgress
+  step.progress:
+    contract: StepProgress
+  workflow.result:
+    contract: WorkflowResult
   answer.final:
     contract: FinalAnswer
 
@@ -150,38 +304,24 @@ agents:
       - name: assess_processable_request
         event: task.plan
         when: "Broadcast when request can be processed by at least one capability."
+      - name: describe_execution_plan
+        event: plan.progress
+        when: "Emit user-visible planning progress before execution begins."
       - name: reject_unprocessable_request
         event: task.result
         when: "Emit when request is not processable by discovered capabilities."
     runtime:
       adapter: http
       endpoint: "http://127.0.0.1:8301/handle"
-      timeout_seconds: 30
+      timeout_seconds: 300
       autostart:
         app: agent_library.agents.llm_operations_planner:app
     subscribes_to:
       - system.capabilities
       - user.ask
     emits:
+      - plan.progress
       - task.plan
-      - task.result
-
-  filesystem:
-    description: "Reads workspace files and returns file contents."
-    methods:
-      - name: read_workspace_file
-        event: task.plan
-        when: "Reads a relative file path from task plans and emits file content."
-    runtime:
-      adapter: http
-      endpoint: "http://127.0.0.1:8302/handle"
-      autostart:
-        app: agent_library.agents.filesystem:app
-    subscribes_to:
-      - file.read
-      - task.plan
-    emits:
-      - file.content
       - task.result
 
   shell_runner:
@@ -202,6 +342,27 @@ agents:
       - shell.result
       - task.result
 
+  sql_runner:
+    description: "Read-only SQL database agent for schema introspection, SQL generation, and query execution."
+    methods:
+      - name: introspect_database
+        event: task.plan
+        when: "Lists database schemas, tables, columns, and relationships."
+      - name: answer_database_question
+        event: task.plan
+        when: "Generates and executes read-only SQL for natural-language database questions."
+    runtime:
+      adapter: http
+      endpoint: "http://127.0.0.1:8307/handle"
+      autostart:
+        app: agent_library.agents.sql_runner:app
+    subscribes_to:
+      - sql.query
+      - task.plan
+    emits:
+      - sql.result
+      - task.result
+
   notifier:
     description: "Sends notification messages to configured channels."
     methods:
@@ -219,22 +380,6 @@ agents:
     emits:
       - notify.result
 
-  calculator:
-    description: "Performs arithmetic tasks from task plans and emits task results."
-    methods:
-      - name: compute_basic_math
-        event: task.plan
-        when: "Computes add/subtract/multiply/divide from natural-language task plans."
-    runtime:
-      adapter: http
-      endpoint: "http://127.0.0.1:8306/handle"
-      autostart:
-        app: agent_library.agents.calculator:app
-    subscribes_to:
-      - task.plan
-    emits:
-      - task.result
-
   synthesizer:
     description: "Builds final user-facing answers from tool results."
     methods:
@@ -247,9 +392,15 @@ agents:
       - name: synthesize_notify_result
         event: notify.result
         when: "Converts notify result into final answer."
+      - name: synthesize_sql_result
+        event: sql.result
+        when: "Converts SQL schema/query results into final answer."
       - name: synthesize_task_result
         event: task.result
         when: "Converts generic task result into final answer."
+      - name: synthesize_workflow_result
+        event: workflow.result
+        when: "Converts aggregated multi-step workflow results into final answer."
     runtime:
       adapter: http
       endpoint: "http://127.0.0.1:8305/handle"
@@ -258,8 +409,10 @@ agents:
     subscribes_to:
       - file.content
       - shell.result
+      - sql.result
       - notify.result
       - task.result
+      - workflow.result
     emits:
       - answer.final
 
