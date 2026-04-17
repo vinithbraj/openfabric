@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Any
 
 import requests
@@ -60,18 +61,52 @@ def _debug_log(message: str):
         log_debug("SYNTH_DEBUG", message)
 
 
+ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _clean_terminal_output(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = ANSI_PATTERN.sub("", value)
+    text = text.replace("\r", "\n")
+    while "\b" in text:
+        text = re.sub(r".\x08", "", text)
+        text = text.replace("\b", "")
+    text = CONTROL_PATTERN.sub("", text)
+    return text.strip()
+
+
+def _details_block(summary: str, body_lines: list[str]) -> str:
+    return "\n".join(
+        [
+            f"<details><summary>{summary}</summary>",
+            "",
+            *body_lines,
+            "",
+            "</details>",
+        ]
+    )
+
+
+def _command_output_details(command: str, stdout: str, stderr: str, returncode: int | None = None) -> str:
+    clean_stdout = _clean_terminal_output(stdout) or "<empty>"
+    clean_stderr = _clean_terminal_output(stderr) or "<empty>"
+    body = []
+    if returncode is not None:
+        body.extend(["**Exit code**", "", f"`{returncode}`", ""])
+    body.extend(["**Command**", "", "```bash", command.strip(), "```", ""])
+    body.extend(["**Stdout**", "", "```text", clean_stdout, "```", ""])
+    body.extend(["**Stderr**", "", "```text", clean_stderr, "```"])
+    return _details_block("Command and output", body)
+
+
 def _format_shell_answer(command: str, returncode: int, stdout: str, stderr: str) -> str:
-    clean_stdout = (stdout or "").strip()
-    clean_stderr = (stderr or "").strip()
     status = "success" if returncode == 0 else "failure"
     lines = [
-        "Shell execution result",
-        f"- command: {command}",
-        f"- exit_code: {returncode} ({status})",
-        "- stdout:",
-        clean_stdout or "<empty>",
-        "- stderr:",
-        clean_stderr or "<empty>",
+        f"Shell command finished with **{status}**.",
+        "",
+        _command_output_details(command, stdout, stderr, returncode),
     ]
     return "\n".join(lines)
 
@@ -210,6 +245,32 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
     if isinstance(error, str) and error.strip():
         lines.extend(["", f"Error: {error.strip()}"])
 
+    shell_details = []
+    for step in flat_steps:
+        step_payload = step.get("payload")
+        if not isinstance(step_payload, dict) or step.get("event") != "shell.result":
+            continue
+        command = step_payload.get("command")
+        if not isinstance(command, str) or not command.strip():
+            continue
+        detail = _command_output_details(
+            command,
+            step_payload.get("stdout", ""),
+            step_payload.get("stderr", ""),
+            step_payload.get("returncode"),
+        )
+        shell_details.append(
+            "\n".join(
+                [
+                    f"**{step.get('display_id', step.get('id', 'step'))}**",
+                    "",
+                    detail,
+                ]
+            )
+        )
+    if shell_details:
+        lines.extend(["", _details_block("Command details", shell_details)])
+
     return "\n".join(lines)
 
 
@@ -338,6 +399,8 @@ def _build_prompt(req: EventRequest) -> str:
         "- Never end with commentary such as 'This is a concise answer' or 'This is formatted as Markdown'.\n"
         "- If include_internal_steps is false, use command outputs only as source data and hide implementation details.\n"
         "- If include_internal_steps is true, include a compact 'How it was done' section after the answer.\n"
+        "- When including command, stdout, stderr, logs, or raw execution details, put them inside a collapsed HTML details block: <details><summary>Command and output</summary> ... fenced code blocks ... </details>.\n"
+        "- Do not put the primary user answer inside a details block; only raw command/output details should be collapsible.\n"
         "- If the workflow failed or partially failed, include the failed step task and the exact error message from that step.\n"
         "- If there are completed steps before a failure, show any useful partial result first, then mention what failed.\n"
         "- If a failed step references unavailable previous results, say which dependency was missing.\n"

@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -112,6 +113,88 @@ def _question_from_messages(messages: list[ChatMessage]) -> str:
             if text:
                 return text
     raise HTTPException(status_code=400, detail="No user message found.")
+
+
+NEW_TASK_PATTERN = re.compile(r"^\s*new\s+task\s*:\s*", re.IGNORECASE)
+
+
+def _is_new_task_request(question: str) -> bool:
+    return bool(NEW_TASK_PATTERN.match(question))
+
+
+def _strip_new_task_prefix(question: str) -> str:
+    if not _is_new_task_request(question):
+        return question
+    stripped = NEW_TASK_PATTERN.sub("", question, count=1).strip()
+    return stripped or question.strip()
+
+
+def _compact_history_text(text: str, limit: int = 900) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _compact_assistant_history_text(text: str, limit: int = 900) -> str:
+    text = re.sub(
+        r"\*\*Planning workflow\.\.\.\*\*.*?\*\*Workflow\s+(?:completed|failed)\.\*\*",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"\*\*(?:Plan|Running|Completed|Failed)[^*]*\*\*.*?(?=\n\n|$)", "", text, flags=re.DOTALL)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "Previous request completed."
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _latest_context_boundary(messages: list[ChatMessage]) -> int:
+    boundary = 0
+    for index, message in enumerate(messages[:-1]):
+        if message.role != "user":
+            continue
+        text = _content_to_text(message.content).strip()
+        if _is_new_task_request(text):
+            boundary = index
+    return boundary
+
+
+def _planner_question_from_messages(messages: list[ChatMessage]) -> str:
+    latest = _question_from_messages(messages)
+    current = _strip_new_task_prefix(latest)
+    if _is_new_task_request(latest):
+        return current
+
+    history: list[str] = []
+    for message in messages[_latest_context_boundary(messages) : -1]:
+        if message.role not in {"user", "assistant"}:
+            continue
+        text = _content_to_text(message.content).strip()
+        if not text:
+            continue
+        if _is_openwebui_auxiliary_prompt(text) or _is_openwebui_followup_prompt(text):
+            continue
+        text = _strip_new_task_prefix(text)
+        role = "User" if message.role == "user" else "Assistant"
+        compact_text = _compact_assistant_history_text(text) if message.role == "assistant" else _compact_history_text(text)
+        history.append(f"{role}: {compact_text}")
+
+    history = history[-8:]
+    if not history:
+        return current
+
+    return (
+        "Use the recent conversation only to resolve references and follow-up requests. "
+        "Execute only the current user request.\n\n"
+        "Recent conversation:\n"
+        + "\n".join(history)
+        + "\n\nCurrent user request:\n"
+        + current
+    )
 
 
 def _is_openwebui_auxiliary_prompt(question: str) -> bool:
@@ -281,6 +364,85 @@ def _compact_fields(*items: tuple[str, Any]) -> str:
     return " · ".join(parts)
 
 
+ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _clean_terminal_output(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = ANSI_PATTERN.sub("", value)
+    text = text.replace("\r", "\n")
+    while "\b" in text:
+        text = re.sub(r".\x08", "", text)
+        text = text.replace("\b", "")
+    text = CONTROL_PATTERN.sub("", text)
+    cleaned_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        compact = line.strip()
+        if not compact:
+            if cleaned_lines and cleaned_lines[-1] != "":
+                cleaned_lines.append("")
+            continue
+        line = re.sub(r"([:\s])[-\\/|.\s]+(done)$", r"\1\2", line)
+        line = re.sub(r":done$", ": done", line)
+        compact = line.strip()
+        if re.fullmatch(r"[-\\/|.\s]+", compact):
+            continue
+        cleaned_lines.append(line)
+    while cleaned_lines and cleaned_lines[-1] == "":
+        cleaned_lines.pop()
+    return "\n".join(cleaned_lines).strip()
+
+
+def _output_excerpt(value: Any, limit: int = 900) -> str:
+    text = _clean_terminal_output(value)
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) > 18:
+        text = "\n".join([*lines[:8], "...", *lines[-8:]])
+    return _truncate_progress(text, limit)
+
+
+def _format_command_block(command: str) -> list[str]:
+    return ["```bash", command.strip(), "```"]
+
+
+def _format_text_block(text: str, language: str = "text") -> list[str]:
+    return [f"```{language}", text, "```"]
+
+
+def _shell_status(returncode: Any) -> str:
+    return "success" if returncode == 0 else "failed"
+
+
+def _append_shell_result(lines: list[str], result: dict, duration: str | None = None):
+    command = result.get("command")
+    returncode = result.get("returncode")
+    stdout = _output_excerpt(result.get("stdout"), 900)
+    stderr = _output_excerpt(result.get("stderr"), 600)
+    status = _shell_status(returncode)
+    summary = _compact_fields(
+        ("Status", f"`{status}`"),
+        ("Exit", f"`{returncode}`" if returncode is not None else None),
+        ("Duration", f"`{duration}`" if duration else None),
+    )
+    if summary:
+        lines.append(summary)
+    if isinstance(command, str) and command.strip():
+        lines.append("**Command:**")
+        lines.extend(_format_command_block(command))
+    if stdout:
+        lines.append("**Output:**")
+        lines.extend(_format_text_block(stdout))
+    if stderr:
+        warning_label = "**Warnings:**" if returncode == 0 else "**Error output:**"
+        lines.append(warning_label)
+        lines.extend(_format_text_block(stderr))
+
+
 def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
     if event_name == "user.ask":
         return _trace_block(["**Planning workflow...**"], separator=False)
@@ -323,7 +485,8 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             ]
             command = payload.get("command")
             if isinstance(command, str) and command.strip():
-                lines.append(f"Command: `{_truncate_progress(command, 260)}`")
+                lines.append("Command:")
+                lines.extend(_format_command_block(command))
             sql = payload.get("sql")
             if isinstance(sql, str) and sql.strip():
                 lines.append(f"SQL: `{_truncate_progress(sql, 300)}`")
@@ -339,15 +502,8 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                 detail = result.get("detail")
                 if isinstance(detail, str) and detail.strip():
                     lines.append(f"Detail: `{_truncate_progress(detail, 260)}`")
-                command = result.get("command")
-                if isinstance(command, str) and command.strip():
-                    lines.append(f"Command: `{_truncate_progress(command, 260)}`")
-                stdout = result.get("stdout")
-                if isinstance(stdout, str) and stdout.strip():
-                    lines.append(f"Output: `{_truncate_progress(stdout, 320)}`")
-                stderr = result.get("stderr")
-                if isinstance(stderr, str) and stderr.strip():
-                    lines.append(f"Stderr: `{_truncate_progress(stderr, 220)}`")
+                if "command" in result or "returncode" in result:
+                    _append_shell_result(lines, result, duration)
                 row_count = result.get("row_count")
                 stats_line = _format_stats(result.get("stats"))
                 nested_result = result.get("result")
@@ -356,7 +512,7 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                 if not sql:
                     sql = result.get("sql")
             summary = _compact_fields(
-                ("Duration", f"`{duration}`" if duration else None),
+                ("Duration", f"`{duration}`" if duration and not (isinstance(result, dict) and ("command" in result or "returncode" in result)) else None),
                 ("Rows", f"`{row_count}`" if row_count is not None else None),
             )
             if summary:
@@ -390,12 +546,8 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
     if event_name == "shell.result":
         command = payload.get("command", "")
         returncode = payload.get("returncode")
-        stdout = payload.get("stdout", "")
-        lines = [f"**Shell command completed** · exit `{returncode}`"]
-        if isinstance(command, str) and command.strip():
-            lines.append(f"Command: `{_truncate_progress(command, 220)}`")
-        if isinstance(stdout, str) and stdout.strip():
-            lines.append(f"Output: `{_truncate_progress(stdout, 300)}`")
+        lines = [f"**Shell command completed** · `{_shell_status(returncode)}`"]
+        _append_shell_result(lines, payload)
         return _trace_block(lines)
     if event_name == "sql.result":
         sql = payload.get("sql", "")
@@ -557,9 +709,11 @@ def chat_completions(request: ChatCompletionRequest):
     if _is_openwebui_auxiliary_prompt(question):
         return _upstream_chat_completion(request)
 
+    planner_question = _planner_question_from_messages(request.messages)
+
     if request.stream:
-        return _stream_response(question, selected_model)
-    answer = gateway.ask(question)
+        return _stream_response(planner_question, selected_model)
+    answer = gateway.ask(planner_question)
     return _chat_response(answer, selected_model)
 
 

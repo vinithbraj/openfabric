@@ -769,12 +769,16 @@ def _fallback_steps(question: str, capabilities: dict):
 
 
 def _sql_fallback_steps(question: str, capabilities: dict):
-    if not _looks_like_sql_question(question, capabilities):
+    return _sql_fallback_steps_for_task(question, question, capabilities)
+
+
+def _sql_fallback_steps_for_task(planning_question: str, task_question: str, capabilities: dict):
+    if not _looks_like_sql_question(planning_question, capabilities):
         return []
-    target_agent = _select_target_agent(question, capabilities)
+    target_agent = _select_target_agent(planning_question, capabilities)
     if not target_agent or _agent_family(target_agent) != "sql_runner":
         return []
-    return [{"id": "step1", "target_agent": target_agent, "task": question.strip()}]
+    return [{"id": "step1", "target_agent": target_agent, "task": task_question.strip()}]
 
 
 def _collapse_sql_steps(question: str, steps: list[dict], capabilities: dict):
@@ -792,6 +796,14 @@ def _collapse_sql_steps(question: str, steps: list[dict], capabilities: dict):
         collapsed = _sql_fallback_steps(question, capabilities)
         return collapsed or steps
     return steps
+
+
+def _current_request_from_context(question: str) -> str:
+    match = re.search(r"(?:^|\n)Current user request:\s*(.+)\s*$", question, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return question
+    current = match.group(1).strip()
+    return current or question
 
 
 def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: dict):
@@ -924,12 +936,13 @@ def _plan_progress_payload(question: str, steps: list, presentation: dict):
     }
 
 
-def _sql_plan_emits(question: str, allowed_events: set[str]):
-    sql_steps = _sql_fallback_steps(question, CAPABILITIES)
+def _sql_plan_emits(question: str, allowed_events: set[str], task_question: str | None = None):
+    task_question = task_question or _current_request_from_context(question)
+    sql_steps = _sql_fallback_steps_for_task(question, task_question, CAPABILITIES)
     if not sql_steps or "task.plan" not in allowed_events:
         return None
     presentation = _normalize_presentation(
-        question,
+        task_question,
         {
             "task": "Show the query result as a readable Markdown table and include the SQL used.",
             "format": "markdown_table",
@@ -939,7 +952,7 @@ def _sql_plan_emits(question: str, allowed_events: set[str]):
         },
     )
     payload = {
-        "task": question,
+        "task": task_question,
         "steps": sql_steps,
         "presentation": presentation,
         "target_agent": sql_steps[0]["target_agent"],
@@ -949,7 +962,7 @@ def _sql_plan_emits(question: str, allowed_events: set[str]):
         emits.append(
             {
                 "event": "plan.progress",
-                "payload": _plan_progress_payload(question, sql_steps, presentation),
+                "payload": _plan_progress_payload(task_question, sql_steps, presentation),
             }
         )
     emits.append({"event": "task.plan", "payload": payload})
@@ -969,8 +982,9 @@ def handle_event(req: EventRequest):
         return {"emits": []}
 
     question = req.payload["question"]
+    current_question = _current_request_from_context(question)
     allowed_events = set(CAPABILITIES.get("available_events", DEFAULT_ALLOWED_EVENTS))
-    if _is_capability_question(question) and "task.result" in allowed_events:
+    if _is_capability_question(current_question) and "task.result" in allowed_events:
         return {
             "emits": [
                 {
@@ -986,14 +1000,16 @@ def handle_event(req: EventRequest):
         decision = _llm_decide(question, CAPABILITIES)
         if decision is not None:
             if decision["processable"] and "task.plan" in allowed_events:
-                steps = _normalize_steps(question, decision.get("steps", []), CAPABILITIES)
+                steps = _normalize_steps(current_question, decision.get("steps", []), CAPABILITIES)
                 if not steps:
-                    steps = _fallback_steps(question, CAPABILITIES)
+                    steps = _fallback_steps(current_question, CAPABILITIES)
                 steps = _collapse_sql_steps(question, steps, CAPABILITIES)
-                payload = {"task": question}
+                if _looks_like_sql_question(question, CAPABILITIES):
+                    steps = _sql_fallback_steps_for_task(question, current_question, CAPABILITIES) or steps
+                payload = {"task": current_question}
                 if steps:
                     payload["steps"] = steps
-                    presentation = _normalize_presentation(question, decision.get("presentation"))
+                    presentation = _normalize_presentation(current_question, decision.get("presentation"))
                     payload["presentation"] = presentation
                     if len(steps) == 1:
                         payload["target_agent"] = steps[0]["target_agent"]
@@ -1006,12 +1022,12 @@ def handle_event(req: EventRequest):
                     emits.append(
                         {
                             "event": "plan.progress",
-                            "payload": _plan_progress_payload(question, steps, payload.get("presentation", {})),
+                            "payload": _plan_progress_payload(current_question, steps, payload.get("presentation", {})),
                         }
                     )
                 emits.append({"event": "task.plan", "payload": payload})
                 return {"emits": emits}
-            emits = _sql_plan_emits(question, allowed_events)
+            emits = _sql_plan_emits(question, allowed_events, current_question)
             if emits is not None:
                 return {"emits": emits}
             if "task.result" in allowed_events:
@@ -1022,7 +1038,7 @@ def handle_event(req: EventRequest):
     except Exception as exc:
         _debug_log(f"LLM planning failed. Error: {type(exc).__name__}: {exc}")
 
-    emits = _sql_plan_emits(question, allowed_events)
+    emits = _sql_plan_emits(question, allowed_events, current_question)
     if emits is not None:
         return {"emits": emits}
 
