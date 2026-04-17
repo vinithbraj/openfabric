@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 services/postgres/postgres_data/
 services/postgres/pgadmin_data/
+services/postgres/init/
