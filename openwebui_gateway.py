@@ -55,8 +55,8 @@ class ChatCompletionRequest(BaseModel):
 
 
 class PlannerGateway:
-    def __init__(self, spec_path: str, timeout_seconds: float | None = None):
-        spec = load_spec(spec_path)
+    def __init__(self, spec_path: str, timeout_seconds: float | None = None, selected_agents: list[str] | None = None):
+        spec = load_spec(spec_path, selected_agents=selected_agents)
         validate_semantics(spec)
         self.engine = Engine(spec, global_timeout_seconds=timeout_seconds)
         self.engine.setup()
@@ -1130,9 +1130,9 @@ def chat_completions(request: ChatCompletionRequest, client_request: Request):
     return _chat_response(answer, selected_model)
 
 
-def create_app(spec_path: str, timeout_seconds: float | None = None):
+def create_app(spec_path: str, timeout_seconds: float | None = None, selected_agents: list[str] | None = None):
     global gateway
-    gateway = PlannerGateway(spec_path, timeout_seconds=timeout_seconds)
+    gateway = PlannerGateway(spec_path, timeout_seconds=timeout_seconds, selected_agents=selected_agents)
 
     @app.on_event("shutdown")
     def shutdown_gateway():
@@ -1149,6 +1149,12 @@ def main():
     parser.add_argument("--port", type=int, default=8310)
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument(
+        "--agent",
+        action="append",
+        dest="selected_agents",
+        help="Start only the named agent(s). Repeat the flag or pass a comma-separated list. Matches agent name, template name, or argument instance name.",
+    )
+    parser.add_argument(
         "--enable-context",
         action="store_true",
         help="Include prior Open WebUI chat history in planner requests. Disabled by default.",
@@ -1158,7 +1164,7 @@ def main():
         os.environ["ENABLE_CONTEXT"] = "1"
 
     uvicorn.run(
-        create_app(args.spec, timeout_seconds=args.timeout),
+        create_app(args.spec, timeout_seconds=args.timeout, selected_agents=args.selected_agents),
         host=args.host,
         port=args.port,
     )

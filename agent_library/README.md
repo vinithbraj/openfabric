@@ -24,7 +24,16 @@ source .venv/bin/activate
 python cli.py agent_library/specs/research_task_assistant.yml
 python cli.py agent_library/specs/ops_assistant.yml
 python cli.py agent_library/specs/ops_assistant_llm.yml
+python cli.py agent_library/specs/ops_assistant_llm.yml --list-agents
+python cli.py agent_library/specs/ops_assistant_llm.yml --agent shell_runner
+python cli.py agent_library/specs/ops_assistant_llm.yml --agent sql_runner --agent synthesizer
 ```
+
+`--agent` works like a runtime service filter. It can match:
+
+- the concrete agent name, for example `sql_runner_mydb`
+- the template agent name, for example `sql_runner`
+- the argument instance name, for example `mydb`
 
 LLM planner environment
 

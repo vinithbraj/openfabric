@@ -5,10 +5,34 @@ from urllib.parse import urlparse, urlunparse
 
 import yaml
 
-def load_spec(path: str) -> dict:
+
+def load_spec(path: str, selected_agents: list[str] | None = None) -> dict:
     with open(path, "r") as f:
         spec = yaml.safe_load(f)
-    return _expand_agent_arguments(spec)
+    expanded = _expand_agent_arguments(spec)
+    return _filter_agents(expanded, selected_agents)
+
+
+def list_spec_agents(path: str) -> list[dict]:
+    spec = load_spec(path)
+    agents = []
+    for agent_name, agent in spec.get("agents", {}).items():
+        metadata = agent.get("metadata", {}) if isinstance(agent.get("metadata"), dict) else {}
+        aliases = []
+        argument_name = metadata.get("argument_name")
+        template_agent = metadata.get("template_agent")
+        if isinstance(argument_name, str) and argument_name.strip():
+            aliases.append(argument_name.strip())
+        if isinstance(template_agent, str) and template_agent.strip() and template_agent.strip() != agent_name:
+            aliases.append(template_agent.strip())
+        agents.append(
+            {
+                "name": agent_name,
+                "aliases": aliases,
+                "description": agent.get("description", ""),
+            }
+        )
+    return agents
 
 
 def _safe_agent_suffix(name: str) -> str:
@@ -43,6 +67,74 @@ def _resolve_env_placeholders(value):
     if isinstance(value, dict):
         return {key: _resolve_env_placeholders(item) for key, item in value.items()}
     return value
+
+
+def _normalize_selected_agents(selected_agents: list[str] | None) -> list[str]:
+    if not selected_agents:
+        return []
+    normalized = []
+    for item in selected_agents:
+        if not isinstance(item, str):
+            continue
+        parts = [part.strip() for part in item.split(",")]
+        normalized.extend(part for part in parts if part)
+    return normalized
+
+
+def _agent_aliases(agent_name: str, agent_cfg: dict) -> set[str]:
+    aliases = {agent_name}
+    metadata = agent_cfg.get("metadata", {}) if isinstance(agent_cfg.get("metadata"), dict) else {}
+    for key in ("argument_name", "template_agent"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            aliases.add(value.strip())
+    return aliases
+
+
+def _filter_agents(spec: dict, selected_agents: list[str] | None) -> dict:
+    selectors = _normalize_selected_agents(selected_agents)
+    if not selectors:
+        return spec
+
+    agents = spec.get("agents", {})
+    if not isinstance(agents, dict):
+        return spec
+
+    matched_names: set[str] = set()
+    unmatched: list[str] = []
+    for selector in selectors:
+        selector_matches = [
+            agent_name
+            for agent_name, agent_cfg in agents.items()
+            if selector in _agent_aliases(agent_name, agent_cfg)
+        ]
+        if not selector_matches:
+            unmatched.append(selector)
+            continue
+        matched_names.update(selector_matches)
+
+    if unmatched:
+        available = sorted(
+            {
+                alias
+                for agent_name, agent_cfg in agents.items()
+                for alias in _agent_aliases(agent_name, agent_cfg)
+            }
+        )
+        raise ValueError(
+            "Unknown agent selector(s): "
+            + ", ".join(unmatched)
+            + ". Available selectors: "
+            + ", ".join(available)
+        )
+
+    filtered = copy.deepcopy(spec)
+    filtered["agents"] = {
+        agent_name: copy.deepcopy(agent_cfg)
+        for agent_name, agent_cfg in agents.items()
+        if agent_name in matched_names
+    }
+    return filtered
 
 
 def _expand_agent_arguments(spec: dict) -> dict:

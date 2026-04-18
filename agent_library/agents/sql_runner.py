@@ -73,6 +73,10 @@ MUTATING_PATTERN = re.compile(
     r"\b(insert|update|delete|drop|alter|create|truncate|merge|replace|grant|revoke|vacuum|attach|detach)\b",
     re.IGNORECASE,
 )
+IDENTIFIER_ERROR_PATTERN = re.compile(
+    r"(undefinedcolumn|undefinedtable|no such column|no such table|unknown column|unknown table|column .* does not exist|relation .* does not exist|syntax error)",
+    re.IGNORECASE,
+)
 
 
 def _debug_enabled() -> bool:
@@ -171,6 +175,63 @@ def _json_safe(value: Any):
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _identifier_quote_char(dialect: str) -> str:
+    if dialect == "mysql":
+        return "`"
+    return '"'
+
+
+def _quote_identifier(identifier: str, dialect: str) -> str:
+    text = identifier.strip()
+    if not text:
+        return text
+    quote = _identifier_quote_char(dialect)
+    if text.startswith(quote) and text.endswith(quote):
+        return text
+    escaped = text.replace(quote, quote * 2)
+    return f"{quote}{escaped}{quote}"
+
+
+def _quote_qualified_identifier(identifier: str, dialect: str) -> str:
+    parts = [part.strip() for part in identifier.split(".") if part.strip()]
+    if not parts:
+        return identifier.strip()
+    return ".".join(_quote_identifier(part, dialect) for part in parts)
+
+
+def _schema_prompt_text(schema: dict) -> str:
+    dialect = schema.get("dialect", "unknown")
+    lines = [f"Dialect: {dialect}"]
+    for table in schema.get("tables", []):
+        schema_name = str(table.get("schema", "") or "").strip()
+        table_name = str(table.get("name", "") or "").strip()
+        qualified = ".".join(part for part in (schema_name, table_name) if part)
+        quoted_table = _quote_qualified_identifier(qualified, dialect) if qualified else ""
+        columns = []
+        for col in table.get("columns", []):
+            col_name = str(col.get("name", "") or "").strip()
+            col_type = str(col.get("type", "") or "").strip()
+            quoted_col = _quote_identifier(col_name, dialect) if col_name else ""
+            nullable = " nullable" if col.get("nullable") else " not null"
+            columns.append(f"{quoted_col} {col_type}{nullable}".strip())
+        lines.append(f"- table {quoted_table}: {', '.join(columns)}")
+        for fk in table.get("foreign_keys", []):
+            source = _quote_identifier(str(fk.get('column', '') or '').strip(), dialect)
+            target_qualified = ".".join(
+                part
+                for part in (
+                    str(fk.get("references_schema", "") or "").strip(),
+                    str(fk.get("references_table", "") or "").strip(),
+                )
+                if part
+            )
+            target_column = _quote_identifier(str(fk.get("references_column", "") or "").strip(), dialect)
+            lines.append(
+                f"  FK {source} -> {_quote_qualified_identifier(target_qualified, dialect)}.{target_column}"
+            )
+    return "\n".join(lines)
 
 
 def _sqlite_schema(conn) -> dict:
@@ -303,20 +364,7 @@ def _introspect(dialect: str, conn) -> dict:
 
 
 def _schema_summary(schema: dict) -> str:
-    lines = [f"Dialect: {schema.get('dialect', 'unknown')}"]
-    for table in schema.get("tables", []):
-        columns = ", ".join(f"{col['name']} {col.get('type', '')}".strip() for col in table.get("columns", []))
-        lines.append(f"- {table.get('schema')}.{table.get('name')}: {columns}")
-        for fk in table.get("foreign_keys", []):
-            lines.append(
-                "  FK {column} -> {schema}.{table}.{column_ref}".format(
-                    column=fk.get("column"),
-                    schema=fk.get("references_schema"),
-                    table=fk.get("references_table"),
-                    column_ref=fk.get("references_column"),
-                )
-            )
-    return "\n".join(lines)
+    return _schema_prompt_text(schema)
 
 
 def _extract_json_values(text: str) -> list[dict[str, Any]]:
@@ -385,6 +433,9 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
         "- Use only tables and columns present in the schema.\n"
         "- Use schema-qualified table names exactly as shown in the schema, for example schema_name.table_name.\n"
         "- Never refer to a table by bare name when the schema summary shows it as schema.table.\n"
+        "- Quote identifiers exactly as shown in the schema whenever case, spaces, punctuation, or reserved words could matter.\n"
+        "- For postgres and sqlite use double quotes for identifiers. For mysql use backticks.\n"
+        "- You may quote all schema, table, and column identifiers consistently, even when not strictly required.\n"
         "- Use foreign-key relationships from the schema for joins.\n"
         "- Prefer SELECT or WITH queries. Do not generate mutating SQL.\n"
         "- Add a reasonable LIMIT unless the user asks for aggregation only.\n"
@@ -409,6 +460,57 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"]
     log_raw("SQL_LLM_RAW", content)
+    return _sql_query_specs_from_json(_extract_json_values(content))
+
+
+def _repair_sql_query(task: str, schema: dict, failing_sql: str, error_text: str) -> list[dict[str, str]]:
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL")
+    model = os.getenv("LLM_OPS_MODEL")
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
+    if not api_key:
+        raise RuntimeError("LLM_OPS_API_KEY is not set")
+    if api_key.startswith("sk-") and api_key.lower() != "dummy":
+        base_url = "https://api.openai.com/v1"
+        if not model:
+            model = "gpt-4.1"
+    elif not base_url:
+        base_url = "https://api.openai.com/v1"
+    if not model:
+        model = "gpt-4o-mini"
+
+    prompt = (
+        "You repair one read-only SQL query after execution failed.\n"
+        "Return JSON only in the form {\"sql\":\"...\",\"reason\":\"...\"}.\n"
+        "Rules:\n"
+        "- Preserve the user's intent.\n"
+        "- Use only tables and columns present in the schema.\n"
+        "- Fix identifier quoting, schema qualification, reserved words, join paths, and dialect syntax issues.\n"
+        "- Quote identifiers exactly as shown in the schema whenever case, spaces, punctuation, or reserved words could matter.\n"
+        "- For postgres and sqlite use double quotes for identifiers. For mysql use backticks.\n"
+        "- Return a single read-only SQL query.\n"
+        "Schema:\n"
+        f"{_schema_summary(schema)}\n"
+        f"Original user request: {task}\n"
+        f"Failing SQL:\n{failing_sql}\n"
+        f"Database error:\n{error_text}"
+    )
+    response = requests.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You produce strict JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+    log_raw("SQL_LLM_REPAIR_RAW", content)
     return _sql_query_specs_from_json(_extract_json_values(content))
 
 
@@ -468,6 +570,10 @@ def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int):
         "limit": limit,
         "queries": query_results,
     }
+
+
+def _should_retry_sql_repair(exc: Exception) -> bool:
+    return bool(IDENTIFIER_ERROR_PATTERN.search(f"{type(exc).__name__}: {exc}"))
 
 
 def _is_schema_request(task: str) -> bool:
@@ -598,7 +704,10 @@ def handle_event(req: EventRequest):
                 table = instruction.get("table")
                 limit = instruction.get("limit", 5)
                 if isinstance(table, str) and table.strip():
-                    provided_sql = f"SELECT * FROM {table.strip()} LIMIT {int(limit) if isinstance(limit, (int, float)) else 5}"
+                    provided_sql = (
+                        f"SELECT * FROM {_quote_qualified_identifier(table.strip(), dialect)} "
+                        f"LIMIT {int(limit) if isinstance(limit, (int, float)) else 5}"
+                    )
             if isinstance(provided_sql, str) and provided_sql.strip():
                 query_specs = [{"label": "provided SQL", "sql": provided_sql.strip()}]
                 stats["sql_generation_ms"] = 0
@@ -628,7 +737,20 @@ def handle_event(req: EventRequest):
                     ]
                 }
             started = time.perf_counter()
-            result = _execute_sql_queries(conn, query_specs, _row_limit())
+            try:
+                result = _execute_sql_queries(conn, query_specs, _row_limit())
+            except Exception as exc:
+                if not _should_retry_sql_repair(exc):
+                    raise
+                repair_started = time.perf_counter()
+                failing_sql = "\n\n".join(spec.get("sql", "") for spec in query_specs if isinstance(spec, dict))
+                query_task = instruction.get("question") if isinstance(instruction, dict) and isinstance(instruction.get("question"), str) else execution_task
+                repaired_specs = _repair_sql_query(query_task, schema, failing_sql, f"{type(exc).__name__}: {exc}")
+                stats["sql_repair_ms"] = _elapsed_ms(repair_started)
+                if not repaired_specs:
+                    raise
+                result = _execute_sql_queries(conn, repaired_specs, _row_limit())
+                query_specs = repaired_specs
             stats["query_ms"] = _elapsed_ms(started)
             stats["total_ms"] = _elapsed_ms(total_started)
             sql = result.get("sql", "")

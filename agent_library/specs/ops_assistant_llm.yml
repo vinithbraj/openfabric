@@ -19,6 +19,20 @@ arguments:
           routing_notes:
             - "Use this SQL agent for requests that mention database 'mydb'."
             - "Use this SQL agent for schema introspection and read-only data questions for mydb."
+      - name: dicom_mock
+        port: 8308
+        description: "Read-only SQL database agent for the Postgres database 'dicom_mock'."
+        env:
+          SQL_AGENT_DSN: "${SQL_DICOM_MOCK_DATABASE_URL:-postgresql://admin:admin123@127.0.0.1:5432/dicom_mock}"
+          SQL_AGENT_NAME: "dicom_mock"
+        metadata:
+          database_name: "dicom_mock"
+          database_aliases:
+            - "dicom_mock"
+            - "dicom mock"
+          routing_notes:
+            - "Use this SQL agent for requests that mention database 'dicom_mock'."
+            - "Use this SQL agent for schema introspection and read-only data questions for dicom_mock."
 
 contracts:
   UserQuestion:
