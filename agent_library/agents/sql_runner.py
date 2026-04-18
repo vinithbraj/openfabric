@@ -104,6 +104,14 @@ def _row_limit() -> int:
         return 100
 
 
+def _sql_repair_max_attempts() -> int:
+    raw = os.getenv("SQL_AGENT_MAX_REPAIR_ATTEMPTS", "2")
+    try:
+        return max(1, min(int(raw), 50))
+    except ValueError:
+        return 10
+
+
 def _dialect_from_dsn(dsn: str) -> str:
     parsed = urlparse(dsn)
     scheme = parsed.scheme.lower()
@@ -175,6 +183,16 @@ def _json_safe(value: Any):
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _rollback_quietly(conn) -> None:
+    rollback = getattr(conn, "rollback", None)
+    if not callable(rollback):
+        return
+    try:
+        rollback()
+    except Exception as exc:
+        _debug_log(f"Rollback failed: {type(exc).__name__}: {exc}")
 
 
 def _identifier_quote_char(dialect: str) -> str:
@@ -386,6 +404,119 @@ def _schema_identifier_catalog(schema: dict) -> str:
     return "\n".join(lines)
 
 
+def _schema_identifier_sets(schema: dict) -> dict[str, set[str]]:
+    schemas: set[str] = set()
+    tables: set[str] = set()
+    qualified_tables: set[str] = set()
+    columns: set[str] = set()
+    qualified_columns: set[str] = set()
+
+    for table in schema.get("tables", []):
+        schema_name = str(table.get("schema", "") or "").strip()
+        table_name = str(table.get("name", "") or "").strip()
+        if schema_name:
+            schemas.add(schema_name)
+        if table_name:
+            tables.add(table_name)
+        qualified_table = ".".join(part for part in (schema_name, table_name) if part)
+        if qualified_table:
+            qualified_tables.add(qualified_table)
+
+        for column in table.get("columns", []):
+            column_name = str(column.get("name", "") or "").strip()
+            if not column_name:
+                continue
+            columns.add(column_name)
+            if table_name:
+                qualified_columns.add(f"{table_name}.{column_name}")
+            if qualified_table:
+                qualified_columns.add(f"{qualified_table}.{column_name}")
+
+    return {
+        "schemas": schemas,
+        "tables": tables,
+        "qualified_tables": qualified_tables,
+        "columns": columns,
+        "qualified_columns": qualified_columns,
+    }
+
+
+SQL_TOKEN_PATTERN = re.compile(
+    r"""
+    (?P<double_quote>"(?:[^"]|"")*")
+    |(?P<single_quote>'(?:''|[^'])*')
+    |(?P<line_comment>--[^\n]*)
+    |(?P<block_comment>/\*.*?\*/)
+    |(?P<whitespace>\s+)
+    |(?P<identifier>[A-Za-z_][A-Za-z0-9_$]*)
+    |(?P<symbol>.)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def _tokenize_sql(sql: str) -> list[dict[str, str]]:
+    return [
+        {"kind": match.lastgroup or "symbol", "text": match.group(0)}
+        for match in SQL_TOKEN_PATTERN.finditer(sql)
+    ]
+
+
+def _next_meaningful_token(tokens: list[dict[str, str]], start: int) -> tuple[int, dict[str, str]] | None:
+    for index in range(start, len(tokens)):
+        if tokens[index]["kind"] != "whitespace":
+            return index, tokens[index]
+    return None
+
+
+def _postgres_safe_sql(sql: str, schema: dict) -> str:
+    if schema.get("dialect") != "postgres":
+        return sql
+
+    identifiers = _schema_identifier_sets(schema)
+    tokens = _tokenize_sql(sql)
+    rewritten: list[str] = []
+    index = 0
+
+    while index < len(tokens):
+        token = tokens[index]
+        kind = token["kind"]
+        text = token["text"]
+
+        if kind != "identifier":
+            rewritten.append(text)
+            index += 1
+            continue
+
+        next_token_info = _next_meaningful_token(tokens, index + 1)
+        if next_token_info and next_token_info[1]["text"] == "(":
+            rewritten.append(text)
+            index += 1
+            continue
+
+        dot_token_info = _next_meaningful_token(tokens, index + 1)
+        if dot_token_info and dot_token_info[1]["text"] == ".":
+            rhs_token_info = _next_meaningful_token(tokens, dot_token_info[0] + 1)
+            if rhs_token_info and rhs_token_info[1]["kind"] == "identifier":
+                qualified_pair = f"{text}.{rhs_token_info[1]['text']}"
+                if qualified_pair in identifiers["qualified_tables"] or qualified_pair in identifiers["qualified_columns"]:
+                    rewritten.append(_quote_identifier(text, "postgres"))
+                elif text in identifiers["schemas"] or text in identifiers["tables"]:
+                    rewritten.append(_quote_identifier(text, "postgres"))
+                else:
+                    rewritten.append(text)
+                index += 1
+                continue
+
+        if text in identifiers["tables"] or text in identifiers["columns"] or text in identifiers["schemas"]:
+            rewritten.append(_quote_identifier(text, "postgres"))
+        else:
+            rewritten.append(text)
+        index += 1
+
+    return "".join(rewritten)
+
+
 def _extract_json_values(text: str) -> list[dict[str, Any]]:
     decoder = json.JSONDecoder()
     values = []
@@ -424,6 +555,19 @@ def _sql_query_specs_from_json(values: list[dict[str, Any]]) -> list[dict[str, s
         seen.add(key)
         deduped.append(spec)
     return deduped
+
+
+def _normalize_sql_for_compare(sql: str) -> str:
+    return re.sub(r"\s+", " ", sql.strip().rstrip(";")).strip().lower()
+
+
+def _same_query_specs(left: list[dict[str, str]], right: list[dict[str, str]]) -> bool:
+    if len(left) != len(right):
+        return False
+    return all(
+        _normalize_sql_for_compare(left_spec.get("sql", "")) == _normalize_sql_for_compare(right_spec.get("sql", ""))
+        for left_spec, right_spec in zip(left, right)
+    )
 
 
 def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
@@ -486,7 +630,14 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
     return _sql_query_specs_from_json(_extract_json_values(content))
 
 
-def _repair_sql_query(task: str, schema: dict, failing_sql: str, error_text: str) -> list[dict[str, str]]:
+def _repair_sql_query(
+    task: str,
+    schema: dict,
+    failing_sql: str,
+    error_text: str,
+    previous_repair_sql: str = "",
+    previous_repair_error: str = "",
+) -> list[dict[str, str]]:
     api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("LLM_OPS_BASE_URL")
     model = os.getenv("LLM_OPS_MODEL")
@@ -514,6 +665,9 @@ def _repair_sql_query(task: str, schema: dict, failing_sql: str, error_text: str
         "- Copy schema, table, and column names verbatim from the schema catalog.\n"
         "- Quote identifiers exactly as shown in the schema whenever case, spaces, punctuation, or reserved words could matter.\n"
         "- For postgres and sqlite use double quotes for identifiers. For mysql use backticks.\n"
+        "- You must return a materially different SQL query when the failing query is invalid. Do not repeat the same broken SQL.\n"
+        "- If a referenced column does not exist on an alias, find a valid join path using the schema foreign keys instead of reusing the same join.\n"
+        "- Validate every selected column, filter column, and JOIN predicate against the schema catalog before answering.\n"
         "- Return a single read-only SQL query.\n"
         "Schema:\n"
         f"{_schema_summary(schema)}\n"
@@ -522,6 +676,12 @@ def _repair_sql_query(task: str, schema: dict, failing_sql: str, error_text: str
         f"Failing SQL:\n{failing_sql}\n"
         f"Database error:\n{error_text}"
     )
+    if previous_repair_sql.strip():
+        prompt += (
+            f"\nPrevious failed repair SQL:\n{previous_repair_sql}\n"
+            f"Previous failed repair error:\n{previous_repair_error}\n"
+            "Your previous repair was still invalid. Return a different SQL query that corrects the failure.\n"
+        )
     response = requests.post(
         f"{base_url.rstrip('/')}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -550,25 +710,30 @@ def _read_only_sql(sql: str) -> bool:
     return stripped.lower().startswith(READ_ONLY_PREFIXES)
 
 
-def _execute_sql(conn, sql: str, limit: int):
+def _execute_sql(conn, sql: str, limit: int, schema: dict):
     if not _read_only_sql(sql):
         raise RuntimeError("Rejected non-read-only SQL.")
+    sql = _postgres_safe_sql(sql, schema)
     with closing(conn.cursor()) as cursor:
-        cursor.execute(sql)
+        try:
+            cursor.execute(sql)
+        except Exception:
+            _rollback_quietly(conn)
+            raise
         columns, rows = _rows_from_cursor(cursor, limit)
     return {"sql": sql, "columns": columns, "rows": rows, "row_count": len(rows), "limit": limit}
 
 
-def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int):
+def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int, schema: dict):
     if len(query_specs) == 1:
-        return _execute_sql(conn, query_specs[0]["sql"], limit)
+        return _execute_sql(conn, query_specs[0]["sql"], limit, schema)
 
     query_results = []
     rows = []
     scalar_rows = True
     for index, spec in enumerate(query_specs, start=1):
         label = spec.get("label") or f"query {index}"
-        result = _execute_sql(conn, spec["sql"], limit)
+        result = _execute_sql(conn, spec["sql"], limit, schema)
         query_results.append({"label": label, **result})
 
         result_rows = result.get("rows", [])
@@ -601,6 +766,74 @@ def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int):
 
 def _should_retry_sql_repair(exc: Exception) -> bool:
     return bool(IDENTIFIER_ERROR_PATTERN.search(f"{type(exc).__name__}: {exc}"))
+
+
+def _repair_sql_with_retries(
+    conn,
+    schema: dict,
+    query_task: str,
+    query_specs: list[dict[str, str]],
+    limit: int,
+    stats: dict[str, float],
+):
+    max_attempts = _sql_repair_max_attempts()
+    repair_started = time.perf_counter()
+    previous_repair_sql = ""
+    previous_repair_error = ""
+    current_specs = query_specs
+
+    try:
+        result = _execute_sql_queries(conn, current_specs, limit, schema)
+        stats["sql_repair_attempts"] = 0.0
+        stats["sql_repair_ms"] = _elapsed_ms(repair_started)
+        return result, current_specs
+    except Exception as exc:
+        last_error = exc
+        last_error_text = f"{type(exc).__name__}: {exc}"
+        if not _should_retry_sql_repair(exc):
+            stats["sql_repair_attempts"] = 0.0
+            stats["sql_repair_ms"] = _elapsed_ms(repair_started)
+            raise
+
+    for attempt in range(1, max_attempts + 1):
+        _rollback_quietly(conn)
+        failing_sql = "\n\n".join(spec.get("sql", "") for spec in current_specs if isinstance(spec, dict))
+        repaired_specs = _repair_sql_query(
+            query_task,
+            schema,
+            failing_sql,
+            last_error_text,
+            previous_repair_sql=previous_repair_sql,
+            previous_repair_error=previous_repair_error,
+        )
+        stats["sql_repair_attempts"] = float(attempt)
+
+        if not repaired_specs:
+            stats["sql_repair_ms"] = _elapsed_ms(repair_started)
+            raise last_error
+
+        repaired_sql = "\n\n".join(spec.get("sql", "") for spec in repaired_specs if isinstance(spec, dict))
+        if _same_query_specs(repaired_specs, current_specs):
+            previous_repair_sql = repaired_sql
+            previous_repair_error = last_error_text
+        else:
+            previous_repair_sql = ""
+            previous_repair_error = ""
+        current_specs = repaired_specs
+
+        try:
+            result = _execute_sql_queries(conn, current_specs, limit, schema)
+            stats["sql_repair_ms"] = _elapsed_ms(repair_started)
+            return result, current_specs
+        except Exception as exc:
+            last_error = exc
+            last_error_text = f"{type(exc).__name__}: {exc}"
+            if not _should_retry_sql_repair(exc):
+                stats["sql_repair_ms"] = _elapsed_ms(repair_started)
+                raise
+
+    stats["sql_repair_ms"] = _elapsed_ms(repair_started)
+    raise last_error
 
 
 def _is_schema_request(task: str) -> bool:
@@ -764,20 +997,8 @@ def handle_event(req: EventRequest):
                     ]
                 }
             started = time.perf_counter()
-            try:
-                result = _execute_sql_queries(conn, query_specs, _row_limit())
-            except Exception as exc:
-                if not _should_retry_sql_repair(exc):
-                    raise
-                repair_started = time.perf_counter()
-                failing_sql = "\n\n".join(spec.get("sql", "") for spec in query_specs if isinstance(spec, dict))
-                query_task = instruction.get("question") if isinstance(instruction, dict) and isinstance(instruction.get("question"), str) else execution_task
-                repaired_specs = _repair_sql_query(query_task, schema, failing_sql, f"{type(exc).__name__}: {exc}")
-                stats["sql_repair_ms"] = _elapsed_ms(repair_started)
-                if not repaired_specs:
-                    raise
-                result = _execute_sql_queries(conn, repaired_specs, _row_limit())
-                query_specs = repaired_specs
+            query_task = instruction.get("question") if isinstance(instruction, dict) and isinstance(instruction.get("question"), str) else execution_task
+            result, query_specs = _repair_sql_with_retries(conn, schema, query_task, query_specs, _row_limit(), stats)
             stats["query_ms"] = _elapsed_ms(started)
             stats["total_ms"] = _elapsed_ms(total_started)
             sql = result.get("sql", "")

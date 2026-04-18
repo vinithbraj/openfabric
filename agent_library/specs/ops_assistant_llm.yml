@@ -12,6 +12,7 @@ arguments:
         env:
           SQL_AGENT_DSN: "${SQL_DATABASE_URL:-postgresql://admin:admin123@127.0.0.1:5432/mydb}"
           SQL_AGENT_NAME: "mydb"
+          SQL_AGENT_MAX_REPAIR_ATTEMPTS: "${SQL_AGENT_MAX_REPAIR_ATTEMPTS:-10}"
         metadata:
           database_name: "mydb"
           database_aliases:
@@ -25,6 +26,7 @@ arguments:
         env:
           SQL_AGENT_DSN: "${SQL_DICOM_MOCK_DATABASE_URL:-postgresql://admin:admin123@127.0.0.1:5432/dicom_mock}"
           SQL_AGENT_NAME: "dicom_mock"
+          SQL_AGENT_MAX_REPAIR_ATTEMPTS: "${SQL_AGENT_MAX_REPAIR_ATTEMPTS:-10}"
         metadata:
           database_name: "dicom_mock"
           database_aliases:
