@@ -123,39 +123,42 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "   Example capture objects: {\"mode\":\"stdout_first_line\"}, {\"mode\":\"stdout_stripped\"}, {\"mode\":\"json\"}, {\"mode\":\"json_field\",\"field\":\"envs\"}.\n"
         "   For conditional checks, prefer machine-readable JSON output and set allow_returncodes when a nonzero exit code is expected and should not fail the workflow.\n"
         "6) For sql_runner use instruction.operation values like inspect_schema, query_from_request, execute_sql, or sample_rows.\n"
-        "7) For filesystem use instruction.operation=read_file with a path.\n"
-        "8) For notifier use instruction.operation=send_notification with channel/message.\n"
-        "9) target_agent MUST be one discovered runtime agent name that can handle task.plan; never use ops_planner or synthesizer.\n"
-        "10) Break chained requests into multiple atomic steps. Do not combine unrelated actions into one step. Use nested steps for grouped subtasks.\n"
-        "11) Rewrite each step as a direct, concrete instruction for the target agent. Do not simply copy long stretches of the user's wording.\n"
-        "12) Each step should be self-contained, operational, and phrased so another LLM can execute it without guessing.\n"
-        "13) If a later step depends on an earlier step result, set depends_on and use a when condition or instruction inputs that reference prior results.\n"
-        "14) References to previous step data must use objects of the form {\"$from\":\"step_id.field.path\"}. Do not splice raw prose into commands.\n"
-        "15) when is optional. Use it for conditional execution such as {\"$from\":\"step1.returncode\",\"not_equals\":0}.\n"
-        "16) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
-        "17) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
-        "18) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
-        "19) For simple SQL/database questions, one sql_runner step is fine. For complex SQL tasks, decompose into concrete sql_runner steps such as inspect schema, sample values, determine join path, and run the final query.\n"
-        "20) When you emit multiple SQL steps, each later SQL step should clearly state what it is trying to learn or produce, and it must declare depends_on when it uses earlier findings.\n"
-        "21) When using shell_runner, prefer explicit machine-readable commands for deterministic checks.\n"
-        "21a) For existence checks, avoid substring grep against broad human-readable output. Use exact or JSON-based checks.\n"
-        "22) When using sql_runner, do not invent shell commands or fake CLI syntax for SQL agents.\n"
-        "23) Do not invent nonexistent specialized agents; use discovered agents only.\n"
-        "24) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
-        "24a) NEVER create execution steps for presentation, summarization, formatting, synthesis, or making output readable. That happens after execution in the synthesizer layer and must not appear in steps.\n"
-        "25) For Open WebUI, prefer format=markdown_table when the user asks for a table/list/comparison/status report with rows and columns.\n"
-        "26) Set include_internal_steps=false unless the user explicitly asks for workflow details, commands, debug output, SQL query text, or how it was done.\n"
-        "27) If the user asks about available capabilities, tools, agents, supported operations, or what this system can do, answer from discovered capabilities with task.result; do not call shell_runner.\n"
-        "28) Capability metadata is descriptive, not executable. Never turn method names, event names, or capability labels into shell commands.\n"
-        "29) Tolerate minor typos and informal phrasing.\n"
-        "30) Do NOT mark false only because the request might fail at execution time.\n"
-        "31) processable=false only when no discovered capability can attempt it; in that case steps=[].\n"
+        "7) For slurm_runner use instruction.operation values like query_from_request, execute_command, cluster_status, list_jobs, or job_details.\n"
+        "8) For filesystem use instruction.operation=read_file with a path.\n"
+        "9) For notifier use instruction.operation=send_notification with channel/message.\n"
+        "10) target_agent MUST be one discovered runtime agent name that can handle task.plan; never use ops_planner or synthesizer.\n"
+        "11) Break chained requests into multiple atomic steps. Do not combine unrelated actions into one step. Use nested steps for grouped subtasks.\n"
+        "12) Rewrite each step as a direct, concrete instruction for the target agent. Do not simply copy long stretches of the user's wording.\n"
+        "13) Each step should be self-contained, operational, and phrased so another LLM can execute it without guessing.\n"
+        "14) If a later step depends on an earlier step result, set depends_on and use a when condition or instruction inputs that reference prior results.\n"
+        "15) References to previous step data must use objects of the form {\"$from\":\"step_id.field.path\"}. Do not splice raw prose into commands.\n"
+        "16) when is optional. Use it for conditional execution such as {\"$from\":\"step1.returncode\",\"not_equals\":0}.\n"
+        "17) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
+        "18) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
+        "19) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
+        "20) For Slurm, HPC cluster, scheduler, queue, node, partition, reservation, fairshare, or job-control questions, prefer slurm_runner.\n"
+        "21) For simple SQL/database questions, one sql_runner step is fine. For complex SQL tasks, decompose into concrete sql_runner steps such as inspect schema, sample values, determine join path, and run the final query.\n"
+        "22) When you emit multiple SQL steps, each later SQL step should clearly state what it is trying to learn or produce, and it must declare depends_on when it uses earlier findings.\n"
+        "23) When using shell_runner, prefer explicit machine-readable commands for deterministic checks.\n"
+        "24) For existence checks, avoid substring grep against broad human-readable output. Use exact or JSON-based checks.\n"
+        "25) When using sql_runner or slurm_runner, do not invent shell commands or fake CLI syntax for other agents.\n"
+        "26) Do not invent nonexistent specialized agents; use discovered agents only.\n"
+        "27) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
+        "28) NEVER create execution steps for presentation, summarization, formatting, synthesis, or making output readable. That happens after execution in the synthesizer layer and must not appear in steps.\n"
+        "29) For Open WebUI, prefer format=markdown_table when the user asks for a table/list/comparison/status report with rows and columns.\n"
+        "30) Set include_internal_steps=false unless the user explicitly asks for workflow details, commands, debug output, SQL query text, or how it was done.\n"
+        "31) If the user asks about available capabilities, tools, agents, supported operations, or what this system can do, answer from discovered capabilities with task.result; do not call shell_runner.\n"
+        "32) Capability metadata is descriptive, not executable. Never turn method names, event names, or capability labels into shell commands.\n"
+        "33) Tolerate minor typos and informal phrasing.\n"
+        "34) Do NOT mark false only because the request might fail at execution time.\n"
+        "35) processable=false only when no discovered capability can attempt it; in that case steps=[].\n"
         "Calibration examples:\n"
         '- "find all files with extension sh in the current directory" -> {"processable":true,"reason":"shell file search","steps":[{"id":"step1","target_agent":"shell_runner","task":"find all files with extension sh in the current directory","instruction":{"operation":"run_command","command":"find . -type f -name \\"*.sh\\"","capture":{"mode":"stdout_stripped"}}}],"presentation":{"task":"List matching files clearly.","format":"bullets","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "list all running docker containers" -> {"processable":true,"reason":"docker container listing","steps":[{"id":"step1","target_agent":"shell_runner","task":"list all running docker containers","instruction":{"operation":"run_command","command":"docker ps","capture":{"mode":"stdout_stripped"}}}],"presentation":{"task":"Show running containers in a concise Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "find the newest log file and then show the last 20 lines" -> {"processable":true,"reason":"file discovery workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the newest log file","instruction":{"operation":"run_command","command":"find . -type f -name \\"*.log\\" -printf \\"%T@ %p\\\\n\\" | sort -nr | head -n 1 | cut -d\\" \\" -f2-","capture":{"mode":"stdout_first_line"}}},{"id":"step2","target_agent":"shell_runner","task":"show the last 20 lines of the newest log file","instruction":{"operation":"run_command","command":{"$from":"step1.value"}},"depends_on":["step1"]}]}\n'
         '- "show database schema and relationships" -> {"processable":true,"reason":"SQL schema introspection","steps":[{"id":"step1","target_agent":"sql_runner","task":"inspect the database schema and relationships","instruction":{"operation":"inspect_schema","focus":"tables, columns, and relationships"}}],"presentation":{"task":"Summarize schemas, tables, columns, and relationships clearly.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "which customers spent the most money last month" -> {"processable":true,"reason":"SQL database question","steps":[{"id":"step1","target_agent":"sql_runner","task":"query which customers spent the most money last month","instruction":{"operation":"query_from_request","question":"which customers spent the most money last month"}}],"presentation":{"task":"Show the query results as a readable Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
+        '- "show queued slurm jobs for user vinith" -> {"processable":true,"reason":"Slurm queue query","steps":[{"id":"step1","target_agent":"slurm_runner","task":"show queued Slurm jobs for user vinith","instruction":{"operation":"query_from_request","question":"show queued Slurm jobs for user vinith"}}],"presentation":{"task":"Show the Slurm results clearly in Markdown.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "open Readme.md" -> {"processable":true,"reason":"file read","steps":[{"id":"step1","target_agent":"filesystem","task":"read Readme.md","instruction":{"operation":"read_file","path":"Readme.md"}}]}\n'
         '- "book a flight to NYC" -> {"processable":false,"reason":"no travel booking capability","steps":[]}\n'
         "Discovered runtime agents:\n"
@@ -574,6 +577,8 @@ def _agent_search_blob(agent: Dict[str, Any]) -> str:
 def _agent_family(name: str) -> str:
     if name.startswith("sql_runner"):
         return "sql_runner"
+    if name.startswith("slurm_runner"):
+        return "slurm_runner"
     return name
 
 
@@ -627,6 +632,34 @@ def _looks_like_sql_question(question: str, capabilities: dict) -> bool:
     return False
 
 
+def _looks_like_slurm_question(question: str) -> bool:
+    tokens = _tokenize(question)
+    return bool(
+        tokens
+        & {
+            "slurm",
+            "sinfo",
+            "squeue",
+            "sacct",
+            "scontrol",
+            "slurmdbd",
+            "partition",
+            "partitions",
+            "node",
+            "nodes",
+            "job",
+            "jobs",
+            "reservation",
+            "reservations",
+            "cluster",
+            "qos",
+            "fairshare",
+            "scancel",
+            "hpc",
+        }
+    )
+
+
 def _select_target_agent(question: str, capabilities: dict) -> str | None:
     question_lc = question.lower()
     question_tokens = _tokenize(question)
@@ -649,6 +682,7 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
     priority_boosts = {
         "shell_runner": 0,
         "sql_runner": 0,
+        "slurm_runner": 0,
         "notifier": 0,
     }
 
@@ -656,6 +690,8 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
         priority_boosts["shell_runner"] += 10
     if _looks_like_sql_question(question, capabilities):
         priority_boosts["sql_runner"] += 12
+    if _looks_like_slurm_question(question):
+        priority_boosts["slurm_runner"] += 12
     if re.search(r"\b(add|subtract|multiply|divide|calculate|compute|sum)\b", question_lc) or len(re.findall(r"\b\d+(?:\.\d+)?\b", question_lc)) >= 2:
         priority_boosts["shell_runner"] += 10
     if any(token in question_tokens for token in {"notify", "notification", "alert", "remind", "message"}):
@@ -853,6 +889,17 @@ def _normalize_agent_instruction(target_agent: str, task: str, instruction: dict
                 return {"operation": "execute_sql", "sql": stripped}
         if _planner_is_schema_request(task):
             return {"operation": "inspect_schema", "focus": task}
+        return {"operation": "query_from_request", "question": task}
+
+    if family == "slurm_runner":
+        if _is_presentation_only_task(task):
+            return None
+        if isinstance(instruction, dict) and instruction:
+            op = instruction.get("operation")
+            if op in {"query_from_request", "execute_command", "cluster_status", "list_jobs", "job_details"}:
+                return instruction
+        if isinstance(command, str) and command.strip():
+            return {"operation": "execute_command", "command": command.strip()}
         return {"operation": "query_from_request", "question": task}
 
     if target_agent == "shell_runner":

@@ -91,7 +91,7 @@ class PostgresSafeSqlTests(unittest.TestCase):
         self.assertTrue(_same_query_specs(original, repaired))
 
     def test_sql_repair_max_attempts_defaults_to_ten(self):
-        with patch.dict("os.environ", {}, clear=False):
+        with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(_sql_repair_max_attempts(), 10)
 
     def test_sql_repair_retries_up_to_max_attempts(self):

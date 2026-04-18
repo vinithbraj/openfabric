@@ -39,6 +39,11 @@ AGENT_METADATA = {
             "when": "Converts SQL schema/query results into final answer.",
         },
         {
+            "name": "synthesize_slurm_result",
+            "event": "slurm.result",
+            "when": "Converts Slurm command results into final answer.",
+        },
+        {
             "name": "synthesize_task_result",
             "event": "task.result",
             "when": "Converts generic task result into final answer.",
@@ -200,6 +205,21 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
     return "\n".join(lines).strip()
 
 
+def _format_slurm_result_answer(payload: dict[str, Any]) -> str:
+    command = str(payload.get("command", "") or "").strip()
+    returncode = payload.get("returncode")
+    stdout = payload.get("stdout", "")
+    stderr = payload.get("stderr", "")
+    result = payload.get("result")
+    kind = result.get("kind") if isinstance(result, dict) else None
+    status = "success" if returncode == 0 else "failure"
+    lines = [f"Slurm command finished with **{status}**."]
+    if isinstance(kind, str) and kind.strip():
+        lines.extend(["", f"Command type: `{kind}`"])
+    lines.extend(["", _command_output_details(command, stdout, stderr, returncode)])
+    return "\n".join(lines)
+
+
 def _format_workflow_answer(payload: dict[str, Any]) -> str:
     task = payload.get("task", "")
     status = payload.get("status", "unknown")
@@ -294,6 +314,9 @@ def _fallback_answer(req: EventRequest) -> str:
             return _format_sql_result_answer(result)
         return f"SQL result:\n{json.dumps(result, indent=2, ensure_ascii=True)}"
 
+    if req.event == "slurm.result":
+        return _format_slurm_result_answer(req.payload)
+
     if req.event == "workflow.result":
         return _format_workflow_answer(req.payload)
 
@@ -368,6 +391,16 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             "detail": req.payload.get("detail"),
             "sql": req.payload.get("sql"),
             "schema": req.payload.get("schema"),
+            "result": req.payload.get("result"),
+        }
+    if req.event == "slurm.result":
+        return {
+            "event": req.event,
+            "detail": req.payload.get("detail"),
+            "command": req.payload.get("command"),
+            "stdout": req.payload.get("stdout"),
+            "stderr": req.payload.get("stderr"),
+            "returncode": req.payload.get("returncode"),
             "result": req.payload.get("result"),
         }
     if req.event == "clarification.required":
@@ -497,7 +530,7 @@ def _synthesize(req: EventRequest) -> str:
 
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
-    if req.event not in {"research.result", "task.result", "file.content", "shell.result", "sql.result", "notify.result", "workflow.result", "clarification.required"}:
+    if req.event not in {"research.result", "task.result", "file.content", "shell.result", "sql.result", "slurm.result", "notify.result", "workflow.result", "clarification.required"}:
         return {"emits": []}
     answer = _synthesize(req)
     return {"emits": [{"event": "answer.final", "payload": {"answer": answer}}]}

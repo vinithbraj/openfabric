@@ -35,6 +35,20 @@ arguments:
           routing_notes:
             - "Use this SQL agent for requests that mention database 'dicom_mock'."
             - "Use this SQL agent for schema introspection and read-only data questions for dicom_mock."
+    slurm_runner:
+      - name: cluster
+        port: 8309
+        description: "Slurm scheduler agent that talks to a remote Slurm gateway."
+        env:
+          SLURM_GATEWAY_HOST: "${SLURM_GATEWAY_HOST:-127.0.0.1}"
+          SLURM_GATEWAY_PORT: "${SLURM_GATEWAY_PORT:-8310}"
+          SLURM_GATEWAY_SCHEME: "${SLURM_GATEWAY_SCHEME:-http}"
+        metadata:
+          cluster_name: "default"
+          cluster_aliases:
+            - "slurm"
+            - "cluster"
+            - "hpc"
 
 contracts:
   UserQuestion:
@@ -90,6 +104,20 @@ contracts:
       sql:
         type: string
 
+  SlurmQuery:
+    type: object
+    properties:
+      question:
+        type: string
+      query:
+        type: string
+      command:
+        type: string
+      args:
+        type: array
+        items:
+          type: string
+
   SqlResult:
     type: object
     required: [detail]
@@ -100,6 +128,24 @@ contracts:
         type: string
       schema:
         type: object
+      stats:
+        type: object
+      result: {}
+
+  SlurmResult:
+    type: object
+    required: [detail]
+    properties:
+      detail:
+        type: string
+      command:
+        type: string
+      stdout:
+        type: string
+      stderr:
+        type: string
+      returncode:
+        type: number
       stats:
         type: object
       result: {}
@@ -378,6 +424,10 @@ events:
     contract: SqlQuery
   sql.result:
     contract: SqlResult
+  slurm.query:
+    contract: SlurmQuery
+  slurm.result:
+    contract: SlurmResult
   notify.send:
     contract: NotifySend
   notify.result:
@@ -472,6 +522,27 @@ agents:
       - sql.result
       - task.result
 
+  slurm_runner:
+    description: "Remote Slurm agent for scheduler queries and control via an HTTP gateway."
+    methods:
+      - name: query_slurm_from_request
+        event: task.plan
+        when: "Generates and executes one Slurm gateway command for a natural-language scheduler request."
+      - name: execute_explicit_slurm_command
+        event: slurm.query
+        when: "Executes an explicit Slurm command through the remote gateway."
+    runtime:
+      adapter: http
+      endpoint: "http://127.0.0.1:8309/handle"
+      autostart:
+        app: agent_library.agents.slurm_runner:app
+    subscribes_to:
+      - slurm.query
+      - task.plan
+    emits:
+      - slurm.result
+      - task.result
+
   notifier:
     description: "Sends notification messages to configured channels."
     methods:
@@ -504,6 +575,9 @@ agents:
       - name: synthesize_sql_result
         event: sql.result
         when: "Converts SQL schema/query results into final answer."
+      - name: synthesize_slurm_result
+        event: slurm.result
+        when: "Converts Slurm command results into final answer."
       - name: synthesize_task_result
         event: task.result
         when: "Converts generic task result into final answer."
@@ -522,6 +596,7 @@ agents:
       - file.content
       - shell.result
       - sql.result
+      - slurm.result
       - notify.result
       - task.result
       - workflow.result

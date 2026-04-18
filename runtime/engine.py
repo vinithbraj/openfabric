@@ -568,6 +568,18 @@ class Engine:
                 summary["row_count"] = result.get("row_count")
                 summary["rows"] = result.get("rows", [])
             return summary
+        if event_name == "slurm.result":
+            result = payload.get("result")
+            summary = {"command": payload.get("command", "")}
+            stats = payload.get("stats")
+            if isinstance(stats, dict):
+                summary["stats"] = stats
+            if isinstance(result, dict):
+                summary["returncode"] = result.get("returncode")
+                summary["stdout"] = result.get("stdout", "")
+                summary["stderr"] = result.get("stderr", "")
+                summary["kind"] = result.get("kind", "")
+            return summary
         if event_name == "task.result":
             return {"detail": payload.get("detail", ""), "result": payload.get("result")}
         return payload
@@ -589,6 +601,11 @@ class Engine:
             if isinstance(stderr, str) and stderr.strip():
                 return stderr.strip()
             return f"Command exited with status {payload.get('returncode')}."
+        if event_name == "slurm.result" and payload.get("returncode") not in (0, None):
+            stderr = payload.get("stderr")
+            if isinstance(stderr, str) and stderr.strip():
+                return stderr.strip()
+            return f"Slurm command exited with status {payload.get('returncode')}."
         return None
 
     def _step_requests_replan(self, event_name: str, payload: dict):
@@ -645,6 +662,11 @@ class Engine:
                 envelope["row_count"] = result.get("row_count")
                 envelope["columns"] = result.get("columns")
                 envelope["rows"] = result.get("rows")
+        if primary_event == "slurm.result" and isinstance(primary_payload, dict):
+            envelope["command"] = primary_payload.get("command")
+            envelope["returncode"] = primary_payload.get("returncode")
+            envelope["stdout"] = primary_payload.get("stdout")
+            envelope["stderr"] = primary_payload.get("stderr")
         return envelope
 
     def _record_step_result(self, context: dict, step_result: dict):

@@ -105,7 +105,7 @@ def _row_limit() -> int:
 
 
 def _sql_repair_max_attempts() -> int:
-    raw = os.getenv("SQL_AGENT_MAX_REPAIR_ATTEMPTS", "2")
+    raw = os.getenv("SQL_AGENT_MAX_REPAIR_ATTEMPTS", "10")
     try:
         return max(1, min(int(raw), 50))
     except ValueError:
