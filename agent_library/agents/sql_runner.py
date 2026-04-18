@@ -517,44 +517,114 @@ def _postgres_safe_sql(sql: str, schema: dict) -> str:
     return "".join(rewritten)
 
 
-def _extract_json_values(text: str) -> list[dict[str, Any]]:
-    decoder = json.JSONDecoder()
-    values = []
-    for match in re.finditer(r"{", text):
-        try:
-            value, _end = decoder.raw_decode(text[match.start() :])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            values.append(value)
-    return values
+def _parse_strict_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
-def _sql_query_specs_from_json(values: list[dict[str, Any]]) -> list[dict[str, str]]:
-    specs = []
-    for value in values:
+def _single_sql_query_spec_from_object(value: dict[str, Any]) -> list[dict[str, str]]:
+    if set(value.keys()) != {"sql", "reason"}:
+        return []
+    sql = value.get("sql")
+    reason = value.get("reason")
+    if not isinstance(sql, str) or not sql.strip():
+        return []
+    if not isinstance(reason, str) or not reason.strip():
+        return []
+    return [{"label": reason.strip(), "sql": sql.strip()}]
+
+
+def _strict_sql_query_specs_from_object(value: dict[str, Any]) -> list[dict[str, str]]:
+    if set(value.keys()) == {"queries"}:
         queries = value.get("queries")
-        if isinstance(queries, list):
-            for index, item in enumerate(queries, start=1):
-                if not isinstance(item, dict):
-                    continue
-                sql = item.get("sql")
-                if isinstance(sql, str) and sql.strip():
-                    label = item.get("label") or item.get("name") or item.get("reason") or f"query {index}"
-                    specs.append({"label": str(label), "sql": sql.strip()})
-        sql = value.get("sql")
-        if isinstance(sql, str) and sql.strip():
-            label = value.get("label") or value.get("name") or value.get("reason") or f"query {len(specs) + 1}"
-            specs.append({"label": str(label), "sql": sql.strip()})
-    deduped = []
-    seen = set()
-    for spec in specs:
-        key = spec["sql"]
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(spec)
-    return deduped
+        if not isinstance(queries, list) or not queries:
+            return []
+        specs = []
+        seen = set()
+        for item in queries:
+            if not isinstance(item, dict) or set(item.keys()) != {"label", "sql", "reason"}:
+                return []
+            label = item.get("label")
+            sql = item.get("sql")
+            reason = item.get("reason")
+            if not all(isinstance(field, str) and field.strip() for field in (label, sql, reason)):
+                return []
+            sql_text = sql.strip()
+            if sql_text in seen:
+                continue
+            seen.add(sql_text)
+            specs.append({"label": label.strip(), "sql": sql_text})
+        return specs
+    return _single_sql_query_spec_from_object(value)
+
+
+def _sql_generation_response_format() -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "sql_generation_response",
+            "strict": True,
+            "schema": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "sql": {"type": "string"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["sql", "reason"],
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "queries": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "label": {"type": "string"},
+                                        "sql": {"type": "string"},
+                                        "reason": {"type": "string"},
+                                    },
+                                    "required": ["label", "sql", "reason"],
+                                },
+                            }
+                        },
+                        "required": ["queries"],
+                    },
+                ]
+            },
+        },
+    }
+
+
+def _sql_repair_response_format() -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "sql_repair_response",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "sql": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["sql", "reason"],
+            },
+        },
+    }
 
 
 def _normalize_sql_for_compare(sql: str) -> str:
@@ -588,11 +658,16 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
 
     prompt = (
         "You generate read-only SQL for a configured database.\n"
-        "Return JSON only. For one query return {\"sql\":\"...\",\"reason\":\"...\"}. "
-        "When the user explicitly asks for separate queries, return {\"queries\":[{\"label\":\"...\",\"sql\":\"...\",\"reason\":\"...\"}]}.\n"
+        "Return exactly one JSON object and no surrounding prose, code fences, or markdown.\n"
+        "For one query return exactly {\"sql\":\"...\",\"reason\":\"...\"}. "
+        "When the user explicitly asks for separate queries, return exactly "
+        "{\"queries\":[{\"label\":\"...\",\"sql\":\"...\",\"reason\":\"...\"}]}.\n"
         "Rules:\n"
         "- Generate one read-only query unless the user explicitly asks for separate queries.\n"
         "- If multiple queries are requested, put all query objects inside one top-level JSON object under the queries array.\n"
+        "- Do not return any keys other than sql and reason for a single-query response.\n"
+        "- Do not return any keys other than queries for a multi-query response.\n"
+        "- In each queries item, return only label, sql, and reason.\n"
         "- Use only tables and columns present in the schema.\n"
         "- Use schema-qualified table names exactly as shown in the schema, for example schema_name.table_name.\n"
         "- Never refer to a table by bare name when the schema summary shows it as schema.table.\n"
@@ -620,6 +695,7 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
                 {"role": "system", "content": "You produce strict JSON only."},
                 {"role": "user", "content": prompt},
             ],
+            "response_format": _sql_generation_response_format(),
             "temperature": 0,
         },
         timeout=timeout_seconds,
@@ -627,7 +703,10 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"]
     log_raw("SQL_LLM_RAW", content)
-    return _sql_query_specs_from_json(_extract_json_values(content))
+    parsed = _parse_strict_json_object(content)
+    if parsed is None:
+        return []
+    return _strict_sql_query_specs_from_object(parsed)
 
 
 def _repair_sql_query(
@@ -655,8 +734,9 @@ def _repair_sql_query(
 
     prompt = (
         "You repair one read-only SQL query after execution failed.\n"
-        "Return JSON only in the form {\"sql\":\"...\",\"reason\":\"...\"}.\n"
+        "Return exactly one JSON object in the form {\"sql\":\"...\",\"reason\":\"...\"} and no surrounding prose, code fences, or markdown.\n"
         "Rules:\n"
+        "- Return only the keys sql and reason.\n"
         "- Preserve the user's intent.\n"
         "- Use only tables and columns present in the schema.\n"
         "- Fix identifier quoting, schema qualification, reserved words, join paths, and dialect syntax issues.\n"
@@ -691,6 +771,7 @@ def _repair_sql_query(
                 {"role": "system", "content": "You produce strict JSON only."},
                 {"role": "user", "content": prompt},
             ],
+            "response_format": _sql_repair_response_format(),
             "temperature": 0,
         },
         timeout=timeout_seconds,
@@ -698,7 +779,10 @@ def _repair_sql_query(
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"]
     log_raw("SQL_LLM_REPAIR_RAW", content)
-    return _sql_query_specs_from_json(_extract_json_values(content))
+    parsed = _parse_strict_json_object(content)
+    if parsed is None:
+        return []
+    return _single_sql_query_spec_from_object(parsed)
 
 
 def _read_only_sql(sql: str) -> bool:

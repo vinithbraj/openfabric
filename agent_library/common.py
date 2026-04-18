@@ -28,6 +28,19 @@ class TaskPlanContext:
     dependency_results: List[Dict[str, Any]]
 
     @property
+    def structured_context(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"current_step": self.step_task}
+        if self.original_task and self.original_task.strip() != self.step_task.strip():
+            payload["original_task"] = self.original_task.strip()
+        if self.previous_step_result:
+            payload["previous_step_result"] = self.previous_step_result
+        if self.prior_step_results:
+            payload["prior_step_results"] = self.prior_step_results
+        if self.dependency_results:
+            payload["dependency_results"] = self.dependency_results
+        return payload
+
+    @property
     def classification_task(self) -> str:
         return self.step_task
 
@@ -36,12 +49,9 @@ class TaskPlanContext:
         sections = [f"Current workflow step: {self.step_task.strip()}"]
         if self.original_task and self.original_task.strip() != self.step_task.strip():
             sections.extend(["Original user request:", self.original_task.strip()])
-        if self.dependency_results:
-            sections.extend(["Dependency step results JSON:", _to_json(self.dependency_results)])
-        elif self.previous_step_result:
-            sections.extend(["Previous step result JSON:", _to_json(self.previous_step_result)])
-        elif self.prior_step_results:
-            sections.extend(["Prior step results JSON:", _to_json(self.prior_step_results)])
+        context_payload = self.structured_context
+        if context_payload:
+            sections.extend(["Structured workflow context JSON:", _to_json(context_payload)])
         return "\n".join(sections)
 
     def targets(self, agent_name_or_family: str) -> bool:

@@ -19,10 +19,13 @@ fastapi_stub.FastAPI = _FastAPIStub
 sys.modules.setdefault("fastapi", fastapi_stub)
 
 from agent_library.agents.sql_runner import (
+    _parse_strict_json_object,
     _execute_sql,
     _postgres_safe_sql,
     _repair_sql_with_retries,
     _same_query_specs,
+    _single_sql_query_spec_from_object,
+    _strict_sql_query_specs_from_object,
     _sql_repair_max_attempts,
 )
 
@@ -44,6 +47,39 @@ POSTGRES_SCHEMA = {
 
 
 class PostgresSafeSqlTests(unittest.TestCase):
+    def test_parse_strict_json_object_rejects_wrapped_sql_markdown(self):
+        wrapped = 'Here is the SQL query:\\n```sql\\nSELECT 1\\n```'
+        self.assertIsNone(_parse_strict_json_object(wrapped))
+
+    def test_strict_sql_query_specs_require_exact_single_query_fields(self):
+        parsed = {"sql": "SELECT 1", "reason": "count rows"}
+        self.assertEqual(
+            _strict_sql_query_specs_from_object(parsed),
+            [{"label": "count rows", "sql": "SELECT 1"}],
+        )
+        self.assertEqual(_strict_sql_query_specs_from_object({"sql": "SELECT 1", "reason": "ok", "extra": "nope"}), [])
+
+    def test_single_sql_query_spec_requires_only_sql_and_reason(self):
+        self.assertEqual(
+            _single_sql_query_spec_from_object({"sql": "SELECT 1", "reason": "repair"}),
+            [{"label": "repair", "sql": "SELECT 1"}],
+        )
+        self.assertEqual(_single_sql_query_spec_from_object({"sql": "SELECT 1"}), [])
+
+    def test_strict_sql_query_specs_require_exact_multi_query_fields(self):
+        parsed = {
+            "queries": [
+                {"label": "a", "sql": "SELECT 1", "reason": "first"},
+                {"label": "b", "sql": "SELECT 2", "reason": "second"},
+            ]
+        }
+        self.assertEqual(
+            _strict_sql_query_specs_from_object(parsed),
+            [{"label": "a", "sql": "SELECT 1"}, {"label": "b", "sql": "SELECT 2"}],
+        )
+        invalid = {"queries": [{"label": "a", "sql": "SELECT 1", "reason": "first", "extra": "nope"}]}
+        self.assertEqual(_strict_sql_query_specs_from_object(invalid), [])
+
     def test_quotes_mixed_case_schema_table_and_columns(self):
         sql = "select PatientId, LastName from flathr.Patients where PatientId is not null"
         expected = 'select "PatientId", "LastName" from "flathr"."Patients" where "PatientId" is not null'

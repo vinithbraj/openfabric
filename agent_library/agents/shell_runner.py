@@ -292,8 +292,8 @@ def _parse_json(content: str):
     return None
 
 
-def _build_preprocess_prompt(task: str):
-    return (
+def _build_preprocess_prompt(task: str, structured_input: Any = None):
+    prompt = (
         "You are a general-purpose local shell-command planner.\n"
         "Do NOT execute commands. Convert the user request into one safe local shell command when possible.\n"
         "Return JSON only.\n"
@@ -306,6 +306,9 @@ def _build_preprocess_prompt(task: str):
         "- Shell-suitable requests include OS, workspace, filesystem, process, network, service, container, repository, build/test, package, arithmetic, and text/data transformation tasks.\n"
         "- If processable=true, command must be one non-empty bash command string.\n"
         "- If processable=false, set command=null.\n"
+        "- If structured workflow input JSON is provided below, the derived command will receive that exact JSON on stdin at execution time.\n"
+        "- When the task asks to inspect, filter, count, search, compare, summarize, or validate prior results, prefer operating on the provided stdin JSON instead of fetching data again.\n"
+        "- Treat references such as 'this list', 'these rows', 'that output', or 'the previous result' as referring to the provided workflow input JSON.\n"
         "- Use workspace-scoped commands by default.\n"
         "- Use standard local tools directly when they fit; examples include sh/bash, printf, awk, sed, grep, rg, find, sort, uniq, wc, cat, head, tail, xargs, python -c, git, docker, ps, ss, date, du, df, make, npm, pytest, and project-local scripts.\n"
         "- Interpret 'current directory' as '.'.\n"
@@ -340,12 +343,18 @@ def _build_preprocess_prompt(task: str):
         '{"processable":true,"command":"git status","reason":"git inspection"}\n'
         '{"processable":true,"command":"git add -A && git commit -m \\"update files\\"","reason":"commit all changes"}\n'
         '{"processable":true,"command":"ss -ltnp","reason":"list listening ports"}\n'
+        '{"processable":true,"command":"python3 -c \\"import json,sys; data=json.load(sys.stdin); rows=data.get(\\\"dependency_results\\\", [{}])[-1].get(\\\"rows\\\", []); print(any(str(row.get(\\\"PatientName\\\", \\\"\\\")).lower() == \\\"test\\\" for row in rows))\\"","reason":"analyze prior JSON rows from stdin"}\n'
         '{"processable":false,"command":null,"reason":"not a shell-operational task"}\n'
         f'User request: "{task}"'
     )
+    if structured_input not in (None, "", [], {}):
+        prompt += "\nStructured workflow input JSON (available on stdin to the command):\n" + json.dumps(
+            structured_input, ensure_ascii=True, indent=2, default=str
+        )
+    return prompt
 
 
-def _llm_preprocess(task: str):
+def _llm_preprocess(task: str, structured_input: Any = None):
     api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("LLM_OPS_BASE_URL")
     model = os.getenv("LLM_OPS_MODEL")
@@ -365,7 +374,7 @@ def _llm_preprocess(task: str):
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    user_prompt = _build_preprocess_prompt(task)
+    user_prompt = _build_preprocess_prompt(task, structured_input)
     messages = [
         {"role": "system", "content": "You produce strict JSON only."},
         {"role": "user", "content": user_prompt},
@@ -435,17 +444,27 @@ def _looks_like_shell_command(text: str) -> bool:
     return token in common_commands or text.strip().startswith("./")
 
 
-def _derive_command_from_task(task: str):
+def _derive_command_from_task(task: str, structured_input: Any = None):
     if _is_introspection_request(task):
         return None
-    decision_raw = _llm_preprocess(task)
+    decision_raw = _llm_preprocess(task, structured_input)
     decision = _parse_decision(decision_raw)
     if decision is None or not decision["processable"]:
         return None
     return decision["command"]
 
 
-def _execute_command(command: str):
+def _serialize_stdin_data(stdin_data: Any) -> str | None:
+    if stdin_data is None:
+        return None
+    if isinstance(stdin_data, str):
+        return stdin_data
+    if isinstance(stdin_data, (dict, list, tuple, int, float, bool)):
+        return json.dumps(stdin_data, ensure_ascii=True, default=str)
+    return str(stdin_data)
+
+
+def _execute_command(command: str, stdin_data: Any = None):
     if _looks_like_metadata_not_command(command):
         return {
             "emits": [
@@ -483,8 +502,10 @@ def _execute_command(command: str):
         }
 
     try:
+        stdin_text = _serialize_stdin_data(stdin_data)
         completed = subprocess.run(
             ["/bin/bash", "-lc", command],
+            input=stdin_text,
             capture_output=True,
             text=True,
             timeout=10,
@@ -517,6 +538,7 @@ def _execute_command(command: str):
 @app.post("/handle", response_model=EventResponse)
 def handle_event(req: EventRequest):
     command = None
+    stdin_data = None
     if req.event == "shell.exec":
         command_raw = req.payload.get("command")
         if not isinstance(command_raw, str):
@@ -536,10 +558,16 @@ def handle_event(req: EventRequest):
     elif req.event == "task.plan":
         plan_context = task_plan_context(req.payload)
         instruction = req.payload.get("instruction")
+        structured_input = None
+        if isinstance(instruction, dict) and "input" in instruction:
+            structured_input = instruction.get("input")
+        else:
+            structured_input = plan_context.structured_context
+        stdin_data = structured_input
         if isinstance(instruction, dict) and instruction.get("operation") == "run_command":
             command_raw = instruction.get("command")
             if isinstance(command_raw, str) and command_raw.strip():
-                return _execute_command(command_raw.strip())
+                return _execute_command(command_raw.strip(), structured_input)
         task = plan_context.classification_task
         execution_task = plan_context.execution_task
         if not task:
@@ -547,7 +575,7 @@ def handle_event(req: EventRequest):
         if _is_introspection_request(task):
             return {"emits": []}
         try:
-            command = _derive_command_from_task(execution_task)
+            command = _derive_command_from_task(execution_task, structured_input)
         except Exception as exc:
             _debug_log(f"Shell preprocessing failed for task.plan: {type(exc).__name__}: {exc}")
             return _needs_decomposition(f"Shell agent could not derive a safe command: {type(exc).__name__}: {exc}")
@@ -555,4 +583,4 @@ def handle_event(req: EventRequest):
             return _needs_decomposition("Shell agent needs the task broken into smaller executable operations.")
     else:
         return {"emits": []}
-    return _execute_command(command)
+    return _execute_command(command, stdin_data)
