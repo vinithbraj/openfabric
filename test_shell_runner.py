@@ -19,7 +19,12 @@ fastapi_stub.FastAPI = _FastAPIStub
 sys.modules.setdefault("fastapi", fastapi_stub)
 
 from agent_library.common import task_plan_context
-from agent_library.agents.shell_runner import handle_event, _build_preprocess_prompt
+from agent_library.agents.shell_runner import (
+    _build_preprocess_prompt,
+    _execute_command_with_retries,
+    _shell_repair_max_attempts,
+    handle_event,
+)
 
 
 class ShellRunnerDataFlowTests(unittest.TestCase):
@@ -100,6 +105,55 @@ class ShellRunnerDataFlowTests(unittest.TestCase):
         emitted = response["emits"][0]
         self.assertEqual(emitted["event"], "shell.result")
         self.assertEqual(emitted["payload"]["stdout"], "false")
+
+
+class ShellRunnerRepairTests(unittest.TestCase):
+    def test_shell_repair_max_attempts_defaults_to_ten(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(_shell_repair_max_attempts(), 10)
+
+    def test_shell_command_retries_until_success(self):
+        calls = []
+
+        def fake_execute(command, stdin_data=None):
+            calls.append((command, stdin_data))
+            if len(calls) == 1:
+                return {"command": command, "stdout": "Mounted\n/dev\n/boot/efi", "stderr": "ValueError: invalid literal for int()", "returncode": 1}
+            return {"command": command, "stdout": "42.75", "stderr": "", "returncode": 0}
+
+        def fake_repair(task, failing_command, error_text, stdout_text="", previous_repair_command="", previous_repair_error=""):
+            self.assertIn("free space", task.lower())
+            self.assertIn("invalid literal", error_text.lower())
+            self.assertIn("/boot/efi", stdout_text)
+            return "python -c \"print(42.75)\""
+
+        with patch("agent_library.agents.shell_runner._execute_command_once", side_effect=fake_execute), patch(
+            "agent_library.agents.shell_runner._repair_command_from_failure", side_effect=fake_repair
+        ), patch.dict("os.environ", {"SHELL_AGENT_MAX_REPAIR_ATTEMPTS": "3"}, clear=False):
+            result, stats = _execute_command_with_retries(
+                "python -c \"print(round(int('Mounted /dev') / (1024**3), 2))\"",
+                "How much free space do I have on this machine and compute the size in GB?",
+            )
+
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["stdout"], "42.75")
+        self.assertEqual(stats["shell_repair_attempts"], 1.0)
+        self.assertEqual(len(calls), 2)
+
+    def test_shell_command_stops_after_max_retries(self):
+        def fake_execute(command, stdin_data=None):
+            return {"command": command, "stdout": "", "stderr": "still bad", "returncode": 1}
+
+        def fake_repair(task=None, failing_command=None, error_text=None, stdout_text="", previous_repair_command="", previous_repair_error=""):
+            return "printf bad"
+
+        with patch("agent_library.agents.shell_runner._execute_command_once", side_effect=fake_execute), patch(
+            "agent_library.agents.shell_runner._repair_command_from_failure", side_effect=fake_repair
+        ), patch.dict("os.environ", {"SHELL_AGENT_MAX_REPAIR_ATTEMPTS": "2"}, clear=False):
+            result, stats = _execute_command_with_retries("printf bad", "bad task")
+
+        self.assertEqual(result["returncode"], 1)
+        self.assertEqual(stats["shell_repair_attempts"], 2.0)
 
 
 if __name__ == "__main__":

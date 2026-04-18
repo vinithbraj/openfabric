@@ -494,6 +494,8 @@ agents:
       endpoint: "http://127.0.0.1:8303/handle"
       autostart:
         app: agent_library.agents.bash_executor:app
+        env:
+          SHELL_AGENT_MAX_REPAIR_ATTEMPTS: "${SHELL_AGENT_MAX_REPAIR_ATTEMPTS:-10}"
     subscribes_to:
       - shell.exec
       - task.plan

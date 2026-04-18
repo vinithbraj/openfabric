@@ -135,6 +135,8 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "15a) When a later step needs to inspect or transform rows returned by an earlier step, prefer shell_runner with instruction.input referencing prior rows or the full prior step result.\n"
         "15b) For tasks like 'in this list', 'from those rows', 'check the previous result', or 'search the output', do not issue a fresh SQL query unless the user explicitly asks to query again.\n"
         "16) when is optional. Use it for conditional execution such as {\"$from\":\"step1.returncode\",\"not_equals\":0}.\n"
+        "16a) When a request requires retrieving raw data and then converting, calculating, filtering, ranking, or otherwise deriving a new value from it, prefer multiple steps.\n"
+        "16b) In those cases, use one step to fetch the raw machine-readable value and a later depends_on step to compute the derived answer from the previous result.\n"
         "17) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
         "18) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
         "19) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
@@ -159,6 +161,7 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         '- "list all running docker containers" -> {"processable":true,"reason":"docker container listing","steps":[{"id":"step1","target_agent":"shell_runner","task":"list all running docker containers","instruction":{"operation":"run_command","command":"docker ps","capture":{"mode":"stdout_stripped"}}}],"presentation":{"task":"Show running containers in a concise Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "find the newest log file and then show the last 20 lines" -> {"processable":true,"reason":"file discovery workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the newest log file","instruction":{"operation":"run_command","command":"find . -type f -name \\"*.log\\" -printf \\"%T@ %p\\\\n\\" | sort -nr | head -n 1 | cut -d\\" \\" -f2-","capture":{"mode":"stdout_first_line"}}},{"id":"step2","target_agent":"shell_runner","task":"show the last 20 lines of the newest log file","instruction":{"operation":"run_command","command":{"$from":"step1.value"}},"depends_on":["step1"]}]}\n'
         '- "list patients with more than 20 studies and then check whether any listed patient is named Test case-insensitively" -> {"processable":true,"reason":"query then inspect prior rows","steps":[{"id":"step1","target_agent":"sql_runner","task":"list patients with more than 20 studies","instruction":{"operation":"query_from_request","question":"list patients with more than 20 studies and include patient names in a neat table"}},{"id":"step2","target_agent":"shell_runner","task":"check whether any patient in the previous SQL result is named Test using a case-insensitive exact match","instruction":{"operation":"run_command","command":"python3 -c \\"import json,sys; rows=json.load(sys.stdin); print(any(str(row.get(\\\\\\\"PatientName\\\\\\\", \\\\\\\"\\\\\\\")).strip().lower() == \\\\\\\"test\\\\\\\" for row in rows))\\"","input":{"$from":"step1.rows"},"capture":{"mode":"stdout_stripped"}},"depends_on":["step1"]}],"presentation":{"task":"Show the patient table and clearly report whether any listed patient name matches Test case-insensitively.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
+        '- "how much free space do i have on this machine and compute the size in GB" -> {"processable":true,"reason":"retrieve then compute disk space","steps":[{"id":"step1","target_agent":"shell_runner","task":"get free disk space on the root filesystem in bytes","instruction":{"operation":"run_command","command":"df -B1 / | tail -n 1 | awk \'{print $4}\'","capture":{"mode":"stdout_stripped"}}},{"id":"step2","target_agent":"shell_runner","task":"convert the free disk space from bytes to GB","instruction":{"operation":"run_command","command":"python -c \\"print(round(int(\'{{step1}}\') / (1024**3), 2))\\"","capture":{"mode":"stdout_stripped"}},"depends_on":["step1"]}],"presentation":{"task":"Give the final free space in GB clearly.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "show database schema and relationships" -> {"processable":true,"reason":"SQL schema introspection","steps":[{"id":"step1","target_agent":"sql_runner","task":"inspect the database schema and relationships","instruction":{"operation":"inspect_schema","focus":"tables, columns, and relationships"}}],"presentation":{"task":"Summarize schemas, tables, columns, and relationships clearly.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "which customers spent the most money last month" -> {"processable":true,"reason":"SQL database question","steps":[{"id":"step1","target_agent":"sql_runner","task":"query which customers spent the most money last month","instruction":{"operation":"query_from_request","question":"which customers spent the most money last month"}}],"presentation":{"task":"Show the query results as a readable Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "show queued slurm jobs for user vinith" -> {"processable":true,"reason":"Slurm queue query","steps":[{"id":"step1","target_agent":"slurm_runner","task":"show queued Slurm jobs for user vinith","instruction":{"operation":"query_from_request","question":"show queued Slurm jobs for user vinith"}}],"presentation":{"task":"Show the Slurm results clearly in Markdown.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
@@ -1212,7 +1215,45 @@ def _format_capability_answer(capabilities: dict) -> str:
     return "\n".join(lines)
 
 
+def _prefers_retrieve_then_compute(question: str) -> bool:
+    question_lc = question.lower()
+    derive_tokens = ("compute", "calculate", "convert", "derived", "in gb", "in mb", "in tb", "percentage", "percent")
+    return any(token in question_lc for token in derive_tokens)
+
+
+def _shell_retrieve_then_compute_steps(question: str, capabilities: dict):
+    target_agent = _select_target_agent(question, capabilities)
+    if target_agent != "shell_runner":
+        return []
+
+    question_lc = question.lower()
+    if "free space" in question_lc and ("gb" in question_lc or "gigabyte" in question_lc or "gigabytes" in question_lc):
+        return [
+            {
+                "id": "step1",
+                "target_agent": target_agent,
+                "task": "get free disk space on the root filesystem in bytes",
+                "command": "df -B1 / | tail -n 1 | awk '{print $4}'",
+                "result_mode": "stdout_stripped",
+            },
+            {
+                "id": "step2",
+                "target_agent": target_agent,
+                "task": "convert the free disk space from bytes to GB",
+                "depends_on": ["step1"],
+                "command": "python -c \"print(round(int('{{step1}}') / (1024**3), 2))\"",
+                "result_mode": "stdout_stripped",
+            },
+        ]
+
+    return []
+
+
 def _fallback_steps(question: str, capabilities: dict):
+    derived_steps = _shell_retrieve_then_compute_steps(question, capabilities)
+    if derived_steps:
+        return derived_steps
+
     parts = [part.strip(" ,") for part in re.split(r"\s+(?:and then|then|after that|next)\s+", question, flags=re.IGNORECASE) if part.strip(" ,")]
     if not parts:
         parts = [question.strip()]

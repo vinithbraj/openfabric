@@ -3,6 +3,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 from typing import Any
 
 from fastapi import FastAPI
@@ -181,6 +182,14 @@ def _debug_enabled() -> bool:
 def _debug_log(message: str):
     if _debug_enabled():
         log_debug("SHELL_DEBUG", message)
+
+
+def _shell_repair_max_attempts() -> int:
+    raw = os.getenv("SHELL_AGENT_MAX_REPAIR_ATTEMPTS", "10")
+    try:
+        return max(0, min(int(raw), 50))
+    except ValueError:
+        return 10
 
 
 def _is_blocked(command: str) -> bool:
@@ -464,41 +473,103 @@ def _serialize_stdin_data(stdin_data: Any) -> str | None:
     return str(stdin_data)
 
 
-def _execute_command(command: str, stdin_data: Any = None):
+def _repair_command_from_failure(
+    task: str,
+    failing_command: str,
+    error_text: str,
+    stdout_text: str = "",
+    previous_repair_command: str = "",
+    previous_repair_error: str = "",
+):
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL")
+    model = os.getenv("LLM_OPS_MODEL")
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
+
+    if not api_key:
+        raise RuntimeError("LLM_OPS_API_KEY is not set")
+
+    if api_key.startswith("sk-") and api_key.lower() != "dummy":
+        base_url = "https://api.openai.com/v1"
+        if not model:
+            model = "gpt-4.1"
+    elif not base_url:
+        base_url = "https://api.openai.com/v1"
+    if not model:
+        model = "gpt-4o-mini"
+
+    prompt = (
+        "You repair one failed local shell command.\n"
+        "Return JSON only with exact keys {\"command\":\"...\",\"reason\":\"...\"}.\n"
+        "Rules:\n"
+        "- Return one safe bash command string only.\n"
+        "- Preserve the user's intent.\n"
+        "- Fix data-shape issues, parsing errors, wrong fields, wrong column positions, missing numeric conversions, and command syntax problems.\n"
+        "- Prefer machine-readable intermediate values when the task involves follow-up computation.\n"
+        "- Do not use dangerous commands: rm -rf, mkfs, dd if=, shutdown, reboot, sudo.\n"
+        "- Do not use markdown.\n"
+        f"Original task:\n{task}\n"
+        f"Failing command:\n{failing_command}\n"
+        f"Command stdout:\n{stdout_text}\n"
+        f"Command error:\n{error_text}\n"
+    )
+    if previous_repair_command.strip():
+        prompt += (
+            f"Previous failed repair command:\n{previous_repair_command}\n"
+            f"Previous failed repair error:\n{previous_repair_error}\n"
+            "Your previous repair was still invalid. Return a different corrected command.\n"
+        )
+
+    response = requests.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You produce strict JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+    log_raw("SHELL_LLM_REPAIR_RAW", content)
+    parsed = _parse_json(content)
+    if not isinstance(parsed, dict):
+        return None
+    command = parsed.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    return command.strip()
+
+
+def _command_validation_error(command: str) -> str | None:
     if _looks_like_metadata_not_command(command):
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {"detail": "Rejected descriptive capability metadata because it is not an executable shell command."},
-                }
-            ]
-        }
+        return "Rejected descriptive capability metadata because it is not an executable shell command."
 
     if _is_blocked(command):
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {"detail": "Rejected potentially destructive command"},
-                }
-            ]
-        }
+        return "Rejected potentially destructive command"
 
     try:
         shlex.split(command)
     except ValueError as exc:
-        return {
-            "emits": [
-                {"event": "task.result", "payload": {"detail": f"Invalid command: {exc}"}}
-            ]
-        }
+        return f"Invalid command: {exc}"
 
     if not command.strip():
+        return "Empty command rejected"
+    return None
+
+
+def _execute_command_once(command: str, stdin_data: Any = None):
+    validation_error = _command_validation_error(command)
+    if validation_error:
         return {
-            "emits": [
-                {"event": "task.result", "payload": {"detail": "Empty command rejected"}}
-            ]
+            "command": command,
+            "stdout": "",
+            "stderr": validation_error,
+            "returncode": 2,
         }
 
     try:
@@ -510,29 +581,90 @@ def _execute_command(command: str, stdin_data: Any = None):
             text=True,
             timeout=10,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {"detail": "Command timed out after 10 seconds"},
-                }
-            ]
+            "command": command,
+            "stdout": (exc.stdout or "").strip() if isinstance(exc.stdout, str) else "",
+            "stderr": "Command timed out after 10 seconds",
+            "returncode": 124,
         }
 
     return {
-        "emits": [
-            {
-                "event": "shell.result",
-                "payload": {
-                    "command": command,
-                    "stdout": completed.stdout.strip(),
-                    "stderr": completed.stderr.strip(),
-                    "returncode": completed.returncode,
-                },
-            }
-        ]
+        "command": command,
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+        "returncode": completed.returncode,
     }
+
+
+def _shell_failure_text(payload: dict[str, Any]) -> str:
+    stderr = payload.get("stderr")
+    stdout = payload.get("stdout")
+    returncode = payload.get("returncode")
+    if isinstance(stderr, str) and stderr.strip():
+        return stderr.strip()
+    if isinstance(stdout, str) and stdout.strip():
+        return stdout.strip()
+    return f"Command exited with status {returncode}."
+
+
+def _execute_command_with_retries(command: str, task: str, stdin_data: Any = None):
+    stats: dict[str, float] = {}
+    current_command = command
+    previous_repair_command = ""
+    previous_repair_error = ""
+    attempts = 0
+
+    result = _execute_command_once(current_command, stdin_data=stdin_data)
+    if result["returncode"] == 0:
+        stats["shell_repair_attempts"] = 0.0
+        return result, stats
+
+    max_attempts = _shell_repair_max_attempts()
+    repair_started = time.perf_counter()
+    last_result = result
+
+    for attempt in range(1, max_attempts + 1):
+        repaired_command = _repair_command_from_failure(
+            task=task or current_command,
+            failing_command=current_command,
+            error_text=_shell_failure_text(last_result),
+            stdout_text=str(last_result.get("stdout", "") or ""),
+            previous_repair_command=previous_repair_command,
+            previous_repair_error=previous_repair_error,
+        )
+        attempts = attempt
+        if not repaired_command:
+            break
+        if repaired_command == current_command:
+            previous_repair_command = repaired_command
+            previous_repair_error = _shell_failure_text(last_result)
+        else:
+            previous_repair_command = ""
+            previous_repair_error = ""
+        current_command = repaired_command
+        last_result = _execute_command_once(current_command, stdin_data=stdin_data)
+        if last_result["returncode"] == 0:
+            stats["shell_repair_attempts"] = float(attempts)
+            stats["shell_repair_ms"] = round((time.perf_counter() - repair_started) * 1000, 2)
+            return last_result, stats
+
+    stats["shell_repair_attempts"] = float(attempts)
+    stats["shell_repair_ms"] = round((time.perf_counter() - repair_started) * 1000, 2)
+    return last_result, stats
+
+
+def _execute_command(command: str, task: str = "", stdin_data: Any = None):
+    result, stats = _execute_command_with_retries(command, task or command, stdin_data=stdin_data)
+    payload = {
+        "command": result["command"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+        "returncode": result["returncode"],
+    }
+    if stats:
+        payload["stats"] = stats
+    return {"emits": [{"event": "shell.result", "payload": payload}]}
 
 
 @app.post("/handle", response_model=EventResponse)
@@ -567,7 +699,11 @@ def handle_event(req: EventRequest):
         if isinstance(instruction, dict) and instruction.get("operation") == "run_command":
             command_raw = instruction.get("command")
             if isinstance(command_raw, str) and command_raw.strip():
-                return _execute_command(command_raw.strip(), structured_input)
+                return _execute_command(
+                    command_raw.strip(),
+                    plan_context.execution_task or plan_context.classification_task,
+                    stdin_data=structured_input,
+                )
         task = plan_context.classification_task
         execution_task = plan_context.execution_task
         if not task:
@@ -583,4 +719,8 @@ def handle_event(req: EventRequest):
             return _needs_decomposition("Shell agent needs the task broken into smaller executable operations.")
     else:
         return {"emits": []}
-    return _execute_command(command, stdin_data)
+    return _execute_command(
+        command,
+        command_raw if req.event == "shell.exec" else execution_task,
+        stdin_data=stdin_data,
+    )

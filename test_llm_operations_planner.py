@@ -17,11 +17,24 @@ class _FastAPIStub:
 fastapi_stub.FastAPI = _FastAPIStub
 sys.modules.setdefault("fastapi", fastapi_stub)
 
-from agent_library.agents.llm_operations_planner import _normalize_steps, _step_semantic_drift
+from agent_library.agents.llm_operations_planner import (
+    _normalize_steps,
+    _shell_retrieve_then_compute_steps,
+    _step_semantic_drift,
+)
 
 
 CAPABILITIES = {
     "agents": [
+        {
+            "name": "shell_runner",
+            "description": "Executes shell commands.",
+            "subscribes_to": ["shell.exec", "task.plan"],
+            "methods": [],
+            "capability_domains": ["general_shell"],
+            "action_verbs": ["run", "execute"],
+            "emits": ["shell.result", "task.result"],
+        },
         {
             "name": "slurm_runner_cluster",
             "subscribes_to": ["task.plan"],
@@ -101,6 +114,19 @@ class PlannerSemanticValidationTests(unittest.TestCase):
             CAPABILITIES,
         )
         self.assertEqual(normalized[0]["instruction"]["question"], "query how many patients have more than 20 studies in mydb")
+
+
+class PlannerDerivedStepTests(unittest.TestCase):
+    def test_disk_space_question_decomposes_into_two_steps(self):
+        steps = _shell_retrieve_then_compute_steps(
+            "How much free space do I have on this machine and compute the size in GB?",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[0]["id"], "step1")
+        self.assertEqual(steps[1]["depends_on"], ["step1"])
+        self.assertIn("df -B1 /", steps[0]["command"])
+        self.assertIn("{{step1}}", steps[1]["command"])
 
 
 if __name__ == "__main__":
