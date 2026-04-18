@@ -367,6 +367,25 @@ def _schema_summary(schema: dict) -> str:
     return _schema_prompt_text(schema)
 
 
+def _schema_identifier_catalog(schema: dict) -> str:
+    lines = ["Exact identifiers:"]
+    for table in schema.get("tables", []):
+        schema_name = str(table.get("schema", "") or "").strip()
+        table_name = str(table.get("name", "") or "").strip()
+        if not table_name:
+            continue
+        qualified = ".".join(part for part in (schema_name, table_name) if part)
+        lines.append(f"- table: {qualified}")
+        columns = [
+            str(col.get("name", "") or "").strip()
+            for col in table.get("columns", [])
+            if str(col.get("name", "") or "").strip()
+        ]
+        if columns:
+            lines.append(f"  columns: {', '.join(columns)}")
+    return "\n".join(lines)
+
+
 def _extract_json_values(text: str) -> list[dict[str, Any]]:
     decoder = json.JSONDecoder()
     values = []
@@ -433,6 +452,9 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
         "- Use only tables and columns present in the schema.\n"
         "- Use schema-qualified table names exactly as shown in the schema, for example schema_name.table_name.\n"
         "- Never refer to a table by bare name when the schema summary shows it as schema.table.\n"
+        "- Identifiers are exact code tokens, not natural-language paraphrases.\n"
+        "- Never singularize, pluralize, translate, normalize, or rename schema, table, or column identifiers.\n"
+        "- Copy schema, table, and column names verbatim from the schema catalog.\n"
         "- Quote identifiers exactly as shown in the schema whenever case, spaces, punctuation, or reserved words could matter.\n"
         "- For postgres and sqlite use double quotes for identifiers. For mysql use backticks.\n"
         "- You may quote all schema, table, and column identifiers consistently, even when not strictly required.\n"
@@ -442,6 +464,7 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
         "- Use the SQL dialect from the schema.\n"
         "Schema:\n"
         f"{_schema_summary(schema)}\n"
+        f"{_schema_identifier_catalog(schema)}\n"
         f"User question: {task}"
     )
     response = requests.post(
@@ -486,11 +509,15 @@ def _repair_sql_query(task: str, schema: dict, failing_sql: str, error_text: str
         "- Preserve the user's intent.\n"
         "- Use only tables and columns present in the schema.\n"
         "- Fix identifier quoting, schema qualification, reserved words, join paths, and dialect syntax issues.\n"
+        "- Identifiers are exact code tokens, not natural-language paraphrases.\n"
+        "- Never singularize, pluralize, translate, normalize, or rename schema, table, or column identifiers.\n"
+        "- Copy schema, table, and column names verbatim from the schema catalog.\n"
         "- Quote identifiers exactly as shown in the schema whenever case, spaces, punctuation, or reserved words could matter.\n"
         "- For postgres and sqlite use double quotes for identifiers. For mysql use backticks.\n"
         "- Return a single read-only SQL query.\n"
         "Schema:\n"
         f"{_schema_summary(schema)}\n"
+        f"{_schema_identifier_catalog(schema)}\n"
         f"Original user request: {task}\n"
         f"Failing SQL:\n{failing_sql}\n"
         f"Database error:\n{error_text}"
