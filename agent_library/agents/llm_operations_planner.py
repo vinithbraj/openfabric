@@ -548,6 +548,144 @@ def _tokenize(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9_.-]+", text.lower()))
 
 
+SEMANTIC_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "get",
+    "give",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "list",
+    "me",
+    "my",
+    "name",
+    "names",
+    "of",
+    "on",
+    "or",
+    "please",
+    "show",
+    "tell",
+    "that",
+    "the",
+    "their",
+    "them",
+    "there",
+    "these",
+    "this",
+    "those",
+    "to",
+    "what",
+    "which",
+    "with",
+}
+
+FAMILY_COMMON_TOKENS = {
+    "slurm_runner": {
+        "slurm",
+        "cluster",
+        "clusters",
+        "command",
+        "commands",
+        "query",
+        "queries",
+    },
+    "sql_runner": {
+        "sql",
+        "database",
+        "databases",
+        "db",
+        "query",
+        "queries",
+    },
+}
+
+SLURM_ANCHOR_GROUPS = {
+    "nodes": {"node", "nodes", "partition", "partitions", "sinfo"},
+    "jobs": {"job", "jobs", "queue", "queued", "pending", "running", "squeue", "sacct"},
+    "users": {"user", "users"},
+    "reservations": {"reservation", "reservations"},
+    "fairshare": {"fairshare", "qos", "sshare", "sprio"},
+}
+
+SQL_ANCHOR_GROUPS = {
+    "schema": {"schema", "schemas", "table", "tables", "column", "columns", "relationship", "relationships"},
+    "rows": {"row", "rows", "count", "counts", "list", "show"},
+}
+
+
+def _filtered_semantic_tokens(text: str, family: str) -> set[str]:
+    tokens = _tokenize(text)
+    family_common = FAMILY_COMMON_TOKENS.get(family, set())
+    normalized = set()
+    for token in tokens:
+        normalized.add(token)
+        if len(token) > 3 and token.endswith("s"):
+            normalized.add(token[:-1])
+    return {
+        token
+        for token in normalized
+        if token not in SEMANTIC_STOPWORDS and token not in family_common and len(token) > 2
+    }
+
+
+def _present_anchor_groups(tokens: set[str], groups: dict[str, set[str]]) -> set[str]:
+    present = set()
+    for name, values in groups.items():
+        if tokens & values:
+            present.add(name)
+    return present
+
+
+def _semantic_anchor_drift(original_tokens: set[str], candidate_tokens: set[str], family: str) -> bool:
+    if family == "slurm_runner":
+        original_groups = _present_anchor_groups(original_tokens, SLURM_ANCHOR_GROUPS)
+        candidate_groups = _present_anchor_groups(candidate_tokens, SLURM_ANCHOR_GROUPS)
+        if "nodes" in original_groups and "nodes" not in candidate_groups:
+            return True
+        if "jobs" in original_groups and "jobs" not in candidate_groups:
+            return True
+        if "users" not in original_groups and "users" in candidate_groups and "nodes" in original_groups:
+            return True
+        if "nodes" in original_groups and "jobs" in candidate_groups and "jobs" not in original_groups:
+            return True
+    if family == "sql_runner":
+        original_groups = _present_anchor_groups(original_tokens, SQL_ANCHOR_GROUPS)
+        candidate_groups = _present_anchor_groups(candidate_tokens, SQL_ANCHOR_GROUPS)
+        if "schema" in original_groups and "schema" not in candidate_groups:
+            return True
+    return False
+
+
+def _step_semantic_drift(question: str, target_agent: str, task: str, instruction: dict | None) -> bool:
+    family = _agent_family(target_agent)
+    if family not in {"slurm_runner", "sql_runner"}:
+        return False
+    candidate_text = task
+    if isinstance(instruction, dict):
+        candidate_text += "\n" + json.dumps(instruction, ensure_ascii=True, sort_keys=True)
+    original_tokens = _tokenize(question)
+    candidate_tokens = _tokenize(candidate_text)
+    if _semantic_anchor_drift(original_tokens, candidate_tokens, family):
+        return True
+    original_filtered = _filtered_semantic_tokens(question, family)
+    candidate_filtered = _filtered_semantic_tokens(candidate_text, family)
+    if original_filtered and candidate_filtered and not (original_filtered & candidate_filtered):
+        return True
+    return False
+
+
 def _agent_search_blob(agent: Dict[str, Any]) -> str:
     parts: List[str] = [
         str(agent.get("name", "")),
@@ -1200,6 +1338,24 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
         )
         if not isinstance(normalized_instruction, dict) or not normalized_instruction:
             continue
+        if _step_semantic_drift(question, target_agent, normalized_step["task"], normalized_instruction):
+            _debug_log(
+                "Rejecting semantically drifted step and recovering to original request: "
+                + json.dumps(
+                    {
+                        "question": question,
+                        "target_agent": target_agent,
+                        "task": normalized_step["task"],
+                        "instruction": normalized_instruction,
+                    },
+                    ensure_ascii=True,
+                )
+            )
+            recovered_instruction = _normalize_agent_instruction(target_agent, question, None, None, index)
+            if not isinstance(recovered_instruction, dict) or not recovered_instruction:
+                continue
+            normalized_step["task"] = question
+            normalized_instruction = recovered_instruction
         normalized_step["instruction"] = normalized_instruction
         depends_on = step.get("depends_on")
         if isinstance(depends_on, list):
