@@ -165,6 +165,16 @@ def _extract_sql_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[st
     return results
 
 
+def _extract_slurm_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results = []
+    for step in _flatten_workflow_steps(steps):
+        payload = step.get("payload")
+        if not isinstance(payload, dict) or step.get("event") != "slurm.result":
+            continue
+        results.append(payload)
+    return results
+
+
 def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
     columns = result.get("columns", [])
     rows = result.get("rows", [])
@@ -206,6 +216,10 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
 
 
 def _format_slurm_result_answer(payload: dict[str, Any]) -> str:
+    refined_answer = payload.get("detail") or payload.get("result", {}).get("refined_answer")
+    if isinstance(refined_answer, str) and refined_answer.strip():
+        return refined_answer.strip()
+
     command = str(payload.get("command", "") or "").strip()
     returncode = payload.get("returncode")
     stdout = payload.get("stdout", "")
@@ -228,6 +242,10 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
     sql_results = _extract_sql_results_from_steps(steps if isinstance(steps, list) else [])
     if status == "completed" and sql_results:
         return _format_sql_result_answer(sql_results[-1], task)
+
+    slurm_results = _extract_slurm_results_from_steps(steps if isinstance(steps, list) else [])
+    if status == "completed" and slurm_results:
+        return _format_slurm_result_answer(slurm_results[-1])
 
     lines = [
         f"Workflow {status}: {task}".strip(),
