@@ -246,26 +246,154 @@ def _llm_api_settings() -> tuple[str, str, float, str]:
         model = "gpt-4o-mini"
     return api_key, base_url.rstrip("/"), timeout_seconds, model
 
+# NEW: Slurm context cache
+_SLURM_CONTEXT_CACHE: dict[str, Any] = {}
+_SLURM_CONTEXT_TS: float = 0.0
+_SLURM_CONTEXT_TTL = 60
+
+
+def _get_slurm_context() -> dict[str, Any]:
+    global _SLURM_CONTEXT_CACHE, _SLURM_CONTEXT_TS
+
+    now = time.time()
+    if _SLURM_CONTEXT_CACHE and (now - _SLURM_CONTEXT_TS) < _SLURM_CONTEXT_TTL:
+        return _SLURM_CONTEXT_CACHE
+
+    context: dict[str, Any] = {}
+
+    try:
+        res = _gateway_execute("sinfo", ["-h", "-o", "%P|%t|%D|%G"])
+        parts = set()
+        for line in res.get("stdout", "").splitlines():
+            cols = line.split("|")
+            if cols:
+                parts.add(cols[0])
+        context["partitions"] = sorted(parts)
+    except Exception:
+        context["partitions"] = []
+
+    try:
+        res = _gateway_execute("sinfo", ["-h", "-o", "%t|%D"])
+        states = {}
+        for line in res.get("stdout", "").splitlines():
+            cols = line.split("|")
+            if len(cols) == 2:
+                state, count = cols
+                try:
+                    states[state] = states.get(state, 0) + int(count)
+                except:
+                    pass
+        context["node_states"] = states
+    except Exception:
+        context["node_states"] = {}
+
+    try:
+        r = requests.get(f"{_gateway_base_url()}/health", timeout=5)
+        if r.ok:
+            context["allowed_commands"] = r.json().get("allowed_commands", [])
+        else:
+            context["allowed_commands"] = []
+    except Exception:
+        context["allowed_commands"] = []
+
+    _SLURM_CONTEXT_CACHE = context
+    _SLURM_CONTEXT_TS = now
+
+    return context
+
 
 def _llm_slurm_command(task: str) -> dict[str, Any]:
     api_key, base_url, timeout_seconds, model = _llm_api_settings()
+
+    context = _get_slurm_context()
+
     prompt = (
-        "You generate exactly one Slurm CLI command for a remote execution gateway.\n"
-        "Return JSON only in the form {\"command\":\"...\",\"args\":[...],\"reason\":\"...\"}.\n"
-        "Rules:\n"
-        "- Use only one of the allowed Slurm commands listed below.\n"
-        "- Return the executable name in command and each argument as a separate args array item.\n"
-        "- Never return shell operators, pipes, redirects, semicolons, subshells, or sudo.\n"
-        "- Prefer read-only query commands unless the user explicitly asks to control jobs or state.\n"
-        "- For control requests use precise commands like scancel, scontrol hold, scontrol release, scontrol requeue, scontrol suspend, or scontrol resume.\n"
-        "- For historical usage or accounting prefer sacct, sreport, sacctmgr, or sshare as appropriate.\n"
-        "- For cluster or node availability prefer sinfo.\n"
-        "- For queue and active jobs prefer squeue.\n"
-        "- Keep output machine-readable when practical by using --format style arguments instead of prose-heavy defaults.\n"
-        "Allowed Slurm commands:\n"
-        f"{_slurm_command_catalog_text()}\n"
+        "You generate exactly one valid Slurm CLI command for a remote execution gateway.\n"
+        "Return STRICT JSON only in the form {\"command\":\"...\",\"args\":[...],\"reason\":\"...\"}.\n\n"
+
+        "Cluster context:\n"
+        f"- Partitions: {context.get('partitions')}\n"
+        f"- Node states: {context.get('node_states')}\n"
+        f"- Allowed commands: {context.get('allowed_commands')}\n\n"
+
+        "====================\n"
+        "INTENT → COMMAND RULES\n"
+        "====================\n"
+
+        "1. CURRENT QUEUE / LIVE JOBS:\n"
+        "- Use squeue\n"
+        "- Examples: queued jobs, pending jobs, running jobs, jobs right now\n"
+        "- Use filters:\n"
+        "  * pending → -t PENDING\n"
+        "  * running → -t RUNNING\n"
+        "  * specific user → -u <user>\n"
+        "- If querying ALL users → DO NOT include -u\n\n"
+
+        "2. HISTORICAL / COMPLETED JOBS:\n"
+        "- Use sacct\n"
+        "- ALWAYS include -X and -P\n"
+        "- Examples: completed jobs, failed jobs, past runs\n"
+        "- For time/duration questions → use:\n"
+        "  --format=JobID,Elapsed,State\n\n"
+
+        "3. CLUSTER / NODE / PARTITION STATE:\n"
+        "- Use sinfo\n"
+        "- Examples: node status, partition availability\n\n"
+
+        "====================\n"
+        "CRITICAL RULES\n"
+        "====================\n"
+        "- NEVER use '*' or 'all' as argument values\n"
+        "- NEVER invent flags\n"
+        "- NEVER use shell syntax (pipes, redirects, etc.)\n"
+        "- Prefer minimal correct command\n\n"
+
+        "====================\n"
+        "SPECIAL HANDLING\n"
+        "====================\n"
+
+        "COUNT / HOW MANY:\n"
+        "- Generate the command that RETURNS the matching rows\n"
+        "- DO NOT attempt to count in the command\n"
+        "- The system will count the rows\n\n"
+
+        "TIME / DURATION QUESTIONS:\n"
+        "- Use sacct (NOT squeue)\n"
+        "- Include Elapsed field\n"
+        "- Example fields:\n"
+        "  --format=JobID,JobName,Elapsed,State\n\n"
+
+        "====================\n"
+        "EXAMPLES (FOLLOW EXACTLY)\n"
+        "====================\n"
+
+        "Q: how many jobs are pending\n"
+        "A:\n"
+        "{\"command\":\"squeue\",\"args\":[\"-h\",\"-t\",\"PENDING\"]}\n\n"
+
+        "Q: how many jobs are running\n"
+        "A:\n"
+        "{\"command\":\"squeue\",\"args\":[\"-h\",\"-t\",\"RUNNING\"]}\n\n"
+
+        "Q: show all queued jobs\n"
+        "A:\n"
+        "{\"command\":\"squeue\",\"args\":[\"-h\"]}\n\n"
+
+        "Q: how long did jobs take to complete\n"
+        "A:\n"
+        "{\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--format=JobID,JobName,Elapsed,State\"]}\n\n"
+
+        "Q: show completed jobs\n"
+        "A:\n"
+        "{\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--state=COMPLETED\"]}\n\n"
+
+        "Q: show failed jobs\n"
+        "A:\n"
+        "{\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--state=FAILED\"]}\n\n"
+
         f"User request: {task}"
     )
+
     response = requests.post(
         f"{base_url}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
