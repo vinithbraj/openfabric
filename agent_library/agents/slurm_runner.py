@@ -1,6 +1,7 @@
 import json
 import os
 import shlex
+import subprocess
 import time
 from typing import Any
 
@@ -456,6 +457,53 @@ def _format_detail(command: str, returncode: int) -> str:
     return "Slurm command failed."
 
 
+def _llm_generate_local_command(task: str, command: str, sample_stdout: str) -> str:
+    try:
+        api_key, base_url, timeout_seconds, model = _llm_api_settings()
+    except Exception:
+        return ""
+
+    prompt = (
+        "You are an expert data engineer. I have a large Slurm output but I only want to send the relevant data "
+        "to an LLM for final analysis. Your job is to provide exactly ONE shell command (using awk, grep, tail, head, or jq) "
+        "that will extract or calculate the necessary information from the FULL output locally.\n\n"
+        f"User Question: {task}\n"
+        f"Original Slurm Command: {command}\n"
+        "Sample Data (first few lines):\n"
+        "```\n"
+        f"{sample_stdout}\n"
+        "```\n"
+        "Instructions:\n"
+        "- Return ONLY the shell command string, no markdown, no explanations.\n"
+        "- The command will receive the full Slurm output via STDIN.\n"
+        "- If the user wants a sum of a column, use awk.\n"
+        "- If the user wants to filter lines, use grep.\n"
+        "- If you cannot generate a reliable processing command, return 'NONE'.\n"
+        "Shell Command:"
+    )
+
+    try:
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a shell command generator. Return only the command."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+            },
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        cmd = response.json()["choices"][0]["message"]["content"].strip().strip("`").strip()
+        return cmd if cmd and cmd.upper() != "NONE" else ""
+    except Exception as exc:
+        _debug_log(f"Local command generation failed: {exc}")
+        return ""
+
+
 def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> str:
     try:
         api_key, base_url, timeout_seconds, model = _llm_api_settings()
@@ -463,30 +511,59 @@ def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> st
         _debug_log(f"Synthesis skipped: API settings missing ({exc})")
         return ""
 
-    # Truncation logic with awareness
+    # Phase 7: Local Data Processing Loop
+    processed_stdout = stdout
+    is_processed_locally = False
+    
+    # Only attempt local processing for large outputs or if specifically requested (implied for stats)
+    if len(stdout) > 5000:
+        sample = stdout[:5000]
+        reduction_cmd = _llm_generate_local_command(task, command, sample)
+        if reduction_cmd:
+            try:
+                _debug_log(f"Running local processing command: {reduction_cmd}")
+                proc_result = subprocess.run(
+                    reduction_cmd,
+                    input=stdout,
+                    capture_output=True,
+                    text=True,
+                    shell=True,
+                    timeout=30
+                )
+                if proc_result.returncode == 0:
+                    processed_stdout = proc_result.stdout
+                    is_processed_locally = True
+                    _debug_log(f"Local processing successful. Reduced data size: {len(processed_stdout)}")
+                else:
+                    _debug_log(f"Local processing command failed (code {proc_result.returncode}): {proc_result.stderr}")
+            except Exception as exc:
+                _debug_log(f"Local processing execution failed: {exc}")
+
+    # Final Synthesis on (potentially reduced) data
     limit = 50000
-    is_truncated = len(stdout) > limit
-    display_stdout = stdout[:limit]
+    display_stdout = processed_stdout[:limit]
+    is_truncated = len(processed_stdout) > limit
     
     truncation_note = ""
     if is_truncated:
-        truncation_note = f"\n[NOTE: Output was truncated from {len(stdout)} to {limit} chars. Summary may be incomplete.]\n"
+        truncation_note = f"\n[NOTE: Data was truncated from {len(processed_stdout)} to {limit} chars for analysis.]\n"
+    elif is_processed_locally:
+        truncation_note = "\n[NOTE: This answer was calculated locally using a generated processing script.]\n"
 
     prompt = (
         "You are an expert Slurm output analyzer. Your task is to answer the user's question "
-        "based ONLY on the provided Slurm command output.\n\n"
+        "based ONLY on the provided data.\n\n"
         f"User Question: {task}\n"
-        f"Command executed: {command}\n"
-        "Output:\n"
+        "Data Preview:\n"
         "```\n"
         f"{display_stdout}\n"
         "```\n"
         f"{truncation_note}"
+        f"Original Command: {command}\n"
         f"Errors (if any):\n{stderr}\n\n"
         "Instructions:\n"
-        "- If the data was truncated, mention it in your answer if it affects accuracy.\n"
-        "- If the user asked for a count or sum, do your best with the available data but warn about truncation if relevant.\n"
-        "- Be concise and factual.\n"
+        "- Provide a concise and factual final answer.\n"
+        "- If the data confirms a calculation (like a sum or count), present it clearly.\n"
         "Final Answer:"
     )
 

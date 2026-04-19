@@ -846,6 +846,9 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             sql = payload.get("sql")
             if isinstance(sql, str) and sql.strip():
                 lines.append(f"SQL: `{_truncate_progress(sql, 300)}`")
+            command = payload.get("command")
+            if isinstance(command, str) and command.strip():
+                lines.append(f"Command: `{_truncate_progress(command, 300)}`")
             return _trace_block(lines)
         if stage == "replanning":
             lines = [
@@ -893,6 +896,11 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                 lines.append(f"**Timing:** {stats_line}")
             if isinstance(sql, str) and sql.strip():
                 lines.append(f"**SQL:** `{_truncate_progress(sql, 360)}`")
+            command = payload.get("command")
+            if not command and isinstance(result, dict):
+                command = result.get("command")
+            if isinstance(command, str) and command.strip():
+                lines.append(f"**Command:** `{_truncate_progress(command, 360)}`")
             return _trace_block(lines)
         if stage == "failed":
             error = payload.get("error") or payload.get("message") or "Step failed."

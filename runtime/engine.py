@@ -1111,6 +1111,7 @@ class Engine:
                 duration_ms=duration_ms,
                 result=result_summary,
                 sql=primary_payload.get("sql") if isinstance(primary_payload, dict) else None,
+                command=primary_payload.get("command") if isinstance(primary_payload, dict) else None,
             )
             self._record_context_value(context, step_id, primary_event, primary_payload, primary_value)
             self._record_step_result(
