@@ -478,6 +478,31 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                             "note": "Rows truncated for synthesis" if len(rows) > 5 else None
                         }
                     )
+        
+        # Generic step outcome extraction (Phase 11)
+        step_outcomes = []
+        for step in req.payload.get("steps", []):
+            if not isinstance(step, dict) or step.get("status") != "completed":
+                continue
+            payload = step.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            
+            # Extract the best human-readable summary from this step
+            best_summary = (
+                payload.get("refined_answer") or 
+                payload.get("detail") or 
+                (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("refined_answer") or
+                (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("detail")
+            )
+            
+            if best_summary and isinstance(best_summary, str) and best_summary.strip():
+                step_outcomes.append({
+                    "step_id": step.get("id"),
+                    "task": step.get("task"),
+                    "outcome": best_summary.strip()
+                })
+
         return {
             "event": req.event,
             "task": req.payload.get("task"),
@@ -485,7 +510,8 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             "presentation": req.payload.get("presentation"),
             "sql_queries": sql_queries,
             "sql_results": compact_sql_results,
-            "steps": [] if compact_sql_results else req.payload.get("steps"), # Or truncate steps
+            "step_outcomes": step_outcomes,
+            "steps": [] if step_outcomes else req.payload.get("steps"), # Hide noisy raw steps if we have clean outcomes
             "result": req.payload.get("result"),
             "error": req.payload.get("error"),
         }
@@ -566,6 +592,7 @@ def _build_prompt(req: EventRequest) -> str:
         "- Never end with commentary such as 'This is a concise answer' or 'This is formatted as Markdown'.\n"
         "- If include_internal_steps is false, use command outputs only as source data and hide implementation details.\n"
         "- If include_internal_steps is true, include a compact 'How it was done' section after the answer.\n"
+        "- For multi-step workflows, review the 'step_outcomes' array. It contains key findings from each individual step. Aggregrate these into one comprehensive response that fully addresses the user's original request.\n"
         "- Never output HTML details, summary, or collapsible blocks.\n"
         "- If command, stdout, stderr, logs, or raw execution details are needed, use one plain fenced Markdown block and no HTML tags.\n"
         "- If the workflow failed or partially failed, include the failed step task and the exact error message from that step.\n"
