@@ -99,14 +99,63 @@ def _command_output_details(command: str, stdout: str, stderr: str, returncode: 
     return "\n".join(["```", "\n".join(body), "```"])
 
 
-def _format_shell_answer(command: str, returncode: int, stdout: str, stderr: str) -> str:
-    status = "success" if returncode == 0 else "failure"
-    lines = [
-        f"Shell command finished with **{status}**.",
-        "",
-        _command_output_details(command, stdout, stderr, returncode),
-    ]
+def _format_agent_result(payload: dict[str, Any], event_name: str | None = None) -> str:
+    """Generic formatter for standard agent result payloads."""
+    # 1. Primary human-readable answer (priority)
+    refined = payload.get("detail") or payload.get("refined_answer")
+    if not refined and isinstance(payload.get("result"), dict):
+        refined = payload["result"].get("refined_answer") or payload["result"].get("detail")
+
+    # 2. Command/Operation
+    op = payload.get("command") or payload.get("sql") or payload.get("task")
+    if not op and isinstance(payload.get("result"), dict):
+        op = payload["result"].get("command") or payload["result"].get("sql")
+
+    # 3. Status
+    rc = payload.get("returncode")
+    if rc is None and isinstance(payload.get("result"), dict):
+        rc = payload["result"].get("returncode")
+    
+    ok = payload.get("ok")
+    if ok is None and isinstance(payload.get("result"), dict):
+        ok = payload["result"].get("ok")
+    
+    if ok is False or (rc is not None and rc != 0):
+        status = "failure"
+    else:
+        status = "success"
+
+    # 4. Raw outputs
+    stdout = payload.get("stdout") or payload.get("content")
+    stderr = payload.get("stderr")
+    if not stdout and isinstance(payload.get("result"), dict):
+        stdout = payload["result"].get("stdout")
+        stderr = payload["result"].get("stderr")
+
+    # 5. Build the UI
+    if refined and isinstance(refined, str) and refined.strip():
+        # If we have a nice refined answer, just return it (concise view)
+        return refined.strip()
+
+    # Fallback to technical block for raw tool results
+    lines = [f"Operation finished with **{status}**."]
+    
+    # Identify agent kind if possible
+    kind = event_name.split(".")[0] if event_name else "agent"
+    if kind:
+        lines[-1] = f"**{kind.title()}** operation finished with **{status}**."
+
+    lines.extend(["", _command_output_details(str(op or "unknown"), str(stdout or ""), str(stderr or ""), rc)])
     return "\n".join(lines)
+
+
+def _format_shell_answer(command: str, returncode: int, stdout: str, stderr: str) -> str:
+    return _format_agent_result({
+        "command": command,
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr
+    }, "shell.result")
 
 
 def _flatten_workflow_steps(steps: list[dict[str, Any]], prefix: str = "") -> list[dict[str, Any]]:
@@ -175,6 +224,19 @@ def _extract_slurm_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[
     return results
 
 
+def _extract_general_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extracts any successful agent results that follow the standard pattern."""
+    results = []
+    for step in _flatten_workflow_steps(steps):
+        payload = step.get("payload")
+        event = step.get("event")
+        if not isinstance(payload, dict) or not event:
+            continue
+        if event in {"slurm.result", "shell.result", "task.result", "file.content"}:
+            results.append((event, payload))
+    return results
+
+
 def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
     columns = result.get("columns", [])
     rows = result.get("rows", [])
@@ -216,22 +278,7 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
 
 
 def _format_slurm_result_answer(payload: dict[str, Any]) -> str:
-    refined_answer = payload.get("detail") or payload.get("result", {}).get("refined_answer")
-    if isinstance(refined_answer, str) and refined_answer.strip():
-        return refined_answer.strip()
-
-    command = str(payload.get("command", "") or "").strip()
-    returncode = payload.get("returncode")
-    stdout = payload.get("stdout", "")
-    stderr = payload.get("stderr", "")
-    result = payload.get("result")
-    kind = result.get("kind") if isinstance(result, dict) else None
-    status = "success" if returncode == 0 else "failure"
-    lines = [f"Slurm command finished with **{status}**."]
-    if isinstance(kind, str) and kind.strip():
-        lines.extend(["", f"Command type: `{kind}`"])
-    lines.extend(["", _command_output_details(command, stdout, stderr, returncode)])
-    return "\n".join(lines)
+    return _format_agent_result(payload, "slurm.result")
 
 
 def _format_workflow_answer(payload: dict[str, Any]) -> str:
@@ -246,6 +293,11 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
     slurm_results = _extract_slurm_results_from_steps(steps if isinstance(steps, list) else [])
     if status == "completed" and slurm_results:
         return _format_slurm_result_answer(slurm_results[-1])
+
+    general_results = _extract_general_results_from_steps(steps if isinstance(steps, list) else [])
+    if status == "completed" and general_results:
+        event, payload = general_results[-1]
+        return _format_agent_result(payload, event)
 
     lines = [
         f"Workflow {status}: {task}".strip(),
