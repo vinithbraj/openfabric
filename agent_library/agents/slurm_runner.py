@@ -327,6 +327,7 @@ def _llm_slurm_command(task: str) -> dict[str, Any]:
         "====================\n"
         "COMMAND GENERATION RULES\n"
         "====================\n"
+        "Follow these rules precisely to ensure command compatibility across Slurm versions:\n\n"
 
         "1. CURRENT QUEUE (squeue):\n"
         "- Use for 'queued', 'pending', 'running', 'active', or 'current' jobs.\n"
@@ -334,11 +335,13 @@ def _llm_slurm_command(task: str) -> dict[str, Any]:
         "  * -h: Suppress headers (preferred for data extraction).\n"
         "  * -t <STATE>: Filter by state (PENDING, RUNNING, COMPLETING, etc.).\n"
         "  * -u <USER>: Filter by specific user.\n"
+        "  * -p <PARTITION>: Filter by partition.\n"
         "- If querying all jobs across all users, DO NOT include -u.\n\n"
 
         "2. HISTORICAL DATA (sacct):\n"
-        "- Use for 'finished', 'completed', 'failed', 'yesterday', 'past', or 'history' requests.\n"
+        "- Use for 'finished', 'completed', 'failed', 'yesterday', 'past', 'history', or 'how long' requests.\n"
         "- ALWAYS include -X (show only one line per job) and -P (pipe-separated / parsable).\n"
+        "- ALWAYS use --partition=<NAME> for partition filtering in sacct. DO NOT USE -p (it is ambiguous for parsable).\n"
         "- Use --format=JobID,JobName,State,Elapsed,End for duration/timing questions.\n"
         "- Use --state=COMPLETED|FAILED|TIMEOUT to filter results.\n\n"
 
@@ -350,7 +353,8 @@ def _llm_slurm_command(task: str) -> dict[str, Any]:
 
         "4. CLUSTER & NODE STATE (sinfo):\n"
         "- Use for 'node status', 'partition info', 'available resources', or 'cluster health'.\n"
-        "- Use -Nel for detailed node/partition output.\n\n"
+        "- Use -Nel for detailed node/partition output.\n"
+        "- Use -p <PARTITION> for partition info.\n\n"
 
         "5. JOB CONTROL (scancel, scontrol):\n"
         "- Use scancel <job_id> to cancel jobs.\n"
@@ -362,13 +366,16 @@ def _llm_slurm_command(task: str) -> dict[str, Any]:
         "- NEVER use shell operators (|, >, &, ;, etc.). The gateway only executes single binaries.\n"
         "- NEVER use '*' or 'all' as argument values.\n"
         "- If the request is for 'non-running' jobs in squeue, use -t with all states EXCEPT RUNNING (e.g., -t PD,CF,S,ST).\n"
+        "- ALWAYS USE LONG FORM FLAGS (e.g. --partition=) if there is any doubt about short flag meaning.\n"
 
         "====================\n"
         "EXAMPLES\n"
         "====================\n"
-
         "Q: how many pending jobs are there\n"
         "A: {\"command\":\"squeue\",\"args\":[\"-h\",\"-t\",\"PENDING\"],\"reason\":\"Listing pending jobs to be counted.\"}\n\n"
+
+        "Q: how long did the totalseg jobs take\n"
+        "A: {\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--state=COMPLETED\",\"--partition=totalseg\",\"--format=JobID,JobName,State,Elapsed,End\"],\"reason\":\"Querying historical job database for completed jobs in the totalseg partition.\"}\n\n"
 
         "Q: show failed jobs from yesterday\n"
         "A: {\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--state=FAILED\",\"--starttime=yesterday\"],\"reason\":\"Querying historical job database for failed jobs.\"}\n\n"
