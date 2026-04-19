@@ -92,6 +92,61 @@ def _elapsed_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 2)
 
 
+def _llm_api_settings():
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL") or "https://api.openai.com/v1"
+    model = os.getenv("LLM_OPS_MODEL") or "gpt-4o-mini"
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
+    return api_key, base_url.rstrip("/"), timeout_seconds, model
+
+
+def _llm_summarize_rows(task: str, sql: str, columns: list[str], rows: list[dict[str, Any]]) -> str:
+    # Phase 10: SQL Result Summarization logic
+    if not rows:
+        return ""
+    
+    api_key, base_url, timeout, model = _llm_api_settings()
+    if not api_key:
+        return ""
+
+    sample = rows[:10]
+    prompt = (
+        "You are an expert SQL data analyst. I have a result set from a database query. "
+        "Your job is to provide a concise, factual summary of the data for the user.\n\n"
+        f"User Question: {task}\n"
+        f"SQL Query: {sql}\n"
+        f"Total rows found: {len(rows)}\n"
+        "Sample Data (first few rows):\n"
+        "```json\n"
+        f"{json.dumps(sample, indent=2, default=str)}\n"
+        "```\n"
+        "Instructions:\n"
+        "- Provide a concise summary of what this data shows in relation to the user's question.\n"
+        "- If the data shows a clear trend or answer, state it clearly.\n"
+        "- Be factual and do not speculate beyond what is in the sample and row count.\n"
+        "Summary:"
+    )
+
+    try:
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a concise data analyst."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return ""
+
+
 def _dsn() -> str | None:
     return os.getenv("SQL_AGENT_DSN") or os.getenv("SQL_DATABASE_URL")
 
@@ -1098,12 +1153,18 @@ def handle_event(req: EventRequest):
             stats["query_ms"] = _elapsed_ms(started)
             stats["total_ms"] = _elapsed_ms(total_started)
             sql = result.get("sql", "")
+            # Phase 10: SQL Result Summarization
+            refined_answer = ""
+            if result and result.get("rows") and len(result.get("rows", [])) > 5:
+                refined_answer = _llm_summarize_rows(execution_task, sql, result.get("columns", []), result.get("rows", []))
+
             return {
                 "emits": [
                     {
                         "event": "sql.result",
                         "payload": {
                             "detail": "SQL query executed.",
+                            "refined_answer": refined_answer or None,
                             "sql": sql,
                             "schema": schema,
                             "stats": stats,

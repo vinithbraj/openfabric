@@ -183,6 +183,85 @@ def _debug_log(message: str):
         log_debug("SHELL_DEBUG", message)
 
 
+def _llm_api_settings():
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL") or "https://api.openai.com/v1"
+    model = os.getenv("LLM_OPS_MODEL") or "gpt-4o-mini"
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
+    return api_key, base_url.rstrip("/"), timeout_seconds, model
+
+
+def _llm_generate_reduction_command(task: str, original_cmd: str, sample_stdout: str) -> str:
+    api_key, base_url, timeout, model = _llm_api_settings()
+    if not api_key:
+        return ""
+
+    prompt = (
+        "You are an expert shell data analyst. I have a large output from a shell command but I only want to "
+        "send the relevant data back for analysis. Your job is to provide exactly ONE shell command "
+        "(using awk, grep, tail, head, or jq) that will extract or calculate the necessary information "
+        "from the FULL output locally.\n\n"
+        f"User Intent: {task}\n"
+        f"Original Command: {original_cmd}\n"
+        "Sample Data (first few lines):\n"
+        "```\n"
+        f"{sample_stdout}\n"
+        "```\n"
+        "Instructions:\n"
+        "- Return ONLY the shell command string, no markdown, no explanations.\n"
+        "- The command will receive the full output via STDIN.\n"
+        "- If the user wants a sum of a column, use awk.\n"
+        "- If you cannot generate a reliable processing command, return 'NONE'.\n"
+        "Shell Command:"
+    )
+
+    try:
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a shell command generator. Return only the command."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        cmd = response.json()["choices"][0]["message"]["content"].strip().strip("`").strip()
+        return cmd if cmd and cmd.upper() != "NONE" else ""
+    except Exception:
+        return ""
+
+
+def _llm_summarize_locally(task: str, original_cmd: str, stdout: str) -> str:
+    # Phase 9: Local Data Processing Loop
+    if len(stdout) < 5000:
+        return ""
+
+    sample = stdout[:5000]
+    reduction_cmd = _llm_generate_reduction_command(task, original_cmd, sample)
+    if not reduction_cmd:
+        return ""
+
+    try:
+        proc_result = subprocess.run(
+            reduction_cmd,
+            input=stdout,
+            capture_output=True,
+            text=True,
+            shell=True,
+            timeout=30
+        )
+        if proc_result.returncode == 0:
+            return proc_result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _is_blocked(command: str) -> bool:
     command_lc = command.lower()
     return any(re.search(pattern, command_lc) for pattern in BLOCKED_PATTERNS)
@@ -464,7 +543,7 @@ def _serialize_stdin_data(stdin_data: Any) -> str | None:
     return str(stdin_data)
 
 
-def _execute_command(command: str, stdin_data: Any = None):
+def _execute_command(command: str, stdin_data: Any = None, task: str = None):
     if _looks_like_metadata_not_command(command):
         return {
             "emits": [
@@ -520,6 +599,13 @@ def _execute_command(command: str, stdin_data: Any = None):
             ]
         }
 
+    # Attempt local reduction for large outputs (Phase 9)
+    refined_answer = ""
+    if task and completed.returncode == 0 and len(completed.stdout) > 5000:
+        refined_answer = _llm_summarize_locally(task, command, completed.stdout)
+        if refined_answer:
+            _debug_log(f"Local reduction successful. Summary: {refined_answer[:100]}...")
+    
     return {
         "emits": [
             {
@@ -529,6 +615,7 @@ def _execute_command(command: str, stdin_data: Any = None):
                     "stdout": completed.stdout.strip(),
                     "stderr": completed.stderr.strip(),
                     "returncode": completed.returncode,
+                    "refined_answer": refined_answer or None,
                 },
             }
         ]
@@ -564,12 +651,15 @@ def handle_event(req: EventRequest):
         else:
             structured_input = plan_context.structured_context
         stdin_data = structured_input
+
+        task = plan_context.classification_task
+        execution_task = plan_context.execution_task
+
         if isinstance(instruction, dict) and instruction.get("operation") == "run_command":
             command_raw = instruction.get("command")
             if isinstance(command_raw, str) and command_raw.strip():
-                return _execute_command(command_raw.strip(), structured_input)
-        task = plan_context.classification_task
-        execution_task = plan_context.execution_task
+                return _execute_command(command_raw.strip(), structured_input, task=task)
+        
         if not task:
             return {"emits": []}
         if _is_introspection_request(task):
@@ -583,4 +673,4 @@ def handle_event(req: EventRequest):
             return _needs_decomposition("Shell agent needs the task broken into smaller executable operations.")
     else:
         return {"emits": []}
-    return _execute_command(command, stdin_data)
+    return _execute_command(command, stdin_data, task=task)

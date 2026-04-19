@@ -87,6 +87,14 @@ def _clean_terminal_output(value: Any) -> str:
     return text.strip()
 
 
+def _truncate_if_large(value: Any, limit: int = 5000) -> Any:
+    if not isinstance(value, str):
+        return value
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"\n\n[... Truncated for synthesis. Actual size: {len(value)} chars. Raw data is visible in the technical details section above. ...]"
+
+
 def _command_output_details(command: str, stdout: str, stderr: str, returncode: int | None = None) -> str:
     clean_stdout = _clean_terminal_output(stdout) or "<empty>"
     clean_stderr = _clean_terminal_output(stderr)
@@ -435,12 +443,13 @@ def _fallback_answer(req: EventRequest) -> str:
 
 
 def _build_source_payload(req: EventRequest) -> dict[str, Any]:
+    # Gatekeeper: Truncate large raw data before sending to LLM for final polish
     if req.event == "shell.result":
         return {
             "event": req.event,
             "command": req.payload.get("command"),
-            "stdout": req.payload.get("stdout"),
-            "stderr": req.payload.get("stderr"),
+            "stdout": _truncate_if_large(req.payload.get("stdout")),
+            "stderr": _truncate_if_large(req.payload.get("stderr"), limit=2000),
             "returncode": req.payload.get("returncode"),
         }
     if req.event == "workflow.result":
@@ -455,14 +464,18 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             if isinstance(payload, dict) and step.get("event") == "sql.result":
                 result = payload.get("result")
                 if isinstance(result, dict):
+                    # Truncate rows in workflow summary
+                    rows = result.get("rows", [])
+                    compact_rows = rows[:5] if len(rows) > 5 else rows
                     compact_sql_results.append(
                         {
                             "sql": payload.get("sql") or result.get("sql"),
                             "queries": result.get("queries"),
                             "columns": result.get("columns"),
-                            "rows": result.get("rows"),
+                            "rows": compact_rows,
                             "row_count": result.get("row_count"),
                             "limit": result.get("limit"),
+                            "note": "Rows truncated for synthesis" if len(rows) > 5 else None
                         }
                     )
         return {
@@ -472,25 +485,35 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             "presentation": req.payload.get("presentation"),
             "sql_queries": sql_queries,
             "sql_results": compact_sql_results,
-            "steps": [] if compact_sql_results else req.payload.get("steps"),
+            "steps": [] if compact_sql_results else req.payload.get("steps"), # Or truncate steps
             "result": req.payload.get("result"),
             "error": req.payload.get("error"),
         }
     if req.event == "sql.result":
+        result = req.payload.get("result")
+        if isinstance(result, dict):
+            rows = result.get("rows", [])
+            compact_result = dict(result)
+            if len(rows) > 10:
+                compact_result["rows"] = rows[:10]
+                compact_result["note"] = "Rows truncated for synthesis to respect data privacy and efficiency."
+        else:
+            compact_result = result
+
         return {
             "event": req.event,
             "detail": req.payload.get("detail"),
             "sql": req.payload.get("sql"),
             "schema": req.payload.get("schema"),
-            "result": req.payload.get("result"),
+            "result": compact_result,
         }
     if req.event == "slurm.result":
         return {
             "event": req.event,
             "detail": req.payload.get("detail"),
             "command": req.payload.get("command"),
-            "stdout": req.payload.get("stdout"),
-            "stderr": req.payload.get("stderr"),
+            "stdout": _truncate_if_large(req.payload.get("stdout")),
+            "stderr": _truncate_if_large(req.payload.get("stderr"), limit=2000),
             "returncode": req.payload.get("returncode"),
             "result": req.payload.get("result"),
         }
