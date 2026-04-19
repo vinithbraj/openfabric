@@ -479,7 +479,7 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                         }
                     )
         
-        # Generic step outcome extraction (Phase 11)
+        # Generic step outcome extraction (Phase 11 Refined)
         step_outcomes = []
         for step in req.payload.get("steps", []):
             if not isinstance(step, dict) or step.get("status") != "completed":
@@ -503,16 +503,23 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                     "outcome": best_summary.strip()
                 })
 
+        # Construction of a unified summary to prevent last-step bias
+        combined_detail = req.payload.get("detail") or ""
+        if step_outcomes:
+            outcome_text = "\n".join([f"- Step '{so['task']}': {so['outcome']}" for so in step_outcomes])
+            combined_detail = f"The workflow completed several steps with the following findings:\n{outcome_text}"
+
         return {
             "event": req.event,
             "task": req.payload.get("task"),
             "status": req.payload.get("status"),
             "presentation": req.payload.get("presentation"),
+            "detail": combined_detail,
             "sql_queries": sql_queries,
             "sql_results": compact_sql_results,
             "step_outcomes": step_outcomes,
             "steps": [] if step_outcomes else req.payload.get("steps"), # Hide noisy raw steps if we have clean outcomes
-            "result": req.payload.get("result"),
+            "result": None, # CRITICAL: Suppress last-step result to prevent LLM from ignoring step_outcomes
             "error": req.payload.get("error"),
         }
     if req.event == "sql.result":
