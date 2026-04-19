@@ -457,20 +457,20 @@ def _format_detail(command: str, returncode: int) -> str:
 
 
 def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> str:
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-    if not api_key:
+    try:
+        api_key, base_url, timeout_seconds, model = _llm_api_settings()
+    except Exception as exc:
+        _debug_log(f"Synthesis skipped: API settings missing ({exc})")
         return ""
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+
+    # Truncation logic with awareness
+    limit = 50000
+    is_truncated = len(stdout) > limit
+    display_stdout = stdout[:limit]
+    
+    truncation_note = ""
+    if is_truncated:
+        truncation_note = f"\n[NOTE: Output was truncated from {len(stdout)} to {limit} chars. Summary may be incomplete.]\n"
 
     prompt = (
         "You are an expert Slurm output analyzer. Your task is to answer the user's question "
@@ -479,20 +479,21 @@ def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> st
         f"Command executed: {command}\n"
         "Output:\n"
         "```\n"
-        f"{stdout[:50000]}\n"  # Safety limit for context window
+        f"{display_stdout}\n"
         "```\n"
+        f"{truncation_note}"
         f"Errors (if any):\n{stderr}\n\n"
         "Instructions:\n"
-        "- If the user asked for a count, return just the number or a very short sentence with the count.\n"
-        "- If the user asked for details, summarize them accurately.\n"
+        "- If the data was truncated, mention it in your answer if it affects accuracy.\n"
+        "- If the user asked for a count or sum, do your best with the available data but warn about truncation if relevant.\n"
         "- Be concise and factual.\n"
-        "- If the output is empty or errors occurred, explain what happened.\n"
         "Final Answer:"
     )
 
     try:
+        _debug_log(f"Starting synthesis for task: {task[:50]}...")
         response = requests.post(
-            f"{base_url.rstrip('/')}/chat/completions",
+            f"{base_url}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
                 "model": model,
@@ -505,8 +506,12 @@ def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> st
             timeout=timeout_seconds,
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
+        answer = response.json()["choices"][0]["message"]["content"].strip()
+        if is_truncated and "truncated" not in answer.lower():
+            answer += " (Note: Based on truncated output)"
+        return answer
+    except Exception as exc:
+        _debug_log(f"Synthesis failed: {type(exc).__name__}: {exc}")
         return ""
 
 
