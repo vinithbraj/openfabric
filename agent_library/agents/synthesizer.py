@@ -90,13 +90,32 @@ def _clean_terminal_output(value: Any) -> str:
 def _command_output_details(command: str, stdout: str, stderr: str, returncode: int | None = None) -> str:
     clean_stdout = _clean_terminal_output(stdout) or "<empty>"
     clean_stderr = _clean_terminal_output(stderr)
-    body = ["Command and output", ""]
+    
+    lines = [
+        "> **Technical Details**",
+        ">",
+        f"> **Command:** `{command.strip()}`"
+    ]
     if returncode is not None:
-        body.extend([f"Exit code: {returncode}", ""])
-    body.extend(["Command:", "", command.strip(), "", "Output:", "", clean_stdout])
+        lines.append(f"> **Status:** {'✅ Success' if returncode == 0 else '❌ Error (Exit ' + str(returncode) + ')'}")
+    
+    lines.extend([
+        "",
+        "**Output:**",
+        "```",
+        clean_stdout,
+        "```"
+    ])
+    
     if clean_stderr:
-        body.extend(["", "Error output:", "", clean_stderr])
-    return "\n".join(["```", "\n".join(body), "```"])
+        lines.extend([
+            "",
+            "**Error details:**",
+            "```",
+            clean_stderr,
+            "```"
+        ])
+    return "\n".join(lines)
 
 
 def _format_agent_result(payload: dict[str, Any], event_name: str | None = None) -> str:
@@ -134,18 +153,20 @@ def _format_agent_result(payload: dict[str, Any], event_name: str | None = None)
 
     # 5. Build the UI
     if refined and isinstance(refined, str) and refined.strip():
-        # If we have a nice refined answer, just return it (concise view)
+        # If we have a nice refined answer, keep it clean
         return refined.strip()
 
-    # Fallback to technical block for raw tool results
-    lines = [f"Operation finished with **{status}**."]
+    # Fallback for raw tool results
+    kind_label = f"**{event_name.split('.')[0].title()}** " if event_name else ""
+    status_icon = "✅" if status == "success" else "❌"
     
-    # Identify agent kind if possible
-    kind = event_name.split(".")[0] if event_name else "agent"
-    if kind:
-        lines[-1] = f"**{kind.title()}** operation finished with **{status}**."
-
-    lines.extend(["", _command_output_details(str(op or "unknown"), str(stdout or ""), str(stderr or ""), rc)])
+    lines = [
+        f"### {status_icon} {kind_label}Operation {status.title()}",
+        "",
+        _command_output_details(str(op or "unknown"), str(stdout or ""), str(stderr or ""), rc),
+        "",
+        "---"
+    ]
     return "\n".join(lines)
 
 
