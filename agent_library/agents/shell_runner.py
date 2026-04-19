@@ -508,7 +508,7 @@ def _execute_command(command: str, stdin_data: Any = None):
             input=stdin_text,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
     except subprocess.TimeoutExpired:
         return {

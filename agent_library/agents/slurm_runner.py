@@ -342,11 +342,17 @@ def _llm_slurm_command(task: str) -> dict[str, Any]:
         "- Use --format=JobID,JobName,State,Elapsed,End for duration/timing questions.\n"
         "- Use --state=COMPLETED|FAILED|TIMEOUT to filter results.\n\n"
 
-        "3. CLUSTER & NODE STATE (sinfo):\n"
+        "3. AGGREGATION & COUNTS:\n"
+        "- For 'how many' or 'count' questions, generate the command that returns exactly the list of matching objects.\n"
+        "- Example: 'how many non-running jobs' -> squeue -h -t PENDING,CONFIGURING,STOPPED,SUSPENDED\n"
+        "- Example: 'how many failed jobs' -> sacct -X -P --state=FAILED\n"
+        "- The synthesizer will perform the final count on the lines returned.\n\n"
+
+        "4. CLUSTER & NODE STATE (sinfo):\n"
         "- Use for 'node status', 'partition info', 'available resources', or 'cluster health'.\n"
         "- Use -Nel for detailed node/partition output.\n\n"
 
-        "4. JOB CONTROL (scancel, scontrol):\n"
+        "5. JOB CONTROL (scancel, scontrol):\n"
         "- Use scancel <job_id> to cancel jobs.\n"
         "- Use scontrol show job <job_id> for deep inspection of a specific job.\n\n"
 
@@ -354,10 +360,8 @@ def _llm_slurm_command(task: str) -> dict[str, Any]:
         "CRITICAL CONSTRAINTS\n"
         "====================\n"
         "- NEVER use shell operators (|, >, &, ;, etc.). The gateway only executes single binaries.\n"
-        "- NEVER invent non-existent Slurm flags.\n"
-        "- If the request involves 'how many' or counting, generate a command that returns the LIST of matching items. "
-        "The system will handle the counting.\n"
-        "- If the request is ambiguous, pick the most standard and safe CLI command.\n\n"
+        "- NEVER use '*' or 'all' as argument values.\n"
+        "- If the request is for 'non-running' jobs in squeue, use -t with all states EXCEPT RUNNING (e.g., -t PD,CF,S,ST).\n"
 
         "====================\n"
         "EXAMPLES\n"
@@ -445,7 +449,61 @@ def _format_detail(command: str, returncode: int) -> str:
     return "Slurm command failed."
 
 
-def _result_payload(command: str, args: list[str], gateway_result: dict[str, Any], stats: dict[str, float]) -> dict[str, Any]:
+def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> str:
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL")
+    model = os.getenv("LLM_OPS_MODEL")
+    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
+    if not api_key:
+        return ""
+    if api_key.startswith("sk-") and api_key.lower() != "dummy":
+        base_url = "https://api.openai.com/v1"
+        if not model:
+            model = "gpt-4.1"
+    elif not base_url:
+        base_url = "https://api.openai.com/v1"
+    if not model:
+        model = "gpt-4o-mini"
+
+    prompt = (
+        "You are an expert Slurm output analyzer. Your task is to answer the user's question "
+        "based ONLY on the provided Slurm command output.\n\n"
+        f"User Question: {task}\n"
+        f"Command executed: {command}\n"
+        "Output:\n"
+        "```\n"
+        f"{stdout[:50000]}\n"  # Safety limit for context window
+        "```\n"
+        f"Errors (if any):\n{stderr}\n\n"
+        "Instructions:\n"
+        "- If the user asked for a count, return just the number or a very short sentence with the count.\n"
+        "- If the user asked for details, summarize them accurately.\n"
+        "- Be concise and factual.\n"
+        "- If the output is empty or errors occurred, explain what happened.\n"
+        "Final Answer:"
+    )
+
+    try:
+        response = requests.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a concise Slurm data processor."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+            },
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return ""
+
+
+def _result_payload(command: str, args: list[str], gateway_result: dict[str, Any], stats: dict[str, float], refined_answer: str = "") -> dict[str, Any]:
     returncode = int(gateway_result.get("returncode", 1))
     stdout = str(gateway_result.get("stdout", "") or "")
     stderr = str(gateway_result.get("stderr", "") or "")
@@ -461,8 +519,11 @@ def _result_payload(command: str, args: list[str], gateway_result: dict[str, Any
         "ok": returncode == 0,
         "kind": _command_kind(command),
     }
+    if refined_answer:
+        result["refined_answer"] = refined_answer
+
     return {
-        "detail": _format_detail(command, returncode),
+        "detail": refined_answer or _format_detail(command, returncode),
         "command": " ".join([command, *args]).strip(),
         "stats": stats,
         "result": result,
@@ -519,7 +580,18 @@ def handle_event(req: EventRequest):
         gateway_result = _gateway_execute(command, args)
         stats["gateway_roundtrip_ms"] = _elapsed_ms(gateway_started)
         stats["total_ms"] = _elapsed_ms(started)
-        payload = _result_payload(command, args, gateway_result, stats)
+
+        # Optional: Refine the result using an LLM if a specific question was asked
+        refined_answer = ""
+        if instruction.get("operation") == "query_from_request" and instruction.get("question"):
+            refined_answer = _llm_process_result(
+                instruction.get("question"),
+                " ".join([command, *args]),
+                gateway_result.get("stdout", ""),
+                gateway_result.get("stderr", "")
+            )
+
+        payload = _result_payload(command, args, gateway_result, stats, refined_answer)
         if payload["returncode"] != 0:
             return {
                 "emits": [
