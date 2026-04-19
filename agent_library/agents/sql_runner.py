@@ -662,6 +662,13 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
         "For one query return exactly {\"sql\":\"...\",\"reason\":\"...\"}. "
         "When the user explicitly asks for separate queries, return exactly "
         "{\"queries\":[{\"label\":\"...\",\"sql\":\"...\",\"reason\":\"...\"}]}.\n"
+        "3. AGGREGATION & COUNTS:\n"
+        "- For 'how many' or 'count' questions about entities matching a criteria:\n"
+        "  * If the criteria involves a simple filter, use COUNT(*).\n"
+        "  * If the criteria involves a count or aggregate of related items (requiring GROUP BY and HAVING), ALWAYS use a subquery to get the final total.\n"
+        "  * INCORRECT: SELECT COUNT(ID) FROM table GROUP BY ID HAVING COUNT(items) > 5 (This returns many rows of '1').\n"
+        "  * CORRECT: SELECT COUNT(*) FROM (SELECT ID FROM table GROUP BY ID HAVING COUNT(items) > 5) as sub.\n\n"
+
         "Rules:\n"
         "- Generate one read-only query unless the user explicitly asks for separate queries.\n"
         "- If multiple queries are requested, put all query objects inside one top-level JSON object under the queries array.\n"
@@ -680,7 +687,12 @@ def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
         "- Use foreign-key relationships from the schema for joins.\n"
         "- Prefer SELECT or WITH queries. Do not generate mutating SQL.\n"
         "- Add a reasonable LIMIT unless the user asks for aggregation only.\n"
-        "- Use the SQL dialect from the schema.\n"
+        "- Use the SQL dialect from the schema.\n\n"
+
+        "EXAMPLES:\n"
+        "Q: how many patients have more than 5 studies\n"
+        "A: {\"sql\":\"SELECT COUNT(*) FROM (SELECT \\\"PatientID\\\" FROM \\\"flathr\\\".\\\"Study\\\" GROUP BY \\\"PatientID\\\" HAVING COUNT(\\\"StudyInstanceUID\\\") > 5) AS sub;\",\"reason\":\"Counting total patients meeting the study count threshold using a subquery to avoid per-group counts.\"}\n\n"
+
         "Schema:\n"
         f"{_schema_summary(schema)}\n"
         f"{_schema_identifier_catalog(schema)}\n"
