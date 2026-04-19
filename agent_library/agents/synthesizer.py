@@ -500,7 +500,8 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                 step_outcomes.append({
                     "step_id": step.get("id"),
                     "task": step.get("task"),
-                    "outcome": best_summary.strip()
+                    "outcome": best_summary.strip(),
+                    "local_reduction_command": payload.get("local_reduction_command") or payload.get("result", {}).get("local_reduction_command")
                 })
 
         # Construction of a unified summary to prevent last-step bias
@@ -588,6 +589,7 @@ def _build_prompt(req: EventRequest) -> str:
         "Requirements:\n"
         "- Answer the user's original request directly.\n"
         "- Look for a 'refined_answer' or 'detail' field in the source JSON; this is the high-quality summary from the agent. Use it as the primary source for your response.\n"
+        "- If a 'local_reduction_command' is present for a step, it means the agent performed a 'Compute Locally' step to reduce a large dataset. You may mention this briefly in your summary if it helps the user understand how the calculation was performed (e.g., 'Calculated via local awk script').\n"
         "- Output only the final answer. Do not explain your formatting choices.\n"
         "- Return concise Markdown unless the requested format is JSON or plain text.\n"
         "- Prefer Markdown tables for tabular data, inventories, comparisons, status reports, and anything requested as a table.\n"

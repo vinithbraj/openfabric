@@ -236,15 +236,15 @@ def _llm_generate_reduction_command(task: str, original_cmd: str, sample_stdout:
         return ""
 
 
-def _llm_summarize_locally(task: str, original_cmd: str, stdout: str) -> str:
+def _llm_summarize_locally(task: str, original_cmd: str, stdout: str) -> tuple[str, str]:
     # Phase 9: Local Data Processing Loop
     if len(stdout) < 5000:
-        return ""
+        return "", ""
 
     sample = stdout[:5000]
     reduction_cmd = _llm_generate_reduction_command(task, original_cmd, sample)
     if not reduction_cmd:
-        return ""
+        return "", ""
 
     try:
         proc_result = subprocess.run(
@@ -256,10 +256,10 @@ def _llm_summarize_locally(task: str, original_cmd: str, stdout: str) -> str:
             timeout=30
         )
         if proc_result.returncode == 0:
-            return proc_result.stdout.strip()
+            return proc_result.stdout.strip(), reduction_cmd
     except Exception:
         pass
-    return ""
+    return "", ""
 
 
 def _is_blocked(command: str) -> bool:
@@ -601,8 +601,9 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
 
     # Attempt local reduction for large outputs (Phase 9)
     refined_answer = ""
+    local_reduction_command = ""
     if task and completed.returncode == 0 and len(completed.stdout) > 5000:
-        refined_answer = _llm_summarize_locally(task, command, completed.stdout)
+        refined_answer, local_reduction_command = _llm_summarize_locally(task, command, completed.stdout)
         if refined_answer:
             _debug_log(f"Local reduction successful. Summary: {refined_answer[:100]}...")
     
@@ -612,6 +613,7 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
                 "event": "shell.result",
                 "payload": {
                     "command": command,
+                    "local_reduction_command": local_reduction_command or None,
                     "stdout": completed.stdout.strip(),
                     "stderr": completed.stderr.strip(),
                     "returncode": completed.returncode,

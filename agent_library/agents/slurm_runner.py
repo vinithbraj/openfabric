@@ -504,16 +504,17 @@ def _llm_generate_local_command(task: str, command: str, sample_stdout: str) -> 
         return ""
 
 
-def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> str:
+def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> tuple[str, str]:
     try:
         api_key, base_url, timeout_seconds, model = _llm_api_settings()
     except Exception as exc:
         _debug_log(f"Synthesis skipped: API settings missing ({exc})")
-        return ""
+        return "", ""
 
     # Phase 7: Local Data Processing Loop
     processed_stdout = stdout
     is_processed_locally = False
+    local_reduction_command = ""
     
     # Only attempt local processing for large outputs or if specifically requested (implied for stats)
     if len(stdout) > 5000:
@@ -533,6 +534,7 @@ def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> st
                 if proc_result.returncode == 0:
                     processed_stdout = proc_result.stdout
                     is_processed_locally = True
+                    local_reduction_command = reduction_cmd
                     _debug_log(f"Local processing successful. Reduced data size: {len(processed_stdout)}")
                 else:
                     _debug_log(f"Local processing command failed (code {proc_result.returncode}): {proc_result.stderr}")
@@ -586,13 +588,13 @@ def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> st
         answer = response.json()["choices"][0]["message"]["content"].strip()
         if is_truncated and "truncated" not in answer.lower():
             answer += " (Note: Based on truncated output)"
-        return answer
+        return answer, local_reduction_command
     except Exception as exc:
         _debug_log(f"Synthesis failed: {type(exc).__name__}: {exc}")
-        return ""
+        return "", ""
 
 
-def _result_payload(command: str, args: list[str], gateway_result: dict[str, Any], stats: dict[str, float], refined_answer: str = "") -> dict[str, Any]:
+def _result_payload(command: str, args: list[str], gateway_result: dict[str, Any], stats: dict[str, float], refined_answer: str = "", local_reduction_command: str = "") -> dict[str, Any]:
     returncode = int(gateway_result.get("returncode", 1))
     stdout = str(gateway_result.get("stdout", "") or "")
     stderr = str(gateway_result.get("stderr", "") or "")
@@ -614,6 +616,7 @@ def _result_payload(command: str, args: list[str], gateway_result: dict[str, Any
     return {
         "detail": refined_answer or _format_detail(command, returncode),
         "command": " ".join([command, *args]).strip(),
+        "local_reduction_command": local_reduction_command or None,
         "stats": stats,
         "result": result,
         "stdout": stdout,
@@ -672,15 +675,16 @@ def handle_event(req: EventRequest):
 
         # Optional: Refine the result using an LLM if a specific question was asked
         refined_answer = ""
+        local_reduction_command = ""
         if instruction.get("operation") == "query_from_request" and instruction.get("question"):
-            refined_answer = _llm_process_result(
+            refined_answer, local_reduction_command = _llm_process_result(
                 instruction.get("question"),
                 " ".join([command, *args]),
                 gateway_result.get("stdout", ""),
                 gateway_result.get("stderr", "")
             )
 
-        payload = _result_payload(command, args, gateway_result, stats, refined_answer)
+        payload = _result_payload(command, args, gateway_result, stats, refined_answer, local_reduction_command)
         if payload["returncode"] != 0:
             return {
                 "emits": [
