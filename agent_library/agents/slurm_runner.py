@@ -78,6 +78,7 @@ SLURM_COMMAND_CATALOG = {
     "squeue": "queued and running jobs",
     "sacct": "historical accounting data via slurmdbd",
     "scontrol": "show, hold, release, requeue, update, suspend, and resume objects",
+    "scancel": "cancel or signal Slurm jobs",
     "sreport": "aggregated accounting reports via slurmdbd",
     "sshare": "fairshare and association usage",
     "sacctmgr": "accounting associations, users, and accounts",
@@ -167,6 +168,11 @@ def _is_slurm_task(task: str) -> bool:
             "qos",
             "accounting",
             "scancel",
+            "hpc",
+            "scheduler",
+            "gpu",
+            "worker",
+            "compute",
         )
     )
 
@@ -308,88 +314,66 @@ def _llm_slurm_command(task: str) -> dict[str, Any]:
     context = _get_slurm_context()
 
     prompt = (
-        "You generate exactly one valid Slurm CLI command for a remote execution gateway.\n"
+        "You are an expert Slurm administrator. Your task is to generate exactly one valid Slurm CLI command "
+        "for a remote execution gateway based on a natural-language request.\n\n"
+
         "Return STRICT JSON only in the form {\"command\":\"...\",\"args\":[...],\"reason\":\"...\"}.\n\n"
 
-        "Cluster context:\n"
+        "Cluster Context (Current State):\n"
         f"- Partitions: {context.get('partitions')}\n"
         f"- Node states: {context.get('node_states')}\n"
         f"- Allowed commands: {context.get('allowed_commands')}\n\n"
 
         "====================\n"
-        "INTENT → COMMAND RULES\n"
+        "COMMAND GENERATION RULES\n"
         "====================\n"
 
-        "1. CURRENT QUEUE / LIVE JOBS:\n"
-        "- Use squeue\n"
-        "- Examples: queued jobs, pending jobs, running jobs, jobs right now\n"
-        "- Use filters:\n"
-        "  * pending → -t PENDING\n"
-        "  * running → -t RUNNING\n"
-        "  * specific user → -u <user>\n"
-        "- If querying ALL users → DO NOT include -u\n\n"
+        "1. CURRENT QUEUE (squeue):\n"
+        "- Use for 'queued', 'pending', 'running', 'active', or 'current' jobs.\n"
+        "- Flags:\n"
+        "  * -h: Suppress headers (preferred for data extraction).\n"
+        "  * -t <STATE>: Filter by state (PENDING, RUNNING, COMPLETING, etc.).\n"
+        "  * -u <USER>: Filter by specific user.\n"
+        "- If querying all jobs across all users, DO NOT include -u.\n\n"
 
-        "2. HISTORICAL / COMPLETED JOBS:\n"
-        "- Use sacct\n"
-        "- ALWAYS include -X and -P\n"
-        "- Examples: completed jobs, failed jobs, past runs\n"
-        "- For time/duration questions → use:\n"
-        "  --format=JobID,Elapsed,State\n\n"
+        "2. HISTORICAL DATA (sacct):\n"
+        "- Use for 'finished', 'completed', 'failed', 'yesterday', 'past', or 'history' requests.\n"
+        "- ALWAYS include -X (show only one line per job) and -P (pipe-separated / parsable).\n"
+        "- Use --format=JobID,JobName,State,Elapsed,End for duration/timing questions.\n"
+        "- Use --state=COMPLETED|FAILED|TIMEOUT to filter results.\n\n"
 
-        "3. CLUSTER / NODE / PARTITION STATE:\n"
-        "- Use sinfo\n"
-        "- Examples: node status, partition availability\n\n"
+        "3. CLUSTER & NODE STATE (sinfo):\n"
+        "- Use for 'node status', 'partition info', 'available resources', or 'cluster health'.\n"
+        "- Use -Nel for detailed node/partition output.\n\n"
 
-        "====================\n"
-        "CRITICAL RULES\n"
-        "====================\n"
-        "- NEVER use '*' or 'all' as argument values\n"
-        "- NEVER invent flags\n"
-        "- NEVER use shell syntax (pipes, redirects, etc.)\n"
-        "- Prefer minimal correct command\n\n"
+        "4. JOB CONTROL (scancel, scontrol):\n"
+        "- Use scancel <job_id> to cancel jobs.\n"
+        "- Use scontrol show job <job_id> for deep inspection of a specific job.\n\n"
 
         "====================\n"
-        "SPECIAL HANDLING\n"
+        "CRITICAL CONSTRAINTS\n"
         "====================\n"
-
-        "COUNT / HOW MANY:\n"
-        "- Generate the command that RETURNS the matching rows\n"
-        "- DO NOT attempt to count in the command\n"
-        "- The system will count the rows\n\n"
-
-        "TIME / DURATION QUESTIONS:\n"
-        "- Use sacct (NOT squeue)\n"
-        "- Include Elapsed field\n"
-        "- Example fields:\n"
-        "  --format=JobID,JobName,Elapsed,State\n\n"
+        "- NEVER use shell operators (|, >, &, ;, etc.). The gateway only executes single binaries.\n"
+        "- NEVER invent non-existent Slurm flags.\n"
+        "- If the request involves 'how many' or counting, generate a command that returns the LIST of matching items. "
+        "The system will handle the counting.\n"
+        "- If the request is ambiguous, pick the most standard and safe CLI command.\n\n"
 
         "====================\n"
-        "EXAMPLES (FOLLOW EXACTLY)\n"
+        "EXAMPLES\n"
         "====================\n"
 
-        "Q: how many jobs are pending\n"
-        "A:\n"
-        "{\"command\":\"squeue\",\"args\":[\"-h\",\"-t\",\"PENDING\"]}\n\n"
+        "Q: how many pending jobs are there\n"
+        "A: {\"command\":\"squeue\",\"args\":[\"-h\",\"-t\",\"PENDING\"],\"reason\":\"Listing pending jobs to be counted.\"}\n\n"
 
-        "Q: how many jobs are running\n"
-        "A:\n"
-        "{\"command\":\"squeue\",\"args\":[\"-h\",\"-t\",\"RUNNING\"]}\n\n"
+        "Q: show failed jobs from yesterday\n"
+        "A: {\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--state=FAILED\",\"--starttime=yesterday\"],\"reason\":\"Querying historical job database for failed jobs.\"}\n\n"
+        
+        "Q: status of nodes in the 'gpu' partition\n"
+        "A: {\"command\":\"sinfo\",\"args\":[\"-p\",\"gpu\"],\"reason\":\"Checking status of gpu partition.\"}\n\n"
 
-        "Q: show all queued jobs\n"
-        "A:\n"
-        "{\"command\":\"squeue\",\"args\":[\"-h\"]}\n\n"
-
-        "Q: how long did jobs take to complete\n"
-        "A:\n"
-        "{\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--format=JobID,JobName,Elapsed,State\"]}\n\n"
-
-        "Q: show completed jobs\n"
-        "A:\n"
-        "{\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--state=COMPLETED\"]}\n\n"
-
-        "Q: show failed jobs\n"
-        "A:\n"
-        "{\"command\":\"sacct\",\"args\":[\"-X\",\"-P\",\"--state=FAILED\"]}\n\n"
+        "Q: cancel job 5521\n"
+        "A: {\"command\":\"scancel\",\"args\":[\"5521\"],\"reason\":\"Cancelling specific job ID.\"}\n\n"
 
         f"User request: {task}"
     )

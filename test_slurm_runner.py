@@ -79,6 +79,23 @@ class SlurmRunnerTests(unittest.TestCase):
         with patch.dict("os.environ", {"SLURM_GATEWAY_HOST": "10.0.0.8", "SLURM_GATEWAY_PORT": "9001"}, clear=False):
             self.assertEqual(_gateway_base_url(), "http://10.0.0.8:9001")
 
+    def test_is_slurm_task_new_keywords(self):
+        from agent_library.agents.slurm_runner import _is_slurm_task
+        self.assertTrue(_is_slurm_task("check gpu availability"))
+        self.assertTrue(_is_slurm_task("scheduler status"))
+        self.assertTrue(_is_slurm_task("list compute nodes"))
+        self.assertFalse(_is_slurm_task("list files"))
+
+    def test_instruction_to_command_scancel(self):
+        # We need to test how scancel is handled via execute_command
+        instruction = {
+            "operation": "execute_command",
+            "command": "scancel 12345"
+        }
+        command, args = _instruction_to_command(instruction, "cancel job")
+        self.assertEqual(command, "scancel")
+        self.assertEqual(args, ["12345"])
+
 
 class SlurmGatewayTests(unittest.TestCase):
     def test_allowed_commands_default_contains_sinfo(self):
