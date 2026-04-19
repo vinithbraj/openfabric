@@ -510,6 +510,7 @@ def _build_prompt(req: EventRequest) -> str:
         f"Include executed SQL query: {include_sql}\n"
         "Requirements:\n"
         "- Answer the user's original request directly.\n"
+        "- Look for a 'refined_answer' or 'detail' field in the source JSON; this is the high-quality summary from the agent. Use it as the primary source for your response.\n"
         "- Output only the final answer. Do not explain your formatting choices.\n"
         "- Return concise Markdown unless the requested format is JSON or plain text.\n"
         "- Prefer Markdown tables for tabular data, inventories, comparisons, status reports, and anything requested as a table.\n"
