@@ -537,10 +537,15 @@ class Engine:
             "task": step_payload.get("task", ""),
             "message": extra.pop("message", f"Step {step_id} {stage}."),
         }
-        command = step_payload.get("command")
+        command = extra.pop("command", step_payload.get("command"))
         if isinstance(command, str) and command.strip():
             payload["command"] = command
-        sql = step_payload.get("sql")
+            
+        local_reduction_command = extra.pop("local_reduction_command", None)
+        if isinstance(local_reduction_command, str) and local_reduction_command.strip():
+            payload["local_reduction_command"] = local_reduction_command
+            
+        sql = extra.pop("sql", step_payload.get("sql"))
         if isinstance(sql, str) and sql.strip():
             payload["sql"] = sql
         for key, value in extra.items():
@@ -1112,6 +1117,7 @@ class Engine:
                 result=result_summary,
                 sql=primary_payload.get("sql") if isinstance(primary_payload, dict) else None,
                 command=primary_payload.get("command") if isinstance(primary_payload, dict) else None,
+                local_reduction_command=primary_payload.get("local_reduction_command") if isinstance(primary_payload, dict) else None,
             )
             self._record_context_value(context, step_id, primary_event, primary_payload, primary_value)
             self._record_step_result(

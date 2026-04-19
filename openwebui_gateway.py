@@ -894,6 +894,11 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                 lines.append(summary)
             if stats_line:
                 lines.append(f"**Timing:** {stats_line}")
+            
+            local_cmd = payload.get("local_reduction_command")
+            if isinstance(local_cmd, str) and local_cmd.strip():
+                lines.append(f"**Local Data Reduction:** `{_truncate_progress(local_cmd, 360)}`")
+                
             if isinstance(sql, str) and sql.strip():
                 lines.append(f"**SQL:** `{_truncate_progress(sql, 360)}`")
             command = payload.get("command")
