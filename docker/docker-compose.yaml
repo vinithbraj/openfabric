@@ -8,14 +8,6 @@ services:
       - "8310:8310"
     volumes:
       - ..:/app
-    environment:
-      - LLM_OPS_API_KEY=${LLM_OPS_API_KEY}
-      - LLM_OPS_MODEL=${LLM_OPS_MODEL:-gpt-4o-mini}
-      - LLM_OPS_SYNTH_MODEL=${LLM_OPS_SYNTH_MODEL:-gpt-4o-mini}
-      - LLM_OPS_BASE_URL=${LLM_OPS_BASE_URL:-https://api.openai.com/v1}
-      - SLURM_GATEWAY_HOST=${SLURM_GATEWAY_HOST}
-      - SLURM_GATEWAY_PORT=${SLURM_GATEWAY_PORT}
-      - SQL_AGENT_DSN=${SQL_AGENT_DSN}
     restart: unless-stopped
 
 networks:
