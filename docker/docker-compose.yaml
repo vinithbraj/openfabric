@@ -7,7 +7,6 @@ services:
     ports:
       - "8310:8310"
     volumes:
-      - ..:/app
       - ..:/opt/src
     restart: unless-stopped
 
