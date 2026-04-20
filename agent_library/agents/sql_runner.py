@@ -1104,7 +1104,9 @@ def handle_event(req: EventRequest):
                                 "detail": "Database schema introspected.",
                                 "schema": schema,
                                 "stats": stats,
-                                "result": schema,
+                                # NOTE: result intentionally omitted for schema introspection.
+                                # Setting result=schema caused the full schema to be sent twice
+                                # to the synthesizer, once via schema and once via result.
                             },
                         }
                     ]

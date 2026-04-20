@@ -289,7 +289,12 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
             lines.append("")
             lines.append(f"Showing up to {limit} rows.")
     else:
-        lines.append(json.dumps(result, indent=2, ensure_ascii=True))
+        # Check if this is actually a schema object masquerading as a plain result
+        schema_check = result if isinstance(result, dict) else {}
+        if "dialect" in schema_check and "tables" in schema_check:
+            lines.append(_format_schema_answer(schema_check))
+        else:
+            lines.append(json.dumps(result, indent=2, ensure_ascii=True))
 
     if isinstance(queries, list) and queries:
         lines.extend(["", "**SQL used**"])
@@ -303,6 +308,42 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
             lines.extend(["", f"{index}. {label}", "", "```sql", query_sql.strip(), "```"])
     elif isinstance(sql, str) and sql.strip():
         lines.extend(["", "**SQL used**", "", "```sql", sql.strip(), "```"])
+    return "\n".join(lines).strip()
+
+def _format_schema_answer(schema: dict[str, Any]) -> str:
+    """Produce a compact Markdown summary of a SQL schema object."""
+    dialect = schema.get("dialect", "unknown")
+    tables = schema.get("tables", {})
+    if not isinstance(tables, dict):
+        return json.dumps(schema, indent=2, ensure_ascii=True)
+
+    lines = [f"**Database schema** (`{dialect}`)\n"]
+    for table_name, table_info in sorted(tables.items()):
+        if not isinstance(table_info, dict):
+            continue
+        columns = table_info.get("columns", [])
+        pks = table_info.get("primary_keys", [])
+        fks = table_info.get("foreign_keys", [])
+        col_names = ", ".join(
+            f"`{c['name']}`" if isinstance(c, dict) else f"`{c}`" for c in columns
+        )
+        pk_str = ", ".join(f"`{k}`" for k in pks) if pks else "—"
+        fk_str = ""
+        if fks:
+            fk_parts = []
+            for fk in fks:
+                if isinstance(fk, dict):
+                    src = fk.get("constrained_columns", [])
+                    ref = fk.get("referred_table", "?")
+                    fk_parts.append(f"{', '.join(src)} → {ref}")
+            if fk_parts:
+                fk_str = f"  FK: {'; '.join(fk_parts)}\n"
+        lines.append(f"**{table_name}** ({len(columns)} columns, PK: {pk_str})")
+        if col_names:
+            lines.append(f"  Columns: {col_names}")
+        if fk_str:
+            lines.append(fk_str.rstrip())
+        lines.append("")
     return "\n".join(lines).strip()
 
 
@@ -544,11 +585,24 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
         else:
             compact_result = result
 
+        schema = req.payload.get("schema")
+        # Compact the schema: send only a table-name->column-count map to avoid
+        # token overflow. The synthesizer LLM doesn't need the full DDL.
+        compact_schema = None
+        if isinstance(schema, dict) and "tables" in schema:
+            compact_schema = {
+                "dialect": schema.get("dialect", "unknown"),
+                "tables": {
+                    tbl: {"column_count": len(info.get("columns", []))} if isinstance(info, dict) else {}
+                    for tbl, info in schema.get("tables", {}).items()
+                },
+            }
+
         return {
             "event": req.event,
             "detail": req.payload.get("detail"),
             "sql": req.payload.get("sql"),
-            "schema": req.payload.get("schema"),
+            "schema": compact_schema,
             "result": compact_result,
         }
     if req.event == "slurm.result":

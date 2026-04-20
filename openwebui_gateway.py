@@ -602,7 +602,16 @@ def _stream_synthesis_parts(
                     yield content
         if yielded:
             return
-    except Exception:
+    except Exception as exc:
+        import traceback
+        if not yielded:
+            # Only log when we haven't streamed anything yet — if we partially
+            # yielded and then hit an error the client already received data.
+            print(
+                f"[gateway] synthesis stream error (falling back to local answer): "
+                f"{exc!r}\n{traceback.format_exc()}",
+                flush=True,
+            )
         if yielded:
             return
         if cancel_event is not None and cancel_event.is_set():
