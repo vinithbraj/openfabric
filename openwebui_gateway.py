@@ -908,7 +908,28 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             if not command and isinstance(result, dict):
                 command = result.get("command")
             if isinstance(command, str) and command.strip():
-                lines.append(f"**Command:** `{_truncate_progress(command, 360)}`")
+                lines.append("**Command**")
+                lines.extend(_format_preformatted_markdown(command.strip()))
+
+            # Raw Output Visibility
+            raw_stdout = payload.get("stdout")
+            raw_stderr = payload.get("stderr")
+            if isinstance(result, dict):
+                raw_stdout = raw_stdout or result.get("stdout")
+                raw_stderr = raw_stderr or result.get("stderr")
+                if not raw_stdout and isinstance(result.get("slurm"), dict):
+                    raw_stdout = result["slurm"].get("stdout")
+                    raw_stderr = raw_stderr or result["slurm"].get("stderr")
+
+            clean_stdout = _clean_terminal_output(raw_stdout)
+            if clean_stdout:
+                lines.append("**Output**")
+                lines.extend(_format_preformatted_markdown(clean_stdout))
+
+            clean_stderr = _clean_terminal_output(raw_stderr)
+            if clean_stderr:
+                lines.append("**Error Output**")
+                lines.extend(_format_preformatted_markdown(clean_stderr))
             return _trace_block(lines)
         if stage == "failed":
             error = payload.get("error") or payload.get("message") or "Step failed."
