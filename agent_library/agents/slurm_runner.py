@@ -253,6 +253,70 @@ def _llm_api_settings() -> tuple[str, str, float, str]:
         model = "gpt-4o-mini"
     return api_key, base_url.rstrip("/"), timeout_seconds, model
 
+
+def _is_usage_error(stderr: str) -> bool:
+    if not isinstance(stderr, str):
+        return False
+    stderr_lc = stderr.lower()
+    return any(
+        term in stderr_lc
+        for term in (
+            "unrecognized option",
+            "invalid option",
+            "usage:",
+            "invalid argument",
+            "illegal option",
+            "not a valid",
+            "invalid value",
+        )
+    )
+
+
+def _llm_repair_slurm_command(task: str, failed_command: str, error_message: str, help_text: str = "") -> dict[str, Any]:
+    api_key, base_url, timeout_seconds, model = _llm_api_settings()
+
+    prompt = (
+        "You are an expert Slurm administrator. A previously generated Slurm command failed due to a syntax or usage error.\n"
+        "Your task is to fix the command based on the error message and (if available) the command's help documentation.\n\n"
+
+        f"User Task: {task}\n"
+        f"Failed Command: {failed_command}\n"
+        f"Error Message: {error_message}\n\n"
+    )
+
+    if help_text:
+        prompt += f"Command Help Output:\n```\n{help_text[:5000]}\n```\n\n"
+
+    prompt += (
+        "Instructions:\n"
+        "- Generate a corrected version of the command that achieves the user's task and resolves the error.\n"
+        "- Return STRICT JSON only: {\"command\":\"...\",\"args\":[...],\"reason\":\"...\"}.\n"
+        "- Ensure all flags are valid for the current Slurm version based on the help output.\n"
+        "Corrected Command JSON:"
+    )
+
+    response = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a Slurm command repair expert. Return only JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+    log_raw("SLURM_REPAIR_LLM_RAW", content)
+    start = content.find("{")
+    end = content.rfind("}")
+    if start == -1 or end == -1:
+        raise RuntimeError("Could not parse Slurm repair JSON.")
+    return json.loads(content[start : end + 1])
+
 # NEW: Slurm context cache
 _SLURM_CONTEXT_CACHE: dict[str, Any] = {}
 _SLURM_CONTEXT_TS: float = 0.0
@@ -664,55 +728,93 @@ def handle_event(req: EventRequest):
 
     started = time.perf_counter()
     stats: dict[str, float] = {}
-    try:
-        command_started = time.perf_counter()
-        command, args = _instruction_to_command(instruction, task)
-        stats["command_planning_ms"] = _elapsed_ms(command_started)
-        gateway_started = time.perf_counter()
-        gateway_result = _gateway_execute(command, args)
-        stats["gateway_roundtrip_ms"] = _elapsed_ms(gateway_started)
-        stats["total_ms"] = _elapsed_ms(started)
+    last_error = ""
 
-        # Optional: Refine the result using an LLM if a specific question was asked
-        refined_answer = ""
-        local_reduction_command = ""
-        if instruction.get("operation") == "query_from_request" and instruction.get("question"):
-            refined_answer, local_reduction_command = _llm_process_result(
-                instruction.get("question"),
-                " ".join([command, *args]),
-                gateway_result.get("stdout", ""),
-                gateway_result.get("stderr", "")
-            )
+    for attempt in range(2):
+        try:
+            command_started = time.perf_counter()
+            command, args = _instruction_to_command(instruction, task)
+            stats[f"command_planning_ms_try{attempt+1}"] = _elapsed_ms(command_started)
+            
+            gateway_started = time.perf_counter()
+            gateway_result = _gateway_execute(command, args)
+            stats[f"gateway_roundtrip_ms_try{attempt+1}"] = _elapsed_ms(gateway_started)
+            
+            # Check for usage errors that might be repairable
+            if gateway_result.get("returncode", 0) != 0:
+                stderr = gateway_result.get("stderr", "")
+                if _is_usage_error(stderr) and attempt == 0:
+                    _debug_log(f"Detected usage error, attempting repair: {stderr.strip()}")
+                    
+                    # Try to fetch help context for repair
+                    help_text = ""
+                    try:
+                        help_res = _gateway_execute(command, ["--help"])
+                        help_text = help_res.get("stdout", "") or help_res.get("stderr", "")
+                    except Exception as e:
+                        _debug_log(f"Could not fetch help text for repair: {e}")
+                    
+                    # Repair the command via LLM
+                    repaired = _llm_repair_slurm_command(task, f"{command} {' '.join(args)}", stderr, help_text)
+                    
+                    # Update instruction for next attempt
+                    instruction = {
+                        "operation": "execute_command",
+                        "command": repaired.get("command"),
+                        "args": repaired.get("args"),
+                        "question": task
+                    }
+                    last_error = stderr
+                    continue
 
-        payload = _result_payload(command, args, gateway_result, stats, refined_answer, local_reduction_command)
-        if payload["returncode"] != 0:
+            # If we reach here, we either succeeded or failed in a non-repairable way (or out of retries)
+            stats["total_ms"] = _elapsed_ms(started)
+
+            # Optional: Refine the result using an LLM if a specific question was asked
+            refined_answer = ""
+            local_reduction_command = ""
+            if gateway_result.get("returncode") == 0 and instruction.get("operation") == "query_from_request" and instruction.get("question"):
+                refined_answer, local_reduction_command = _llm_process_result(
+                    instruction.get("question"),
+                    " ".join([command, *args]),
+                    gateway_result.get("stdout", ""),
+                    gateway_result.get("stderr", "")
+                )
+
+            payload = _result_payload(command, args, gateway_result, stats, refined_answer, local_reduction_command)
+            if payload["returncode"] != 0:
+                return {
+                    "emits": [
+                        {
+                            "event": "task.result",
+                            "payload": {
+                                "detail": f"Slurm command failed: {payload['stderr'] or payload['stdout'] or payload['command']}",
+                                "status": "failed",
+                                "error": payload["stderr"] or payload["stdout"] or payload["command"],
+                                "result": {"ok": False, "stats": stats, "slurm": payload["result"]},
+                            },
+                        }
+                    ]
+                }
+            return {"emits": [{"event": "slurm.result", "payload": payload}]}
+
+        except Exception as exc:
+            if attempt == 0:
+                _debug_log(f"Slurm attempt 1 failed: {exc}. Retrying...")
+                continue
+            
+            stats["total_ms"] = _elapsed_ms(started)
+            _debug_log(f"Slurm task failed after retries: {type(exc).__name__}: {exc}")
             return {
                 "emits": [
                     {
                         "event": "task.result",
                         "payload": {
-                            "detail": f"Slurm command failed: {payload['stderr'] or payload['stdout'] or payload['command']}",
+                            "detail": f"Slurm task failed: {type(exc).__name__}: {exc}",
                             "status": "failed",
-                            "error": payload["stderr"] or payload["stdout"] or payload["command"],
-                            "result": {"ok": False, "stats": stats, "slurm": payload["result"]},
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "result": {"ok": False, "stats": stats} if stats else None,
                         },
                     }
                 ]
             }
-        return {"emits": [{"event": "slurm.result", "payload": payload}]}
-    except Exception as exc:
-        stats["total_ms"] = _elapsed_ms(started)
-        _debug_log(f"Slurm task failed: {type(exc).__name__}: {exc}")
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {
-                        "detail": f"Slurm task failed: {type(exc).__name__}: {exc}",
-                        "status": "failed",
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "result": {"ok": False, "stats": stats} if stats else None,
-                    },
-                }
-            ]
-        }
