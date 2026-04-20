@@ -8,6 +8,7 @@ services:
       - "8310:8310"
     volumes:
       - ..:/opt/src
+    network_mode: host
     restart: unless-stopped
 
 networks:
