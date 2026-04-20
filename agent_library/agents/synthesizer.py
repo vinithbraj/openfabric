@@ -496,6 +496,16 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                 (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("detail")
             )
             
+            if not best_summary or not isinstance(best_summary, str) or not best_summary.strip():
+                # Fallback: Capture the semantic signal of the return code
+                rc = payload.get("returncode")
+                if rc == 0:
+                    best_summary = f"Command succeeded (exit 0)."
+                elif rc is not None:
+                    best_summary = f"Command failed with exit code {rc}."
+                else:
+                    best_summary = "Step completed."
+            
             if best_summary and isinstance(best_summary, str) and best_summary.strip():
                 step_outcomes.append({
                     "step_id": step.get("id"),
@@ -608,6 +618,7 @@ def _build_prompt(req: EventRequest) -> str:
         "- If there are completed steps before a failure, show any useful partial result first, then mention what failed.\n"
         "- If a failed step references unavailable previous results, say which dependency was missing.\n"
         "- If requested format is json, output only valid JSON and no Markdown.\n"
+        "- **CRITICAL**: For 'Existence Checks' (e.g., using `grep -q`, `ls`, `find`, or `test`), the **Return Code (Exit Code)** is your primary signal. An exit code of 0 usually confirms the presence or success of the object/pattern, even if the output is empty. Interpret these correctly (e.g., if `grep -q` succeeded, the answer is 'Yes').\n"
         "- Do not invent facts not present in the source event.\n"
         "- Keep the answer compact, practical, and attractive in a chat UI.\n"
         "Source event JSON:\n"
