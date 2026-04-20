@@ -655,13 +655,16 @@ def _format_stats(stats: Any) -> str | None:
         "schema_ms": "schema",
         "sql_generation_ms": "generate SQL",
         "query_ms": "query",
-        "total_ms": "SQL total",
+        "total_ms": "task took",
     }
     parts = []
     for key, label in labels.items():
         duration = _duration_label(stats.get(key))
         if duration:
-            parts.append(f"{label}: `{duration}`")
+            if key == "total_ms":
+                parts.append(f"{label} `{duration}`")
+            else:
+                parts.append(f"{label}: `{duration}`")
     return ", ".join(parts) if parts else None
 
 
@@ -893,7 +896,7 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             if summary:
                 lines.append(summary)
             if stats_line:
-                lines.append(f"**Timing:** {stats_line}")
+                lines.append(f"**Timing :** {stats_line}")
             
             local_cmd = payload.get("local_reduction_command")
             if isinstance(local_cmd, str) and local_cmd.strip():
@@ -926,7 +929,7 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                 if not stats_line and isinstance(nested_result, dict):
                     stats_line = _format_stats(nested_result.get("stats"))
                 if stats_line:
-                    lines.append(f"**Timing:** {stats_line}")
+                    lines.append(f"**Timing :** {stats_line}")
             return _trace_block(lines)
     if event_name == "shell.result":
         command = payload.get("command", "")
@@ -948,7 +951,7 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             lines.append(f"SQL: `{_truncate_progress(sql, 300)}`")
         stats_line = _format_stats(payload.get("stats"))
         if stats_line:
-            lines.append(f"Timing: {stats_line}")
+            lines.append(f"Timing : {stats_line}")
         return _trace_block(lines)
     if event_name in {"file.content", "notify.result"}:
         return _trace_block([f"Completed {event_name}."])
