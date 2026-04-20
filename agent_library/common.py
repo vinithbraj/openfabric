@@ -1,5 +1,6 @@
+import subprocess
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from pydantic import BaseModel
 
@@ -87,3 +88,71 @@ def json_dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=True, indent=2, default=str)
+
+
+@dataclass(frozen=True)
+class LocalReductionResult:
+    output: str = ""
+    command: str = ""
+    attempts: int = 0
+    error: str = ""
+
+    @property
+    def succeeded(self) -> bool:
+        return bool(self.output and self.command)
+
+
+def serialize_for_stdin(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple, int, float, bool)):
+        return json_dumps(value)
+    return str(value)
+
+
+def run_local_reducer_loop(
+    input_data: Any,
+    generate_command: Callable[[str, str], str],
+    *,
+    max_attempts: int = 3,
+    timeout_seconds: float = 30.0,
+    validate_output: Callable[[str], bool] | None = None,
+) -> LocalReductionResult:
+    stdin_text = serialize_for_stdin(input_data)
+    previous_command = ""
+    previous_error = ""
+
+    for attempt in range(1, max_attempts + 1):
+        command = generate_command(previous_command, previous_error)
+        if not isinstance(command, str) or not command.strip():
+            break
+        command = command.strip()
+        previous_command = command
+
+        try:
+            completed = subprocess.run(
+                command,
+                input=stdin_text,
+                capture_output=True,
+                text=True,
+                shell=True,
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:
+            previous_error = f"{type(exc).__name__}: {exc}"
+            continue
+
+        if completed.returncode != 0:
+            previous_error = completed.stderr.strip() or completed.stdout.strip() or f"Reducer exited with {completed.returncode}"
+            continue
+
+        output = completed.stdout.strip()
+        if validate_output and not validate_output(output):
+            previous_error = "Reducer produced empty or invalid output."
+            continue
+
+        return LocalReductionResult(output=output, command=command, attempts=attempt)
+
+    return LocalReductionResult(command=previous_command, attempts=max_attempts, error=previous_error)

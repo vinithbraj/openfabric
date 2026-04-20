@@ -129,9 +129,13 @@ def _command_output_details(command: str, stdout: str, stderr: str, returncode: 
 def _format_agent_result(payload: dict[str, Any], event_name: str | None = None) -> str:
     """Generic formatter for standard agent result payloads."""
     # 1. Primary human-readable answer (priority)
-    refined = payload.get("detail") or payload.get("refined_answer")
+    refined = payload.get("reduced_result") or payload.get("detail") or payload.get("refined_answer")
     if not refined and isinstance(payload.get("result"), dict):
-        refined = payload["result"].get("refined_answer") or payload["result"].get("detail")
+        refined = (
+            payload["result"].get("reduced_result")
+            or payload["result"].get("refined_answer")
+            or payload["result"].get("detail")
+        )
 
     # 2. Command/Operation
     op = payload.get("command") or payload.get("sql") or payload.get("task")
@@ -356,6 +360,13 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
     status = payload.get("status", "unknown")
     steps = payload.get("steps", [])
     flat_steps = _flatten_workflow_steps(steps if isinstance(steps, list) else [])
+    for step in reversed(flat_steps):
+        step_payload = step.get("payload")
+        if not isinstance(step_payload, dict):
+            continue
+        reduced = step_payload.get("reduced_result") or step_payload.get("refined_answer")
+        if isinstance(reduced, str) and reduced.strip():
+            return reduced.strip()
     sql_results = _extract_sql_results_from_steps(steps if isinstance(steps, list) else [])
     if status == "completed" and sql_results:
         return _format_sql_result_answer(sql_results[-1], task)
@@ -449,6 +460,9 @@ def _fallback_answer(req: EventRequest) -> str:
         return _format_shell_answer(command, returncode, stdout, stderr)
 
     if req.event == "sql.result":
+        reduced = req.payload.get("reduced_result") or req.payload.get("refined_answer")
+        if isinstance(reduced, str) and reduced.strip():
+            return reduced.strip()
         result = req.payload.get("result")
         if isinstance(result, dict):
             return _format_sql_result_answer(result)
@@ -489,6 +503,8 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
         return {
             "event": req.event,
             "command": req.payload.get("command"),
+            "reduced_result": req.payload.get("reduced_result") or req.payload.get("refined_answer"),
+            "local_reduction_command": req.payload.get("local_reduction_command"),
             "stdout": _truncate_if_large(req.payload.get("stdout")),
             "stderr": _truncate_if_large(req.payload.get("stderr"), limit=2000),
             "returncode": req.payload.get("returncode"),
@@ -513,6 +529,7 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                             "sql": payload.get("sql") or result.get("sql"),
                             "queries": result.get("queries"),
                             "columns": result.get("columns"),
+                            "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
                             "rows": compact_rows,
                             "row_count": result.get("row_count"),
                             "limit": result.get("limit"),
@@ -531,8 +548,10 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             
             # Extract the best human-readable summary from this step
             best_summary = (
+                payload.get("reduced_result") or
                 payload.get("refined_answer") or 
                 payload.get("detail") or 
+                (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("reduced_result") or
                 (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("refined_answer") or
                 (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("detail")
             )
@@ -602,6 +621,8 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             "event": req.event,
             "detail": req.payload.get("detail"),
             "sql": req.payload.get("sql"),
+            "reduced_result": req.payload.get("reduced_result") or req.payload.get("refined_answer"),
+            "local_reduction_command": req.payload.get("local_reduction_command"),
             "schema": compact_schema,
             "result": compact_result,
         }
@@ -610,6 +631,8 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             "event": req.event,
             "detail": req.payload.get("detail"),
             "command": req.payload.get("command"),
+            "reduced_result": req.payload.get("reduced_result") or req.payload.get("refined_answer"),
+            "local_reduction_command": req.payload.get("local_reduction_command"),
             "stdout": _truncate_if_large(req.payload.get("stdout")),
             "stderr": _truncate_if_large(req.payload.get("stderr"), limit=2000),
             "returncode": req.payload.get("returncode"),
@@ -652,7 +675,7 @@ def _build_prompt(req: EventRequest) -> str:
         f"Include executed SQL query: {include_sql}\n"
         "Requirements:\n"
         "- Answer the user's original request directly.\n"
-        "- Look for a 'refined_answer' or 'detail' field in the source JSON; this is the high-quality summary from the agent. Use it as the primary source for your response.\n"
+        "- Look for a 'reduced_result', 'refined_answer', or 'detail' field in the source JSON; this is the high-quality reduced summary from the agent. Use it as the primary source for your response.\n"
         "- If a 'local_reduction_command' is present for a step, it means the agent performed a 'Compute Locally' step to reduce a large dataset. You may mention this briefly in your summary if it helps the user understand how the calculation was performed (e.g., 'Calculated via local awk script').\n"
         "- Output only the final answer. Do not explain your formatting choices.\n"
         "- Return concise Markdown unless the requested format is JSON or plain text.\n"

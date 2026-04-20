@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import FastAPI
 import requests
 
-from agent_library.common import EventRequest, EventResponse, task_plan_context
+from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, serialize_for_stdin, task_plan_context
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -191,10 +191,24 @@ def _llm_api_settings():
     return api_key, base_url.rstrip("/"), timeout_seconds, model
 
 
-def _llm_generate_reduction_command(task: str, original_cmd: str, sample_stdout: str) -> str:
+def _llm_generate_reduction_command(
+    task: str,
+    original_cmd: str,
+    sample_stdout: str,
+    previous_command: str = "",
+    previous_error: str = "",
+) -> str:
     api_key, base_url, timeout, model = _llm_api_settings()
     if not api_key:
         return ""
+
+    repair_context = ""
+    if previous_error:
+        repair_context = (
+            "- The previous reducer failed. Generate a corrected command that avoids the prior issue.\n"
+            f"- Previous command: {previous_command}\n"
+            f"- Previous error: {previous_error}\n"
+        )
 
     prompt = (
         "You are an expert shell data analyst. I have a large output from a shell command but I only want to "
@@ -212,6 +226,7 @@ def _llm_generate_reduction_command(task: str, original_cmd: str, sample_stdout:
         "- The command will receive the full output via STDIN.\n"
         "- If the user wants a sum of a column, use awk.\n"
         "- If you cannot generate a reliable processing command, return 'NONE'.\n"
+        f"{repair_context}"
         "Shell Command:"
     )
 
@@ -237,29 +252,22 @@ def _llm_generate_reduction_command(task: str, original_cmd: str, sample_stdout:
 
 
 def _llm_summarize_locally(task: str, original_cmd: str, stdout: str) -> tuple[str, str]:
-    # Phase 9: Local Data Processing Loop
     if len(stdout) < 5000:
         return "", ""
 
     sample = stdout[:5000]
-    reduction_cmd = _llm_generate_reduction_command(task, original_cmd, sample)
-    if not reduction_cmd:
-        return "", ""
-
-    try:
-        proc_result = subprocess.run(
-            reduction_cmd,
-            input=stdout,
-            capture_output=True,
-            text=True,
-            shell=True,
-            timeout=30
-        )
-        if proc_result.returncode == 0:
-            return proc_result.stdout.strip(), reduction_cmd
-    except Exception:
-        pass
-    return "", ""
+    reduction = run_local_reducer_loop(
+        stdout,
+        lambda previous_command, previous_error: _llm_generate_reduction_command(
+            task,
+            original_cmd,
+            sample,
+            previous_command,
+            previous_error,
+        ),
+        validate_output=lambda output: bool(output.strip()),
+    )
+    return reduction.output, reduction.command
 
 
 def _is_blocked(command: str) -> bool:
@@ -533,16 +541,6 @@ def _derive_command_from_task(task: str, structured_input: Any = None):
     return decision["command"]
 
 
-def _serialize_stdin_data(stdin_data: Any) -> str | None:
-    if stdin_data is None:
-        return None
-    if isinstance(stdin_data, str):
-        return stdin_data
-    if isinstance(stdin_data, (dict, list, tuple, int, float, bool)):
-        return json.dumps(stdin_data, ensure_ascii=True, default=str)
-    return str(stdin_data)
-
-
 def _execute_command(command: str, stdin_data: Any = None, task: str = None):
     if _looks_like_metadata_not_command(command):
         return {
@@ -581,7 +579,7 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
         }
 
     try:
-        stdin_text = _serialize_stdin_data(stdin_data)
+        stdin_text = serialize_for_stdin(stdin_data)
         completed = subprocess.run(
             ["/bin/bash", "-lc", command],
             input=stdin_text,
@@ -617,6 +615,7 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
                     "stdout": completed.stdout.strip(),
                     "stderr": completed.stderr.strip(),
                     "returncode": completed.returncode,
+                    "reduced_result": refined_answer or None,
                     "refined_answer": refined_answer or None,
                 },
             }

@@ -8,7 +8,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, task_plan_context
+from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, task_plan_context
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -521,11 +521,25 @@ def _format_detail(command: str, returncode: int) -> str:
     return "Slurm command failed."
 
 
-def _llm_generate_local_command(task: str, command: str, sample_stdout: str) -> str:
+def _llm_generate_local_command(
+    task: str,
+    command: str,
+    sample_stdout: str,
+    previous_command: str = "",
+    previous_error: str = "",
+) -> str:
     try:
         api_key, base_url, timeout_seconds, model = _llm_api_settings()
     except Exception:
         return ""
+
+    repair_context = ""
+    if previous_error:
+        repair_context = (
+            "- The previous reducer failed. Generate a corrected command that avoids the prior issue.\n"
+            f"- Previous command: {previous_command}\n"
+            f"- Previous error: {previous_error}\n"
+        )
 
     prompt = (
         "You are an expert data engineer. I have a large Slurm output but I only want to send the relevant data "
@@ -543,6 +557,7 @@ def _llm_generate_local_command(task: str, command: str, sample_stdout: str) -> 
         "- If the user wants a sum of a column, use awk.\n"
         "- If the user wants to filter lines, use grep.\n"
         "- If you cannot generate a reliable processing command, return 'NONE'.\n"
+        f"{repair_context}"
         "Shell Command:"
     )
 
@@ -575,7 +590,6 @@ def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> tu
         _debug_log(f"Synthesis skipped: API settings missing ({exc})")
         return "", ""
 
-    # Phase 7: Local Data Processing Loop
     processed_stdout = stdout
     is_processed_locally = False
     local_reduction_command = ""
@@ -583,27 +597,24 @@ def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> tu
     # Only attempt local processing for large outputs or if specifically requested (implied for stats)
     if len(stdout) > 5000:
         sample = stdout[:5000]
-        reduction_cmd = _llm_generate_local_command(task, command, sample)
-        if reduction_cmd:
-            try:
-                _debug_log(f"Running local processing command: {reduction_cmd}")
-                proc_result = subprocess.run(
-                    reduction_cmd,
-                    input=stdout,
-                    capture_output=True,
-                    text=True,
-                    shell=True,
-                    timeout=30
-                )
-                if proc_result.returncode == 0:
-                    processed_stdout = proc_result.stdout
-                    is_processed_locally = True
-                    local_reduction_command = reduction_cmd
-                    _debug_log(f"Local processing successful. Reduced data size: {len(processed_stdout)}")
-                else:
-                    _debug_log(f"Local processing command failed (code {proc_result.returncode}): {proc_result.stderr}")
-            except Exception as exc:
-                _debug_log(f"Local processing execution failed: {exc}")
+        reduction = run_local_reducer_loop(
+            stdout,
+            lambda previous_command, previous_error: _llm_generate_local_command(
+                task,
+                command,
+                sample,
+                previous_command,
+                previous_error,
+            ),
+            validate_output=lambda output: bool(output.strip()),
+        )
+        if reduction.succeeded:
+            processed_stdout = reduction.output
+            is_processed_locally = True
+            local_reduction_command = reduction.command
+            _debug_log(f"Local processing successful. Reduced data size: {len(processed_stdout)}")
+        elif reduction.error:
+            _debug_log(f"Local processing failed after retries: {reduction.error}")
 
     # Final Synthesis on (potentially reduced) data
     limit = 50000
@@ -676,11 +687,13 @@ def _result_payload(command: str, args: list[str], gateway_result: dict[str, Any
     }
     if refined_answer:
         result["refined_answer"] = refined_answer
+        result["reduced_result"] = refined_answer
 
     return {
         "detail": refined_answer or _format_detail(command, returncode),
         "command": " ".join([command, *args]).strip(),
         "local_reduction_command": local_reduction_command or None,
+        "reduced_result": refined_answer or None,
         "stats": stats,
         "result": result,
         "stdout": stdout,

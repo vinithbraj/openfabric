@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlparse
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, task_plan_context
+from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, task_plan_context
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -145,6 +145,115 @@ def _llm_summarize_rows(task: str, sql: str, columns: list[str], rows: list[dict
         return response.json()["choices"][0]["message"]["content"].strip()
     except Exception:
         return ""
+
+
+def _llm_generate_sql_reduction_command(
+    task: str,
+    sql: str,
+    columns: list[str],
+    sample_rows: list[dict[str, Any]],
+    row_count: int,
+    previous_command: str = "",
+    previous_error: str = "",
+) -> str:
+    api_key, base_url, timeout, model = _llm_api_settings()
+    if not api_key:
+        return ""
+
+    repair_context = ""
+    if previous_error:
+        repair_context = (
+            "- The previous reducer failed. Generate a corrected command that avoids the prior issue.\n"
+            f"- Previous command: {previous_command}\n"
+            f"- Previous error: {previous_error}\n"
+        )
+
+    prompt = (
+        "You are an expert local data reduction engineer.\n"
+        "Generate exactly ONE shell command that reads the full SQL result JSON from STDIN and produces the reduced output needed for the user.\n\n"
+        f"User request: {task}\n"
+        f"SQL query: {sql}\n"
+        f"Columns: {json.dumps(columns, ensure_ascii=True)}\n"
+        f"Row count: {row_count}\n"
+        "Sample rows:\n"
+        "```json\n"
+        f"{json.dumps(sample_rows, indent=2, ensure_ascii=True, default=str)}\n"
+        "```\n"
+        "Input JSON on STDIN has this shape:\n"
+        '{"task":"...","sql":"...","columns":[...],"rows":[...],"row_count":123}\n'
+        "Instructions:\n"
+        "- Return ONLY the shell command string, no markdown, no explanations.\n"
+        "- Prefer python3 -c for JSON processing; jq is also acceptable.\n"
+        "- For inventory/list requests, print every requested item, one per line or as markdown bullets.\n"
+        "- For count, aggregate, or filter requests, compute exactly from the JSON rows.\n"
+        "- If you cannot generate a reliable reducer, return 'NONE'.\n"
+        f"{repair_context}"
+        "Reducer command:"
+    )
+
+    try:
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You generate one shell command only."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        cmd = response.json()["choices"][0]["message"]["content"].strip().strip("`").strip()
+        return cmd if cmd and cmd.upper() != "NONE" else ""
+    except Exception:
+        return ""
+
+
+def _should_reduce_sql_result(task: str, result: dict[str, Any]) -> bool:
+    rows = result.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return False
+    row_count = result.get("row_count")
+    row_total = row_count if isinstance(row_count, int) else len(rows)
+    task_lc = task.lower()
+    return (
+        row_total > 20
+        or len(json.dumps(rows[: min(len(rows), 25)], ensure_ascii=True, default=str)) > 5000
+        or any(token in task_lc for token in ("list all", "full list", "all tables", "all rows", "every", "save it", "export"))
+    )
+
+
+def _llm_reduce_sql_result(
+    task: str,
+    sql: str,
+    columns: list[str],
+    rows: list[dict[str, Any]],
+    row_count: int,
+) -> tuple[str, str]:
+    sample_rows = rows[:10]
+    reduction = run_local_reducer_loop(
+        {
+            "task": task,
+            "sql": sql,
+            "columns": columns,
+            "rows": rows,
+            "row_count": row_count,
+        },
+        lambda previous_command, previous_error: _llm_generate_sql_reduction_command(
+            task,
+            sql,
+            columns,
+            sample_rows,
+            row_count,
+            previous_command,
+            previous_error,
+        ),
+        validate_output=lambda output: bool(output.strip()),
+    )
+    return reduction.output, reduction.command
 
 
 def _dsn() -> str | None:
@@ -1209,8 +1318,23 @@ def handle_event(req: EventRequest):
             sql = result.get("sql", "")
             # Phase 10: SQL Result Summarization
             refined_answer = ""
-            if result and result.get("rows") and len(result.get("rows", [])) > 5:
-                refined_answer = _llm_summarize_rows(execution_task, sql, result.get("columns", []), result.get("rows", []))
+            reduced_result = ""
+            local_reduction_command = ""
+            if result and result.get("rows"):
+                rows = result.get("rows", [])
+                columns = result.get("columns", [])
+                row_count = result.get("row_count", len(rows))
+                if _should_reduce_sql_result(execution_task, result):
+                    reduced_result, local_reduction_command = _llm_reduce_sql_result(
+                        execution_task,
+                        sql,
+                        columns,
+                        rows,
+                        row_count if isinstance(row_count, int) else len(rows),
+                    )
+                    refined_answer = reduced_result
+                elif len(rows) > 5:
+                    refined_answer = _llm_summarize_rows(execution_task, sql, columns, rows)
 
             return {
                 "emits": [
@@ -1219,6 +1343,8 @@ def handle_event(req: EventRequest):
                         "payload": {
                             "detail": "SQL query executed.",
                             "refined_answer": refined_answer or None,
+                            "reduced_result": reduced_result or None,
+                            "local_reduction_command": local_reduction_command or None,
                             "sql": sql,
                             "schema": schema,
                             "stats": stats,

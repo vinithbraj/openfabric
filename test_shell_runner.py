@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+import json
 from unittest.mock import patch
 
 
@@ -64,7 +65,7 @@ class ShellRunnerDataFlowTests(unittest.TestCase):
         with patch("agent_library.agents.shell_runner.subprocess.run", side_effect=fake_run):
             response = handle_event(types.SimpleNamespace(event="task.plan", payload=payload))
 
-        self.assertEqual(captured["input"], '[{"PatientName": "Test"}]')
+        self.assertEqual(json.loads(captured["input"]), [{"PatientName": "Test"}])
         emitted = response["emits"][0]
         self.assertEqual(emitted["event"], "shell.result")
         self.assertEqual(emitted["payload"]["stdout"], "true")

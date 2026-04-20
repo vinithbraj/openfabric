@@ -39,6 +39,7 @@ from agent_library.agents.sql_runner import (
     _postgres_safe_sql,
     _repair_sql_with_retries,
     _schema_tables_result,
+    _should_reduce_sql_result,
     _tables_only_schema_request,
     _same_query_specs,
     _single_sql_query_spec_from_object,
@@ -87,6 +88,15 @@ class PostgresSafeSqlTests(unittest.TestCase):
                 {"schema": "public", "table": "resources", "type": "table"},
             ],
         )
+
+    def test_should_reduce_sql_result_for_full_list_requests(self):
+        result = {
+            "columns": ["schema", "table", "type"],
+            "rows": [{"schema": "flathr", "table": f"Table{i}", "type": "table"} for i in range(10)],
+            "row_count": 10,
+        }
+        self.assertTrue(_should_reduce_sql_result("give me the full list of all tables in mydb", result))
+        self.assertFalse(_should_reduce_sql_result("show top 3 tables", {"columns": ["table"], "rows": [{"table": "a"}], "row_count": 1}))
 
     def test_parse_strict_json_object_rejects_wrapped_sql_markdown(self):
         wrapped = 'Here is the SQL query:\\n```sql\\nSELECT 1\\n```'
