@@ -314,6 +314,80 @@ contracts:
       presentation:
         type: object
 
+  ValidationRequest:
+    type: object
+    required: [task, workflow_status]
+    properties:
+      task:
+        type: string
+      attempt:
+        type: number
+      total_attempts:
+        type: number
+      option_id:
+        type: string
+      option_label:
+        type: string
+      option_reason:
+        type: string
+      workflow_status:
+        type: string
+      steps:
+        type: array
+        items:
+          type: object
+      result: {}
+      error:
+        type: string
+      presentation:
+        type: object
+      available_context:
+        type: object
+
+  ValidationResult:
+    type: object
+    required: [valid, reason, retry_recommended]
+    properties:
+      valid:
+        type: boolean
+      reason:
+        type: string
+      retry_recommended:
+        type: boolean
+      missing_requirements:
+        type: array
+        items:
+          type: string
+      trace:
+        type: array
+        items:
+          type: string
+
+  ValidationProgress:
+    type: object
+    required: [stage, task, message]
+    properties:
+      stage:
+        type: string
+      task:
+        type: string
+      message:
+        type: string
+      option_id:
+        type: string
+      option_label:
+        type: string
+      attempt:
+        type: number
+      total_attempts:
+        type: number
+      reason:
+        type: string
+      trace:
+        type: array
+        items:
+          type: string
+
   StepProgress:
     type: object
     required: [stage, step_id, message]
@@ -448,6 +522,12 @@ events:
     contract: StepProgress
   workflow.result:
     contract: WorkflowResult
+  validation.request:
+    contract: ValidationRequest
+  validation.result:
+    contract: ValidationResult
+  validation.progress:
+    contract: ValidationProgress
   answer.final:
     contract: FinalAnswer
 
@@ -603,6 +683,22 @@ agents:
       - clarification.required
     emits:
       - answer.final
+
+  validator:
+    description: "Validates whether a workflow attempt satisfied the user's request and whether fallback options should be tried."
+    methods:
+      - name: validate_workflow_attempt
+        event: validation.result
+        when: "Scores each workflow attempt against the original task and recommends retrying when needed."
+    runtime:
+      adapter: http
+      endpoint: "http://127.0.0.1:8311/handle"
+      autostart:
+        app: agent_library.agents.validator:app
+    subscribes_to:
+      - validation.request
+    emits:
+      - validation.result
 
 execution:
   mode: event-driven

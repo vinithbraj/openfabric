@@ -112,11 +112,12 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "Task: decide whether the request is processable by at least one discovered agent capability and, when processable, "
         "produce the best execution plan and presentation intent.\n"
         "Output JSON only with exact keys: "
-        '{"processable":true|false,"reason":"short reason","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","instruction":{"operation":"agent_specific_operation"},"depends_on":["optional_step_id"],"when":{"$from":"optional.path","equals":"optional value"},"steps":[{"id":"step1_1","task":"optional nested substep"}]}],"presentation":{"task":"how to present the result","format":"markdown|markdown_table|json|bullets|plain","audience":"openwebui","include_context":true|false,"include_internal_steps":true|false}}\n'
+        '{"processable":true|false,"reason":"short reason","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","instruction":{"operation":"agent_specific_operation"},"depends_on":["optional_step_id"],"when":{"$from":"optional.path","equals":"optional value"},"steps":[{"id":"step1_1","task":"optional nested substep"}]}],"plan_options":[{"id":"option1","label":"primary approach","reason":"why try this first","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","instruction":{"operation":"agent_specific_operation"}}]}],"presentation":{"task":"how to present the result","format":"markdown|markdown_table|json|bullets|plain","audience":"openwebui","include_context":true|false,"include_internal_steps":true|false}}\n'
         "No markdown, no extra keys, no prose outside JSON.\n"
         "Decision policy:\n"
         "1) processable=true if any discovered agent can attempt the request.\n"
         "2) For processable=true, steps MUST be a non-empty ordered list.\n"
+        "2a) Also provide plan_options when there is more than one plausible execution strategy. Rank them best-first. Option 1 should be your preferred approach and option 2 should be the best fallback strategy.\n"
         "3) Each step MUST have id and task. Leaf steps MUST have target_agent. Group steps may omit target_agent when they contain nested steps.\n"
         "4) Every leaf step MUST include an instruction object with an agent-native operation and inputs.\n"
         "5) For shell_runner use instruction.operation=run_command with fields such as command, input, and capture.\n"
@@ -275,6 +276,7 @@ def _parse_decision(raw: Any):
     processable = raw.get("processable")
     reason = raw.get("reason", "")
     steps = raw.get("steps", [])
+    plan_options = raw.get("plan_options", raw.get("options"))
     presentation = raw.get("presentation")
     if not isinstance(processable, bool):
         return None
@@ -290,8 +292,44 @@ def _parse_decision(raw: Any):
         "processable": processable,
         "reason": reason.strip(),
         "steps": normalized_steps,
+        "plan_options": _parse_plan_options(plan_options),
         "presentation": _parse_presentation(presentation),
     }
+
+
+def _parse_plan_options(raw: Any):
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    parsed = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            return None
+        steps = item.get("steps", [])
+        if not isinstance(steps, list):
+            return None
+        normalized_steps = _parse_steps(steps)
+        if normalized_steps is None or not normalized_steps:
+            return None
+        option_id = item.get("id") or f"option{index}"
+        label = item.get("label") or f"Option {index}"
+        reason = item.get("reason") or ""
+        if not isinstance(option_id, str) or not option_id.strip():
+            return None
+        if not isinstance(label, str) or not label.strip():
+            label = f"Option {index}"
+        if not isinstance(reason, str):
+            reason = ""
+        parsed.append(
+            {
+                "id": option_id.strip(),
+                "label": label.strip(),
+                "reason": reason.strip(),
+                "steps": normalized_steps,
+            }
+        )
+    return parsed
 
 
 def _parse_replan_decision(raw: Any):
@@ -1607,6 +1645,68 @@ def _normalize_presentation(question: str, presentation: dict | None):
     return normalized
 
 
+def _steps_signature(steps: list[dict]) -> str:
+    return json.dumps(steps, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+
+
+def _build_plan_options(question: str, decision: dict, capabilities: dict):
+    options = []
+    seen = set()
+
+    def append_option(option_id: str, label: str, reason: str, steps: list[dict]):
+        if not isinstance(steps, list) or not steps:
+            return
+        signature = _steps_signature(steps)
+        if signature in seen:
+            return
+        seen.add(signature)
+        options.append(
+            {
+                "id": option_id,
+                "label": label,
+                "reason": reason,
+                "steps": steps,
+            }
+        )
+
+    raw_primary = decision.get("steps", [])
+    primary_steps = _normalize_steps(question, raw_primary, capabilities) if raw_primary else []
+    if primary_steps:
+        append_option("option1", "Preferred plan", decision.get("reason", ""), primary_steps)
+
+    raw_options = decision.get("plan_options") if isinstance(decision.get("plan_options"), list) else []
+    for index, option in enumerate(raw_options, start=1):
+        if not isinstance(option, dict):
+            continue
+        steps = _normalize_steps(question, option.get("steps", []), capabilities)
+        append_option(
+            str(option.get("id") or f"option{index}"),
+            str(option.get("label") or f"Option {index}"),
+            str(option.get("reason") or ""),
+            steps,
+        )
+
+    fallback_steps = _fallback_steps(question, capabilities)
+    if fallback_steps:
+        append_option(
+            f"option{len(options) + 1}",
+            "Fallback plan",
+            "Deterministic fallback generated from discovered capabilities.",
+            fallback_steps,
+        )
+
+    sql_fallback = _sql_fallback_steps_for_task(question, question, capabilities)
+    if sql_fallback:
+        append_option(
+            f"option{len(options) + 1}",
+            "SQL fallback",
+            "Native SQL fallback path for database-oriented requests.",
+            sql_fallback,
+        )
+
+    return options[:3]
+
+
 def _flatten_plan_steps(steps: list, prefix: str = "") -> list[dict]:
     flattened = []
     for index, step in enumerate(steps, start=1):
@@ -1651,6 +1751,26 @@ def _plan_progress_payload(question: str, steps: list, presentation: dict):
         "steps": flat_steps,
         "presentation": presentation,
     }
+
+
+def _plan_progress_payload_with_options(question: str, plan_options: list[dict], presentation: dict):
+    primary_steps = plan_options[0]["steps"] if plan_options else []
+    payload = _plan_progress_payload(question, primary_steps, presentation)
+    if len(plan_options) > 1:
+        payload["message"] = f"I found {len(plan_options)} workflow options and will try them in order."
+    payload["options"] = [
+        {
+            "id": option.get("id", f"option{index}"),
+            "label": option.get("label", f"Option {index}"),
+            "reason": option.get("reason", ""),
+            "step_count": len(_flatten_plan_steps(option.get("steps", []))),
+        }
+        for index, option in enumerate(plan_options, start=1)
+        if isinstance(option, dict)
+    ]
+    if plan_options:
+        payload["selected_option_id"] = plan_options[0].get("id")
+    return payload
 
 
 def _sql_plan_emits(question: str, allowed_events: set[str], task_question: str | None = None):
@@ -1790,20 +1910,43 @@ def handle_event(req: EventRequest):
         decision = _llm_decide(question, CAPABILITIES)
         if decision is not None:
             if decision["processable"] and "task.plan" in allowed_events:
-                steps = _normalize_steps(current_question, decision.get("steps", []), CAPABILITIES)
+                plan_options = _build_plan_options(current_question, decision, CAPABILITIES)
+                steps = plan_options[0]["steps"] if plan_options else []
                 if not steps:
                     steps = _fallback_steps(current_question, CAPABILITIES)
+                    if steps:
+                        plan_options = [
+                            {
+                                "id": "option1",
+                                "label": "Fallback plan",
+                                "reason": "Deterministic fallback generated from discovered capabilities.",
+                                "steps": steps,
+                            }
+                        ]
                 if not steps and _looks_like_sql_question(question, CAPABILITIES):
                     steps = _sql_fallback_steps_for_task(question, current_question, CAPABILITIES) or steps
+                    if steps:
+                        plan_options = [
+                            {
+                                "id": "option1",
+                                "label": "SQL fallback",
+                                "reason": "Native SQL fallback path for database-oriented requests.",
+                                "steps": steps,
+                            }
+                        ]
                 payload = {"task": current_question}
                 if steps:
                     payload["steps"] = steps
+                    payload["plan_options"] = plan_options
                     presentation = _normalize_presentation(current_question, decision.get("presentation"))
                     payload["presentation"] = presentation
                     if len(steps) == 1:
                         payload["target_agent"] = steps[0]["target_agent"]
                     _debug_log("Planner steps:")
                     _debug_log(json.dumps(steps, indent=2))
+                    if plan_options:
+                        _debug_log("Planner options:")
+                        _debug_log(json.dumps(plan_options, indent=2))
                 else:
                     _debug_log("Planner found no valid target steps after normalization.")
                 emits = []
@@ -1811,7 +1954,7 @@ def handle_event(req: EventRequest):
                     emits.append(
                         {
                             "event": "plan.progress",
-                            "payload": _plan_progress_payload(current_question, steps, payload.get("presentation", {})),
+                            "payload": _plan_progress_payload_with_options(current_question, plan_options, payload.get("presentation", {})),
                         }
                     )
                 emits.append({"event": "task.plan", "payload": payload})

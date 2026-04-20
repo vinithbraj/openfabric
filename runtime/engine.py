@@ -494,38 +494,283 @@ class Engine:
         return bool(left)
 
     def _execute_task_plan(self, payload: dict, depth: int):
-        steps = payload.get("steps", [])
-        if not steps:
+        plan_options = self._plan_options(payload)
+        if not plan_options:
+            return
+        attempts = []
+        deferred_clarification = None
+        selected_attempt = None
+
+        for index, option in enumerate(plan_options, start=1):
+            option_payload = dict(payload)
+            option_payload["steps"] = option.get("steps", [])
+            option_payload["selected_option_id"] = option.get("id")
+            option_payload["selected_option_label"] = option.get("label")
+            self._emit_validation_progress(
+                "option_started",
+                payload,
+                depth + 1,
+                option_id=option.get("id"),
+                option_label=option.get("label"),
+                attempt=index,
+                total_attempts=len(plan_options),
+                reason=option.get("reason"),
+                message=f"Trying workflow option {index} of {len(plan_options)}.",
+            )
+            context = {
+                "original_task": payload.get("task", ""),
+                "__step_results__": [],
+                "__step_results_by_id__": {},
+            }
+            workflow = self._execute_workflow_steps(option_payload.get("steps", []), option_payload, context, depth)
+            validation = self._validate_workflow_attempt(
+                payload,
+                option,
+                workflow,
+                context,
+                index,
+                len(plan_options),
+                depth,
+            )
+            attempt_record = {
+                "attempt": index,
+                "option": {
+                    "id": option.get("id"),
+                    "label": option.get("label"),
+                    "reason": option.get("reason"),
+                },
+                "status": workflow.get("status"),
+                "steps": workflow.get("steps", []),
+                "result": workflow.get("result"),
+                "error": workflow.get("error"),
+                "validation": validation,
+            }
+            attempts.append(attempt_record)
+            clarification = workflow.get("clarification")
+            if workflow.get("status") == "needs_clarification" and isinstance(clarification, dict) and deferred_clarification is None:
+                deferred_clarification = clarification
+            if validation.get("valid"):
+                selected_attempt = attempt_record
+                break
+            if index < len(plan_options):
+                self._emit_validation_progress(
+                    "retrying",
+                    payload,
+                    depth + 1,
+                    option_id=option.get("id"),
+                    option_label=option.get("label"),
+                    attempt=index,
+                    total_attempts=len(plan_options),
+                    reason=validation.get("reason"),
+                    message="The validator rejected this attempt, so I am trying the next workflow option.",
+                )
+
+        if selected_attempt is not None:
+            if "workflow.result" in self.spec.get("events", {}):
+                result_payload = {
+                    "task": payload.get("task", ""),
+                    "status": selected_attempt["status"],
+                    "steps": selected_attempt["steps"],
+                    "result": selected_attempt.get("result"),
+                    "attempts": attempts,
+                    "selected_option": selected_attempt["option"],
+                    "validation": selected_attempt["validation"],
+                }
+                presentation = payload.get("presentation")
+                if isinstance(presentation, dict):
+                    result_payload["presentation"] = presentation
+                if selected_attempt.get("error"):
+                    result_payload["error"] = selected_attempt["error"]
+                self.emit("workflow.result", result_payload, depth + 1)
+                return
             return
 
-        context = {
-            "original_task": payload.get("task", ""),
-            "__step_results__": [],
-            "__step_results_by_id__": {},
-        }
-        workflow = self._execute_workflow_steps(steps, payload, context, depth)
-        clarification = workflow.get("clarification")
-        if workflow["status"] == "needs_clarification" and isinstance(clarification, dict):
-            if "clarification.required" in self.spec.get("events", {}):
-                self.emit("clarification.required", clarification, depth + 1)
-                return
+        if deferred_clarification is not None and "clarification.required" in self.spec.get("events", {}):
+            deferred_clarification["attempts"] = attempts
+            self.emit("clarification.required", deferred_clarification, depth + 1)
+            return
+
+        last_attempt = attempts[-1] if attempts else None
         if "workflow.result" in self.spec.get("events", {}):
             result_payload = {
                 "task": payload.get("task", ""),
-                "status": workflow["status"],
-                "steps": workflow["steps"],
-                "result": workflow.get("result"),
+                "status": "failed",
+                "steps": last_attempt.get("steps", []) if isinstance(last_attempt, dict) else [],
+                "result": last_attempt.get("result") if isinstance(last_attempt, dict) else None,
+                "attempts": attempts,
+                "validation": last_attempt.get("validation") if isinstance(last_attempt, dict) else None,
             }
             presentation = payload.get("presentation")
             if isinstance(presentation, dict):
                 result_payload["presentation"] = presentation
-            if workflow.get("error"):
-                result_payload["error"] = workflow["error"]
+            if isinstance(last_attempt, dict):
+                result_payload["selected_option"] = last_attempt.get("option")
+                result_payload["error"] = last_attempt.get("error") or (
+                    last_attempt.get("validation", {}) or {}
+                ).get("reason")
             self.emit("workflow.result", result_payload, depth + 1)
             return
 
-        for new_event, new_payload in workflow.get("final_results", []):
-            self.emit(new_event, new_payload, depth + 1)
+    def _plan_options(self, payload: dict) -> list[dict]:
+        raw_options = payload.get("plan_options")
+        normalized = []
+        if isinstance(raw_options, list):
+            for index, option in enumerate(raw_options, start=1):
+                if not isinstance(option, dict):
+                    continue
+                steps = option.get("steps")
+                if not isinstance(steps, list) or not steps:
+                    continue
+                normalized.append(
+                    {
+                        "id": option.get("id") or f"option{index}",
+                        "label": option.get("label") or f"Option {index}",
+                        "reason": option.get("reason") or "",
+                        "steps": steps,
+                    }
+                )
+        if normalized:
+            return normalized
+        steps = payload.get("steps")
+        if isinstance(steps, list) and steps:
+            return [
+                {
+                    "id": "option1",
+                    "label": "Primary plan",
+                    "reason": "",
+                    "steps": steps,
+                }
+            ]
+        return []
+
+    def _default_validation_result(
+        self,
+        workflow_payload: dict,
+        option: dict,
+        workflow: dict,
+        context: dict,
+        attempt: int,
+        total_attempts: int,
+    ) -> dict:
+        status = workflow.get("status")
+        error = workflow.get("error")
+        result = workflow.get("result")
+        completed = status == "completed"
+        has_result = result not in (None, "", [], {})
+        valid = completed and (has_result or any(item.get("status") == "completed" for item in self._prior_step_results(context)))
+        trace = [
+            f"Attempt {attempt} of {total_attempts} used option '{option.get('label') or option.get('id') or 'workflow'}'.",
+            f"Workflow status was '{status or 'unknown'}'.",
+        ]
+        if error:
+            trace.append(f"Execution error observed: {error}")
+        if valid:
+            trace.append("The workflow completed and produced material output, so it is accepted.")
+        else:
+            trace.append("The workflow did not clearly satisfy the request, so another option should be tried if available.")
+        return {
+            "valid": valid,
+            "reason": "Workflow satisfied the request." if valid else (str(error or "Workflow output did not clearly satisfy the request.")),
+            "retry_recommended": not valid,
+            "missing_requirements": [],
+            "trace": trace,
+        }
+
+    def _emit_validation_progress(self, stage: str, workflow_payload: dict, depth: int, **extra):
+        if "validation.progress" not in self.spec.get("events", {}):
+            return
+        payload = {
+            "stage": stage,
+            "task": workflow_payload.get("task", ""),
+            "message": extra.pop("message", f"Validation stage: {stage}."),
+        }
+        for key, value in extra.items():
+            if value is not None:
+                payload[key] = value
+        self.emit("validation.progress", payload, depth)
+
+    def _validate_workflow_attempt(
+        self,
+        workflow_payload: dict,
+        option: dict,
+        workflow: dict,
+        context: dict,
+        attempt: int,
+        total_attempts: int,
+        depth: int,
+    ) -> dict:
+        self._emit_validation_progress(
+            "started",
+            workflow_payload,
+            depth + 1,
+            option_id=option.get("id"),
+            option_label=option.get("label"),
+            attempt=attempt,
+            total_attempts=total_attempts,
+            message=f"Validating workflow option {attempt} of {total_attempts}.",
+        )
+        if "validation.request" not in self.spec.get("events", {}):
+            result = self._default_validation_result(workflow_payload, option, workflow, context, attempt, total_attempts)
+            self._emit_validation_progress(
+                "passed" if result.get("valid") else "failed",
+                workflow_payload,
+                depth + 1,
+                option_id=option.get("id"),
+                option_label=option.get("label"),
+                attempt=attempt,
+                total_attempts=total_attempts,
+                reason=result.get("reason"),
+                trace=result.get("trace"),
+                message=result.get("reason") or "Validation completed.",
+            )
+            return result
+
+        request_payload = {
+            "task": workflow_payload.get("task", ""),
+            "attempt": attempt,
+            "total_attempts": total_attempts,
+            "option_id": option.get("id"),
+            "option_label": option.get("label"),
+            "option_reason": option.get("reason"),
+            "workflow_status": workflow.get("status", ""),
+            "steps": workflow.get("steps", []),
+            "result": workflow.get("result"),
+            "error": workflow.get("error"),
+            "presentation": workflow_payload.get("presentation", {}),
+            "available_context": {
+                key: value
+                for key, value in context.items()
+                if key != "original_task" and not key.endswith(".event")
+            },
+        }
+        contract_name = self.spec["events"]["validation.request"]["contract"]
+        self.contracts.validate_payload(contract_name, request_payload)
+        log_event("validation.request", request_payload, depth + 1)
+        emitted = self._invoke_subscribers("validation.request", request_payload, depth + 1)
+        validation_result = None
+        auxiliary = []
+        for event_name, event_payload in emitted:
+            if event_name == "validation.result":
+                validation_result = event_payload
+            else:
+                auxiliary.append((event_name, event_payload))
+        for event_name, event_payload in auxiliary:
+            self.emit(event_name, event_payload, depth + 1)
+        if not isinstance(validation_result, dict):
+            validation_result = self._default_validation_result(workflow_payload, option, workflow, context, attempt, total_attempts)
+        self._emit_validation_progress(
+            "passed" if validation_result.get("valid") else "failed",
+            workflow_payload,
+            depth + 1,
+            option_id=option.get("id"),
+            option_label=option.get("label"),
+            attempt=attempt,
+            total_attempts=total_attempts,
+            reason=validation_result.get("reason"),
+            trace=validation_result.get("trace"),
+            message=validation_result.get("reason") or "Validation completed.",
+        )
+        return validation_result
 
     def _emit_step_progress(self, stage: str, step_id: str, step_payload: dict, depth: int, **extra):
         if "step.progress" not in self.spec.get("events", {}):

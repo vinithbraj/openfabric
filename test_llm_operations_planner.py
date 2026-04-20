@@ -34,6 +34,7 @@ sys.modules.setdefault("pydantic", pydantic_stub)
 
 from agent_library.agents.llm_operations_planner import (
     _derive_shell_command,
+    _parse_decision,
     _compound_fallback_steps,
     _normalize_steps,
     _split_compound_request,
@@ -234,6 +235,54 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertIn("tables.txt", normalized[1]["instruction"]["command"])
         self.assertEqual(normalized[1]["instruction"]["input"], {"$from": "step1.rows"})
         self.assertEqual(normalized[1]["depends_on"], ["step1"])
+
+    def test_parse_decision_accepts_ranked_plan_options(self):
+        decision = _parse_decision(
+            {
+                "processable": True,
+                "reason": "multiple viable approaches",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "target_agent": "shell_runner",
+                        "task": "list files",
+                        "instruction": {"operation": "run_command", "command": "find . -maxdepth 1 -type f"},
+                    }
+                ],
+                "plan_options": [
+                    {
+                        "id": "option1",
+                        "label": "Primary",
+                        "reason": "use shell discovery",
+                        "steps": [
+                            {
+                                "id": "step1",
+                                "target_agent": "shell_runner",
+                                "task": "list files",
+                                "instruction": {"operation": "run_command", "command": "find . -maxdepth 1 -type f"},
+                            }
+                        ],
+                    },
+                    {
+                        "id": "option2",
+                        "label": "Fallback",
+                        "reason": "use ripgrep file listing",
+                        "steps": [
+                            {
+                                "id": "step1",
+                                "target_agent": "shell_runner",
+                                "task": "list files with rg",
+                                "instruction": {"operation": "run_command", "command": "rg --files ."},
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(len(decision["plan_options"]), 2)
+        self.assertEqual(decision["plan_options"][0]["id"], "option1")
+        self.assertEqual(decision["plan_options"][1]["label"], "Fallback")
 
 
 if __name__ == "__main__":

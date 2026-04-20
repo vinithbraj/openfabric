@@ -640,6 +640,110 @@ def _trace_block(lines: list[str], *, separator: bool = True) -> str:
     return "\n".join(clean_lines).rstrip() + suffix
 
 
+def _trace_title(label: str, summary: str | None = None) -> str:
+    if isinstance(summary, str) and summary.strip():
+        return f"**{label}**\n{summary.strip()}"
+    return f"**{label}**"
+
+
+def _trace_kv_lines(*items: tuple[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for label, value in items:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        lines.append(f"`{label}` {text}")
+    return lines
+
+
+def _trace_snippet(label: str, value: Any, limit: int = 700) -> list[str]:
+    text = _clean_terminal_output(value) if isinstance(value, str) else str(value or "").strip()
+    if not text:
+        return []
+    text = _truncate_progress(text, limit)
+    return [f"**{label}**", "", *_format_preformatted_markdown(text)]
+
+
+def _trace_bullets(items: list[str], *, prefix: str = "- ") -> list[str]:
+    return [f"{prefix}{item}" for item in items if isinstance(item, str) and item.strip()]
+
+
+def _narration_block(text: str) -> str:
+    return _trace_block([text])
+
+
+def _narration_for_event(event_name: str, payload: dict, state: dict[str, Any]) -> str | None:
+    if event_name == "user.ask":
+        return _narration_block("Mapping the request into a workflow and choosing the best path to try first.")
+    if event_name == "plan.progress":
+        options = payload.get("options")
+        if isinstance(options, list) and len(options) > 1:
+            return _narration_block(
+                f"I found {len(options)} viable workflow options. I’ll start with the strongest one and only fall back if validation says it missed the mark."
+            )
+        steps = payload.get("steps")
+        if isinstance(steps, list) and steps:
+            return _narration_block(
+                f"I broke this into {len(steps)} planned step(s) so the execution stays structured and easier to recover if something fails."
+            )
+        return None
+    if event_name == "step.progress":
+        stage = payload.get("stage")
+        step_id = str(payload.get("step_id") or "step")
+        task = _task_label(payload.get("task", ""))
+        target = payload.get("target_agent")
+        if stage == "started":
+            state["last_running_step"] = step_id
+            return _narration_block(
+                f"I’m handing `{step_id}` to {_agent_label(target)} now and watching the result before moving on.\n`focus` {_truncate_progress(task, 180)}"
+            )
+        if stage == "completed":
+            detail = None
+            result = payload.get("result")
+            if isinstance(result, dict):
+                detail = result.get("detail")
+            detail_text = f"\n`result` `{_truncate_progress(detail, 180)}`" if isinstance(detail, str) and detail.strip() else ""
+            return _narration_block(f"`{step_id}` came back successfully, so I can use that output for whatever depends on it next.{detail_text}")
+        if stage == "failed":
+            reason = payload.get("error") or payload.get("message")
+            reason_text = f"\n`issue` `{_truncate_progress(str(reason), 180)}`" if reason else ""
+            return _narration_block(f"`{step_id}` did not complete cleanly. I’m treating that as a signal to inspect, replan, or fall back.{reason_text}")
+        if stage == "replanning":
+            return _narration_block(f"The current step was too coarse or blocked, so I’m decomposing it into a smaller plan before trying again.")
+    if event_name == "validation.progress":
+        stage = payload.get("stage")
+        option_id = payload.get("option_id")
+        if stage == "option_started":
+            return _narration_block(f"I’m now trying `{option_id or 'this option'}` and will validate it against the original request before accepting it.")
+        if stage == "started":
+            return _narration_block("Execution finished for this option. I’m checking whether it actually answered the request, not just whether the steps ran.")
+        if stage == "failed":
+            reason = payload.get("reason")
+            reason_text = f"\n`validator` `{_truncate_progress(str(reason), 180)}`" if reason else ""
+            return _narration_block(f"This option executed, but it still doesn’t fully satisfy the request, so I’m not accepting it yet.{reason_text}")
+        if stage == "retrying":
+            return _narration_block("I’m carrying forward what I learned from the failed attempt and trying the next workflow option.")
+        if stage == "passed":
+            return _narration_block("This attempt satisfies the request closely enough to promote it to the final answer.")
+    if event_name == "clarification.required":
+        return _narration_block("I hit a point where guessing would be risky, so I’m surfacing the exact clarification needed instead of fabricating a result.")
+    if event_name == "workflow.result":
+        status = payload.get("status")
+        attempts = payload.get("attempts")
+        selected = payload.get("selected_option")
+        if isinstance(attempts, list) and len(attempts) > 1 and isinstance(selected, dict):
+            return _narration_block(
+                f"I tested multiple workflow options and `{selected.get('id', 'the selected option')}` was the first one that validated successfully."
+            )
+        if status == "completed":
+            return _narration_block("The execution path is complete, so I’m switching from orchestration to the final user-facing answer.")
+        if status == "failed":
+            return _narration_block("None of the attempted workflows validated successfully, so I’m surfacing the failure state instead of pretending the task succeeded.")
+    return None
+
+
 def _agent_label(agent: Any) -> str:
     return f"`{agent}`" if isinstance(agent, str) and agent else "`agent`"
 
@@ -820,13 +924,32 @@ def _append_shell_result(lines: list[str], result: dict, duration: str | None = 
 
 def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
     if event_name == "user.ask":
-        return _trace_block(["**Planning workflow...**"], separator=False)
+        return _trace_block([_trace_title("Thinking", "Planning the workflow and selecting an execution path.")], separator=False)
     if event_name == "plan.progress":
-        lines = [
-            f"**Plan:** {payload.get('message', 'Plan ready.')}".rstrip(),
-        ]
+        lines = [_trace_title("Plan", payload.get("message", "Plan ready."))]
+        options = payload.get("options", [])
+        if isinstance(options, list) and options:
+            lines.append("**Workflow options**")
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                option_id = option.get("id", "option")
+                label = option.get("label", option_id)
+                reason = option.get("reason")
+                step_count = option.get("step_count")
+                summary = f"`{option_id}` {label}"
+                if step_count is not None:
+                    summary += f" · `{step_count}` step(s)"
+                if isinstance(reason, str) and reason.strip():
+                    summary += f" · {_truncate_progress(reason, 180)}"
+                lines.append(f"- {summary}")
+        if isinstance(options, list) and options:
+            selected_option_id = payload.get("selected_option_id")
+            if isinstance(selected_option_id, str) and selected_option_id.strip():
+                lines.append(f"`selected` `{selected_option_id}`")
         steps = payload.get("steps", [])
         if isinstance(steps, list):
+            lines.append("**Planned steps**")
             for step in steps:
                 if not isinstance(step, dict):
                     continue
@@ -838,41 +961,75 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                     f"- `{step.get('id', 'step')}` via {_agent_label(target)}: {_task_label(task)}"
                 )
         return _trace_block(lines)
+    if event_name == "validation.progress":
+        stage = payload.get("stage", "")
+        option_id = payload.get("option_id", "option")
+        option_label = payload.get("option_label")
+        label = f"`{option_id}`"
+        if isinstance(option_label, str) and option_label.strip():
+            label += f" {option_label.strip()}"
+        if stage == "option_started":
+            lines = [_trace_title("Trying workflow option", str(label))]
+            reason = payload.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                lines.extend(_trace_kv_lines(("reason", f"`{_truncate_progress(reason, 240)}`")))
+            return _trace_block(lines)
+        if stage == "started":
+            return _trace_block([_trace_title("Validation", f"Checking whether {label} satisfied the request.")])
+        if stage == "passed":
+            lines = [_trace_title("Validation passed", str(label))]
+            reason = payload.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                lines.extend(_trace_kv_lines(("reason", f"`{_truncate_progress(reason, 240)}`")))
+            trace = payload.get("trace")
+            if isinstance(trace, list):
+                lines.append("**Checks**")
+                lines.extend(_trace_bullets([_truncate_progress(item, 240) for item in trace[:4] if isinstance(item, str) and item.strip()]))
+            return _trace_block(lines)
+        if stage == "failed":
+            lines = [_trace_title("Validation failed", str(label))]
+            reason = payload.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                lines.extend(_trace_kv_lines(("reason", f"`{_truncate_progress(reason, 240)}`")))
+            trace = payload.get("trace")
+            if isinstance(trace, list):
+                lines.append("**Checks**")
+                lines.extend(_trace_bullets([_truncate_progress(item, 240) for item in trace[:4] if isinstance(item, str) and item.strip()]))
+            return _trace_block(lines)
+        if stage == "retrying":
+            message = payload.get("message") or "Trying the next workflow option."
+            return _trace_block([_trace_title("Retrying", message)])
     if event_name == "task.plan":
         step_id = payload.get("step_id")
         target = payload.get("target_agent")
         task = payload.get("task", "")
         if step_id or target:
             return None
-        return _trace_block([f"**Planning:** {task}"])
+        return _trace_block([_trace_title("Planning", task)])
     if event_name == "step.progress":
         stage = payload.get("stage", "")
         step_id = payload.get("step_id", "step")
         target = payload.get("target_agent")
         task = payload.get("task", "")
         if stage == "started":
-            lines = [
-                f"**Running `{step_id}`** · {_agent_label(target)}",
-                f"Task: {_task_label(task)}",
-            ]
+            lines = [_trace_title("Running step", f"`{step_id}` via {_agent_label(target)}")]
+            lines.extend(_trace_kv_lines(("task", _task_label(task))))
             sql = payload.get("sql")
             if isinstance(sql, str) and sql.strip():
-                lines.append(f"SQL: `{_truncate_progress(sql, 300)}`")
+                lines.extend(_trace_snippet("SQL snippet", sql, 500))
             command = payload.get("command")
             if isinstance(command, str) and command.strip():
-                lines.append(f"Command: `{_truncate_progress(command, 300)}`")
+                lines.extend(_trace_snippet("Command snippet", command, 500))
             return _trace_block(lines)
         if stage == "replanning":
-            lines = [
-                f"**Replanning `{step_id}`** · {_agent_label(target)}",
-                f"Task: {_task_label(task)}",
-            ]
+            lines = [_trace_title("Replanning step", f"`{step_id}` via {_agent_label(target)}")]
+            lines.extend(_trace_kv_lines(("task", _task_label(task))))
             error = payload.get("error")
             if isinstance(error, str) and error.strip():
-                lines.append(f"Reason: `{_truncate_progress(error, 260)}`")
+                lines.extend(_trace_kv_lines(("reason", f"`{_truncate_progress(error, 260)}`")))
             return _trace_block(lines)
         if stage == "completed":
-            lines = [f"**Completed `{step_id}`** · {_agent_label(target)}"]
+            lines = [_trace_title("Completed step", f"`{step_id}` via {_agent_label(target)}")]
             duration = _duration_label(payload.get("duration_ms"))
             result = payload.get("result")
             sql = payload.get("sql")
@@ -881,7 +1038,7 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             if isinstance(result, dict):
                 detail = result.get("detail")
                 if isinstance(detail, str) and detail.strip():
-                    lines.append(f"Detail: `{_truncate_progress(detail, 260)}`")
+                    lines.extend(_trace_kv_lines(("detail", f"`{_truncate_progress(detail, 260)}`")))
                 row_count = result.get("row_count")
                 stats_line = _format_stats(result.get("stats"))
                 nested_result = result.get("result")
@@ -905,20 +1062,19 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             if summary:
                 lines.append(summary)
             if stats_line:
-                lines.append(f"**Timing :** {stats_line}")
+                lines.append(f"`timing` {stats_line}")
             
             local_cmd = payload.get("local_reduction_command")
             if isinstance(local_cmd, str) and local_cmd.strip():
-                lines.append(f"**Local Data Reduction:** `{_truncate_progress(local_cmd, 360)}`")
+                lines.extend(_trace_snippet("Local reduction command", local_cmd, 500))
                 
             if isinstance(sql, str) and sql.strip():
-                lines.append(f"**SQL:** `{_truncate_progress(sql, 360)}`")
+                lines.extend(_trace_snippet("SQL", sql, 700))
             command = payload.get("command")
             if not command and isinstance(result, dict):
                 command = result.get("command")
             if isinstance(command, str) and command.strip():
-                lines.append("**Command**")
-                lines.extend(_format_preformatted_markdown(command.strip()))
+                lines.extend(_trace_snippet("Command", command, 700))
 
             # Raw Output Visibility
             raw_stdout = payload.get("stdout")
@@ -932,39 +1088,35 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
 
             clean_stdout = _clean_terminal_output(raw_stdout)
             if clean_stdout:
-                lines.append("**Output**")
-                lines.extend(_format_preformatted_markdown(clean_stdout))
+                lines.extend(_trace_snippet("Output", clean_stdout, 1200))
 
             clean_stderr = _clean_terminal_output(raw_stderr)
             if clean_stderr:
-                lines.append("**Error Output**")
-                lines.extend(_format_preformatted_markdown(clean_stderr))
+                lines.extend(_trace_snippet("Error output", clean_stderr, 900))
             return _trace_block(lines)
         if stage == "failed":
             error = payload.get("error") or payload.get("message") or "Step failed."
-            lines = [
-                f"**Failed `{step_id}`** · {_agent_label(target)}",
-                f"**Error:** {error}",
-            ]
+            lines = [_trace_title("Failed step", f"`{step_id}` via {_agent_label(target)}")]
+            lines.extend(_trace_kv_lines(("error", error)))
             duration = _duration_label(payload.get("duration_ms"))
             if duration:
-                lines.append(f"**Duration:** `{duration}`")
+                lines.extend(_trace_kv_lines(("duration", f"`{duration}`")))
             result = payload.get("result")
             if isinstance(result, dict):
                 detail = result.get("detail")
                 if isinstance(detail, str) and detail.strip():
-                    lines.append(f"**Detail:** `{_truncate_progress(detail, 260)}`")
+                    lines.extend(_trace_kv_lines(("detail", f"`{_truncate_progress(detail, 260)}`")))
                 stats_line = _format_stats(result.get("stats"))
                 nested_result = result.get("result")
                 if not stats_line and isinstance(nested_result, dict):
                     stats_line = _format_stats(nested_result.get("stats"))
                 if stats_line:
-                    lines.append(f"**Timing :** {stats_line}")
+                    lines.append(f"`timing` {stats_line}")
             return _trace_block(lines)
     if event_name == "shell.result":
         command = payload.get("command", "")
         returncode = payload.get("returncode")
-        lines = [f"**Shell command completed** · `{_shell_status(returncode)}`"]
+        lines = [_trace_title("Shell result", f"`{_shell_status(returncode)}`")]
         _append_shell_result(lines, payload)
         return _trace_block(lines)
     if event_name == "sql.result":
@@ -973,26 +1125,38 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
         row_count = None
         if isinstance(result, dict):
             row_count = result.get("row_count")
-        lines = [
-            f"**SQL query completed**"
-            + (f" with `{row_count}` row(s)." if row_count is not None else ".")
-        ]
+        lines = [_trace_title("SQL result", f"Completed query{f' with `{row_count}` row(s)' if row_count is not None else ''}.")]
         if isinstance(sql, str) and sql.strip():
-            lines.append(f"SQL: `{_truncate_progress(sql, 300)}`")
+            lines.extend(_trace_snippet("SQL", sql, 700))
         stats_line = _format_stats(payload.get("stats"))
         if stats_line:
-            lines.append(f"Timing : {stats_line}")
+            lines.append(f"`timing` {stats_line}")
         return _trace_block(lines)
     if event_name in {"file.content", "notify.result"}:
-        return _trace_block([f"Completed {event_name}."])
+        return _trace_block([_trace_title("Completed", event_name)])
     if event_name == "task.result":
         return None
     if event_name == "clarification.required":
         question = payload.get("question") or payload.get("detail") or "More information is required."
-        return _trace_block([f"**Clarification needed.** {question}"], separator=False)
+        return _trace_block([_trace_title("Clarification needed", question)], separator=False)
     if event_name == "workflow.result":
         status = payload.get("status", "unknown")
-        return _trace_block([f"**Workflow {status}.**"], separator=False)
+        selected = payload.get("selected_option")
+        lines = [_trace_title("Workflow complete", f"Status: `{status}`")]
+        if isinstance(selected, dict):
+            option_id = selected.get("id")
+            label = selected.get("label")
+            if isinstance(option_id, str) and option_id.strip():
+                summary = f"`selected option` `{option_id}`"
+                if isinstance(label, str) and label.strip():
+                    summary += f" {label.strip()}"
+                lines.append(summary)
+        validation = payload.get("validation")
+        if isinstance(validation, dict):
+            reason = validation.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                lines.extend(_trace_kv_lines(("validator", f"`{_truncate_progress(reason, 260)}`")))
+        return _trace_block(lines, separator=False)
     return None
 
 
@@ -1005,6 +1169,7 @@ def _stream_response(client_request: Request, question: str, model: str):
 
     def run_planner():
         final_answer_streamed = False
+        narration_state: dict[str, Any] = {}
 
         def put_text(content: str):
             for part in _text_stream_parts(content):
@@ -1022,6 +1187,10 @@ def _stream_response(client_request: Request, question: str, model: str):
                         events.put(_stream_chunk(completion_id, created, model, answer))
                         final_answer_streamed = True
                     return
+
+                narration = _narration_for_event(event_name, payload, narration_state)
+                if narration and _stream_progress_enabled():
+                    events.put(_stream_chunk(completion_id, created, model, narration))
 
                 progress = _format_progress(event_name, payload, depth)
                 if progress and _stream_progress_enabled():
