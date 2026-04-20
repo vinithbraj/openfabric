@@ -46,7 +46,7 @@ AGENT_METADATA = {
 }
 
 SUPPORTED_EVENT_SCHEMAS = {
-    "task.plan": '{"task":"...","steps":[{"id":"step1","target_agent":"shell_runner","task":"...","instruction":{"operation":"run_command","command":"docker ps","capture":{"mode":"stdout_first_line"}}}]}',
+    "task.plan": '{"task":"...","task_shape":"lookup","steps":[{"id":"step1","target_agent":"shell_runner","task":"...","instruction":{"operation":"run_command","command":"docker ps","capture":{"mode":"stdout_first_line"}}}]}',
     "task.result": '{"detail":"..."}',
     "plan.progress": '{"stage":"planned","message":"...","steps":[...],"presentation":{...}}',
     "planner.replan.result": '{"replace_step_id":"step1","reason":"...","steps":[{"id":"step1_1","target_agent":"shell_runner","task":"..."}]}',
@@ -112,12 +112,13 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "Task: decide whether the request is processable by at least one discovered agent capability and, when processable, "
         "produce the best execution plan and presentation intent.\n"
         "Output JSON only with exact keys: "
-        '{"processable":true|false,"reason":"short reason","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","instruction":{"operation":"agent_specific_operation"},"depends_on":["optional_step_id"],"when":{"$from":"optional.path","equals":"optional value"},"steps":[{"id":"step1_1","task":"optional nested substep"}]}],"plan_options":[{"id":"option1","label":"primary approach","reason":"why try this first","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","instruction":{"operation":"agent_specific_operation"}}]}],"presentation":{"task":"how to present the result","format":"markdown|markdown_table|json|bullets|plain","audience":"openwebui","include_context":true|false,"include_internal_steps":true|false}}\n'
+        '{"processable":true|false,"reason":"short reason","task_shape":"count|boolean_check|save_artifact|schema_summary|compare|list|summarize_dataset|lookup|command_execution","steps":[{"id":"step1","target_agent":"agent_name","task":"step task","instruction":{"operation":"agent_specific_operation"},"depends_on":["optional_step_id"],"when":{"$from":"optional.path","equals":"optional value"},"steps":[{"id":"step1_1","task":"optional nested substep"}]}],"presentation":{"task":"how to present the result","format":"markdown|markdown_table|json|bullets|plain","audience":"openwebui","include_context":true|false,"include_internal_steps":true|false}}\n'
         "No markdown, no extra keys, no prose outside JSON.\n"
         "Decision policy:\n"
         "1) processable=true if any discovered agent can attempt the request.\n"
         "2) For processable=true, steps MUST be a non-empty ordered list.\n"
-        "2a) Also provide plan_options when there is more than one plausible execution strategy. Rank them best-first. Option 1 should be your preferred approach and option 2 should be the best fallback strategy.\n"
+        "2a) Produce one strong primary workflow in steps. Do not spend output budget inventing fallback workflows up front.\n"
+        "2b) task_shape MUST describe the user goal at a high level using one of the allowed values.\n"
         "3) Each step MUST have id and task. Leaf steps MUST have target_agent. Group steps may omit target_agent when they contain nested steps.\n"
         "4) Every leaf step MUST include an instruction object with an agent-native operation and inputs.\n"
         "5) For shell_runner use instruction.operation=run_command with fields such as command, input, and capture.\n"
@@ -278,6 +279,7 @@ def _parse_decision(raw: Any):
     steps = raw.get("steps", [])
     plan_options = raw.get("plan_options", raw.get("options"))
     presentation = raw.get("presentation")
+    task_shape = raw.get("task_shape")
     if not isinstance(processable, bool):
         return None
     if not isinstance(reason, str):
@@ -293,6 +295,7 @@ def _parse_decision(raw: Any):
         "reason": reason.strip(),
         "steps": normalized_steps,
         "plan_options": _parse_plan_options(plan_options),
+        "task_shape": task_shape.strip().lower() if isinstance(task_shape, str) and task_shape.strip() else None,
         "presentation": _parse_presentation(presentation),
     }
 
@@ -368,6 +371,59 @@ def _parse_presentation(raw: Any):
         if isinstance(value, bool):
             parsed[key] = value
     return parsed
+
+
+TASK_SHAPES = {
+    "count",
+    "boolean_check",
+    "save_artifact",
+    "schema_summary",
+    "compare",
+    "list",
+    "summarize_dataset",
+    "lookup",
+    "command_execution",
+}
+
+
+def _normalize_task_shape(question: str, raw: Any = None, *, target_agent: str | None = None, presentation: dict | None = None) -> str:
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in TASK_SHAPES:
+            return normalized
+    return _infer_task_shape(question, target_agent=target_agent, presentation=presentation)
+
+
+def _infer_task_shape(question: str, *, target_agent: str | None = None, presentation: dict | None = None) -> str:
+    text = str(question or "").strip().lower()
+    family = _agent_family(target_agent or "") if isinstance(target_agent, str) else ""
+    fmt = presentation.get("format") if isinstance(presentation, dict) else None
+
+    if _extract_save_output_path(text) or (
+        any(token in text for token in ("save", "write", "export", "store"))
+        and any(token in text for token in ("file", "path", ".txt", ".csv", ".json", ".md"))
+    ):
+        return "save_artifact"
+    if _planner_is_schema_request(text):
+        return "schema_summary"
+    if any(token in text for token in ("how many", "count ", "number of", "total number", "total count")):
+        return "count"
+    if any(token in text for token in ("whether", "check if", "check whether", "exists", "exist", "is there", "are there")):
+        return "boolean_check"
+    if re.match(r"^(?:is|are|does|do|did|can|has|have|was|were)\b", text):
+        return "boolean_check"
+    if any(token in text for token in ("compare", "difference", "different", "versus", " vs ")):
+        return "compare"
+    if any(token in text for token in ("summarize", "summary", "overview", "describe the dataset", "summarise")):
+        return "summarize_dataset"
+    if fmt == "markdown_table" or any(token in text for token in ("list", "rows", "all ", "show me all", "table of", "tables", "columns")):
+        return "list"
+    if family in {"shell_runner", "filesystem", "notifier"} and re.match(
+        r"^(?:run|execute|open|read|commit|push|checkout|create|delete|rename|move|copy|install)\b",
+        text,
+    ):
+        return "command_execution"
+    return "lookup"
 
 
 def _parse_steps(steps: list):
@@ -1649,62 +1705,18 @@ def _steps_signature(steps: list[dict]) -> str:
     return json.dumps(steps, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
 
 
-def _build_plan_options(question: str, decision: dict, capabilities: dict):
-    options = []
-    seen = set()
-
-    def append_option(option_id: str, label: str, reason: str, steps: list[dict]):
-        if not isinstance(steps, list) or not steps:
-            return
-        signature = _steps_signature(steps)
-        if signature in seen:
-            return
-        seen.add(signature)
-        options.append(
-            {
-                "id": option_id,
-                "label": label,
-                "reason": reason,
-                "steps": steps,
-            }
-        )
-
+def _build_primary_plan(question: str, decision: dict, capabilities: dict):
     raw_primary = decision.get("steps", [])
     primary_steps = _normalize_steps(question, raw_primary, capabilities) if raw_primary else []
     if primary_steps:
-        append_option("option1", "Preferred plan", decision.get("reason", ""), primary_steps)
-
-    raw_options = decision.get("plan_options") if isinstance(decision.get("plan_options"), list) else []
-    for index, option in enumerate(raw_options, start=1):
-        if not isinstance(option, dict):
-            continue
-        steps = _normalize_steps(question, option.get("steps", []), capabilities)
-        append_option(
-            str(option.get("id") or f"option{index}"),
-            str(option.get("label") or f"Option {index}"),
-            str(option.get("reason") or ""),
-            steps,
-        )
-
+        return primary_steps
     fallback_steps = _fallback_steps(question, capabilities)
     if fallback_steps:
-        append_option(
-            f"option{len(options) + 1}",
-            "Fallback plan",
-            "Deterministic fallback generated from discovered capabilities.",
-            fallback_steps,
-        )
-
+        return fallback_steps
     sql_fallback = _sql_fallback_steps_for_task(question, question, capabilities)
     if sql_fallback:
-        append_option(
-            f"option{len(options) + 1}",
-            "SQL fallback",
-            "Native SQL fallback path for database-oriented requests.",
-            sql_fallback,
-        )
-
-    return options[:3]
+        return sql_fallback
+    return []
 
 
 def _flatten_plan_steps(steps: list, prefix: str = "") -> list[dict]:
@@ -1745,31 +1757,13 @@ def _plan_progress_payload(question: str, steps: list, presentation: dict):
             message = "I found 1 action to run."
         elif step_count > 1:
             message = f"I found {step_count} actions to run in order."
-    return {
+    payload = {
         "stage": "planned",
         "message": message,
         "steps": flat_steps,
         "presentation": presentation,
     }
-
-
-def _plan_progress_payload_with_options(question: str, plan_options: list[dict], presentation: dict):
-    primary_steps = plan_options[0]["steps"] if plan_options else []
-    payload = _plan_progress_payload(question, primary_steps, presentation)
-    if len(plan_options) > 1:
-        payload["message"] = f"I found {len(plan_options)} workflow options and will try them in order."
-    payload["options"] = [
-        {
-            "id": option.get("id", f"option{index}"),
-            "label": option.get("label", f"Option {index}"),
-            "reason": option.get("reason", ""),
-            "step_count": len(_flatten_plan_steps(option.get("steps", []))),
-        }
-        for index, option in enumerate(plan_options, start=1)
-        if isinstance(option, dict)
-    ]
-    if plan_options:
-        payload["selected_option_id"] = plan_options[0].get("id")
+    payload["task_shape"] = _infer_task_shape(question, presentation=presentation)
     return payload
 
 
@@ -1790,6 +1784,7 @@ def _sql_plan_emits(question: str, allowed_events: set[str], task_question: str 
     )
     payload = {
         "task": task_question,
+        "task_shape": _infer_task_shape(task_question, target_agent=sql_steps[0]["target_agent"], presentation=presentation),
         "steps": sql_steps,
         "presentation": presentation,
         "target_agent": sql_steps[0]["target_agent"],
@@ -1910,43 +1905,23 @@ def handle_event(req: EventRequest):
         decision = _llm_decide(question, CAPABILITIES)
         if decision is not None:
             if decision["processable"] and "task.plan" in allowed_events:
-                plan_options = _build_plan_options(current_question, decision, CAPABILITIES)
-                steps = plan_options[0]["steps"] if plan_options else []
-                if not steps:
-                    steps = _fallback_steps(current_question, CAPABILITIES)
-                    if steps:
-                        plan_options = [
-                            {
-                                "id": "option1",
-                                "label": "Fallback plan",
-                                "reason": "Deterministic fallback generated from discovered capabilities.",
-                                "steps": steps,
-                            }
-                        ]
-                if not steps and _looks_like_sql_question(question, CAPABILITIES):
-                    steps = _sql_fallback_steps_for_task(question, current_question, CAPABILITIES) or steps
-                    if steps:
-                        plan_options = [
-                            {
-                                "id": "option1",
-                                "label": "SQL fallback",
-                                "reason": "Native SQL fallback path for database-oriented requests.",
-                                "steps": steps,
-                            }
-                        ]
+                steps = _build_primary_plan(current_question, decision, CAPABILITIES)
                 payload = {"task": current_question}
                 if steps:
                     payload["steps"] = steps
-                    payload["plan_options"] = plan_options
                     presentation = _normalize_presentation(current_question, decision.get("presentation"))
                     payload["presentation"] = presentation
+                    primary_target = steps[0]["target_agent"] if len(steps) == 1 else None
+                    payload["task_shape"] = _normalize_task_shape(
+                        current_question,
+                        decision.get("task_shape"),
+                        target_agent=primary_target,
+                        presentation=presentation,
+                    )
                     if len(steps) == 1:
                         payload["target_agent"] = steps[0]["target_agent"]
                     _debug_log("Planner steps:")
                     _debug_log(json.dumps(steps, indent=2))
-                    if plan_options:
-                        _debug_log("Planner options:")
-                        _debug_log(json.dumps(plan_options, indent=2))
                 else:
                     _debug_log("Planner found no valid target steps after normalization.")
                 emits = []
@@ -1954,7 +1929,7 @@ def handle_event(req: EventRequest):
                     emits.append(
                         {
                             "event": "plan.progress",
-                            "payload": _plan_progress_payload_with_options(current_question, plan_options, payload.get("presentation", {})),
+                            "payload": _plan_progress_payload(current_question, steps, payload.get("presentation", {})),
                         }
                     )
                 emits.append({"event": "task.plan", "payload": payload})

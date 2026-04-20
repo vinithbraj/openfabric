@@ -515,6 +515,7 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
         for step in req.payload.get("steps", []):
             if not isinstance(step, dict):
                 continue
+            evidence = step.get("evidence") if isinstance(step.get("evidence"), dict) else {}
             payload = step.get("payload")
             if isinstance(payload, dict) and isinstance(payload.get("sql"), str):
                 sql_queries.append(payload["sql"])
@@ -536,18 +537,26 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                             "note": "Rows truncated for synthesis" if len(rows) > 5 else None
                         }
                     )
-        
+            elif isinstance(evidence, dict):
+                evidence_payload = evidence.get("payload")
+                if isinstance(evidence_payload, dict) and isinstance(evidence_payload.get("sql"), str):
+                    sql_queries.append(evidence_payload["sql"])
+
         # Generic step outcome extraction (Phase 11 Refined)
         step_outcomes = []
         for step in req.payload.get("steps", []):
             if not isinstance(step, dict) or step.get("status") != "completed":
                 continue
+            evidence = step.get("evidence") if isinstance(step.get("evidence"), dict) else {}
             payload = step.get("payload")
             if not isinstance(payload, dict):
-                continue
+                payload = {}
             
             # Extract the best human-readable summary from this step
             best_summary = (
+                evidence.get("summary_text") or
+                (evidence.get("payload", {}) if isinstance(evidence.get("payload"), dict) else {}).get("reduced_result") or
+                (evidence.get("payload", {}) if isinstance(evidence.get("payload"), dict) else {}).get("detail") or
                 payload.get("reduced_result") or
                 payload.get("refined_answer") or 
                 payload.get("detail") or 
@@ -557,7 +566,7 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             )
 
             if (not best_summary or not isinstance(best_summary, str) or not best_summary.strip()) and step.get("event") == "shell.result":
-                stdout = payload.get("stdout")
+                stdout = payload.get("stdout") or payload.get("stdout_excerpt") or (evidence.get("payload", {}) if isinstance(evidence.get("payload"), dict) else {}).get("stdout_excerpt")
                 if isinstance(stdout, str) and stdout.strip():
                     trimmed = stdout.strip()
                     if "\n" not in trimmed and len(trimmed) <= 400:
@@ -578,7 +587,11 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                     "step_id": step.get("id"),
                     "task": step.get("task"),
                     "outcome": best_summary.strip(),
-                    "local_reduction_command": payload.get("local_reduction_command") or payload.get("result", {}).get("local_reduction_command")
+                    "local_reduction_command": (
+                        payload.get("local_reduction_command")
+                        or payload.get("result", {}).get("local_reduction_command")
+                        or (evidence.get("payload", {}) if isinstance(evidence.get("payload"), dict) else {}).get("local_reduction_command")
+                    )
                 })
 
         # Construction of a unified summary to prevent last-step bias
@@ -599,6 +612,7 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
             "steps": [] if step_outcomes else req.payload.get("steps"), # Hide noisy raw steps if we have clean outcomes
             "result": None, # CRITICAL: Suppress last-step result to prevent LLM from ignoring step_outcomes
             "error": req.payload.get("error"),
+            "task_shape": req.payload.get("task_shape"),
         }
     if req.event == "sql.result":
         result = req.payload.get("result")

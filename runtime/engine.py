@@ -22,6 +22,13 @@ from .registry import ADAPTER_REGISTRY
 
 class Engine:
 
+    DEFAULT_WORKFLOW_LIMITS = {
+        "max_attempts": 3,
+        "max_replans": 1,
+        "max_uncertain_attempts": 1,
+        "max_validation_llm_calls": 1,
+    }
+
     def __init__(self, spec: dict, global_timeout_seconds: float | None = None):
         self.spec = copy.deepcopy(spec)
         self.global_timeout_seconds = global_timeout_seconds
@@ -497,15 +504,21 @@ class Engine:
         plan_options = self._plan_options(payload)
         if not plan_options:
             return
+        limits = self._workflow_limits(payload)
         attempts = []
         deferred_clarification = None
         selected_attempt = None
+        replan_count = 0
+        uncertain_count = 0
 
         for index, option in enumerate(plan_options, start=1):
+            if index > limits["max_attempts"]:
+                break
             option_payload = dict(payload)
             option_payload["steps"] = option.get("steps", [])
             option_payload["selected_option_id"] = option.get("id")
             option_payload["selected_option_label"] = option.get("label")
+            option_payload["__attempts_so_far__"] = index
             self._emit_validation_progress(
                 "option_started",
                 payload,
@@ -549,9 +562,19 @@ class Engine:
             clarification = workflow.get("clarification")
             if workflow.get("status") == "needs_clarification" and isinstance(clarification, dict) and deferred_clarification is None:
                 deferred_clarification = clarification
+            if validation.get("verdict") == "uncertain":
+                uncertain_count += 1
             if validation.get("valid"):
                 selected_attempt = attempt_record
                 break
+            if validation.get("verdict") == "uncertain" and uncertain_count > limits["max_uncertain_attempts"]:
+                deferred_clarification = self._clarification_from_validation(payload, attempts, attempt_record, "Validation remained uncertain after repeated attempts.")
+                break
+            if index >= len(plan_options) and replan_count < limits["max_replans"] and len(attempts) < limits["max_attempts"]:
+                derived_option = self._derive_fallback_option(payload, plan_options, attempt_record, context, len(attempts), depth)
+                if derived_option is not None:
+                    plan_options.append(derived_option)
+                    replan_count += 1
             if index < len(plan_options):
                 self._emit_validation_progress(
                     "retrying",
@@ -575,6 +598,7 @@ class Engine:
                     "attempts": attempts,
                     "selected_option": selected_attempt["option"],
                     "validation": selected_attempt["validation"],
+                    "task_shape": payload.get("task_shape"),
                 }
                 presentation = payload.get("presentation")
                 if isinstance(presentation, dict):
@@ -599,6 +623,7 @@ class Engine:
                 "result": last_attempt.get("result") if isinstance(last_attempt, dict) else None,
                 "attempts": attempts,
                 "validation": last_attempt.get("validation") if isinstance(last_attempt, dict) else None,
+                "task_shape": payload.get("task_shape"),
             }
             presentation = payload.get("presentation")
             if isinstance(presentation, dict):
@@ -610,6 +635,38 @@ class Engine:
                 ).get("reason")
             self.emit("workflow.result", result_payload, depth + 1)
             return
+
+    def _workflow_limits(self, payload: dict) -> dict:
+        limits = dict(self.DEFAULT_WORKFLOW_LIMITS)
+        raw = payload.get("retry_budget")
+        if isinstance(raw, dict):
+            for key in limits:
+                value = raw.get(key)
+                if isinstance(value, (int, float)):
+                    limits[key] = max(0, int(value))
+        return limits
+
+    def _clarification_from_validation(self, payload: dict, attempts: list[dict], last_attempt: dict, detail: str) -> dict:
+        validation = last_attempt.get("validation") if isinstance(last_attempt, dict) else {}
+        question = (
+            (validation or {}).get("reason")
+            or last_attempt.get("error")
+            or detail
+        )
+        clarification = {
+            "task": payload.get("task", ""),
+            "task_shape": payload.get("task_shape", ""),
+            "detail": detail,
+            "question": f"I need either a clearer goal or a narrower target to continue: {question}",
+            "available_context": {
+                "attempts": self._compact_value(attempts, text_limit=180, row_limit=2),
+                "last_attempt": self._compact_value(last_attempt, text_limit=180, row_limit=2),
+            },
+        }
+        missing = (validation or {}).get("missing_requirements")
+        if isinstance(missing, list) and missing:
+            clarification["missing_information"] = [item for item in missing if isinstance(item, str) and item.strip()]
+        return clarification
 
     def _plan_options(self, payload: dict) -> list[dict]:
         raw_options = payload.get("plan_options")
@@ -643,6 +700,67 @@ class Engine:
             ]
         return []
 
+    def _derive_fallback_option(self, payload: dict, current_options: list[dict], last_attempt: dict, context: dict, attempt_count: int, depth: int):
+        existing = [option for option in current_options if isinstance(option, dict)]
+        if attempt_count > 3:
+            return None
+        if "planner.replan.request" not in self.spec.get("events", {}):
+            return None
+        reason = (
+            ((last_attempt.get("validation") or {}).get("reason"))
+            or last_attempt.get("error")
+            or "The previous workflow attempt did not satisfy the request."
+        )
+        replan_payload = {
+            "task": payload.get("task", ""),
+            "task_shape": payload.get("task_shape", ""),
+            "step_id": "__workflow__",
+            "original_task": payload.get("task", ""),
+            "target_agent": "",
+            "reason": reason,
+            "failure_class": "execution_failed",
+            "event": "workflow.result",
+            "available_context": {
+                "attempts": self._compact_value([attempt.get("validation") for attempt in [last_attempt]], text_limit=180, row_limit=2),
+                "last_steps": self._compact_value(last_attempt.get("steps", []), text_limit=180, row_limit=3),
+                "step_results": self._compact_value(context.get("__step_results__", []), text_limit=180, row_limit=3),
+            },
+            "partial_result": self._compact_value(last_attempt.get("result"), text_limit=180, row_limit=3),
+            "presentation": payload.get("presentation", {}),
+        }
+        contract_name = self.spec["events"]["planner.replan.request"]["contract"]
+        self.contracts.validate_payload(contract_name, replan_payload)
+        log_event("planner.replan.request", replan_payload, depth + 1)
+        emitted = self._invoke_subscribers("planner.replan.request", replan_payload, depth + 1)
+        replan_result = None
+        auxiliary = []
+        for event_name, event_payload in emitted:
+            if event_name == "planner.replan.result":
+                replan_result = event_payload
+            else:
+                auxiliary.append((event_name, event_payload))
+        for event_name, event_payload in auxiliary:
+            self.emit(event_name, event_payload, depth + 1)
+        if not isinstance(replan_result, dict):
+            return None
+        steps = replan_result.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return None
+        existing_signatures = {
+            json.dumps(option.get("steps", []), sort_keys=True, ensure_ascii=True)
+            for option in existing
+            if isinstance(option, dict)
+        }
+        candidate_signature = json.dumps(steps, sort_keys=True, ensure_ascii=True)
+        if candidate_signature in existing_signatures:
+            return None
+        return {
+            "id": f"option{len(existing) + 1}",
+            "label": "Recovered fallback",
+            "reason": str(replan_result.get("reason") or reason),
+            "steps": steps,
+        }
+
     def _default_validation_result(
         self,
         workflow_payload: dict,
@@ -655,26 +773,115 @@ class Engine:
         status = workflow.get("status")
         error = workflow.get("error")
         result = workflow.get("result")
+        task_shape = str(workflow_payload.get("task_shape") or "").strip().lower() or "lookup"
         completed = status == "completed"
-        has_result = result not in (None, "", [], {})
-        valid = completed and (has_result or any(item.get("status") == "completed" for item in self._prior_step_results(context)))
+        prior_results = self._prior_step_results(context)
+        shape_assessment = self._assess_task_shape_result(task_shape, result, prior_results)
+        valid = completed and shape_assessment["verdict"] == "valid"
         trace = [
             f"Attempt {attempt} of {total_attempts} used option '{option.get('label') or option.get('id') or 'workflow'}'.",
             f"Workflow status was '{status or 'unknown'}'.",
+            f"Task shape was '{task_shape}'.",
         ]
         if error:
             trace.append(f"Execution error observed: {error}")
+        trace.extend(shape_assessment["trace"])
         if valid:
-            trace.append("The workflow completed and produced material output, so it is accepted.")
+            trace.append("The workflow completed and satisfied the task-shape checks, so it is accepted.")
         else:
             trace.append("The workflow did not clearly satisfy the request, so another option should be tried if available.")
         return {
             "valid": valid,
-            "reason": "Workflow satisfied the request." if valid else (str(error or "Workflow output did not clearly satisfy the request.")),
+            "verdict": shape_assessment["verdict"] if completed else "invalid",
+            "reason": "Workflow satisfied the request." if valid else (str(error or shape_assessment["reason"] or "Workflow output did not clearly satisfy the request.")),
             "retry_recommended": not valid,
-            "missing_requirements": [],
+            "missing_requirements": shape_assessment.get("missing_requirements", []),
             "trace": trace,
         }
+
+    def _looks_like_scalar(self, value: Any) -> bool:
+        if isinstance(value, (int, float, bool)):
+            return True
+        if isinstance(value, str):
+            compact = value.strip()
+            return bool(compact) and bool(re.fullmatch(r"-?\d+(?:\.\d+)?", compact))
+        return False
+
+    def _looks_like_boolean(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return True
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "false", "yes", "no", "exists", "missing", "0", "1"}
+        return False
+
+    def _looks_like_path(self, value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        compact = value.strip()
+        return bool(compact) and ("/" in compact or "\\" in compact or re.search(r"\.[A-Za-z0-9]+$", compact) is not None)
+
+    def _has_nonempty_collection(self, value: Any) -> bool:
+        if isinstance(value, list):
+            return len(value) > 0
+        if isinstance(value, dict):
+            if isinstance(value.get("rows"), list):
+                return len(value["rows"]) > 0
+            return len(value) > 0
+        if isinstance(value, str):
+            return len([line for line in value.splitlines() if line.strip()]) > 1
+        return False
+
+    def _assess_task_shape_result(self, task_shape: str, result: Any, prior_results: list[dict]) -> dict:
+        if isinstance(result, dict) and "rows" in result and isinstance(result.get("rows"), list):
+            rows = result.get("rows", [])
+        else:
+            rows = None
+
+        if task_shape == "count":
+            if self._looks_like_scalar(result):
+                return {"verdict": "valid", "reason": "Count-like scalar detected.", "missing_requirements": [], "trace": ["Detected scalar output compatible with a count task."]}
+            if isinstance(rows, list) and len(rows) == 1:
+                return {"verdict": "uncertain", "reason": "Single-row structured output may still need local reduction into a scalar count.", "missing_requirements": ["scalar count"], "trace": ["Observed one structured row; count reduction may still be required."]}
+            return {"verdict": "invalid", "reason": "Count task did not produce a scalar result.", "missing_requirements": ["scalar count"], "trace": ["Did not detect a scalar-like count output."]}
+
+        if task_shape == "boolean_check":
+            if self._looks_like_boolean(result):
+                return {"verdict": "valid", "reason": "Boolean-like output detected.", "missing_requirements": [], "trace": ["Detected boolean-like output compatible with a boolean check."]}
+            return {"verdict": "invalid", "reason": "Boolean check did not produce a boolean-like result.", "missing_requirements": ["boolean result"], "trace": ["Did not detect a clear yes/no or true/false style result."]}
+
+        if task_shape == "save_artifact":
+            if self._looks_like_path(result):
+                return {"verdict": "valid", "reason": "Artifact path detected.", "missing_requirements": [], "trace": ["Detected a path-like output compatible with save_artifact."]}
+            return {"verdict": "invalid", "reason": "Save task did not return an artifact path.", "missing_requirements": ["artifact path"], "trace": ["Did not detect a path-like result for the saved artifact."]}
+
+        if task_shape == "schema_summary":
+            for item in prior_results:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("event") == "sql.result":
+                    summary = item.get("summary")
+                    if isinstance(summary, dict) and ("sql" in summary or "rows" in summary or "row_count" in summary):
+                        return {"verdict": "valid", "reason": "Schema-oriented SQL output detected.", "missing_requirements": [], "trace": ["Observed schema-oriented SQL output from a prior step."]}
+            return {"verdict": "uncertain", "reason": "Schema workflow completed but the summary evidence is thin.", "missing_requirements": ["schema/table/column summary"], "trace": ["Workflow completed, but schema evidence was not strongly structured in the reduced output."]}
+
+        if task_shape in {"list", "compare"}:
+            if self._has_nonempty_collection(result):
+                return {"verdict": "valid", "reason": "Collection-like output detected.", "missing_requirements": [], "trace": ["Detected non-empty collection output compatible with list/compare tasks."]}
+            return {"verdict": "invalid", "reason": "List/compare task did not produce structured collection output.", "missing_requirements": ["non-empty collection"], "trace": ["Did not detect a non-empty collection-like result."]}
+
+        if task_shape == "summarize_dataset":
+            if isinstance(result, str) and result.strip():
+                return {"verdict": "valid", "reason": "Summary text detected.", "missing_requirements": [], "trace": ["Detected non-empty summary text."]}
+            return {"verdict": "uncertain", "reason": "Dataset summary task completed but summary text is not clearly reduced yet.", "missing_requirements": ["summary text"], "trace": ["Did not detect a clear reduced summary string."]}
+
+        if task_shape in {"lookup", "command_execution"}:
+            if result not in (None, "", [], {}):
+                return {"verdict": "valid", "reason": "Material output detected.", "missing_requirements": [], "trace": ["Detected material output compatible with lookup/command execution."]}
+            if any(item.get("status") == "completed" for item in prior_results):
+                return {"verdict": "uncertain", "reason": "Steps completed but reduced output is sparse.", "missing_requirements": ["reduced final output"], "trace": ["Completed steps exist, but the reduced result is too sparse to accept confidently."]}
+            return {"verdict": "invalid", "reason": "No usable output detected.", "missing_requirements": ["usable output"], "trace": ["Did not detect usable output for the completed workflow."]}
+
+        return {"verdict": "uncertain", "reason": "Unknown task shape.", "missing_requirements": ["shape-specific output"], "trace": ["Task shape was not recognized by deterministic validation."]}
 
     def _emit_validation_progress(self, stage: str, workflow_payload: dict, depth: int, **extra):
         if "validation.progress" not in self.spec.get("events", {}):
@@ -699,6 +906,9 @@ class Engine:
         total_attempts: int,
         depth: int,
     ) -> dict:
+        limits = self._workflow_limits(workflow_payload)
+        prior_attempts = workflow_payload.get("__attempts_so_far__", 0)
+        validation_llm_budget_remaining = max(0, limits["max_validation_llm_calls"] - max(0, prior_attempts - 1))
         self._emit_validation_progress(
             "started",
             workflow_payload,
@@ -727,18 +937,20 @@ class Engine:
 
         request_payload = {
             "task": workflow_payload.get("task", ""),
+            "task_shape": workflow_payload.get("task_shape", ""),
             "attempt": attempt,
             "total_attempts": total_attempts,
             "option_id": option.get("id"),
             "option_label": option.get("label"),
             "option_reason": option.get("reason"),
             "workflow_status": workflow.get("status", ""),
-            "steps": workflow.get("steps", []),
-            "result": workflow.get("result"),
+            "validation_llm_budget_remaining": validation_llm_budget_remaining,
+            "steps": [self._compact_value(step, text_limit=240, row_limit=4) for step in workflow.get("steps", []) if isinstance(step, dict)],
+            "result": self._compact_value(workflow.get("result"), text_limit=240, row_limit=4),
             "error": workflow.get("error"),
             "presentation": workflow_payload.get("presentation", {}),
             "available_context": {
-                key: value
+                key: self._compact_value(value, text_limit=180, row_limit=3)
                 for key, value in context.items()
                 if key != "original_task" and not key.endswith(".event")
             },
@@ -798,6 +1010,176 @@ class Engine:
                 payload[key] = value
         self.emit("step.progress", payload, depth)
 
+    def _compact_text(self, value: Any, limit: int = 800):
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if len(value) <= limit:
+            return value
+        return value[: limit - 3].rstrip() + "..."
+
+    def _compact_rows(self, rows: Any, limit: int = 5):
+        if not isinstance(rows, list):
+            return rows
+        compact = []
+        for row in rows[:limit]:
+            if isinstance(row, dict):
+                compact.append({str(key): self._compact_value(val, text_limit=120) for key, val in row.items()})
+            else:
+                compact.append(self._compact_value(row, text_limit=120))
+        return compact
+
+    def _compact_schema(self, schema: Any):
+        if not isinstance(schema, dict):
+            return schema
+        tables = schema.get("tables")
+        if not isinstance(tables, dict):
+            return self._compact_value(schema, text_limit=200)
+        return {
+            "dialect": schema.get("dialect"),
+            "tables": {
+                table_name: {
+                    "column_count": len(table_info.get("columns", [])) if isinstance(table_info, dict) and isinstance(table_info.get("columns"), list) else None,
+                    "foreign_key_count": len(table_info.get("foreign_keys", [])) if isinstance(table_info, dict) and isinstance(table_info.get("foreign_keys"), list) else None,
+                }
+                for table_name, table_info in list(tables.items())[:20]
+                if isinstance(table_name, str)
+            },
+        }
+
+    def _compact_value(self, value: Any, *, text_limit: int = 800, row_limit: int = 5):
+        if isinstance(value, str):
+            return self._compact_text(value, text_limit)
+        if isinstance(value, list):
+            if value and all(isinstance(item, dict) for item in value):
+                return self._compact_rows(value, row_limit)
+            return [self._compact_value(item, text_limit=text_limit, row_limit=row_limit) for item in value[:row_limit]]
+        if isinstance(value, dict):
+            compact = {}
+            preferred_keys = [
+                "detail",
+                "reduced_result",
+                "refined_answer",
+                "sql",
+                "command",
+                "returncode",
+                "ok",
+                "kind",
+                "row_count",
+                "columns",
+                "limit",
+                "stats",
+                "stdout",
+                "stderr",
+                "rows",
+                "result",
+                "schema",
+                "queries",
+                "local_reduction_command",
+                "note",
+                "error",
+                "status",
+            ]
+            keys = [key for key in preferred_keys if key in value]
+            if not keys:
+                keys = list(value.keys())[:8]
+            for key in keys:
+                item = value.get(key)
+                if key == "rows":
+                    compact[key] = self._compact_rows(item, row_limit)
+                    if isinstance(item, list) and len(item) > row_limit:
+                        compact["rows_note"] = f"Showing first {row_limit} rows out of {len(item)}."
+                elif key == "stdout":
+                    compact["stdout_excerpt"] = self._compact_text(item, 500)
+                elif key == "stderr":
+                    compact["stderr_excerpt"] = self._compact_text(item, 300)
+                elif key == "schema":
+                    compact[key] = self._compact_schema(item)
+                elif key == "queries" and isinstance(item, list):
+                    compact[key] = [self._compact_value(entry, text_limit=240, row_limit=2) for entry in item[:5]]
+                else:
+                    compact[key] = self._compact_value(item, text_limit=text_limit, row_limit=row_limit)
+            return compact
+        return value
+
+    def _compact_event_payload(self, event_name: str, payload: Any):
+        if not isinstance(payload, dict):
+            return payload
+        compact = {"event": event_name}
+        if event_name == "shell.result":
+            compact.update(
+                {
+                    "detail": payload.get("detail"),
+                    "command": payload.get("command"),
+                    "returncode": payload.get("returncode"),
+                    "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
+                    "local_reduction_command": payload.get("local_reduction_command"),
+                    "stdout_excerpt": self._compact_text(payload.get("stdout"), 500),
+                    "stderr_excerpt": self._compact_text(payload.get("stderr"), 300),
+                    "stats": self._compact_value(payload.get("stats"), text_limit=120),
+                    "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3),
+                }
+            )
+            return compact
+        if event_name == "sql.result":
+            compact.update(
+                {
+                    "detail": payload.get("detail"),
+                    "sql": self._compact_text(payload.get("sql"), 500),
+                    "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
+                    "local_reduction_command": payload.get("local_reduction_command"),
+                    "schema": self._compact_schema(payload.get("schema")),
+                    "stats": self._compact_value(payload.get("stats"), text_limit=120),
+                    "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=5),
+                }
+            )
+            return compact
+        if event_name == "slurm.result":
+            compact.update(
+                {
+                    "detail": payload.get("detail"),
+                    "command": payload.get("command"),
+                    "returncode": payload.get("returncode"),
+                    "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
+                    "local_reduction_command": payload.get("local_reduction_command"),
+                    "stdout_excerpt": self._compact_text(payload.get("stdout"), 500),
+                    "stderr_excerpt": self._compact_text(payload.get("stderr"), 300),
+                    "stats": self._compact_value(payload.get("stats"), text_limit=120),
+                    "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3),
+                }
+            )
+            return compact
+        if event_name == "task.result":
+            compact.update(
+                {
+                    "detail": payload.get("detail"),
+                    "status": payload.get("status"),
+                    "error": payload.get("error"),
+                    "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3),
+                    "replan_hint": self._compact_value(payload.get("replan_hint"), text_limit=180, row_limit=3),
+                }
+            )
+            return compact
+        return self._compact_value(payload, text_limit=240, row_limit=4)
+
+    def _step_evidence(self, event_name: str | None, payload: Any, value: Any):
+        compact_payload = self._compact_event_payload(event_name or "", payload) if event_name else self._compact_value(payload, text_limit=240, row_limit=4)
+        evidence = {
+            "event": event_name or "",
+            "value_preview": self._compact_value(value, text_limit=240, row_limit=4),
+            "payload": compact_payload,
+        }
+        if isinstance(compact_payload, dict):
+            summary = (
+                compact_payload.get("reduced_result")
+                or compact_payload.get("detail")
+                or compact_payload.get("stdout_excerpt")
+                or compact_payload.get("result", {}).get("reduced_result") if isinstance(compact_payload.get("result"), dict) else None
+            )
+            if isinstance(summary, str) and summary.strip():
+                evidence["summary_text"] = summary.strip()
+        return evidence
+
     def _step_result_summary(self, event_name: str, payload: dict):
         if not isinstance(payload, dict):
             return None
@@ -805,8 +1187,9 @@ class Engine:
             return {
                 "command": payload.get("command", ""),
                 "returncode": payload.get("returncode"),
-                "stdout": payload.get("stdout", ""),
-                "stderr": payload.get("stderr", ""),
+                "stdout_excerpt": self._compact_text(payload.get("stdout", ""), 500),
+                "stderr_excerpt": self._compact_text(payload.get("stderr", ""), 300),
+                "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
             }
         if event_name == "sql.result":
             result = payload.get("result")
@@ -816,7 +1199,9 @@ class Engine:
                 summary["stats"] = stats
             if isinstance(result, dict):
                 summary["row_count"] = result.get("row_count")
-                summary["rows"] = result.get("rows", [])
+                summary["columns"] = result.get("columns", [])
+                summary["rows"] = self._compact_rows(result.get("rows", []), 5)
+                summary["reduced_result"] = payload.get("reduced_result") or payload.get("refined_answer")
             return summary
         if event_name == "slurm.result":
             result = payload.get("result")
@@ -826,12 +1211,13 @@ class Engine:
                 summary["stats"] = stats
             if isinstance(result, dict):
                 summary["returncode"] = result.get("returncode")
-                summary["stdout"] = result.get("stdout", "")
-                summary["stderr"] = result.get("stderr", "")
+                summary["stdout_excerpt"] = self._compact_text(result.get("stdout", ""), 500)
+                summary["stderr_excerpt"] = self._compact_text(result.get("stderr", ""), 300)
                 summary["kind"] = result.get("kind", "")
+                summary["reduced_result"] = payload.get("reduced_result") or payload.get("refined_answer")
             return summary
         if event_name == "task.result":
-            return {"detail": payload.get("detail", ""), "result": payload.get("result")}
+            return {"detail": payload.get("detail", ""), "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3)}
         return payload
 
     def _step_failure_error(self, event_name: str, payload: dict, step_payload: dict | None = None):
@@ -895,28 +1281,29 @@ class Engine:
             "status": status,
             "event": primary_event or "",
             "detail": detail,
-            "value": primary_value,
-            "result": primary_payload.get("result", primary_value) if isinstance(primary_payload, dict) else primary_value,
+            "value": self._compact_value(primary_value, text_limit=240, row_limit=4),
+            "result": self._compact_value(primary_payload.get("result", primary_value), text_limit=240, row_limit=4) if isinstance(primary_payload, dict) else self._compact_value(primary_value, text_limit=240, row_limit=4),
             "summary": self._step_result_summary(primary_event or "", primary_payload) if primary_event and isinstance(primary_payload, dict) else primary_value,
             "duration_ms": duration_ms,
+            "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
         }
         if primary_event == "shell.result" and isinstance(primary_payload, dict):
             envelope["command"] = primary_payload.get("command")
             envelope["returncode"] = primary_payload.get("returncode")
-            envelope["stdout"] = primary_payload.get("stdout")
-            envelope["stderr"] = primary_payload.get("stderr")
+            envelope["stdout_excerpt"] = self._compact_text(primary_payload.get("stdout"), 500)
+            envelope["stderr_excerpt"] = self._compact_text(primary_payload.get("stderr"), 300)
         if primary_event == "sql.result" and isinstance(primary_payload, dict):
             envelope["sql"] = primary_payload.get("sql")
             result = primary_payload.get("result")
             if isinstance(result, dict):
                 envelope["row_count"] = result.get("row_count")
                 envelope["columns"] = result.get("columns")
-                envelope["rows"] = result.get("rows")
+                envelope["rows"] = self._compact_rows(result.get("rows"), 5)
         if primary_event == "slurm.result" and isinstance(primary_payload, dict):
             envelope["command"] = primary_payload.get("command")
             envelope["returncode"] = primary_payload.get("returncode")
-            envelope["stdout"] = primary_payload.get("stdout")
-            envelope["stderr"] = primary_payload.get("stderr")
+            envelope["stdout_excerpt"] = self._compact_text(primary_payload.get("stdout"), 500)
+            envelope["stderr_excerpt"] = self._compact_text(primary_payload.get("stderr"), 300)
         return envelope
 
     def _record_step_result(self, context: dict, step_result: dict):
@@ -980,6 +1367,7 @@ class Engine:
             return None
         replan_payload = {
             "task": step_payload.get("task", ""),
+            "task_shape": workflow_payload.get("task_shape", ""),
             "step_id": step_id,
             "original_task": workflow_payload.get("task", context.get("original_task", "")),
             "target_agent": step_payload.get("target_agent", ""),
@@ -1044,6 +1432,7 @@ class Engine:
                 question = detail
         clarification = {
             "task": workflow_payload.get("task", context.get("original_task", "")),
+            "task_shape": workflow_payload.get("task_shape", ""),
             "step_id": step_id,
             "detail": detail,
             "question": question,
@@ -1072,6 +1461,7 @@ class Engine:
                 "task": raw_step.get("task", workflow_payload.get("task", "")),
                 "step_id": step_id,
                 "presentation": workflow_payload.get("presentation", {}),
+                "task_shape": workflow_payload.get("task_shape", ""),
             }
             log_event("task.plan", nested_payload, depth + 1)
             nested = self._execute_workflow_steps(nested_steps, nested_payload, nested_context, depth + 1)
@@ -1092,6 +1482,8 @@ class Engine:
         step_payload = self._resolve_templates(step_payload, context)
         step_payload = self._resolve_references(step_payload, context)
         step_payload.setdefault("task", workflow_payload.get("task", ""))
+        if isinstance(workflow_payload.get("task_shape"), str) and workflow_payload.get("task_shape"):
+            step_payload.setdefault("task_shape", workflow_payload.get("task_shape"))
         step_payload["step_id"] = step_id
         step_payload["original_task"] = workflow_payload.get("task", context.get("original_task", ""))
         prior_step_results = self._prior_step_results(context)
@@ -1317,11 +1709,12 @@ class Engine:
                         "status": "needs_clarification" if self._step_requests_replan(primary_event or "", primary_payload) else "failed",
                         "event": primary_event,
                         "duration_ms": duration_ms,
-                        "payload": primary_payload,
-                        "result": primary_value,
+                        "payload": self._compact_event_payload(primary_event or "", primary_payload),
+                        "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
+                        "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
                         "error": error,
                         "emitted": [
-                            {"event": event_name, "payload": event_payload}
+                            {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
                             for event_name, event_payload in step_results
                         ],
                     }
@@ -1388,10 +1781,11 @@ class Engine:
                     "status": "completed",
                     "event": primary_event,
                     "duration_ms": duration_ms,
-                    "payload": primary_payload,
-                    "result": primary_value,
+                    "payload": self._compact_event_payload(primary_event or "", primary_payload),
+                    "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
+                    "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
                     "emitted": [
-                        {"event": event_name, "payload": event_payload}
+                        {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
                         for event_name, event_payload in step_results
                     ],
                 }

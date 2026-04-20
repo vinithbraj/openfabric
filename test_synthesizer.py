@@ -119,6 +119,32 @@ class SynthesizerReducedResultTests(unittest.TestCase):
         source = _build_source_payload(req)
         self.assertEqual(source["step_outcomes"][0]["outcome"], "/tmp/tables/tables.txt")
 
+    def test_workflow_source_payload_prefers_compact_step_evidence_summary(self):
+        req = types.SimpleNamespace(
+            event="workflow.result",
+            payload={
+                "task": "count matching rows",
+                "task_shape": "count",
+                "status": "completed",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "task": "count matching rows",
+                        "status": "completed",
+                        "event": "sql.result",
+                        "payload": {"detail": "SQL query executed."},
+                        "evidence": {
+                            "summary_text": "There are 42 matching rows.",
+                            "payload": {"reduced_result": "There are 42 matching rows."},
+                        },
+                    }
+                ],
+            },
+        )
+        source = _build_source_payload(req)
+        self.assertEqual(source["task_shape"], "count")
+        self.assertEqual(source["step_outcomes"][0]["outcome"], "There are 42 matching rows.")
+
 
 if __name__ == "__main__":
     unittest.main()

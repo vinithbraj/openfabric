@@ -34,6 +34,7 @@ sys.modules.setdefault("pydantic", pydantic_stub)
 
 from agent_library.agents.llm_operations_planner import (
     _derive_shell_command,
+    _infer_task_shape,
     _parse_decision,
     _compound_fallback_steps,
     _normalize_steps,
@@ -283,6 +284,24 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(len(decision["plan_options"]), 2)
         self.assertEqual(decision["plan_options"][0]["id"], "option1")
         self.assertEqual(decision["plan_options"][1]["label"], "Fallback")
+
+    def test_infer_task_shape_count(self):
+        self.assertEqual(
+            _infer_task_shape("how many jobs are running on my slurm cluster?"),
+            "count",
+        )
+
+    def test_infer_task_shape_save_artifact(self):
+        self.assertEqual(
+            _infer_task_shape("save these rows to results.txt and give me the final path"),
+            "save_artifact",
+        )
+
+    def test_infer_task_shape_schema_summary(self):
+        self.assertEqual(
+            _infer_task_shape("show database schema and relationships"),
+            "schema_summary",
+        )
 
 
 if __name__ == "__main__":

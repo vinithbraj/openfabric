@@ -42,6 +42,7 @@ class ValidatorTests(unittest.TestCase):
                 event="validation.request",
                 payload={
                     "task": "list the files",
+                    "task_shape": "list",
                     "workflow_status": "completed",
                     "result": ["a.txt", "b.txt"],
                     "steps": [{"id": "step1", "status": "completed"}],
@@ -51,6 +52,7 @@ class ValidatorTests(unittest.TestCase):
         payload = response["emits"][0]["payload"]
         self.assertTrue(payload["valid"])
         self.assertFalse(payload["retry_recommended"])
+        self.assertEqual(payload["verdict"], "valid")
         self.assertTrue(payload["trace"])
 
     def test_validation_heuristic_rejects_failed_attempt(self):
@@ -59,6 +61,7 @@ class ValidatorTests(unittest.TestCase):
                 event="validation.request",
                 payload={
                     "task": "list the files",
+                    "task_shape": "list",
                     "workflow_status": "failed",
                     "error": "command crashed",
                     "steps": [{"id": "step1", "status": "failed"}],
@@ -68,7 +71,27 @@ class ValidatorTests(unittest.TestCase):
         payload = response["emits"][0]["payload"]
         self.assertFalse(payload["valid"])
         self.assertTrue(payload["retry_recommended"])
+        self.assertEqual(payload["verdict"], "invalid")
         self.assertIn("command crashed", payload["reason"])
+
+    def test_validation_respects_zero_llm_budget_on_uncertain_result(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "task": "summarize the dataset",
+                    "task_shape": "summarize_dataset",
+                    "workflow_status": "completed",
+                    "validation_llm_budget_remaining": 0,
+                    "result": {},
+                    "steps": [{"id": "step1", "status": "completed"}],
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertFalse(payload["valid"])
+        self.assertEqual(payload["verdict"], "uncertain")
+        self.assertFalse(payload["retry_recommended"])
 
 
 if __name__ == "__main__":
