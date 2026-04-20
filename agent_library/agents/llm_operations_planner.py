@@ -857,6 +857,11 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
 
 def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
     task_lc = task.lower().strip()
+    save_path = _extract_save_output_path(task)
+
+    if save_path and any(token in task_lc for token in {"list", "save", "write", "create"}):
+        return _build_save_rows_command(save_path)
+
     if "{{prev}}" in task_lc:
         if "log" in task_lc:
             tail_match = re.search(r"\b(?:last|tail)\s+(\d+)\b", task_lc)
@@ -937,6 +942,36 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
         return "find . -maxdepth 2 -type f | sort"
 
     return None
+
+
+def _extract_save_output_path(text: str) -> str | None:
+    if not isinstance(text, str):
+        return None
+    match = re.search(
+        r"\b(?:save|write)(?:\s+it|\s+them|\s+these(?:\s+\w+)*)?\s+(?:in|to)\s+([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+    match = re.search(r"\b([A-Za-z0-9_./-]+\.txt)\b", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _build_save_rows_command(path: str) -> str:
+    safe_path = json.dumps(path)
+    return (
+        "python3 -c 'import json,sys,pathlib; "
+        "rows=json.load(sys.stdin); "
+        "lines=[(f\"{row.get(\\\"PatientID\\\", \\\"\\\")}: {row.get(\\\"PatientName\\\", \\\"\\\")}\".strip(\": \") "
+        "if isinstance(row, dict) and (row.get(\"PatientID\") or row.get(\"PatientName\")) "
+        "else (json.dumps(row, ensure_ascii=True) if isinstance(row, dict) else str(row))) for row in rows]; "
+        f"path=pathlib.Path({safe_path}); "
+        "path.write_text(\"\\n\".join(lines)); "
+        "print(path.resolve())'"
+    )
 
 
 def _derive_shell_result_mode(task: str, command: str | None) -> str | None:
@@ -1215,6 +1250,9 @@ def _format_capability_answer(capabilities: dict) -> str:
 
 
 def _fallback_steps(question: str, capabilities: dict):
+    compound_steps = _compound_fallback_steps(question, capabilities)
+    if compound_steps:
+        return compound_steps
     parts = [part.strip(" ,") for part in re.split(r"\s+(?:and then|then|after that|next)\s+", question, flags=re.IGNORECASE) if part.strip(" ,")]
     if not parts:
         parts = [question.strip()]
@@ -1268,6 +1306,147 @@ def _current_request_from_context(question: str) -> str:
         return question
     current = match.group(1).strip()
     return current or question
+
+
+COMPOUND_REQUEST_MARKER_RE = re.compile(
+    r"\b(?:how many|count|list|show|find|which|what(?:\s+is|\s+are)?)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _split_compound_request(question: str) -> list[str]:
+    text = re.sub(r"\s+", " ", question).strip()
+    if not text:
+        return []
+
+    matches = list(COMPOUND_REQUEST_MARKER_RE.finditer(text))
+    if len(matches) < 2:
+        return [text]
+
+    split_points = [0]
+    lower_text = text.lower()
+    for match in matches[1:]:
+        prefix = lower_text[split_points[-1] : match.start()]
+        if any(separator in prefix for separator in (" and ", ", and ", ";", ",")):
+            split_points.append(match.start())
+
+    if len(split_points) < 2:
+        return [text]
+
+    parts = []
+    split_points.append(len(text))
+    for start, end in zip(split_points, split_points[1:]):
+        part = text[start:end].strip(" ,;")
+        part = re.sub(r"\s+(?:,?\s*and|;)\s*$", "", part, flags=re.IGNORECASE)
+        part = re.sub(r"^(?:and|then|also)\s+", "", part, flags=re.IGNORECASE)
+        if part:
+            parts.append(part)
+    return parts or [text]
+
+
+def _compound_fallback_steps(question: str, capabilities: dict):
+    parts = _split_compound_request(question)
+    if len(parts) < 2:
+        return []
+
+    steps = []
+    for index, part in enumerate(parts, start=1):
+        target_agent = _select_target_agent(part, capabilities)
+        if not target_agent or target_agent in {"ops_planner", "synthesizer"}:
+            return []
+        instruction = _normalize_agent_instruction(target_agent, part, None, None, index)
+        if not isinstance(instruction, dict) or not instruction:
+            return []
+        step = {
+            "id": f"step{index}",
+            "target_agent": target_agent,
+            "task": part,
+            "instruction": instruction,
+        }
+        steps.append(step)
+    return steps
+
+
+def _recover_compound_steps(question: str, steps: list[dict], capabilities: dict):
+    if len(steps) != 1:
+        return steps
+    compound_steps = _compound_fallback_steps(question, capabilities)
+    if len(compound_steps) < 2:
+        return steps
+
+    original_task = str(steps[0].get("task") or "").strip().lower()
+    split_tasks = {str(step.get("task") or "").strip().lower() for step in compound_steps}
+    if original_task and original_task in split_tasks:
+        return compound_steps
+    if original_task != question.strip().lower():
+        return compound_steps
+    return steps
+
+
+def _looks_like_save_list_sql_request(question: str, capabilities: dict) -> bool:
+    question_lc = question.lower()
+    return (
+        _looks_like_sql_question(question, capabilities)
+        and bool(re.search(r"\b(?:save|write)\b", question_lc))
+        and bool(re.search(r"\b(?:list|llist|users|patients|rows|results)\b", question_lc))
+        and bool(re.search(r"\b(?:how many|count)\b", question_lc))
+    )
+
+
+def _list_query_from_request(question: str) -> str:
+    compact = re.sub(r"\s+", " ", question).strip()
+    compact = re.split(r"\s*,\s*(?:create|save|write)\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    compact = re.split(r"\b(?:and then|then)\b\s+(?:create|save|write)\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    return (
+        f"{compact}. Return one row per matching patient and include PatientID and PatientName. "
+        "Do not return only an aggregate count."
+    )
+
+
+def _align_sql_steps_with_downstream_needs(question: str, steps: list[dict], capabilities: dict) -> list[dict]:
+    if len(steps) < 2 or not _looks_like_save_list_sql_request(question, capabilities):
+        return steps
+
+    aligned = []
+    saw_sql_list_rewrite = False
+    for index, step in enumerate(steps):
+        updated = dict(step)
+        target_agent = updated.get("target_agent")
+        instruction = updated.get("instruction")
+        if (
+            not saw_sql_list_rewrite
+            and _agent_family(str(target_agent)) == "sql_runner"
+            and isinstance(instruction, dict)
+            and instruction.get("operation") == "query_from_request"
+        ):
+            downstream = steps[index + 1] if index + 1 < len(steps) else None
+            if isinstance(downstream, dict) and str(downstream.get("target_agent")) == "shell_runner":
+                downstream_task = str(downstream.get("task") or "")
+                if _extract_save_output_path(downstream_task):
+                    updated_instruction = dict(instruction)
+                    updated_instruction["question"] = _list_query_from_request(question)
+                    updated["instruction"] = updated_instruction
+                    updated["task"] = "List the qualifying patients from mydb with identifying columns for export"
+                    saw_sql_list_rewrite = True
+
+        if (
+            str(updated.get("target_agent")) == "shell_runner"
+            and _extract_save_output_path(str(updated.get("task") or ""))
+        ):
+            command = _derive_shell_command(str(updated.get("task") or ""), index + 1)
+            if command:
+                input_ref = None
+                if isinstance(updated.get("instruction"), dict):
+                    input_ref = updated["instruction"].get("input")
+                updated["instruction"] = {
+                    "operation": "run_command",
+                    "command": command,
+                    "capture": {"mode": "stdout_stripped"},
+                }
+                if input_ref is not None:
+                    updated["instruction"]["input"] = input_ref
+        aligned.append(updated)
+    return aligned
 
 
 def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: dict):
@@ -1369,7 +1548,8 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             normalized_step["when"] = when
         normalized.append(normalized_step)
         available_step_ids.add(normalized_step["id"])
-    return normalized
+    normalized = _recover_compound_steps(question, normalized, capabilities)
+    return _align_sql_steps_with_downstream_needs(question, normalized, capabilities)
 
 
 def _normalize_presentation(question: str, presentation: dict | None):

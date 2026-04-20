@@ -440,6 +440,44 @@ def _schema_summary(schema: dict) -> str:
     return _schema_prompt_text(schema)
 
 
+def _schema_focus_terms(focus: str | None, task: str | None) -> set[str]:
+    tokens = set()
+    for text in (focus or "", task or ""):
+        lowered = str(text).lower()
+        if "table" in lowered:
+            tokens.add("tables")
+        if "column" in lowered:
+            tokens.add("columns")
+        if "relationship" in lowered or "foreign key" in lowered or "relation" in lowered:
+            tokens.add("relationships")
+        if "schema" in lowered:
+            tokens.add("schema")
+    return tokens
+
+
+def _tables_only_schema_request(focus: str | None, task: str | None) -> bool:
+    terms = _schema_focus_terms(focus, task)
+    return "tables" in terms and "columns" not in terms and "relationships" not in terms
+
+
+def _schema_tables_result(schema: dict) -> dict[str, Any]:
+    rows = []
+    for table in schema.get("tables", []):
+        rows.append(
+            {
+                "schema": table.get("schema"),
+                "table": table.get("name"),
+                "type": table.get("type", "table"),
+            }
+        )
+    return {
+        "columns": ["schema", "table", "type"],
+        "rows": rows,
+        "row_count": len(rows),
+        "limit": len(rows),
+    }
+
+
 def _schema_identifier_catalog(schema: dict) -> str:
     lines = ["Exact identifiers:"]
     for table in schema.get("tables", []):
@@ -1095,7 +1133,21 @@ def handle_event(req: EventRequest):
             stats["schema_ms"] = _elapsed_ms(started)
             operation = instruction.get("operation") if isinstance(instruction, dict) else None
             if operation == "inspect_schema" or (_is_schema_request(classification_task) and not provided_sql):
+                focus = instruction.get("focus") if isinstance(instruction, dict) else None
                 stats["total_ms"] = _elapsed_ms(total_started)
+                if _tables_only_schema_request(focus if isinstance(focus, str) else None, classification_task):
+                    return {
+                        "emits": [
+                            {
+                                "event": "sql.result",
+                                "payload": {
+                                    "detail": "Database tables listed.",
+                                    "stats": stats,
+                                    "result": _schema_tables_result(schema),
+                                },
+                            }
+                        ]
+                    }
                 return {
                     "emits": [
                         {

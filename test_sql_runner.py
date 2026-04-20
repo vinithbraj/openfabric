@@ -18,11 +18,28 @@ class _FastAPIStub:
 fastapi_stub.FastAPI = _FastAPIStub
 sys.modules.setdefault("fastapi", fastapi_stub)
 
+requests_stub = types.ModuleType("requests")
+sys.modules.setdefault("requests", requests_stub)
+
+pydantic_stub = types.ModuleType("pydantic")
+
+
+class _BaseModel:
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+pydantic_stub.BaseModel = _BaseModel
+sys.modules.setdefault("pydantic", pydantic_stub)
+
 from agent_library.agents.sql_runner import (
     _parse_strict_json_object,
     _execute_sql,
     _postgres_safe_sql,
     _repair_sql_with_retries,
+    _schema_tables_result,
+    _tables_only_schema_request,
     _same_query_specs,
     _single_sql_query_spec_from_object,
     _strict_sql_query_specs_from_object,
@@ -47,6 +64,30 @@ POSTGRES_SCHEMA = {
 
 
 class PostgresSafeSqlTests(unittest.TestCase):
+    def test_tables_only_schema_request_detects_table_listing(self):
+        self.assertTrue(_tables_only_schema_request("tables", "give me a list of all the tables in mydb"))
+        self.assertFalse(_tables_only_schema_request("tables, columns, and relationships", "show database schema"))
+
+    def test_schema_tables_result_returns_compact_table_rows(self):
+        result = _schema_tables_result(
+            {
+                "dialect": "postgres",
+                "tables": [
+                    {"schema": "flathr", "name": "Patient", "type": "table"},
+                    {"schema": "public", "name": "resources", "type": "table"},
+                ],
+            }
+        )
+        self.assertEqual(result["columns"], ["schema", "table", "type"])
+        self.assertEqual(result["row_count"], 2)
+        self.assertEqual(
+            result["rows"],
+            [
+                {"schema": "flathr", "table": "Patient", "type": "table"},
+                {"schema": "public", "table": "resources", "type": "table"},
+            ],
+        )
+
     def test_parse_strict_json_object_rejects_wrapped_sql_markdown(self):
         wrapped = 'Here is the SQL query:\\n```sql\\nSELECT 1\\n```'
         self.assertIsNone(_parse_strict_json_object(wrapped))
