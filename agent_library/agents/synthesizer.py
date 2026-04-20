@@ -555,6 +555,13 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                 (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("refined_answer") or
                 (payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}).get("detail")
             )
+
+            if (not best_summary or not isinstance(best_summary, str) or not best_summary.strip()) and step.get("event") == "shell.result":
+                stdout = payload.get("stdout")
+                if isinstance(stdout, str) and stdout.strip():
+                    trimmed = stdout.strip()
+                    if "\n" not in trimmed and len(trimmed) <= 400:
+                        best_summary = trimmed
             
             if not best_summary or not isinstance(best_summary, str) or not best_summary.strip():
                 # Fallback: Capture the semantic signal of the return code

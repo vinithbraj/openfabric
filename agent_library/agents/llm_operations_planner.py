@@ -954,6 +954,13 @@ def _extract_save_output_path(text: str) -> str | None:
     )
     if match:
         return match.group(1)
+    match = re.search(
+        r"\bfile\s+named\s+([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
     match = re.search(r"\b([A-Za-z0-9_./-]+\.txt)\b", text, flags=re.IGNORECASE)
     if match:
         return match.group(1)
@@ -972,6 +979,21 @@ def _build_save_rows_command(path: str) -> str:
         "path.write_text(\"\\n\".join(lines)); "
         "print(path.resolve())'"
     )
+
+
+def _build_save_rows_step(source_step_id: str, path: str, step_index: int = 2) -> dict:
+    return {
+        "id": f"step{step_index}",
+        "target_agent": "shell_runner",
+        "task": f"save the rows from {source_step_id} into {path} and print the final absolute path",
+        "instruction": {
+            "operation": "run_command",
+            "command": _build_save_rows_command(path),
+            "input": {"$from": f"{source_step_id}.rows"},
+            "capture": {"mode": "stdout_stripped"},
+        },
+        "depends_on": [source_step_id],
+    }
 
 
 def _derive_shell_result_mode(task: str, command: str | None) -> str | None:
@@ -1388,8 +1410,7 @@ def _looks_like_save_list_sql_request(question: str, capabilities: dict) -> bool
     return (
         _looks_like_sql_question(question, capabilities)
         and bool(re.search(r"\b(?:save|write)\b", question_lc))
-        and bool(re.search(r"\b(?:list|llist|users|patients|rows|results)\b", question_lc))
-        and bool(re.search(r"\b(?:how many|count)\b", question_lc))
+        and bool(re.search(r"\b(?:list|llist|users|patients|rows|results|tables|schema)\b", question_lc))
     )
 
 
@@ -1404,15 +1425,23 @@ def _list_query_from_request(question: str) -> str:
 
 
 def _align_sql_steps_with_downstream_needs(question: str, steps: list[dict], capabilities: dict) -> list[dict]:
-    if len(steps) < 2 or not _looks_like_save_list_sql_request(question, capabilities):
+    if not steps or not _looks_like_save_list_sql_request(question, capabilities):
+        return steps
+
+    save_path = _extract_save_output_path(question)
+    if not save_path:
         return steps
 
     aligned = []
     saw_sql_list_rewrite = False
+    saw_save_step = False
+    first_sql_step_id = None
     for index, step in enumerate(steps):
         updated = dict(step)
         target_agent = updated.get("target_agent")
         instruction = updated.get("instruction")
+        if first_sql_step_id is None and _agent_family(str(target_agent)) == "sql_runner":
+            first_sql_step_id = str(updated.get("id") or f"step{index+1}")
         if (
             not saw_sql_list_rewrite
             and _agent_family(str(target_agent)) == "sql_runner"
@@ -1433,6 +1462,7 @@ def _align_sql_steps_with_downstream_needs(question: str, steps: list[dict], cap
             str(updated.get("target_agent")) == "shell_runner"
             and _extract_save_output_path(str(updated.get("task") or ""))
         ):
+            saw_save_step = True
             command = _derive_shell_command(str(updated.get("task") or ""), index + 1)
             if command:
                 input_ref = None
@@ -1446,6 +1476,8 @@ def _align_sql_steps_with_downstream_needs(question: str, steps: list[dict], cap
                 if input_ref is not None:
                     updated["instruction"]["input"] = input_ref
         aligned.append(updated)
+    if first_sql_step_id and not saw_save_step:
+        aligned.append(_build_save_rows_step(first_sql_step_id, save_path, len(aligned) + 1))
     return aligned
 
 

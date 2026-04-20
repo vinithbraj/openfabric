@@ -95,6 +95,30 @@ class SynthesizerReducedResultTests(unittest.TestCase):
         )
         self.assertEqual(_fallback_answer(req), "- TableA\n- TableB")
 
+    def test_workflow_source_payload_uses_shell_stdout_for_saved_path(self):
+        req = types.SimpleNamespace(
+            event="workflow.result",
+            payload={
+                "task": "save tables and give me the final path",
+                "status": "completed",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "task": "save the rows to tables.txt",
+                        "status": "completed",
+                        "event": "shell.result",
+                        "payload": {
+                            "stdout": "/tmp/tables/tables.txt",
+                            "stderr": "",
+                            "returncode": 0,
+                        },
+                    }
+                ],
+            },
+        )
+        source = _build_source_payload(req)
+        self.assertEqual(source["step_outcomes"][0]["outcome"], "/tmp/tables/tables.txt")
+
 
 if __name__ == "__main__":
     unittest.main()

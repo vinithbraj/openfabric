@@ -211,6 +211,30 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertIn("patient.txt", normalized[1]["instruction"]["command"])
         self.assertEqual(normalized[1]["instruction"]["input"], {"$from": "step1.rows"})
 
+    def test_normalize_steps_appends_save_step_for_table_list_request(self):
+        steps = [
+            {
+                "id": "step1",
+                "target_agent": "sql_runner_mydb",
+                "task": "introspect the database schema to list all tables",
+                "instruction": {
+                    "operation": "inspect_schema",
+                    "focus": "tables",
+                },
+            }
+        ]
+        normalized = _normalize_steps(
+            "give me a list of all the tables in mydb and save this in a file named tables.txt and give me the final path of this file",
+            steps,
+            CAPABILITIES,
+        )
+        self.assertEqual(len(normalized), 2)
+        self.assertEqual(normalized[0]["instruction"]["operation"], "inspect_schema")
+        self.assertEqual(normalized[1]["target_agent"], "shell_runner")
+        self.assertIn("tables.txt", normalized[1]["instruction"]["command"])
+        self.assertEqual(normalized[1]["instruction"]["input"], {"$from": "step1.rows"})
+        self.assertEqual(normalized[1]["depends_on"], ["step1"])
+
 
 if __name__ == "__main__":
     unittest.main()
