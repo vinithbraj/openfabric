@@ -21,22 +21,16 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
+# Setup a virtual environment for Python dependencies (recommended for Ubuntu 24.04 / PEP 668)
+RUN python3 -m venv /app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
+
 # Copy requirements file and install Python dependencies
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
 COPY . .
 
-# Expose the gateway port
-EXPOSE 8310
-
-# Default environment variables (can be overridden)
-ENV LLM_OPS_TIMEOUT_SECONDS=300
-ENV OPENFABRIC_GATEWAY_STREAM_PROGRESS=True
-
-# Entry point for the application
-ENTRYPOINT ["python3", "openwebui_gateway.py"]
-
-# Default arguments
-CMD ["--host", "0.0.0.0", "--port", "8310"]
+# Default shell
+CMD ["/bin/bash"]
