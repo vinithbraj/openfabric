@@ -177,6 +177,8 @@ def _is_slurm_task(task: str) -> bool:
         return True
     if "gpu" in task_lc and any(token in task_lc for token in ("partition", "node", "nodes", "cluster", "slurm", "sinfo", "squeue", "job", "jobs", "hpc")):
         return True
+    if "gpu" in task_lc and any(token in task_lc for token in ("availability", "available", "capacity", "allocat", "utilization", "free")):
+        return True
     if "worker" in task_lc and any(token in task_lc for token in ("cluster", "slurm", "node", "nodes", "hpc")):
         return True
     if "compute" in task_lc and any(token in task_lc for token in ("cluster", "slurm", "node", "nodes", "partition", "hpc")):
@@ -281,7 +283,27 @@ def _looks_like_elapsed_summary_task(task: str) -> bool:
     return any(marker in text for marker in duration_markers)
 
 
+def _looks_like_node_inventory_summary_task(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not any(token in text for token in ("slurm", "cluster", "sinfo", "scheduler")):
+        return False
+    has_nodes = any(token in text for token in ("node", "nodes", "nodelist", "compute node", "compute nodes"))
+    asks_for_count = any(token in text for token in ("how many", "count", "number of", "total nodes", "total number"))
+    asks_for_state = any(token in text for token in ("state", "states", "status", "statuses"))
+    return has_nodes and asks_for_count and asks_for_state
+
+
 def _deterministic_slurm_command(task: str) -> dict[str, Any] | None:
+    if _looks_like_node_inventory_summary_task(task):
+        args = ["-N", "-h", "-o", "%N|%T"]
+        partition = _extract_partition_name(task)
+        if partition:
+            args = ["-p", partition, *args]
+        return {
+            "command": "sinfo",
+            "args": args,
+            "reason": "Using deterministic sinfo query for Slurm node count and state summary.",
+        }
     if not _looks_like_elapsed_summary_task(task):
         return None
     args = ["-X", "-P", "--format=JobID,JobName,State,Elapsed,End"]
@@ -747,12 +769,65 @@ print("\\n".join(lines_out))
     return f"python3 -c {shlex.quote(script)}"
 
 
+def _deterministic_node_inventory_reducer_command(task: str) -> str:
+    script = """
+import sys
+from collections import Counter
+
+text = sys.stdin.read()
+lines = [line.strip() for line in text.splitlines() if line.strip()]
+if not lines:
+    print("No Slurm node records were returned.")
+    raise SystemExit(0)
+
+state_counts = Counter()
+unique_nodes = set()
+
+for line in lines:
+    if "|" not in line:
+        continue
+    node, state = line.split("|", 1)
+    node = node.strip()
+    state = state.strip().rstrip("*").lower()
+    if not node:
+        continue
+    if node in unique_nodes:
+        continue
+    unique_nodes.add(node)
+    state_counts[state or "unknown"] += 1
+
+if not unique_nodes:
+    print("No Slurm node records were returned.")
+    raise SystemExit(0)
+
+lines_out = [f"Total nodes: {len(unique_nodes)}"]
+for state, count in sorted(state_counts.items()):
+    lines_out.append(f"State {state}: {count}")
+print("\\n".join(lines_out))
+""".strip()
+    return f"python3 -c {shlex.quote(script)}"
+
+
 def _deterministic_reduce_slurm_result(task: str, command: str, stdout: str) -> tuple[str, str]:
+    full_command_lc = str(command or "").lower()
+    if _looks_like_node_inventory_summary_task(task):
+        if not isinstance(stdout, str) or "|" not in stdout:
+            return "", ""
+        if "sinfo" not in full_command_lc:
+            return "", ""
+        reduction = run_local_reducer_loop(
+            stdout,
+            lambda previous_command, previous_error: _deterministic_node_inventory_reducer_command(task),
+            max_attempts=1,
+            validate_output=lambda output: bool(output.strip()),
+        )
+        if reduction.succeeded:
+            return reduction.output, reduction.command
+        return "", ""
     if not _looks_like_elapsed_summary_task(task):
         return "", ""
     if not isinstance(stdout, str) or "Elapsed" not in stdout or "|" not in stdout:
         return "", ""
-    full_command_lc = str(command or "").lower()
     if "sacct" not in full_command_lc:
         return "", ""
     reduction = run_local_reducer_loop(

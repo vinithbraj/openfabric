@@ -49,7 +49,12 @@ class _BaseModelStub:
 pydantic_stub.BaseModel = _BaseModelStub
 sys.modules.setdefault("pydantic", pydantic_stub)
 
-from agent_library.agents.slurm_runner import _instruction_to_command, _parse_command_input
+from agent_library.agents.slurm_runner import (
+    _deterministic_reduce_slurm_result,
+    _deterministic_slurm_command,
+    _instruction_to_command,
+    _parse_command_input,
+)
 from agent_library.agents.slurm_runner import _gateway_base_url, _result_payload
 from dep_agent_library.slurm_gateway_agent.app import _allowed_commands, _resolve_command
 
@@ -95,6 +100,29 @@ class SlurmRunnerTests(unittest.TestCase):
         command, args = _instruction_to_command(instruction, "cancel job")
         self.assertEqual(command, "scancel")
         self.assertEqual(args, ["12345"])
+
+    def test_deterministic_slurm_command_for_node_inventory_summary(self):
+        command = _deterministic_slurm_command("how many nodes are currently in my slurm cluster and what is their state ?")
+        self.assertEqual(command["command"], "sinfo")
+        self.assertEqual(command["args"], ["-N", "-h", "-o", "%N|%T"])
+
+    def test_deterministic_reduce_slurm_result_for_node_inventory_summary(self):
+        stdout = "\n".join(
+            [
+                "node-a|idle",
+                "node-b|mixed*",
+                "node-c|idle",
+            ]
+        )
+        reduced, reducer_command = _deterministic_reduce_slurm_result(
+            "how many nodes are currently in my slurm cluster and what is their state ?",
+            "sinfo -N -h -o %N|%T",
+            stdout,
+        )
+        self.assertIn("Total nodes: 3", reduced)
+        self.assertIn("State idle: 2", reduced)
+        self.assertIn("State mixed: 1", reduced)
+        self.assertIn("python3 -c", reducer_command)
 
 
 class SlurmGatewayTests(unittest.TestCase):

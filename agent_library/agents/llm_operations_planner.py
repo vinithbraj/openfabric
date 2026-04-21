@@ -449,6 +449,8 @@ def _infer_task_shape(question: str, *, target_agent: str | None = None, present
         return "schema_summary"
     if _looks_like_slurm_elapsed_summary_question(text):
         return "lookup"
+    if _looks_like_slurm_node_inventory_summary_question(text):
+        return "lookup"
     if _looks_like_mixed_count_and_detail_request(text):
         return "list" if fmt == "markdown_table" or family == "sql_runner" else "lookup"
     if len(compound_parts) > 1 and (count_part_count > 1 or (count_part_count and boolean_part_count)):
@@ -848,6 +850,20 @@ def _agent_family(name: str) -> str:
     return name
 
 
+def _first_agent_in_family(capabilities: dict, family: str) -> str | None:
+    for agent in capabilities.get("agents", []):
+        if not isinstance(agent, dict):
+            continue
+        name = agent.get("name")
+        if (
+            isinstance(name, str)
+            and _agent_family(name) == family
+            and "task.plan" in agent.get("subscribes_to", [])
+        ):
+            return name
+    return None
+
+
 def _has_agent_family(capabilities: dict, family: str) -> bool:
     return any(
         isinstance(agent, dict)
@@ -1131,6 +1147,16 @@ def _looks_like_slurm_elapsed_summary_question(question: str) -> bool:
     )
 
 
+def _looks_like_slurm_node_inventory_summary_question(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    if not any(token in text for token in ("slurm", "cluster", "sinfo", "scheduler")):
+        return False
+    has_nodes = any(token in text for token in ("node", "nodes", "nodelist", "compute node", "compute nodes"))
+    asks_for_count = any(token in text for token in ("how many", "count", "number of", "total nodes", "total number"))
+    asks_for_state = any(token in text for token in ("state", "states", "status", "statuses"))
+    return has_nodes and asks_for_count and asks_for_state
+
+
 def _looks_like_local_hardware_question(question: str) -> bool:
     text = str(question or "").strip().lower()
     tokens = _tokenize(question)
@@ -1207,6 +1233,11 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
 
     if not candidates:
         return None
+
+    if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
+        native_slurm = _first_agent_in_family(capabilities, "slurm_runner")
+        if native_slurm:
+            return native_slurm
 
     priority_boosts = {
         "shell_runner": 0,
@@ -1837,6 +1868,9 @@ def _derive_presentation(question: str) -> dict:
     if _looks_like_slurm_elapsed_summary_question(question_lc):
         presentation["format"] = "markdown"
         presentation["task"] = "Report the computed Slurm timing summary clearly in Markdown."
+    elif _looks_like_slurm_node_inventory_summary_question(question_lc):
+        presentation["format"] = "markdown"
+        presentation["task"] = "Report the total Slurm node count and state summary clearly in Markdown."
     elif docker_listing_request:
         presentation["format"] = "markdown"
         presentation["task"] = "Show the raw Docker command output clearly in a preformatted block."
@@ -2104,6 +2138,20 @@ def _format_capability_answer(capabilities: dict) -> str:
 
 
 def _fallback_steps(question: str, capabilities: dict):
+    if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
+        target_agent = _first_agent_in_family(capabilities, "slurm_runner")
+        if target_agent:
+            return [
+                {
+                    "id": "step1",
+                    "target_agent": target_agent,
+                    "task": _sanitize_task_text(question) or question.strip(),
+                    "instruction": {
+                        "operation": "query_from_request",
+                        "question": question.strip(),
+                    },
+                }
+            ]
     mixed_parts = _mixed_count_and_detail_parts(question)
     if mixed_parts is not None and _looks_like_sql_question(question, capabilities):
         target_agent = _select_sql_target_agent(question, capabilities)
@@ -2253,14 +2301,15 @@ def _normalize_compound_shell_part(part: str, question: str) -> str:
     compact_lc = compact.lower()
     question_lc = str(question or "").lower()
     if any(marker in compact_lc for marker in COUNT_REQUEST_MARKERS):
-        entity = _strip_count_request_prefix(compact)
-        entity_lc = entity.lower()
-        if "docker" in question_lc and "docker" not in entity_lc:
-            if re.search(r"\bcontainers?\b", entity_lc):
-                entity = f"docker {entity}"
-            elif re.search(r"\bimages?\b", entity_lc):
-                entity = f"docker {entity}"
-        compact = f"count {entity}".strip()
+        if not _looks_like_slurm_question(question):
+            entity = _strip_count_request_prefix(compact)
+            entity_lc = entity.lower()
+            if "docker" in question_lc and "docker" not in entity_lc:
+                if re.search(r"\bcontainers?\b", entity_lc):
+                    entity = f"docker {entity}"
+                elif re.search(r"\bimages?\b", entity_lc):
+                    entity = f"docker {entity}"
+            compact = f"count {entity}".strip()
     elif "docker" in question_lc and "docker" not in compact_lc:
         if re.search(r"\bcontainers?\b", compact_lc):
             compact = re.sub(r"\bcontainers?\b", lambda m: f"docker {m.group(0)}", compact, count=1, flags=re.IGNORECASE)
@@ -2582,6 +2631,10 @@ def _expand_sql_export_steps(question: str, steps: list[dict], capabilities: dic
 
 
 def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: dict):
+    if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
+        slurm_steps = _fallback_steps(question, capabilities)
+        if slurm_steps:
+            return slurm_steps
     valid_names = _agent_names_with_task_plan(capabilities)
     normalized = []
     available_step_ids = set()
@@ -2633,6 +2686,12 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             and (_looks_like_repo_file_scan(task or question) or (_looks_like_workspace_file_question(task or question) and not _looks_like_sql_question(task or question, capabilities)))
         ):
             target_agent = "shell_runner"
+        if _agent_family(target_agent) == "sql_runner" and (
+            _looks_like_slurm_elapsed_summary_question(task or question)
+            or _looks_like_slurm_node_inventory_summary_question(task or question)
+            or (_looks_like_slurm_question(task or question) and not _looks_like_sql_question(task or question, capabilities))
+        ):
+            target_agent = _first_agent_in_family(capabilities, "slurm_runner") or target_agent
         if _is_presentation_only_task(task or question):
             continue
         normalized_step = {
@@ -2744,6 +2803,9 @@ def _normalize_presentation(question: str, presentation: dict | None):
     if _looks_like_slurm_elapsed_summary_question(question):
         normalized["format"] = "markdown"
         normalized["task"] = "Report the computed Slurm timing summary clearly in Markdown."
+    if _looks_like_slurm_node_inventory_summary_question(question):
+        normalized["format"] = "markdown"
+        normalized["task"] = "Report the total Slurm node count and state summary clearly in Markdown."
     if docker_listing_request:
         normalized["format"] = "markdown"
         normalized["task"] = "Show the raw Docker command output clearly in a preformatted block."
@@ -2755,6 +2817,10 @@ def _steps_signature(steps: list[dict]) -> str:
 
 
 def _build_primary_plan(question: str, decision: dict, capabilities: dict):
+    if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
+        slurm_steps = _fallback_steps(question, capabilities)
+        if slurm_steps:
+            return slurm_steps
     if _looks_like_sql_export_request(question, capabilities):
         sql_export_steps = _sql_fallback_steps(question, capabilities)
         if sql_export_steps:

@@ -35,12 +35,14 @@ sys.modules.setdefault("pydantic", pydantic_stub)
 from agent_library.agents.llm_operations_planner import (
     _derive_presentation,
     _derive_shell_command,
+    _fallback_steps,
     _infer_task_shape,
     _normalize_task_shape,
     _parse_decision,
     _compound_fallback_steps,
     _normalize_followup_shell_instruction,
     _normalize_steps,
+    _select_target_agent,
     _sql_fallback_steps_for_task,
     _split_compound_request,
     _step_semantic_drift,
@@ -460,6 +462,60 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(
             _infer_task_shape("how many jobs are running on my slurm cluster?"),
             "count",
+        )
+
+    def test_infer_task_shape_slurm_node_count_and_state_is_lookup(self):
+        self.assertEqual(
+            _infer_task_shape("how many nodes are currently in my slurm cluster and what is their state ?"),
+            "lookup",
+        )
+
+    def test_select_target_agent_prefers_slurm_for_node_inventory_summary(self):
+        self.assertEqual(
+            _select_target_agent("how many nodes are currently in my slurm cluster and what is their state ?", CAPABILITIES),
+            "slurm_runner_cluster",
+        )
+
+    def test_fallback_steps_use_single_slurm_step_for_node_inventory_summary(self):
+        steps = _fallback_steps(
+            "how many nodes are currently in my slurm cluster and what is their state ?",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["target_agent"], "slurm_runner_cluster")
+        self.assertEqual(steps[0]["instruction"]["question"], "how many nodes are currently in my slurm cluster and what is their state ?")
+
+    def test_normalize_steps_collapses_bad_two_step_node_inventory_plan_to_single_slurm_step(self):
+        steps = [
+            {
+                "id": "step1",
+                "target_agent": "sql_runner_mydb",
+                "task": "count nodes are curently in my slurm cluster",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": "count nodes are curently in my slurm cluster",
+                },
+            },
+            {
+                "id": "step2",
+                "target_agent": "slurm_runner_cluster",
+                "task": "what is their state ?",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": "what is their state ?",
+                },
+            },
+        ]
+        normalized = _normalize_steps(
+            "how many nodes are curently in my slurm cluster and what is their state ?",
+            steps,
+            CAPABILITIES,
+        )
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["target_agent"], "slurm_runner_cluster")
+        self.assertEqual(
+            normalized[0]["instruction"]["question"],
+            "how many nodes are curently in my slurm cluster and what is their state ?",
         )
 
     def test_infer_task_shape_save_artifact(self):
