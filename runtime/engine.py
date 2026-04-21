@@ -8,6 +8,8 @@ import subprocess
 import sys
 import time
 import hashlib
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 from importlib import import_module
 from urllib.parse import urlparse
@@ -19,6 +21,7 @@ from .contracts import ContractRegistry
 from .event_bus import EventBus
 from .graph import build_agent_graph_node, build_capability_graph, build_workflow_graph
 from .registry import ADAPTER_REGISTRY
+from .run_store import RunStore
 
 
 class Engine:
@@ -45,6 +48,7 @@ class Engine:
         self.agents = {}
         self._managed_processes = []
         self._shutdown_registered = False
+        self.run_store = RunStore()
 
     def setup(self):
         self._autostart_http_services()
@@ -219,6 +223,95 @@ class Engine:
 
         return metadata
 
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _new_run_id(self) -> str:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return f"{timestamp}_{uuid.uuid4().hex[:12]}"
+
+    def _resume_run_id(self, payload: dict | None) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        raw = payload.get("resume_run_id")
+        return str(raw).strip() if isinstance(raw, str) else ""
+
+    def _persistence_metadata(self, session: dict, *, resumable: bool, status: str | None = None) -> dict:
+        metadata = {
+            "run_id": session.get("run_id"),
+            "resume_run_id": session.get("run_id"),
+            "resumable": resumable,
+            "status": status or session.get("status"),
+        }
+        state_path = session.get("state_path")
+        if isinstance(state_path, str) and state_path.strip():
+            metadata["state_path"] = state_path
+        return metadata
+
+    def _checkpoint_run_state(self, session: dict, stage: str) -> None:
+        session["updated_at"] = self._now_iso()
+        session["state_path"] = self.run_store.save(copy.deepcopy(session), stage=stage)
+
+    def _new_run_session(self, payload: dict, plan_options: list[dict], limits: dict) -> dict:
+        run_id = str(payload.get("run_id") or "").strip() or self._new_run_id()
+        session_payload = copy.deepcopy(payload)
+        session_payload.pop("resume_run_id", None)
+        now = self._now_iso()
+        session = {
+            "run_id": run_id,
+            "status": "running",
+            "task": session_payload.get("task", ""),
+            "task_shape": session_payload.get("task_shape", ""),
+            "created_at": now,
+            "updated_at": now,
+            "payload": session_payload,
+            "plan_options": copy.deepcopy(plan_options),
+            "limits": copy.deepcopy(limits),
+            "attempts": [],
+            "replan_count": 0,
+            "uncertain_count": 0,
+            "current_attempt_index": 0,
+            "selected_attempt_index": None,
+            "deferred_clarification": None,
+            "terminal_event": None,
+            "terminal_payload": None,
+        }
+        self._checkpoint_run_state(session, "run_created")
+        return session
+
+    def _load_or_create_run_session(self, payload: dict, plan_options: list[dict], limits: dict) -> tuple[dict, bool]:
+        resume_run_id = self._resume_run_id(payload)
+        if resume_run_id:
+            session = self.run_store.load(resume_run_id)
+            if not isinstance(session, dict):
+                raise ValueError(f"Cannot resume run '{resume_run_id}': persisted state was not found.")
+            session["state_path"] = str(self.run_store.state_path(resume_run_id))
+            return session, True
+        return self._new_run_session(payload, plan_options, limits), False
+
+    def replay_run(self, run_id: str, depth: int = 0):
+        session = self.run_store.load(run_id)
+        if not isinstance(session, dict):
+            raise ValueError(f"Cannot replay run '{run_id}': persisted state was not found.")
+        terminal_event = session.get("terminal_event")
+        terminal_payload = session.get("terminal_payload")
+        if not isinstance(terminal_event, str) or not terminal_event.strip() or not isinstance(terminal_payload, dict):
+            raise ValueError(f"Cannot replay run '{run_id}': the run has not reached a terminal state.")
+        self.emit(terminal_event.strip(), copy.deepcopy(terminal_payload), depth)
+
+    def resume_run(self, run_id: str, depth: int = 0):
+        session = self.run_store.load(run_id)
+        if not isinstance(session, dict):
+            raise ValueError(f"Cannot resume run '{run_id}': persisted state was not found.")
+        terminal_event = session.get("terminal_event")
+        terminal_payload = session.get("terminal_payload")
+        if isinstance(terminal_event, str) and terminal_event.strip() and isinstance(terminal_payload, dict):
+            self.emit(terminal_event.strip(), copy.deepcopy(terminal_payload), depth)
+            return
+        payload = copy.deepcopy(session.get("payload") or {})
+        payload["resume_run_id"] = run_id
+        self._execute_task_plan(payload, depth)
+
     def _autostart_http_services(self):
         for agent_name, config in self.spec["agents"].items():
             runtime_cfg = self._effective_runtime_config(config.get("runtime", {}))
@@ -358,7 +451,9 @@ class Engine:
         contract_name = self.spec["events"][event_name]["contract"]
         self.contracts.validate_payload(contract_name, payload)
 
-        if event_name == "task.plan" and isinstance(payload, dict) and isinstance(payload.get("steps"), list):
+        if event_name == "task.plan" and isinstance(payload, dict) and (
+            isinstance(payload.get("steps"), list) or self._resume_run_id(payload)
+        ):
             self._execute_task_plan(payload, depth)
             return
 
@@ -547,43 +642,134 @@ class Engine:
         return bool(left)
 
     def _execute_task_plan(self, payload: dict, depth: int):
-        plan_options = self._plan_options(payload)
+        incoming_plan_options = self._plan_options(payload)
+        limits = self._workflow_limits(payload)
+        session, resumed = self._load_or_create_run_session(payload, incoming_plan_options, limits)
+        if isinstance(session.get("terminal_event"), str) and session.get("terminal_event") and isinstance(session.get("terminal_payload"), dict):
+            self.emit(session["terminal_event"], copy.deepcopy(session["terminal_payload"]), depth + 1)
+            return
+
+        active_payload = copy.deepcopy(session.get("payload") or payload)
+        plan_options = [
+            option
+            for option in (session.get("plan_options") or incoming_plan_options)
+            if isinstance(option, dict)
+        ]
         if not plan_options:
             return
-        limits = self._workflow_limits(payload)
-        attempts = []
-        deferred_clarification = None
-        selected_attempt = None
-        replan_count = 0
-        uncertain_count = 0
 
-        for index, option in enumerate(plan_options, start=1):
+        session["payload"] = active_payload
+        session["plan_options"] = copy.deepcopy(plan_options)
+        session["limits"] = copy.deepcopy(limits)
+        session["status"] = "running"
+        self._checkpoint_run_state(session, "run_resumed" if resumed else "run_started")
+
+        attempts = [item for item in session.get("attempts", []) if isinstance(item, dict)]
+        session["attempts"] = attempts
+        deferred_clarification = session.get("deferred_clarification")
+        selected_attempt = None
+        selected_attempt_index = session.get("selected_attempt_index")
+        if isinstance(selected_attempt_index, int) and 1 <= selected_attempt_index <= len(attempts):
+            selected_attempt = attempts[selected_attempt_index - 1]
+        replan_count = max(0, int(session.get("replan_count", 0)))
+        uncertain_count = max(0, int(session.get("uncertain_count", 0)))
+
+        next_attempt_index = len(attempts) + 1
+        if attempts:
+            last_attempt = attempts[-1]
+            if last_attempt.get("status") == "running" or isinstance(last_attempt.get("workflow_state"), dict):
+                next_attempt_index = max(1, int(last_attempt.get("attempt", len(attempts))))
+
+        index = next_attempt_index
+        while index <= len(plan_options):
             if index > limits["max_attempts"]:
                 break
-            option_payload = dict(payload)
+            option = plan_options[index - 1]
+            is_resuming_attempt = index <= len(attempts)
+
+            if is_resuming_attempt:
+                attempt_record = attempts[index - 1]
+                if attempt_record.get("status") not in {"running"} and not isinstance(attempt_record.get("workflow_state"), dict):
+                    continue
+            else:
+                attempt_record = {
+                    "attempt": index,
+                    "option": {
+                        "id": option.get("id"),
+                        "label": option.get("label"),
+                        "reason": option.get("reason"),
+                    },
+                    "status": "running",
+                }
+                if isinstance(option.get("origin"), dict):
+                    attempt_record["option"]["origin"] = self._compact_value(option.get("origin"), text_limit=180, row_limit=3)
+                if isinstance(option.get("derived_from_attempt"), int):
+                    attempt_record["option"]["derived_from_attempt"] = option.get("derived_from_attempt")
+                attempts.append(attempt_record)
+                session["attempts"] = attempts
+                session["current_attempt_index"] = index
+                self._checkpoint_run_state(session, "attempt_started")
+
+            option_payload = dict(active_payload)
             option_payload["steps"] = option.get("steps", [])
             option_payload["selected_option_id"] = option.get("id")
             option_payload["selected_option_label"] = option.get("label")
             option_payload["__attempts_so_far__"] = index
-            self._emit_validation_progress(
-                "option_started",
-                payload,
-                depth + 1,
-                option_id=option.get("id"),
-                option_label=option.get("label"),
-                attempt=index,
-                total_attempts=len(plan_options),
-                reason=option.get("reason"),
-                message=f"Trying workflow option {index} of {len(plan_options)}.",
+            workflow_state = attempt_record.get("workflow_state") if isinstance(attempt_record.get("workflow_state"), dict) else None
+            if workflow_state is None:
+                self._emit_validation_progress(
+                    "option_started",
+                    active_payload,
+                    depth + 1,
+                    option_id=option.get("id"),
+                    option_label=option.get("label"),
+                    attempt=index,
+                    total_attempts=len(plan_options),
+                    reason=option.get("reason"),
+                    message=f"Trying workflow option {index} of {len(plan_options)}.",
+                )
+                context = {
+                    "original_task": active_payload.get("task", ""),
+                    "__step_results__": [],
+                    "__step_results_by_id__": {},
+                }
+            else:
+                self._emit_validation_progress(
+                    "option_started",
+                    active_payload,
+                    depth + 1,
+                    option_id=option.get("id"),
+                    option_label=option.get("label"),
+                    attempt=index,
+                    total_attempts=len(plan_options),
+                    reason=option.get("reason"),
+                    message=f"Resuming workflow option {index} of {len(plan_options)}.",
+                )
+                context = copy.deepcopy(workflow_state.get("context")) if isinstance(workflow_state.get("context"), dict) else {
+                    "original_task": active_payload.get("task", ""),
+                    "__step_results__": [],
+                    "__step_results_by_id__": {},
+                }
+
+            def checkpoint_attempt(workflow_snapshot: dict):
+                attempt_record["workflow_state"] = workflow_snapshot
+                attempt_record["status"] = workflow_snapshot.get("status", "running")
+                session["attempts"] = attempts
+                session["current_attempt_index"] = index
+                session["status"] = "running"
+                self._checkpoint_run_state(session, "attempt_checkpoint")
+
+            workflow = self._execute_workflow_steps(
+                option_payload.get("steps", []),
+                option_payload,
+                context,
+                depth,
+                resume_state=workflow_state,
+                checkpoint=checkpoint_attempt,
             )
-            context = {
-                "original_task": payload.get("task", ""),
-                "__step_results__": [],
-                "__step_results_by_id__": {},
-            }
-            workflow = self._execute_workflow_steps(option_payload.get("steps", []), option_payload, context, depth)
+            attempt_record.pop("workflow_state", None)
             validation = self._validate_workflow_attempt(
-                payload,
+                active_payload,
                 option,
                 workflow,
                 context,
@@ -591,30 +777,22 @@ class Engine:
                 len(plan_options),
                 depth,
             )
-            attempt_record = {
-                "attempt": index,
-                "option": {
-                    "id": option.get("id"),
-                    "label": option.get("label"),
-                    "reason": option.get("reason"),
-                },
-                "status": workflow.get("status"),
-                "steps": workflow.get("steps", []),
-                "result": workflow.get("result"),
-                "error": workflow.get("error"),
-                "validation": validation,
-            }
-            if isinstance(option.get("origin"), dict):
-                attempt_record["option"]["origin"] = self._compact_value(option.get("origin"), text_limit=180, row_limit=3)
-            if isinstance(option.get("derived_from_attempt"), int):
-                attempt_record["option"]["derived_from_attempt"] = option.get("derived_from_attempt")
-            attempts.append(attempt_record)
+            attempt_record["status"] = workflow.get("status")
+            attempt_record["steps"] = workflow.get("steps", [])
+            attempt_record["result"] = workflow.get("result")
+            attempt_record["error"] = workflow.get("error")
+            attempt_record["validation"] = validation
             clarification = workflow.get("clarification")
             if isinstance(clarification, dict) and clarification:
                 attempt_record["clarification"] = clarification
+            else:
+                attempt_record.pop("clarification", None)
+            session["attempts"] = attempts
+            session["current_attempt_index"] = index
+            self._checkpoint_run_state(session, "attempt_finished")
 
             routing = self._route_workflow_attempt(
-                payload,
+                active_payload,
                 option,
                 workflow,
                 validation,
@@ -627,32 +805,40 @@ class Engine:
             )
             attempt_record["routing"] = self._compact_routing_record(routing)
             uncertain_count = max(uncertain_count, int(routing.get("uncertain_count_after", uncertain_count)))
+            session["uncertain_count"] = uncertain_count
+            session["attempts"] = attempts
+            self._checkpoint_run_state(session, "attempt_routed")
 
             if routing.get("action") == "accept_attempt":
                 selected_attempt = attempt_record
+                session["selected_attempt_index"] = index
                 break
 
             if routing.get("action") == "clarify":
                 clarification_payload = clarification if isinstance(clarification, dict) else self._clarification_from_validation(
-                    payload,
+                    active_payload,
                     attempts,
                     attempt_record,
                     "Validation remained uncertain after repeated attempts.",
                 )
                 attempt_record["clarification"] = clarification_payload
+                session["deferred_clarification"] = clarification_payload
                 if deferred_clarification is None:
                     deferred_clarification = clarification_payload
+                self._checkpoint_run_state(session, "clarification_deferred")
                 break
 
             if routing.get("action") == "replan_workflow":
-                derived = self._derive_fallback_option(payload, plan_options, attempt_record, context, len(attempts), depth)
+                derived = self._derive_fallback_option(active_payload, plan_options, attempt_record, context, len(attempts), depth)
                 if isinstance(derived, dict):
                     if isinstance(derived.get("replan"), dict):
                         attempt_record["replan"] = derived.get("replan")
                     derived_option = derived.get("option")
                     if isinstance(derived_option, dict):
                         plan_options.append(derived_option)
+                        session["plan_options"] = copy.deepcopy(plan_options)
                         replan_count += 1
+                        session["replan_count"] = replan_count
                         if isinstance(attempt_record.get("routing"), dict):
                             attempt_record["routing"]["activated_option_id"] = derived_option.get("id")
                             attempt_record["routing"]["budget"] = self._compact_value(
@@ -666,11 +852,12 @@ class Engine:
                                 text_limit=220,
                                 row_limit=3,
                             )
+                        self._checkpoint_run_state(session, "workflow_replanned")
                     else:
                         fallback_reason = str(validation.get("reason") or workflow.get("error") or "Workflow fallback planning failed.").strip()
                         if validation.get("verdict") == "uncertain":
                             clarification_payload = self._clarification_from_validation(
-                                payload,
+                                active_payload,
                                 attempts,
                                 attempt_record,
                                 fallback_reason,
@@ -680,16 +867,19 @@ class Engine:
                                 attempt_record["routing"]["action"] = "clarify"
                                 attempt_record["routing"]["clarification_required"] = True
                             deferred_clarification = clarification_payload
+                            session["deferred_clarification"] = clarification_payload
+                            self._checkpoint_run_state(session, "clarification_deferred")
                             break
                         if isinstance(attempt_record.get("routing"), dict):
                             attempt_record["routing"]["action"] = "fail_run"
                             attempt_record["routing"]["reason"] = fallback_reason
+                        self._checkpoint_run_state(session, "workflow_replan_failed")
                         break
 
             if routing.get("action") in {"try_next_option", "replan_workflow"} and index < len(plan_options):
                 self._emit_validation_progress(
                     "retrying",
-                    payload,
+                    active_payload,
                     depth + 1,
                     option_id=option.get("id"),
                     option_label=option.get("label"),
@@ -698,68 +888,100 @@ class Engine:
                     reason=routing.get("reason") or validation.get("reason"),
                     message="The workflow router rejected this attempt, so I am trying the next workflow option.",
                 )
+                session["current_attempt_index"] = index + 1
+                self._checkpoint_run_state(session, "next_attempt_scheduled")
+                index += 1
                 continue
 
             if routing.get("action") == "fail_run":
                 break
 
+            index += 1
+
         if selected_attempt is not None:
             if "workflow.result" in self.spec.get("events", {}):
+                presentation = active_payload.get("presentation")
+                session["status"] = str(selected_attempt["status"] or "completed")
+                session["selected_attempt_index"] = int(selected_attempt.get("attempt", 0) or 0)
+                session["deferred_clarification"] = None
                 result_payload = {
-                    "task": payload.get("task", ""),
+                    "task": active_payload.get("task", ""),
+                    "task_shape": active_payload.get("task_shape"),
                     "status": selected_attempt["status"],
                     "steps": selected_attempt["steps"],
                     "result": selected_attempt.get("result"),
                     "attempts": attempts,
                     "selected_option": selected_attempt["option"],
                     "validation": selected_attempt["validation"],
-                    "task_shape": payload.get("task_shape"),
+                    "run_id": session.get("run_id"),
+                    "persistence": self._persistence_metadata(session, resumable=False, status=session["status"]),
                 }
-                presentation = payload.get("presentation")
                 if isinstance(presentation, dict):
                     result_payload["presentation"] = presentation
                 if selected_attempt.get("error"):
                     result_payload["error"] = selected_attempt["error"]
                 result_payload["graph"] = build_workflow_graph(
-                    task=payload.get("task", ""),
-                    task_shape=str(payload.get("task_shape") or ""),
+                    task=active_payload.get("task", ""),
+                    task_shape=str(active_payload.get("task_shape") or ""),
                     status=str(selected_attempt["status"] or ""),
                     attempts=attempts,
                     selected_option=selected_attempt["option"],
                     result=selected_attempt.get("result"),
                     presentation=presentation if isinstance(presentation, dict) else None,
+                    run_id=str(session.get("run_id") or ""),
                 )
+                session["terminal_event"] = "workflow.result"
+                session["terminal_payload"] = copy.deepcopy(result_payload)
+                session["current_attempt_index"] = 0
+                self._checkpoint_run_state(session, "run_completed")
                 self.emit("workflow.result", result_payload, depth + 1)
                 return
             return
 
         if deferred_clarification is not None and "clarification.required" in self.spec.get("events", {}):
-            deferred_clarification["attempts"] = attempts
-            presentation = payload.get("presentation")
-            deferred_clarification["graph"] = build_workflow_graph(
-                task=payload.get("task", ""),
-                task_shape=str(payload.get("task_shape") or ""),
-                status="needs_clarification",
-                attempts=attempts,
-                selected_option=None,
-                result=(attempts[-1] or {}).get("result") if attempts else None,
-                presentation=presentation if isinstance(presentation, dict) else None,
+            presentation = active_payload.get("presentation")
+            session["status"] = "needs_clarification"
+            terminal_attempts = copy.deepcopy(attempts)
+            clarification_payload = copy.deepcopy(deferred_clarification)
+            clarification_payload["attempts"] = terminal_attempts
+            clarification_payload["run_id"] = session.get("run_id")
+            clarification_payload["persistence"] = self._persistence_metadata(
+                session,
+                resumable=True,
+                status=session["status"],
             )
-            self.emit("clarification.required", deferred_clarification, depth + 1)
+            clarification_payload["graph"] = build_workflow_graph(
+                task=active_payload.get("task", ""),
+                task_shape=str(active_payload.get("task_shape") or ""),
+                status="needs_clarification",
+                attempts=terminal_attempts,
+                selected_option=None,
+                result=(terminal_attempts[-1] or {}).get("result") if terminal_attempts else None,
+                presentation=presentation if isinstance(presentation, dict) else None,
+                run_id=str(session.get("run_id") or ""),
+            )
+            session["terminal_event"] = "clarification.required"
+            session["terminal_payload"] = copy.deepcopy(clarification_payload)
+            session["current_attempt_index"] = 0
+            self._checkpoint_run_state(session, "run_needs_clarification")
+            self.emit("clarification.required", clarification_payload, depth + 1)
             return
 
         last_attempt = attempts[-1] if attempts else None
         if "workflow.result" in self.spec.get("events", {}):
+            presentation = active_payload.get("presentation")
+            session["status"] = "failed"
             result_payload = {
-                "task": payload.get("task", ""),
+                "task": active_payload.get("task", ""),
+                "task_shape": active_payload.get("task_shape"),
                 "status": "failed",
                 "steps": last_attempt.get("steps", []) if isinstance(last_attempt, dict) else [],
                 "result": last_attempt.get("result") if isinstance(last_attempt, dict) else None,
                 "attempts": attempts,
                 "validation": last_attempt.get("validation") if isinstance(last_attempt, dict) else None,
-                "task_shape": payload.get("task_shape"),
+                "run_id": session.get("run_id"),
+                "persistence": self._persistence_metadata(session, resumable=False, status=session["status"]),
             }
-            presentation = payload.get("presentation")
             if isinstance(presentation, dict):
                 result_payload["presentation"] = presentation
             if isinstance(last_attempt, dict):
@@ -770,14 +992,19 @@ class Engine:
                 if isinstance(resolved_error, str) and resolved_error.strip():
                     result_payload["error"] = resolved_error.strip()
             result_payload["graph"] = build_workflow_graph(
-                task=payload.get("task", ""),
-                task_shape=str(payload.get("task_shape") or ""),
+                task=active_payload.get("task", ""),
+                task_shape=str(active_payload.get("task_shape") or ""),
                 status="failed",
                 attempts=attempts,
                 selected_option=(last_attempt or {}).get("option") if isinstance(last_attempt, dict) else None,
                 result=result_payload.get("result"),
                 presentation=presentation if isinstance(presentation, dict) else None,
+                run_id=str(session.get("run_id") or ""),
             )
+            session["terminal_event"] = "workflow.result"
+            session["terminal_payload"] = copy.deepcopy(result_payload)
+            session["current_attempt_index"] = 0
+            self._checkpoint_run_state(session, "run_failed")
             self.emit("workflow.result", result_payload, depth + 1)
             return
 
@@ -2506,15 +2733,76 @@ class Engine:
             "step_results": step_results,
         }
 
-    def _execute_workflow_steps(self, steps: list, payload: dict, context: dict, depth: int):
-        records = []
-        final_results = []
-        final_value = None
+    def _execute_workflow_steps(
+        self,
+        steps: list,
+        payload: dict,
+        context: dict,
+        depth: int,
+        *,
+        resume_state: dict | None = None,
+        checkpoint=None,
+    ):
         limits = self._workflow_limits(payload)
-        pending = [step for step in steps if isinstance(step, dict)]
-        completed_ids: set[str] = set()
-        step_replans: dict[str, int] = {}
-        step_validation_requests = 0
+        if isinstance(resume_state, dict):
+            records = [copy.deepcopy(item) for item in resume_state.get("records", []) if isinstance(item, dict)]
+            final_results = copy.deepcopy(resume_state.get("final_results", [])) if isinstance(resume_state.get("final_results"), list) else []
+            final_value = copy.deepcopy(resume_state.get("final_value"))
+            pending = [copy.deepcopy(step) for step in resume_state.get("pending", []) if isinstance(step, dict)]
+            inflight_step = resume_state.get("inflight_step")
+            if isinstance(inflight_step, dict):
+                pending.insert(0, copy.deepcopy(inflight_step))
+            completed_ids = {
+                item
+                for item in resume_state.get("completed_ids", [])
+                if isinstance(item, str)
+            }
+            step_replans = {
+                key: max(0, int(value))
+                for key, value in (resume_state.get("step_replans") or {}).items()
+                if isinstance(key, str) and isinstance(value, (int, float))
+            }
+            step_validation_requests = max(0, int(resume_state.get("step_validation_requests", 0)))
+            restored_context = resume_state.get("context")
+            if isinstance(restored_context, dict):
+                context.clear()
+                context.update(copy.deepcopy(restored_context))
+        else:
+            records = []
+            final_results = []
+            final_value = None
+            pending = [step for step in steps if isinstance(step, dict)]
+            completed_ids: set[str] = set()
+            step_replans: dict[str, int] = {}
+            step_validation_requests = 0
+
+        def persist_workflow_state(
+            status: str,
+            *,
+            inflight_step: dict | None = None,
+            error: str | None = None,
+            clarification: dict | None = None,
+        ):
+            if not callable(checkpoint):
+                return
+            snapshot = {
+                "status": status,
+                "records": copy.deepcopy(records),
+                "final_results": copy.deepcopy(final_results),
+                "final_value": copy.deepcopy(final_value),
+                "pending": copy.deepcopy(pending),
+                "completed_ids": sorted(completed_ids),
+                "step_replans": copy.deepcopy(step_replans),
+                "step_validation_requests": step_validation_requests,
+                "context": copy.deepcopy(context),
+            }
+            if isinstance(inflight_step, dict):
+                snapshot["inflight_step"] = copy.deepcopy(inflight_step)
+            if isinstance(error, str) and error.strip():
+                snapshot["error"] = error.strip()
+            if isinstance(clarification, dict) and clarification:
+                snapshot["clarification"] = copy.deepcopy(clarification)
+            checkpoint(snapshot)
 
         while pending:
             ready_index = next(
@@ -2523,6 +2811,7 @@ class Engine:
             )
             if ready_index is None:
                 error = "Workflow is blocked by unresolved or cyclic depends_on references."
+                persist_workflow_state("failed", error=error)
                 return {
                     "status": "failed",
                     "steps": records,
@@ -2531,6 +2820,7 @@ class Engine:
                     "final_results": final_results,
                 }
             raw_step = pending.pop(ready_index)
+            persist_workflow_state("running", inflight_step=raw_step)
             outcome = self._execute_single_workflow_step(raw_step, payload, context, depth)
             step_id = outcome["step_id"]
             if outcome["kind"] == "skipped":
@@ -2567,6 +2857,7 @@ class Engine:
                         "result": None,
                     }
                 )
+                persist_workflow_state("running")
                 continue
             if outcome["kind"] == "nested":
                 nested = outcome["nested"]
@@ -2604,7 +2895,13 @@ class Engine:
                     }
                     if nested.get("clarification"):
                         result["clarification"] = nested["clarification"]
+                    persist_workflow_state(
+                        nested["status"],
+                        error=nested.get("error"),
+                        clarification=nested.get("clarification") if isinstance(nested.get("clarification"), dict) else None,
+                    )
                     return result
+                persist_workflow_state("running")
                 continue
 
             step_payload = outcome["step_payload"]
@@ -2637,6 +2934,7 @@ class Engine:
                         "duration_ms": duration_ms,
                     }
                 )
+                persist_workflow_state("failed", error=error)
                 return {
                     "status": "failed",
                     "steps": records,
@@ -2711,6 +3009,7 @@ class Engine:
                             replanned_step["__replan_history__"] = replan_history
                         replanned_step["steps"] = replanned_steps
                         pending.insert(ready_index, replanned_step)
+                        persist_workflow_state("running")
                         continue
                 self._emit_step_progress(
                     "failed",
@@ -2769,6 +3068,11 @@ class Engine:
                     )
                 )
                 if isinstance(clarification, dict):
+                    persist_workflow_state(
+                        "needs_clarification",
+                        error=error,
+                        clarification=clarification,
+                    )
                     return {
                         "status": "needs_clarification",
                         "steps": records,
@@ -2777,6 +3081,7 @@ class Engine:
                         "clarification": clarification,
                         "final_results": step_results,
                     }
+                persist_workflow_state("failed", error=error)
                 return {
                     "status": "failed",
                     "steps": records,
@@ -2881,6 +3186,7 @@ class Engine:
                             replanned_step["__replan_history__"] = replan_history
                         replanned_step["steps"] = replanned_steps
                         pending.insert(ready_index, replanned_step)
+                        persist_workflow_state("running")
                         continue
 
                 self._emit_step_progress(
@@ -2930,6 +3236,7 @@ class Engine:
                         replan=replan_envelope.get("trace") if isinstance(replan_envelope, dict) else None,
                     )
                 )
+                persist_workflow_state("failed", error=error)
                 return {
                     "status": "failed",
                     "steps": records,
@@ -2995,7 +3302,9 @@ class Engine:
                 ],
             }
             records.append(self._attach_step_runtime_metadata(raw_step, completed_record, routing=step_routing))
+            persist_workflow_state("running")
 
+        persist_workflow_state("completed")
         return {
             "status": "completed",
             "steps": records,

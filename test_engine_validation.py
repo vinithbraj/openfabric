@@ -1,5 +1,8 @@
 import copy
+import json
+import os
 import sys
+import tempfile
 import types
 import unittest
 
@@ -51,6 +54,25 @@ class _ExecAdapter:
                 )
             ]
         return [("task.result", {"detail": "Unknown task", "status": "failed", "error": "unsupported"})]
+
+
+class _CrashOnceExecAdapter:
+    crash_counts = {}
+
+    def __init__(self, _config):
+        pass
+
+    def handle(self, event_name, payload):
+        if event_name != "task.plan":
+            return []
+        if payload.get("task") == "resume after crash step":
+            run_id = str(payload.get("run_id") or payload.get("original_task") or "resume_after_crash").strip()
+            count = self.__class__.crash_counts.get(run_id, 0)
+            if count == 0:
+                self.__class__.crash_counts[run_id] = 1
+                raise RuntimeError("simulated executor crash")
+            return [("task.result", {"detail": "Resumed step finished.", "result": "resumed answer"})]
+        return _ExecAdapter({}).handle(event_name, payload)
 
 
 class _ValidatorAdapter:
@@ -285,6 +307,8 @@ TEST_SPEC = {
             "required": ["task"],
             "properties": {
                 "task": {"type": "string"},
+                "run_id": {"type": "string"},
+                "resume_run_id": {"type": "string"},
                 "task_shape": {"type": "string"},
                 "retry_budget": {"type": "object"},
                 "steps": {"type": "array"},
@@ -411,10 +435,13 @@ TEST_SPEC = {
             "required": ["task", "status", "steps"],
             "properties": {
                 "task": {"type": "string"},
+                "run_id": {"type": "string"},
                 "task_shape": {"type": "string"},
                 "status": {"type": "string"},
                 "steps": {"type": "array"},
                 "result": {},
+                "persistence": {"type": "object"},
+                "graph": {"type": "object"},
             },
         },
         "ClarificationRequired": {
@@ -422,11 +449,14 @@ TEST_SPEC = {
             "required": ["task", "detail"],
             "properties": {
                 "task": {"type": "string"},
+                "run_id": {"type": "string"},
                 "task_shape": {"type": "string"},
                 "detail": {"type": "string"},
                 "question": {"type": "string"},
                 "available_context": {"type": "object"},
                 "missing_information": {"type": "array"},
+                "persistence": {"type": "object"},
+                "graph": {"type": "object"},
             },
         },
     },
@@ -477,17 +507,27 @@ TEST_SPEC = {
 class EngineValidationTests(unittest.TestCase):
     def setUp(self):
         self.original_registry = dict(ADAPTER_REGISTRY)
+        self.original_run_store_dir = os.environ.get("OPENFABRIC_RUN_STORE_DIR")
+        self.run_store_dir = tempfile.TemporaryDirectory()
+        os.environ["OPENFABRIC_RUN_STORE_DIR"] = self.run_store_dir.name
         ADAPTER_REGISTRY["test_exec"] = _ExecAdapter
+        ADAPTER_REGISTRY["test_crash_exec"] = _CrashOnceExecAdapter
         ADAPTER_REGISTRY["test_validator"] = _ValidatorAdapter
         ADAPTER_REGISTRY["test_reducer"] = _ReducerAdapter
         ADAPTER_REGISTRY["test_recorder"] = _RecorderAdapter
         ADAPTER_REGISTRY["test_fallback_planner"] = _FallbackPlannerAdapter
         ADAPTER_REGISTRY["test_no_recovery_planner"] = _NoRecoveryPlannerAdapter
         _RecorderAdapter.events = []
+        _CrashOnceExecAdapter.crash_counts = {}
 
     def tearDown(self):
         ADAPTER_REGISTRY.clear()
         ADAPTER_REGISTRY.update(self.original_registry)
+        if self.original_run_store_dir is None:
+            os.environ.pop("OPENFABRIC_RUN_STORE_DIR", None)
+        else:
+            os.environ["OPENFABRIC_RUN_STORE_DIR"] = self.original_run_store_dir
+        self.run_store_dir.cleanup()
 
     def test_structured_step_result_exposes_shell_stdout_alias_for_followup_references(self):
         engine = Engine(TEST_SPEC)
@@ -829,6 +869,125 @@ class EngineValidationTests(unittest.TestCase):
         self.assertEqual(workflow["graph"]["statistics"]["reducer_count"], 1)
         self.assertEqual(workflow["graph"]["statistics"]["router_count"], 2)
         self.assertTrue(any(item["node_id"].endswith(":reducer") for item in workflow["graph"]["nodes"]))
+
+    def test_engine_replays_terminal_run_from_persisted_state(self):
+        engine = Engine(TEST_SPEC)
+        engine.setup()
+        engine.emit(
+            "task.plan",
+            {
+                "task": "replay the final answer",
+                "task_shape": "lookup",
+                "steps": [],
+                "plan_options": [
+                    {
+                        "id": "option2",
+                        "label": "Replayable workflow",
+                        "steps": [
+                            {
+                                "id": "step1",
+                                "target_agent": "executor",
+                                "task": "fallback attempt",
+                                "instruction": {"operation": "run_command", "command": "fallback"},
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
+        self.assertEqual(len(workflow_events), 1)
+        original = workflow_events[0]
+        run_id = original["run_id"]
+        state_path = engine.run_store.state_path(run_id)
+        self.assertTrue(state_path.exists())
+
+        with state_path.open("r", encoding="utf-8") as handle:
+            persisted = json.load(handle)
+        self.assertEqual(persisted["terminal_event"], "workflow.result")
+        self.assertEqual(persisted["status"], "completed")
+
+        _RecorderAdapter.events = []
+        replay_engine = Engine(TEST_SPEC)
+        replay_engine.setup()
+        replay_engine.replay_run(run_id)
+
+        replayed_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
+        self.assertEqual(len(replayed_events), 1)
+        replayed = replayed_events[0]
+        self.assertEqual(replayed["run_id"], run_id)
+        self.assertEqual(replayed["result"], "final answer")
+        self.assertEqual(replayed["persistence"]["status"], "completed")
+        self.assertEqual(replayed["persistence"]["state_path"], str(state_path))
+
+    def test_engine_resumes_run_after_persisted_step_crash(self):
+        spec = copy.deepcopy(TEST_SPEC)
+        spec["agents"]["executor"]["runtime"]["adapter"] = "test_crash_exec"
+        engine = Engine(spec)
+        engine.setup()
+        run_id = "resume_after_crash_case"
+
+        with self.assertRaisesRegex(RuntimeError, "simulated executor crash"):
+            engine.emit(
+                "task.plan",
+                {
+                    "task": "resume after crash workflow",
+                    "run_id": run_id,
+                    "task_shape": "lookup",
+                    "steps": [],
+                    "plan_options": [
+                        {
+                            "id": "option2",
+                            "label": "Crashy workflow",
+                            "steps": [
+                                {
+                                    "id": "step1",
+                                    "target_agent": "executor",
+                                    "task": "resume after crash step",
+                                    "instruction": {"operation": "run_command", "command": "resume"},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+        state_path = engine.run_store.state_path(run_id)
+        timeline_path = engine.run_store.timeline_path(run_id)
+        self.assertTrue(state_path.exists())
+        self.assertTrue(timeline_path.exists())
+
+        with state_path.open("r", encoding="utf-8") as handle:
+            persisted = json.load(handle)
+        self.assertEqual(persisted["status"], "running")
+        self.assertEqual(persisted["current_attempt_index"], 1)
+        self.assertEqual(persisted["attempts"][0]["workflow_state"]["inflight_step"]["task"], "resume after crash step")
+
+        _RecorderAdapter.events = []
+        resume_engine = Engine(spec)
+        resume_engine.setup()
+        resume_engine.resume_run(run_id)
+
+        workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
+        self.assertEqual(len(workflow_events), 1)
+        resumed = workflow_events[0]
+        self.assertEqual(resumed["run_id"], run_id)
+        self.assertEqual(resumed["status"], "completed")
+        self.assertEqual(resumed["result"], "resumed answer")
+        self.assertEqual(resumed["persistence"]["status"], "completed")
+        self.assertFalse(resumed["persistence"]["resumable"])
+        self.assertEqual(resumed["persistence"]["state_path"], str(state_path))
+
+        with state_path.open("r", encoding="utf-8") as handle:
+            completed_state = json.load(handle)
+        self.assertEqual(completed_state["terminal_event"], "workflow.result")
+        self.assertEqual(completed_state["status"], "completed")
+
+        with timeline_path.open("r", encoding="utf-8") as handle:
+            stages = [json.loads(line)["stage"] for line in handle if line.strip()]
+        self.assertIn("attempt_checkpoint", stages)
+        self.assertIn("run_completed", stages)
 
 
 if __name__ == "__main__":

@@ -106,9 +106,13 @@ Implemented in this change:
 
 ### Phase 5
 
-- add persisted graph history
-- add graph replay, inspection, and debugging tools
-- support branch comparison between attempted workflows
+Implemented in this change:
+
+- add durable run-state persistence in [runtime/run_store.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_store.py)
+- checkpoint in-flight workflow execution so runs can resume after crashes
+- persist terminal workflow payloads and expose `run_id` plus persistence metadata in `workflow.result` and `clarification.required`
+- add `Engine.replay_run(run_id)` and `Engine.resume_run(run_id)` for replay and recovery flows
+- attach `run_id` to the workflow graph so stored runs can be correlated with visualized executions
 
 ## Current Mapping
 
@@ -140,7 +144,6 @@ The runtime now exposes the following execution chains directly in the graph:
 
 The main remaining architectural gaps before production are:
 
-- persist graph state so runs can resume after crashes
-- add replay and inspection tooling on top of persisted graph state
 - standardize a stricter common envelope for every node implementation
+- add richer run inspection and debugging tools on top of the persisted run store
 - surface the graph through a dedicated visualization or UI layer

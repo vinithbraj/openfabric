@@ -181,6 +181,10 @@ contracts:
     properties:
       task:
         type: string
+      run_id:
+        type: string
+      resume_run_id:
+        type: string
       task_shape:
         type: string
       retry_budget:
@@ -319,6 +323,8 @@ contracts:
     properties:
       task:
         type: string
+      run_id:
+        type: string
       task_shape:
         type: string
       step_id:
@@ -332,6 +338,10 @@ contracts:
         items:
           type: string
       available_context:
+        type: object
+      persistence:
+        type: object
+      graph:
         type: object
 
   PlanProgress:
@@ -547,6 +557,8 @@ contracts:
     properties:
       task:
         type: string
+      run_id:
+        type: string
       task_shape:
         type: string
       status:
@@ -559,6 +571,8 @@ contracts:
       error:
         type: string
       presentation:
+        type: object
+      persistence:
         type: object
       graph:
         type: object

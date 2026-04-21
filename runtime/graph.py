@@ -582,6 +582,7 @@ def build_workflow_graph(
     selected_option: dict[str, Any] | None,
     result: Any,
     presentation: dict[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     workflow_suffix = _stable_suffix(task, task_shape, status, len(attempts))
     workflow_node_id = f"workflow:{workflow_suffix}"
@@ -596,6 +597,7 @@ def build_workflow_graph(
             "status": status,
             "presentation": _compact_value(presentation or {}, text_limit=160, row_limit=3),
             "result": _compact_value(result, text_limit=220, row_limit=3),
+            "run_id": run_id or None,
         }
     ]
     edges: list[dict[str, Any]] = []
@@ -677,6 +679,7 @@ def build_workflow_graph(
         "schema_version": GRAPH_SCHEMA_VERSION,
         "kind": "workflow_execution",
         "root_node_id": workflow_node_id,
+        "run_id": run_id or None,
         "task": task,
         "task_shape": task_shape,
         "status": status,
