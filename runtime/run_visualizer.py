@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from .run_store import RunStore
 
 
-VISUALIZER_SCHEMA_VERSION = "phase1"
+VISUALIZER_SCHEMA_VERSION = "phase2"
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 8787
 
@@ -222,6 +222,85 @@ def build_graph_view_model(graph: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_graph_index(graph: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(graph, dict):
+        return {
+            "schema_version": VISUALIZER_SCHEMA_VERSION,
+            "kind": "graph_index",
+            "root_node_id": "",
+            "nodes": {},
+            "incoming": {},
+            "outgoing": {},
+            "counts": {"kinds": {}, "statuses": {}, "agents": {}},
+        }
+
+    nodes = [copy.deepcopy(item) for item in graph.get("nodes", []) if isinstance(item, dict)]
+    edges = [copy.deepcopy(item) for item in graph.get("edges", []) if isinstance(item, dict)]
+    depths = _graph_depths(graph)
+    indexed_nodes: dict[str, dict[str, Any]] = {}
+    incoming: dict[str, list[dict[str, str]]] = defaultdict(list)
+    outgoing: dict[str, list[dict[str, str]]] = defaultdict(list)
+    kind_counts: dict[str, int] = defaultdict(int)
+    status_counts: dict[str, int] = defaultdict(int)
+    agent_counts: dict[str, int] = defaultdict(int)
+
+    for node in nodes:
+        node_id = str(node.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        kind = str(node.get("kind") or "node").strip() or "node"
+        status = str(node.get("status") or "unknown").strip() or "unknown"
+        agent_name = str(node.get("agent_name") or node.get("target_agent") or "").strip()
+        indexed_nodes[node_id] = {
+            "node_id": node_id,
+            "kind": kind,
+            "status": status,
+            "title": _node_title(node),
+            "subtitle": _node_subtitle(node),
+            "attempt": node.get("attempt"),
+            "step_id": str(node.get("step_id") or "").strip(),
+            "agent_name": agent_name,
+            "task": str(node.get("task") or "").strip(),
+            "depth": depths.get(node_id, 0),
+        }
+        kind_counts[kind] += 1
+        status_counts[status] += 1
+        if agent_name:
+            agent_counts[agent_name] += 1
+
+    for edge in edges:
+        source = str(edge.get("source") or "").strip()
+        target = str(edge.get("target") or "").strip()
+        relation = str(edge.get("relation") or "").strip()
+        if not source or not target:
+            continue
+        outgoing[source].append({"node_id": target, "relation": relation})
+        incoming[target].append({"node_id": source, "relation": relation})
+
+    def _sorted_adjacency(values: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
+        normalized: dict[str, list[dict[str, str]]] = {}
+        for node_id, items in values.items():
+            normalized[node_id] = sorted(
+                items,
+                key=lambda item: (str(item.get("relation") or ""), str(item.get("node_id") or "")),
+            )
+        return normalized
+
+    return {
+        "schema_version": VISUALIZER_SCHEMA_VERSION,
+        "kind": "graph_index",
+        "root_node_id": str(graph.get("root_node_id") or ""),
+        "nodes": indexed_nodes,
+        "incoming": _sorted_adjacency(incoming),
+        "outgoing": _sorted_adjacency(outgoing),
+        "counts": {
+            "kinds": dict(sorted(kind_counts.items())),
+            "statuses": dict(sorted(status_counts.items())),
+            "agents": dict(sorted(agent_counts.items())),
+        },
+    }
+
+
 def build_run_visualization_payload(inspection: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(inspection, dict):
         raise ValueError("Run inspection payload must be a dict.")
@@ -236,6 +315,7 @@ def build_run_visualization_payload(inspection: dict[str, Any]) -> dict[str, Any
         else {},
         "graph": copy.deepcopy(graph),
         "graph_view": build_graph_view_model(graph),
+        "graph_index": build_graph_index(graph),
         "graph_mermaid": str(inspection.get("graph_mermaid") or ""),
         "timeline": copy.deepcopy(inspection.get("timeline")) if isinstance(inspection.get("timeline"), list) else [],
     }
@@ -590,6 +670,71 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       min-height: 420px;
     }}
 
+    .graph-toolbar {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) repeat(2, minmax(140px, 0.55fr)) auto auto;
+      gap: 10px;
+      margin-bottom: 12px;
+    }}
+
+    .graph-toolbar input,
+    .graph-toolbar select {{
+      width: 100%;
+      border: 1px solid rgba(48, 43, 37, 0.12);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font: inherit;
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--ink);
+    }}
+
+    .toggle-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      min-height: 42px;
+      border-radius: 14px;
+      border: 1px solid rgba(48, 43, 37, 0.12);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }}
+
+    .toggle-chip input {{
+      margin: 0;
+      accent-color: var(--accent);
+    }}
+
+    .legend-grid {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }}
+
+    .legend-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      font-size: 11px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid rgba(60, 43, 24, 0.08);
+    }}
+
+    .legend-swatch {{
+      width: 11px;
+      height: 11px;
+      border-radius: 999px;
+      display: inline-block;
+      border: 1px solid rgba(60, 43, 24, 0.12);
+    }}
+
     svg {{
       display: block;
       min-width: 100%;
@@ -633,6 +778,12 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       stroke-width: 2.6;
     }}
 
+    .node-card.related rect {{
+      stroke: rgba(15, 118, 110, 0.78);
+      stroke-width: 2.1;
+      stroke-dasharray: 5 4;
+    }}
+
     .detail-stack {{
       display: grid;
       gap: 20px;
@@ -656,6 +807,132 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       line-height: 1.55;
       white-space: pre-wrap;
       word-break: break-word;
+    }}
+
+    .signal-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }}
+
+    .signal-card {{
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid rgba(60, 43, 24, 0.08);
+    }}
+
+    .signal-card .label {{
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }}
+
+    .signal-card .value {{
+      margin-top: 6px;
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.1;
+    }}
+
+    .signal-card .detail {{
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.4;
+    }}
+
+    .adjacency-shell {{
+      display: grid;
+      gap: 12px;
+      margin-bottom: 14px;
+    }}
+
+    .adjacency-group {{
+      display: grid;
+      gap: 8px;
+    }}
+
+    .adjacency-title {{
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }}
+
+    .adjacency-list {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }}
+
+    .adjacency-pill {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.76);
+      border: 1px solid rgba(60, 43, 24, 0.08);
+      font-size: 11px;
+      color: var(--muted);
+    }}
+
+    .adjacency-pill strong {{
+      color: var(--ink);
+      font-weight: 700;
+    }}
+
+    .metrics-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }}
+
+    .metrics-table th,
+    .metrics-table td {{
+      text-align: left;
+      padding: 9px 8px;
+      border-bottom: 1px solid rgba(58, 44, 27, 0.08);
+      vertical-align: top;
+    }}
+
+    .metrics-table th {{
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }}
+
+    .failure-list {{
+      display: grid;
+      gap: 10px;
+    }}
+
+    .failure-card {{
+      border-radius: 16px;
+      padding: 13px 14px;
+      background: rgba(255, 250, 248, 0.9);
+      border: 1px solid rgba(220, 38, 38, 0.12);
+    }}
+
+    .failure-card .title {{
+      font-size: 13px;
+      font-weight: 700;
+    }}
+
+    .failure-card .meta {{
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted);
+    }}
+
+    .failure-card .reason {{
+      margin-top: 8px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--ink);
     }}
 
     .timeline {{
@@ -698,6 +975,10 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       .summary-grid {{
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }}
+
+      .graph-toolbar {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
     }}
 
     @media (max-width: 720px) {{
@@ -707,6 +988,10 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       }}
 
       .summary-grid {{
+        grid-template-columns: 1fr;
+      }}
+
+      .signal-grid {{
         grid-template-columns: 1fr;
       }}
 
@@ -766,6 +1051,24 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
             </div>
             <div id="graph-stats" class="chip">0 nodes</div>
           </div>
+          <div class="graph-toolbar">
+            <input id="node-search" type="search" placeholder="Search nodes, tasks, agents" />
+            <select id="node-kind-filter">
+              <option value="">All node kinds</option>
+            </select>
+            <select id="node-status-filter">
+              <option value="">All node statuses</option>
+            </select>
+            <label class="toggle-chip" for="focus-neighborhood">
+              <input id="focus-neighborhood" type="checkbox" />
+              Focus selection
+            </label>
+            <label class="toggle-chip" for="auto-refresh">
+              <input id="auto-refresh" type="checkbox" />
+              Auto-refresh
+            </label>
+          </div>
+          <div id="graph-legend" class="legend-grid"></div>
           <div id="graph-shell" class="graph-shell">
             <div class="empty">Choose a run to render its graph.</div>
           </div>
@@ -776,10 +1079,43 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
             <div class="panel-head">
               <div>
                 <h3 class="panel-title">Selected Node</h3>
-                <div class="panel-subtle">Click a node in the graph to inspect its payload.</div>
+                <div class="panel-subtle">Click a node in the graph to inspect its neighbors and payload.</div>
               </div>
             </div>
+            <div id="node-summary" class="adjacency-shell">
+              <div class="empty">No node selected.</div>
+            </div>
             <pre id="node-detail" class="codeblock">No node selected.</pre>
+          </section>
+
+          <section class="panel detail-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Run Signals</h3>
+                <div class="panel-subtle">Routing, validation, timing, and topology digests for the selected run.</div>
+              </div>
+            </div>
+            <div id="signal-shell" class="empty">No run selected.</div>
+          </section>
+
+          <section class="panel detail-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Agent Metrics</h3>
+                <div class="panel-subtle">Per-agent step volume and timing from persisted observability.</div>
+              </div>
+            </div>
+            <div id="agent-metrics-shell" class="empty">No run selected.</div>
+          </section>
+
+          <section class="panel detail-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Failures</h3>
+                <div class="panel-subtle">Recent workflow or step-level failures recorded during the run.</div>
+              </div>
+            </div>
+            <div id="failure-shell" class="empty">No run selected.</div>
           </section>
 
           <section class="panel detail-panel">
@@ -807,12 +1143,15 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
   </div>
 
   <script>
+    const initialParams = new URLSearchParams(window.location.search);
     const state = {{
       runs: [],
       filteredRuns: [],
-      selectedRunId: null,
-      selectedNodeId: null,
+      selectedRunId: initialParams.get('run_id') || null,
+      selectedNodeId: initialParams.get('node_id') || null,
       selectedVisualization: null,
+      autoRefreshHandle: null,
+      autoRefreshIntervalMs: 5000,
     }};
 
     const kindStyles = {{
@@ -854,6 +1193,38 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
         .replaceAll('"', '&quot;');
     }}
 
+    function setUrlState() {{
+      const url = new URL(window.location.href);
+      if (state.selectedRunId) {{
+        url.searchParams.set('run_id', state.selectedRunId);
+      }} else {{
+        url.searchParams.delete('run_id');
+      }}
+      if (state.selectedNodeId) {{
+        url.searchParams.set('node_id', state.selectedNodeId);
+      }} else {{
+        url.searchParams.delete('node_id');
+      }}
+      window.history.replaceState({{}}, '', url.toString());
+    }}
+
+    function currentGraphView() {{
+      return state.selectedVisualization?.graph_view || {{ nodes: [], edges: [], width: 960, height: 320 }};
+    }}
+
+    function currentGraphIndex() {{
+      return state.selectedVisualization?.graph_index || {{
+        nodes: {{}},
+        incoming: {{}},
+        outgoing: {{}},
+        counts: {{ kinds: {{}}, statuses: {{}}, agents: {{}} }},
+      }};
+    }}
+
+    function currentSummary() {{
+      return state.selectedVisualization?.summary || {{}};
+    }}
+
     async function fetchJson(path) {{
       const response = await fetch(path);
       if (!response.ok) {{
@@ -862,7 +1233,33 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       return response.json();
     }}
 
-    async function loadRuns() {{
+    function clearAutoRefresh() {{
+      if (state.autoRefreshHandle) {{
+        clearTimeout(state.autoRefreshHandle);
+        state.autoRefreshHandle = null;
+      }}
+    }}
+
+    function scheduleAutoRefresh() {{
+      clearAutoRefresh();
+      const summary = currentSummary();
+      const autoRefreshRequested = document.getElementById('auto-refresh')?.checked;
+      if (!state.selectedRunId || (!autoRefreshRequested && summary.status !== 'running')) {{
+        return;
+      }}
+      state.autoRefreshHandle = window.setTimeout(async () => {{
+        try {{
+          await loadRuns({{ skipSelection: true }});
+          await refreshSelectedRun({{ preserveNode: true, silent: true }});
+        }} catch (error) {{
+          console.error('auto-refresh failed', error);
+        }} finally {{
+          scheduleAutoRefresh();
+        }}
+      }}, state.autoRefreshIntervalMs);
+    }}
+
+    async function loadRuns(options = {{}}) {{
       const status = document.getElementById('run-status').value;
       const agent = document.getElementById('run-agent').value.trim();
       const hasErrors = document.getElementById('run-errors').value;
@@ -874,6 +1271,16 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       const payload = await fetchJson(`/api/runs?${{query.toString()}}`);
       state.runs = Array.isArray(payload.runs) ? payload.runs : [];
       applyRunFilter();
+      if (options.skipSelection) {{
+        renderRunList();
+        return;
+      }}
+      const preferredRunId = options.preferredRunId || state.selectedRunId || initialParams.get('run_id');
+      const preferredExists = preferredRunId && state.runs.some((run) => run.run_id === preferredRunId);
+      if (preferredExists) {{
+        await selectRun(preferredRunId, {{ preserveNode: true }});
+        return;
+      }}
       if (!state.selectedRunId && state.filteredRuns.length) {{
         await selectRun(state.filteredRuns[0].run_id);
       }} else {{
@@ -908,6 +1315,12 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
         const activeStep = run.active_step_id ? `<span class="chip">active ${{
           escapeHtml(run.active_step_id)
         }}</span>` : '';
+        const errorChip = Number(run.error_count || 0) > 0
+          ? `<span class="chip">${{escapeHtml(String(run.error_count))}} errors</span>`
+          : '';
+        const durationChip = run.wall_clock_duration_ms != null
+          ? `<span class="chip">${{escapeHtml(formatDuration(run.wall_clock_duration_ms))}}</span>`
+          : '';
         return `
           <button class="run-card ${{active}}" data-run-id="${{escapeHtml(run.run_id)}}" type="button">
             <div class="run-id">${{escapeHtml(run.run_id)}}</div>
@@ -915,6 +1328,8 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
             <div class="run-meta">
               <span class="chip">${{escapeHtml(run.status || 'unknown')}}</span>
               <span class="chip">${{formatCount(run.attempt_count || 0, 'attempts')}}</span>
+              ${{durationChip}}
+              ${{errorChip}}
               ${{activeStep}}
             </div>
           </button>
@@ -925,14 +1340,33 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       }});
     }}
 
-    async function selectRun(runId) {{
-      state.selectedRunId = runId;
-      renderRunList();
-      document.getElementById('hero-title').textContent = 'Loading run…';
-      const visualization = await fetchJson(`/api/runs/${{encodeURIComponent(runId)}}`);
+    async function refreshSelectedRun(options = {{}}) {{
+      if (!state.selectedRunId) {{
+        return;
+      }}
+      if (!options.silent) {{
+        document.getElementById('hero-title').textContent = 'Loading run…';
+      }}
+      const visualization = await fetchJson(`/api/runs/${{encodeURIComponent(state.selectedRunId)}}`);
       state.selectedVisualization = visualization;
-      state.selectedNodeId = null;
+      const graphIndex = currentGraphIndex();
+      if (!options.preserveNode || !state.selectedNodeId || !graphIndex.nodes[state.selectedNodeId]) {{
+        state.selectedNodeId = options.preserveNode && state.selectedNodeId && graphIndex.nodes[state.selectedNodeId]
+          ? state.selectedNodeId
+          : null;
+      }}
+      syncGraphFilters(graphIndex);
       renderVisualization();
+    }}
+
+    async function selectRun(runId, options = {{}}) {{
+      state.selectedRunId = runId;
+      if (!options.preserveNode) {{
+        state.selectedNodeId = null;
+      }}
+      setUrlState();
+      renderRunList();
+      await refreshSelectedRun({{ preserveNode: options.preserveNode, silent: false }});
     }}
 
     function renderVisualization() {{
@@ -945,9 +1379,55 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
         `Run ${payload.run_id} | last stage: ${summary.last_stage || 'unknown'} | selected option: ${summary.selected_option_id || 'n/a'}`;
       document.getElementById('hero-status').textContent = summary.status || 'unknown';
       renderSummary(summary, observability);
-      renderGraph(payload.graph_view || {{ nodes: [], edges: [] }});
-      renderTimeline(payload.timeline || []);
+      renderLegend(currentGraphIndex());
+      renderSignals(summary, observability, payload.graph_index || {{}});
+      renderAgentMetrics(observability.agent_metrics || []);
+      renderFailures(observability.failures || []);
+      renderGraph(currentGraphView());
+      renderTimeline(observability.timeline?.stages || payload.timeline || []);
       document.getElementById('mermaid-detail').textContent = payload.graph_mermaid || 'No Mermaid diagram stored.';
+      setUrlState();
+      scheduleAutoRefresh();
+    }}
+
+    function syncGraphFilters(graphIndex) {{
+      const kindSelect = document.getElementById('node-kind-filter');
+      const statusSelect = document.getElementById('node-status-filter');
+      const currentKind = kindSelect.value;
+      const currentStatus = statusSelect.value;
+      const kindOptions = Object.keys(graphIndex?.counts?.kinds || {{}}).sort();
+      const statusOptions = Object.keys(graphIndex?.counts?.statuses || {{}}).sort();
+      kindSelect.innerHTML = ['<option value="">All node kinds</option>']
+        .concat(kindOptions.map((kind) => `<option value="${{escapeHtml(kind)}}">${{escapeHtml(kind)}}</option>`))
+        .join('');
+      statusSelect.innerHTML = ['<option value="">All node statuses</option>']
+        .concat(statusOptions.map((status) => `<option value="${{escapeHtml(status)}}">${{escapeHtml(status)}}</option>`))
+        .join('');
+      if (kindOptions.includes(currentKind)) {{
+        kindSelect.value = currentKind;
+      }}
+      if (statusOptions.includes(currentStatus)) {{
+        statusSelect.value = currentStatus;
+      }}
+    }}
+
+    function renderLegend(graphIndex) {{
+      const shell = document.getElementById('graph-legend');
+      const kinds = Object.entries(graphIndex?.counts?.kinds || {{}});
+      if (!kinds.length) {{
+        shell.innerHTML = '<div class="empty">No node kinds available for this run.</div>';
+        return;
+      }}
+      shell.innerHTML = kinds.map(([kind, count]) => {{
+        const style = kindStyles[kind] || kindStyles.default;
+        return `
+          <div class="legend-chip">
+            <span class="legend-swatch" style="background:${{style.fill}}; border-color:${{style.stroke}}"></span>
+            <span>${{escapeHtml(kind)}}</span>
+            <strong>${{escapeHtml(String(count))}}</strong>
+          </div>
+        `;
+      }}).join('');
     }}
 
     function renderSummary(summary, observability) {{
@@ -1009,18 +1489,98 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       `).join('');
     }}
 
-    function renderGraph(graphView) {{
-      const shell = document.getElementById('graph-shell');
+    function neighborhoodNodeIds(nodeId, graphIndex) {{
+      const ids = new Set();
+      if (!nodeId) return ids;
+      ids.add(nodeId);
+      for (const edge of graphIndex?.incoming?.[nodeId] || []) {{
+        ids.add(edge.node_id);
+      }}
+      for (const edge of graphIndex?.outgoing?.[nodeId] || []) {{
+        ids.add(edge.node_id);
+      }}
+      return ids;
+    }}
+
+    function filteredGraphView(graphView) {{
+      const graphIndex = currentGraphIndex();
+      const search = document.getElementById('node-search').value.trim().toLowerCase();
+      const kind = document.getElementById('node-kind-filter').value;
+      const status = document.getElementById('node-status-filter').value;
+      const focusSelection = document.getElementById('focus-neighborhood').checked;
       const nodes = Array.isArray(graphView.nodes) ? graphView.nodes : [];
       const edges = Array.isArray(graphView.edges) ? graphView.edges : [];
+      let visibleIds = new Set(
+        nodes
+          .filter((node) => {{
+            const summary = graphIndex.nodes?.[node.node_id] || {{}};
+            if (kind && (summary.kind || node.kind) !== kind) {{
+              return false;
+            }}
+            if (status && (summary.status || node.status) !== status) {{
+              return false;
+            }}
+            if (!search) {{
+              return true;
+            }}
+            const haystack = [
+              node.node_id,
+              node.title,
+              node.subtitle,
+              summary.agent_name,
+              summary.task,
+              summary.kind,
+            ]
+              .join(' ')
+              .toLowerCase();
+            return haystack.includes(search);
+          }})
+          .map((node) => node.node_id)
+      );
+
+      if (!search && !kind && !status) {{
+        visibleIds = new Set(nodes.map((node) => node.node_id));
+      }}
+
+      if (focusSelection && state.selectedNodeId) {{
+        const relatedIds = neighborhoodNodeIds(state.selectedNodeId, graphIndex);
+        const focusedIds = new Set();
+        for (const nodeId of relatedIds) {{
+          if (visibleIds.has(nodeId) || (!search && !kind && !status)) {{
+            focusedIds.add(nodeId);
+          }}
+        }}
+        if (!focusedIds.size) {{
+          for (const nodeId of relatedIds) {{
+            focusedIds.add(nodeId);
+          }}
+        }}
+        visibleIds = focusedIds;
+      }}
+
+      const filteredNodes = nodes.filter((node) => visibleIds.has(node.node_id));
+      const filteredEdges = edges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target));
+      return {{ nodes: filteredNodes, edges: filteredEdges }};
+    }}
+
+    function renderGraph(graphView) {{
+      const shell = document.getElementById('graph-shell');
+      const filtered = filteredGraphView(graphView);
+      const nodes = filtered.nodes;
+      const edges = filtered.edges;
+      const totalNodes = Array.isArray(graphView.nodes) ? graphView.nodes.length : 0;
+      const totalEdges = Array.isArray(graphView.edges) ? graphView.edges.length : 0;
       document.getElementById('graph-stats').textContent =
-        `${nodes.length} nodes | ${edges.length} edges`;
+        `${nodes.length}/${{totalNodes}} nodes | ${edges.length}/${{totalEdges}} edges`;
       if (!nodes.length) {{
-        shell.innerHTML = '<div class="empty">No graph nodes were stored for this run.</div>';
+        shell.innerHTML = '<div class="empty">No graph nodes matched the current filters.</div>';
+        document.getElementById('node-summary').innerHTML = '<div class="empty">No node selected.</div>';
         document.getElementById('node-detail').textContent = 'No node selected.';
         return;
       }}
 
+      const graphIndex = currentGraphIndex();
+      const relatedIds = neighborhoodNodeIds(state.selectedNodeId, graphIndex);
       const svgParts = [];
       svgParts.push(`<svg viewBox="0 0 ${graphView.width || 1200} ${graphView.height || 400}" role="img" aria-label="Workflow graph">`);
       svgParts.push('<defs><marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><polygon points="0 0, 10 4, 0 8" fill="rgba(85,70,51,0.4)"></polygon></marker></defs>');
@@ -1035,10 +1595,11 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       for (const node of nodes) {{
         const style = kindStyles[node.kind] || kindStyles.default;
         const active = node.node_id === state.selectedNodeId ? 'active' : '';
+        const related = node.node_id !== state.selectedNodeId && relatedIds.has(node.node_id) ? 'related' : '';
         const title = escapeHtml(node.title || node.node_id);
         const subtitle = escapeHtml(node.subtitle || '');
         svgParts.push(`
-          <g class="node-card ${active}" data-node-id="${escapeHtml(node.node_id)}" tabindex="0" role="button" aria-label="${title}">
+          <g class="node-card ${active} ${related}" data-node-id="${escapeHtml(node.node_id)}" tabindex="0" role="button" aria-label="${title}">
             <rect x="${node.x}" y="${node.y}" rx="18" ry="18" width="${node.width}" height="${node.height}" fill="${style.fill}" stroke="${style.stroke}"></rect>
             <text class="node-title" x="${node.x + 16}" y="${node.y + 28}">${title}</text>
             <text class="node-subtitle" x="${node.x + 16}" y="${node.y + 50}">${subtitle}</text>
@@ -1051,6 +1612,7 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       shell.querySelectorAll('.node-card').forEach((nodeElement) => {{
         const activate = () => {{
           state.selectedNodeId = nodeElement.dataset.nodeId;
+          setUrlState();
           renderNodeDetail();
           renderGraph(graphView);
         }};
@@ -1068,12 +1630,175 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
     function renderNodeDetail() {{
       const payload = state.selectedVisualization;
       const detail = document.getElementById('node-detail');
+      const summaryShell = document.getElementById('node-summary');
       if (!payload || !payload.graph_view || !Array.isArray(payload.graph_view.nodes)) {{
+        summaryShell.innerHTML = '<div class="empty">No node selected.</div>';
         detail.textContent = 'No node selected.';
         return;
       }}
       const match = payload.graph_view.nodes.find((node) => node.node_id === state.selectedNodeId);
-      detail.textContent = match ? JSON.stringify(match.data, null, 2) : 'No node selected.';
+      if (!match) {{
+        summaryShell.innerHTML = '<div class="empty">No node selected.</div>';
+        detail.textContent = 'No node selected.';
+        return;
+      }}
+      const graphIndex = currentGraphIndex();
+      const nodeSummary = graphIndex.nodes?.[match.node_id] || {{}};
+      const incoming = graphIndex.incoming?.[match.node_id] || [];
+      const outgoing = graphIndex.outgoing?.[match.node_id] || [];
+      const summaryCards = [
+        {{
+          label: 'Kind',
+          value: nodeSummary.kind || match.kind || 'node',
+          detail: nodeSummary.status || match.status || 'unknown',
+        }},
+        {{
+          label: 'Depth',
+          value: String(nodeSummary.depth ?? match.depth ?? 0),
+          detail: nodeSummary.step_id || nodeSummary.agent_name || 'graph node',
+        }},
+        {{
+          label: 'Attempt',
+          value: String(nodeSummary.attempt ?? 'n/a'),
+          detail: nodeSummary.agent_name || 'no agent',
+        }},
+        {{
+          label: 'Edges',
+          value: `${incoming.length} in / ${outgoing.length} out`,
+          detail: nodeSummary.task || match.title || 'node',
+        }},
+      ];
+      summaryShell.innerHTML = `
+        <div class="signal-grid">
+          ${summaryCards.map((card) => `
+            <article class="signal-card">
+              <div class="label">${escapeHtml(card.label)}</div>
+              <div class="value">${escapeHtml(card.value)}</div>
+              <div class="detail">${escapeHtml(card.detail)}</div>
+            </article>
+          `).join('')}
+        </div>
+        <div class="adjacency-group">
+          <div class="adjacency-title">Incoming</div>
+          <div class="adjacency-list">
+            ${incoming.length
+              ? incoming.map((edge) => `<span class="adjacency-pill"><strong>${escapeHtml(edge.node_id)}</strong><span>${escapeHtml(edge.relation || 'edge')}</span></span>`).join('')
+              : '<span class="adjacency-pill">No incoming edges</span>'}
+          </div>
+        </div>
+        <div class="adjacency-group">
+          <div class="adjacency-title">Outgoing</div>
+          <div class="adjacency-list">
+            ${outgoing.length
+              ? outgoing.map((edge) => `<span class="adjacency-pill"><strong>${escapeHtml(edge.node_id)}</strong><span>${escapeHtml(edge.relation || 'edge')}</span></span>`).join('')
+              : '<span class="adjacency-pill">No outgoing edges</span>'}
+          </div>
+        </div>
+      `;
+      detail.textContent = JSON.stringify(match.data, null, 2);
+    }}
+
+    function renderSignals(summary, observability, graphIndex) {{
+      const shell = document.getElementById('signal-shell');
+      const routingCounts = observability.routing_action_counts || {{}};
+      const validationCounts = observability.validation_counts || {{}};
+      const stageCounts = observability.timeline?.stage_counts || {{}};
+      const validationDigest = [
+        ...Object.entries(validationCounts.workflow || {{}}).map(([verdict, count]) => `workflow ${verdict}: ${count}`),
+        ...Object.entries(validationCounts.step || {{}}).map(([verdict, count]) => `step ${verdict}: ${count}`),
+      ].join(' | ') || 'No validation metrics recorded.';
+      const routingDigest = Object.entries(routingCounts)
+        .sort((left, right) => Number(right[1]) - Number(left[1]))
+        .slice(0, 3)
+        .map(([action, count]) => `${action}: ${count}`)
+        .join(' | ') || 'No routing actions recorded.';
+      const stageDigest = Object.entries(stageCounts)
+        .sort((left, right) => Number(right[1]) - Number(left[1]))
+        .slice(0, 3)
+        .map(([stage, count]) => `${stage}: ${count}`)
+        .join(' | ') || 'No timeline stages recorded.';
+      const cards = [
+        {{
+          label: 'Topology',
+          value: `${summary.graph_node_count || 0} nodes`,
+          detail: `${summary.graph_edge_count || 0} edges | root ${graphIndex.root_node_id || 'n/a'}`,
+        }},
+        {{
+          label: 'Routing',
+          value: String(Object.keys(routingCounts).length),
+          detail: routingDigest,
+        }},
+        {{
+          label: 'Validation',
+          value: String((summary.step_validation_count || 0) + (summary.workflow_validation_count || 0)),
+          detail: validationDigest,
+        }},
+        {{
+          label: 'Timeline',
+          value: String(summary.timeline_entries || 0),
+          detail: stageDigest,
+        }},
+      ];
+      shell.innerHTML = `
+        <div class="signal-grid">
+          ${cards.map((card) => `
+            <article class="signal-card">
+              <div class="label">${escapeHtml(card.label)}</div>
+              <div class="value">${escapeHtml(card.value)}</div>
+              <div class="detail">${escapeHtml(card.detail)}</div>
+            </article>
+          `).join('')}
+        </div>
+      `;
+    }}
+
+    function renderAgentMetrics(agentMetrics) {{
+      const shell = document.getElementById('agent-metrics-shell');
+      if (!Array.isArray(agentMetrics) || !agentMetrics.length) {{
+        shell.innerHTML = '<div class="empty">No agent metrics stored for this run.</div>';
+        return;
+      }}
+      shell.innerHTML = `
+        <table class="metrics-table">
+          <thead>
+            <tr>
+              <th>Agent</th>
+              <th>Steps</th>
+              <th>Total</th>
+              <th>Max</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${agentMetrics.slice(0, 10).map((metric) => `
+              <tr>
+                <td>${escapeHtml(metric.agent || 'unknown')}</td>
+                <td>${escapeHtml(String(metric.step_count || 0))}</td>
+                <td>${escapeHtml(formatDuration(metric.total_duration_ms))}</td>
+                <td>${escapeHtml(formatDuration(metric.max_duration_ms))}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }}
+
+    function renderFailures(failures) {{
+      const shell = document.getElementById('failure-shell');
+      if (!Array.isArray(failures) || !failures.length) {{
+        shell.innerHTML = '<div class="empty">No failures were recorded for this run.</div>';
+        return;
+      }}
+      shell.innerHTML = `
+        <div class="failure-list">
+          ${failures.slice(0, 8).map((failure) => `
+            <article class="failure-card">
+              <div class="title">${escapeHtml(failure.scope || 'failure')} ${escapeHtml(failure.step_id || failure.option_id || '')}</div>
+              <div class="meta">${escapeHtml(failure.status || 'unknown')} | attempt ${escapeHtml(String(failure.attempt ?? 'n/a'))}</div>
+              <div class="reason">${escapeHtml(failure.reason || failure.error || 'No failure reason recorded.')}</div>
+            </article>
+          `).join('')}
+        </div>
+      `;
     }}
 
     function renderTimeline(timeline) {{
@@ -1088,7 +1813,7 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
             <tr>
               <th>Stage</th>
               <th>Status</th>
-              <th>Attempt</th>
+              <th>Delta</th>
               <th>Updated</th>
             </tr>
           </thead>
@@ -1097,7 +1822,7 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
               <tr>
                 <td>${escapeHtml(entry.stage || '')}</td>
                 <td>${escapeHtml(entry.status || '')}</td>
-                <td>${escapeHtml(String(entry.current_attempt_index ?? ''))}</td>
+                <td>${escapeHtml(formatDuration(entry.delta_ms_from_previous))}</td>
                 <td>${escapeHtml(entry.updated_at || '')}</td>
               </tr>
             `).join('')}
@@ -1108,9 +1833,14 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
 
     document.getElementById('run-search').addEventListener('input', applyRunFilter);
     document.getElementById('run-status').addEventListener('change', loadRuns);
-    document.getElementById('run-agent').addEventListener('change', loadRuns);
+    document.getElementById('run-agent').addEventListener('input', loadRuns);
     document.getElementById('run-errors').addEventListener('change', loadRuns);
-    loadRuns().catch((error) => {{
+    document.getElementById('node-search').addEventListener('input', () => renderGraph(currentGraphView()));
+    document.getElementById('node-kind-filter').addEventListener('change', () => renderGraph(currentGraphView()));
+    document.getElementById('node-status-filter').addEventListener('change', () => renderGraph(currentGraphView()));
+    document.getElementById('focus-neighborhood').addEventListener('change', () => renderGraph(currentGraphView()));
+    document.getElementById('auto-refresh').addEventListener('change', scheduleAutoRefresh);
+    loadRuns({{ preferredRunId: state.selectedRunId || undefined }}).catch((error) => {{
       document.getElementById('run-list').innerHTML = `<div class="empty">Failed to load runs: ${escapeHtml(error.message)}</div>`;
     }});
   </script>
@@ -1166,8 +1896,8 @@ def create_run_visualizer_app(run_store: RunStore | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' was not found.") from exc
         return JSONResponse(payload)
 
-    @app.get("/api/runs/{run_id}/graph")
-    def api_run_graph(run_id: str, format: str = "view") -> JSONResponse | PlainTextResponse:
+    @app.get("/api/runs/{run_id}/graph", response_model=None)
+    def api_run_graph(run_id: str, format: str = "view") -> PlainTextResponse | JSONResponse:
         try:
             payload = load_run_graph_payload(store, run_id, format=format)
         except KeyError as exc:

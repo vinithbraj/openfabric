@@ -12,15 +12,18 @@ class _FastAPIStub:
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
+        self.routes = []
 
     def get(self, *_args, **_kwargs):
         def decorator(func):
+            self.routes.append({"method": "GET", "args": _args, "kwargs": _kwargs, "func": func})
             return func
 
         return decorator
 
     def post(self, *_args, **_kwargs):
         def decorator(func):
+            self.routes.append({"method": "POST", "args": _args, "kwargs": _kwargs, "func": func})
             return func
 
         return decorator
@@ -59,8 +62,10 @@ from runtime.engine import Engine
 from runtime.registry import ADAPTER_REGISTRY
 from runtime.run_store import RunStore
 from runtime.run_visualizer import (
+    build_graph_index,
     build_graph_view_model,
     build_run_visualization_payload,
+    create_run_visualizer_app,
     list_run_visualizations,
     load_run_graph_payload,
     load_run_observability_payload,
@@ -149,6 +154,11 @@ class RunVisualizerTests(unittest.TestCase):
         self.assertLess(root["x"], attempt["x"])
         self.assertLess(attempt["x"], step["x"])
 
+        graph_index = build_graph_index(payload["graph"])
+        self.assertEqual(graph_index["root_node_id"], payload["graph"]["root_node_id"])
+        self.assertIn(payload["graph"]["root_node_id"], graph_index["nodes"])
+        self.assertIn(attempt["node_id"], [item["node_id"] for item in graph_index["outgoing"][payload["graph"]["root_node_id"]]])
+
     def test_run_visualization_helpers_load_store_payloads(self):
         run_id = self._completed_run_id()
         store = RunStore()
@@ -160,8 +170,12 @@ class RunVisualizerTests(unittest.TestCase):
         visualization = load_run_visualization(store, run_id)
         self.assertEqual(visualization["run_id"], run_id)
         self.assertIn("graph_view", visualization)
+        self.assertIn("graph_index", visualization)
         self.assertIn("timeline", visualization)
         self.assertIn("observability", visualization)
+        self.assertIn("nodes", visualization["graph_index"])
+        self.assertIn("incoming", visualization["graph_index"])
+        self.assertIn("outgoing", visualization["graph_index"])
 
         graph_json = load_run_graph_payload(store, run_id, format="json")
         self.assertEqual(graph_json["run_id"], run_id)
@@ -179,7 +193,23 @@ class RunVisualizerTests(unittest.TestCase):
         self.assertIn("/api/runs", html)
         self.assertIn("graph-shell", html)
         self.assertIn("run-search", html)
+        self.assertIn("node-search", html)
+        self.assertIn("graph-legend", html)
+        self.assertIn("signal-shell", html)
+        self.assertIn("agent-metrics-shell", html)
+        self.assertIn("failure-shell", html)
+        self.assertIn("auto-refresh", html)
         self.assertIn("/tmp/openfabric_runs", html)
+
+    def test_graph_endpoint_disables_response_model_generation(self):
+        app = create_run_visualizer_app(run_store=RunStore())
+        graph_routes = [
+            route
+            for route in getattr(app, "routes", [])
+            if route.get("method") == "GET" and route.get("args") and route["args"][0] == "/api/runs/{run_id}/graph"
+        ]
+        self.assertEqual(len(graph_routes), 1)
+        self.assertIsNone(graph_routes[0]["kwargs"].get("response_model"))
 
 
 if __name__ == "__main__":
