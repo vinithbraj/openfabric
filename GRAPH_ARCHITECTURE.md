@@ -123,6 +123,15 @@ Implemented in this change:
 - attach `run_id`, `attempt`, `step_id`, `task`, `target_agent`, `operation`, and role metadata to runtime-sent `task.plan`, `validation.request`, and `data.reduce` payloads
 - preserve node metadata inside compacted step payloads so workflow records retain the agent-level execution envelope
 
+### Phase 7
+
+Implemented in this change:
+
+- add persisted run-inspection helpers in [runtime/run_inspector.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_inspector.py)
+- derive and store `summary.json`, `graph.json`, and `graph.mmd` alongside persisted run state in [runtime/run_store.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_store.py)
+- expose `Engine.list_runs(...)`, `Engine.inspect_run(...)`, and `Engine.render_run_graph(...)` for programmatic debugging and replay-adjacent tooling
+- add CLI inspection commands for listing runs, dumping a run inspection payload, and rendering stored workflow graphs as Mermaid or JSON
+
 ## Current Mapping
 
 Today’s runtime already maps naturally to the target graph:
@@ -154,5 +163,5 @@ The runtime now exposes the following execution chains directly in the graph:
 The main remaining architectural gaps before production are:
 
 - extend the stricter common envelope to the remaining non-core agents and answer/synthesis paths
-- add richer run inspection and debugging tools on top of the persisted run store
 - surface the graph through a dedicated visualization or UI layer
+- add stronger production observability around timings, metrics, and audit queries on top of the persisted run store

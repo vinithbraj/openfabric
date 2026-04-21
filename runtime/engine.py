@@ -20,6 +20,7 @@ from .console import log_boot, log_event, log_event_handler
 from .contracts import ContractRegistry
 from .event_bus import EventBus
 from .graph import build_agent_graph_node, build_capability_graph, build_workflow_graph
+from .run_inspector import render_workflow_graph_mermaid
 from .registry import ADAPTER_REGISTRY
 from .run_store import RunStore
 
@@ -343,6 +344,27 @@ class Engine:
         payload = copy.deepcopy(session.get("payload") or {})
         payload["resume_run_id"] = run_id
         self._execute_task_plan(payload, depth)
+
+    def list_runs(self, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
+        return self.run_store.list_runs(limit=limit, status=status)
+
+    def inspect_run(self, run_id: str, *, include_timeline: bool = True) -> dict[str, Any]:
+        inspection = self.run_store.inspect(run_id, include_timeline=include_timeline)
+        if not isinstance(inspection, dict):
+            raise ValueError(f"Cannot inspect run '{run_id}': persisted state was not found.")
+        return inspection
+
+    def render_run_graph(self, run_id: str, *, format: str = "mermaid") -> str | dict[str, Any]:
+        inspection = self.inspect_run(run_id, include_timeline=False)
+        target_format = str(format or "mermaid").strip().lower()
+        if target_format == "json":
+            return copy.deepcopy(inspection.get("graph") or {})
+        if target_format == "mermaid":
+            graph_mermaid = inspection.get("graph_mermaid")
+            if isinstance(graph_mermaid, str) and graph_mermaid.strip():
+                return graph_mermaid
+            return render_workflow_graph_mermaid(inspection.get("graph") or {})
+        raise ValueError(f"Unsupported graph format '{format}'.")
 
     def _autostart_http_services(self):
         for agent_name, config in self.spec["agents"].items():

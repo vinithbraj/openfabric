@@ -196,6 +196,28 @@ python cli.py agent_library/specs/ops_assistant_llm.yml --agent shell_runner
 python cli.py agent_library/specs/ops_assistant_llm.yml --agent sql_runner --agent synthesizer
 ```
 
+## Persisted Runs And Graph Inspection
+
+Workflow runs are checkpointed under `artifacts/runtime_runs` by default. You can override that location with `OPENFABRIC_RUN_STORE_DIR`.
+
+Useful inspection commands:
+
+```bash
+python cli.py --list-runs
+python cli.py --list-runs --run-status completed
+python cli.py --show-run 20260421T010203Z_abcd1234ef56
+python cli.py --show-run-graph 20260421T010203Z_abcd1234ef56
+python cli.py --show-run-graph 20260421T010203Z_abcd1234ef56 --graph-format json
+```
+
+Each persisted run directory now includes:
+
+- `state.json`: the latest durable runtime state
+- `timeline.jsonl`: checkpoint-by-checkpoint stage history
+- `summary.json`: compact inspection summary
+- `graph.json`: persisted workflow execution graph
+- `graph.mmd`: Mermaid flowchart rendering of the workflow graph
+
 ## LLM Configuration
 
 The LLM-driven planner stack uses shared environment variables across agents.
