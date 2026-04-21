@@ -147,7 +147,7 @@ def _llm_timeout_seconds() -> float:
 
 def _is_slurm_task(task: str) -> bool:
     task_lc = task.lower()
-    return any(
+    if any(
         token in task_lc
         for token in (
             "slurm",
@@ -171,11 +171,16 @@ def _is_slurm_task(task: str) -> bool:
             "scancel",
             "hpc",
             "scheduler",
-            "gpu",
-            "worker",
-            "compute",
         )
-    )
+    ):
+        return True
+    if "gpu" in task_lc and any(token in task_lc for token in ("partition", "node", "nodes", "cluster", "slurm", "sinfo", "squeue", "job", "jobs", "hpc")):
+        return True
+    if "worker" in task_lc and any(token in task_lc for token in ("cluster", "slurm", "node", "nodes", "hpc")):
+        return True
+    if "compute" in task_lc and any(token in task_lc for token in ("cluster", "slurm", "node", "nodes", "partition", "hpc")):
+        return True
+    return False
 
 
 def _slurm_gateway_ready() -> bool:

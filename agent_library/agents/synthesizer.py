@@ -118,6 +118,23 @@ def _format_callout_section(label: str, value: Any) -> list[str]:
     return _format_console_section(label, text)
 
 
+def _markdown_section(title: str, body: Any, level: int = 3) -> str:
+    text = ""
+    if isinstance(body, list):
+        text = "\n".join(str(item) for item in body if str(item).strip()).strip()
+    elif body is not None:
+        text = str(body).strip()
+    if not title or not text:
+        return text
+    hashes = "#" * max(1, min(level, 6))
+    return f"{hashes} {title}\n\n{text}"
+
+
+def _join_markdown_sections(*sections: Any) -> str:
+    parts = [str(section).strip() for section in sections if isinstance(section, str) and section.strip()]
+    return "\n\n".join(parts).strip()
+
+
 def _extract_file_paths_from_text(value: Any) -> list[str]:
     if not isinstance(value, str):
         return []
@@ -253,20 +270,18 @@ def _format_agent_result(payload: dict[str, Any], event_name: str | None = None)
 
     linked_stdout_path = _markdown_link_for_file_path(stdout)
     if linked_stdout_path and not stderr and status == "success":
-        return f"File path: {linked_stdout_path}"
+        return _markdown_section("Summary", f"File path: {linked_stdout_path}")
 
     # Fallback for raw tool results
-    kind_label = f"**{event_name.split('.')[0].title()}** " if event_name else ""
-    status_icon = "✅" if status == "success" else "❌"
-    
-    lines = [
-        f"### {status_icon} {kind_label}Operation {status.title()}",
-        "",
+    summary = _markdown_section(
+        "Summary",
+        f"Status: `{status}`" + (f"\n\nSource: `{event_name}`" if isinstance(event_name, str) and event_name.strip() else ""),
+    )
+    details = _markdown_section(
+        "Details",
         _command_output_details(str(op or "unknown"), str(stdout or ""), str(stderr or ""), rc),
-        "",
-        "---"
-    ]
-    return "\n".join(lines)
+    )
+    return _join_markdown_sections(summary, details)
 
 
 def _format_shell_answer(command: str, returncode: int, stdout: str, stderr: str) -> str:
@@ -431,7 +446,7 @@ def _shell_fact_value(text: str) -> str | None:
 
 
 def _shell_fact_label(step: dict[str, Any]) -> str:
-    task = str(step.get("task") or "").strip()
+    task = _clean_shell_task_text(step.get("task") or "")
     task_lc = task.lower()
     if "docker" in task_lc and any(token in task_lc for token in ("installed", "available")):
         return "Docker installed"
@@ -456,6 +471,31 @@ def _shell_fact_label(step: dict[str, Any]) -> str:
     return task[:1].upper() + task[1:] if task else "Result"
 
 
+def _clean_shell_task_text(task: Any) -> str:
+    text = re.sub(r"\s+", " ", str(task or "").strip(" ,;:."))
+    if not text:
+        return ""
+    text = re.sub(r"^(?:and|then|also)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+(?:and|then|also)\s*$", "", text, flags=re.IGNORECASE)
+    return text.strip(" ,;:.")
+
+
+def _shell_detail_heading(step: dict[str, Any]) -> str:
+    task = _clean_shell_task_text(step.get("task") or "")
+    task_lc = task.lower()
+    if "nvidia-smi" in task_lc and any(
+        token in task_lc for token in ("gpu", "gpus", "spec", "specs", "detail", "details", "cuda", "driver", "memory", "vram")
+    ):
+        return "GPU details from nvidia-smi"
+    if "docker" in task_lc and "container" in task_lc and "count" in task_lc:
+        return "Docker container count"
+    if "docker" in task_lc and "image" in task_lc and "count" in task_lc:
+        return "Docker image count"
+    if task:
+        return task[:1].upper() + task[1:]
+    return "Details"
+
+
 def _format_multi_shell_workflow_answer(steps: list[dict[str, Any]], task: str = "") -> str | None:
     facts: list[tuple[str, str]] = []
     for step in steps:
@@ -467,10 +507,8 @@ def _format_multi_shell_workflow_answer(steps: list[dict[str, Any]], task: str =
         facts.append((_shell_fact_label(step), value))
     if not facts:
         return None
-    if len(facts) == 1:
-        label, value = facts[0]
-        return f"**{label}:** `{value}`"
-    return "\n".join(f"- **{label}:** `{value}`" for label, value in facts).strip()
+    summary_lines = [f"- **{label}:** `{value}`" for label, value in facts]
+    return _markdown_section("Summary", summary_lines)
 
 
 def _format_size_path_table_answer(text: Any, intro: str = "") -> str | None:
@@ -490,7 +528,7 @@ def _format_size_path_table_answer(text: Any, intro: str = "") -> str | None:
         return None
     lines: list[str] = []
     if isinstance(intro, str) and intro.strip():
-        lines.extend([intro.strip(), ""])
+        lines.extend([f"#### {intro.strip()}", ""])
     lines.append(_markdown_table(["Size (bytes)", "Path"], rows, limit=50))
     return "\n".join(lines).strip()
 
@@ -516,7 +554,7 @@ def _format_labeled_stdout_answer(text: Any, intro: str = "") -> str | None:
         return None
     lines: list[str] = []
     if isinstance(intro, str) and intro.strip():
-        lines.extend([intro.strip(), ""])
+        lines.extend([f"#### {intro.strip()}", ""])
     lines.extend(f"- **{label}:** `{value}`" for label, value in pairs)
     return "\n".join(lines).strip()
 
@@ -525,7 +563,7 @@ def _format_shell_detail_answer(step: dict[str, Any]) -> str | None:
     stdout = _step_clean_stdout(step)
     if not stdout:
         return None
-    intro = str(step.get("task") or "").strip()
+    intro = _shell_detail_heading(step)
     rendered = _format_labeled_stdout_answer(stdout, intro)
     if rendered:
         return rendered
@@ -537,12 +575,20 @@ def _format_shell_detail_answer(step: dict[str, Any]) -> str | None:
         return rendered
     linked_paths = _extract_file_paths_from_text(stdout)
     if linked_paths:
-        lines = [intro] if intro else []
+        lines = [f"#### {intro}"] if intro else []
         if lines:
             lines.append("")
         lines.extend(f"- {path}" for path in linked_paths)
         return "\n".join(lines).strip()
     return None
+
+
+def _shell_step_prefers_detail_render(step: dict[str, Any]) -> bool:
+    task = str(step.get("task") or "").strip().lower()
+    stdout = _step_clean_stdout(step)
+    if "\n" not in stdout:
+        return False
+    return any(token in task for token in ("gpu", "gpus", "spec", "specs", "detail", "details", "driver", "cuda", "memory", "vram"))
 
 
 def _format_compound_shell_workflow_answer(steps: list[dict[str, Any]], task: str = "") -> str | None:
@@ -551,6 +597,21 @@ def _format_compound_shell_workflow_answer(steps: list[dict[str, Any]], task: st
     for step in steps:
         if step.get("status") != "completed" or step.get("event") != "shell.result":
             continue
+        if _shell_step_prefers_detail_render(step):
+            rendered = _format_shell_detail_answer(step)
+            if not rendered:
+                reduced = _step_payload_field(step, "reduced_result") or _step_payload_field(step, "refined_answer")
+                if isinstance(reduced, str) and reduced.strip():
+                    rendered = _format_labeled_stdout_answer(reduced, _shell_detail_heading(step))
+                    if not rendered:
+                        intro = _shell_detail_heading(step)
+                        body = ["```text", reduced.strip(), "```"]
+                        rendered = _join_markdown_sections(
+                            _markdown_section(intro, "\n".join(body), level=4) if intro else "\n".join(body)
+                        )
+            if rendered:
+                detail_sections.append(rendered)
+                continue
         reduced = _step_payload_field(step, "reduced_result") or _step_payload_field(step, "refined_answer")
         value = _shell_fact_value(reduced) if isinstance(reduced, str) else None
         if value is None:
@@ -563,14 +624,16 @@ def _format_compound_shell_workflow_answer(steps: list[dict[str, Any]], task: st
             detail_sections.append(rendered)
     if not facts and not detail_sections:
         return None
-    lines: list[str] = []
+    summary_section = ""
+    details_section = ""
     if facts:
-        lines.extend(f"- **{label}:** `{value}`" for label, value in facts)
+        summary_section = _markdown_section(
+            "Summary",
+            [f"- **{label}:** `{value}`" for label, value in facts],
+        )
     if detail_sections:
-        if lines:
-            lines.append("")
-        lines.extend(detail_sections)
-    return "\n".join(lines).strip()
+        details_section = _markdown_section("Details", "\n\n".join(detail_sections))
+    return _join_markdown_sections(summary_section, details_section)
 
 
 def _workflow_requests_internal_steps(payload: dict[str, Any]) -> bool:
@@ -646,7 +709,7 @@ def _format_fixed_width_table_answer(text: Any, intro: str = "") -> str | None:
     columns, rows = parsed
     lines = []
     if isinstance(intro, str) and intro.strip():
-        lines.extend([intro.strip(), ""])
+        lines.extend([f"#### {intro.strip()}", ""])
     lines.append(_markdown_table(columns, rows, limit=50))
     if len(rows) > 50:
         lines.extend(["", "Showing first 50 rows."])
@@ -667,41 +730,39 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
     queries = result.get("queries")
     limit = result.get("limit")
 
-    lines = []
+    summary_lines = []
     if isinstance(row_count, int):
-        lines.append(f"Found {row_count} matching result row(s).")
+        summary_lines.append(f"Found {row_count} matching result row(s).")
     elif task:
-        lines.append(f"Returned {returned_row_count} result row(s).")
+        summary_lines.append(f"Returned {returned_row_count} result row(s).")
     elif returned_row_count:
-        lines.append(f"Returned {returned_row_count} result row(s).")
-    if lines:
-        lines.append("")
+        summary_lines.append(f"Returned {returned_row_count} result row(s).")
 
+    detail_lines = []
     if isinstance(columns, list) and isinstance(rows, list) and columns:
         table_limit = 50
-        lines.append(_markdown_table(columns, rows, table_limit))
+        detail_lines.append(_markdown_table(columns, rows, table_limit))
         if len(rows) > table_limit:
-            lines.append("")
             if isinstance(row_count, int):
-                lines.append(f"Showing first {table_limit} of {returned_row_count} returned row(s).")
+                detail_lines.extend(["", f"Showing first {table_limit} of {returned_row_count} returned row(s)."])
             else:
-                lines.append(f"Showing first {table_limit} rows.")
+                detail_lines.extend(["", f"Showing first {table_limit} rows."])
         elif truncated:
-            lines.append("")
             if isinstance(row_count, int):
-                lines.append(f"Showing {returned_row_count} returned row(s) out of {row_count} matching row(s).")
+                detail_lines.extend(["", f"Showing {returned_row_count} returned row(s) out of {row_count} matching row(s)."])
             else:
-                lines.append(f"Showing up to {limit if isinstance(limit, int) else returned_row_count} rows.")
+                detail_lines.extend(["", f"Showing up to {limit if isinstance(limit, int) else returned_row_count} rows."])
     else:
         # Check if this is actually a schema object masquerading as a plain result
         schema_check = result if isinstance(result, dict) else {}
         if "dialect" in schema_check and "tables" in schema_check:
-            lines.append(_format_schema_answer(schema_check))
+            detail_lines.append(_format_schema_answer(schema_check))
         else:
-            lines.append(json.dumps(result, indent=2, ensure_ascii=True))
+            detail_lines.append("```json\n" + json.dumps(result, indent=2, ensure_ascii=True) + "\n```")
 
+    sql_sections: list[str] = []
     if isinstance(queries, list) and queries:
-        lines.extend(["", "**SQL used**"])
+        sql_lines = []
         for index, query in enumerate(queries, start=1):
             if not isinstance(query, dict):
                 continue
@@ -709,12 +770,17 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
             if not isinstance(query_sql, str) or not query_sql.strip():
                 continue
             label = query.get("label") or f"Query {index}"
-            lines.extend(["", f"{index}. {label}", ""])
-            lines.extend(_format_preformatted_block(query_sql.strip()))
+            sql_lines.extend([f"{index}. {label}", "", "```sql", query_sql.strip(), "```", ""])
+        if sql_lines:
+            sql_sections.append(_markdown_section("SQL Used", "\n".join(sql_lines).strip()))
     elif isinstance(sql, str) and sql.strip():
-        lines.extend(["", "**SQL used**", ""])
-        lines.extend(_format_preformatted_block(sql.strip()))
-    return "\n".join(lines).strip()
+        sql_sections.append(_markdown_section("SQL Used", "\n".join(["```sql", sql.strip(), "```"])))
+
+    return _join_markdown_sections(
+        _markdown_section("Summary", summary_lines) if summary_lines else "",
+        _markdown_section("Details", "\n".join(detail_lines)) if detail_lines else "",
+        *sql_sections,
+    )
 
 
 def _extract_scalar_sql_value(result: dict[str, Any]) -> Any:
@@ -748,18 +814,8 @@ def _format_multi_sql_workflow_answer(results: list[dict[str, Any]], task: str =
     if table_result is None:
         return None
     table_answer = _format_sql_result_answer(table_result, "")
-    lines = []
-    if task:
-        lines.append(task)
-    if scalar_lines:
-        if lines:
-            lines.append("")
-        lines.extend(scalar_lines)
-    if table_answer:
-        if lines:
-            lines.append("")
-        lines.append(table_answer)
-    return "\n".join(lines).strip() or None
+    summary_section = _markdown_section("Summary", [f"- {line}" for line in scalar_lines]) if scalar_lines else ""
+    return _join_markdown_sections(summary_section, table_answer) or None
 
 
 def _artifact_paths_from_steps(steps: list[dict[str, Any]]) -> list[str]:
@@ -953,19 +1009,12 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
                 primary_answer = _format_multi_sql_workflow_answer(sql_results, task) or _format_sql_result_answer(sql_results[-1], task)
         if artifact_paths:
             artifact_links = [(_markdown_link_for_file_path(path) or path) for path in artifact_paths]
-            artifact_text = (
-                f"Saved results to: {artifact_links[0]}"
-                if len(artifact_links) == 1
-                else "\n".join(["Saved files:", *[f"- {link}" for link in artifact_links]])
+            artifact_text = _markdown_section(
+                "Files",
+                artifact_links[0] if len(artifact_links) == 1 else "\n".join(f"- {link}" for link in artifact_links),
             )
             if isinstance(primary_answer, str) and primary_answer.strip():
-                primary_answer = "\n".join(
-                    [
-                        primary_answer.strip(),
-                        "",
-                        artifact_text,
-                    ]
-                ).strip()
+                primary_answer = _join_markdown_sections(primary_answer, artifact_text)
             else:
                 primary_answer = artifact_text
     else:
@@ -982,25 +1031,19 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
                 primary_answer = reduced.strip()
                 break
     if (
-        task_shape != "save_artifact"
+        task_shape == "save_artifact"
         and artifact_paths
         and isinstance(primary_answer, str)
         and primary_answer.strip()
     ):
         artifact_links = [(_markdown_link_for_file_path(path) or path) for path in artifact_paths]
         artifact_text = (
-            f"Saved results to: {artifact_links[0]}"
+            _markdown_section("Files", artifact_links[0])
             if len(artifact_links) == 1
-            else "\n".join(["Saved files:", *[f"- {link}" for link in artifact_links]])
+            else _markdown_section("Files", "\n".join(f"- {link}" for link in artifact_links))
         )
         if artifact_text not in primary_answer:
-            primary_answer = "\n".join(
-                [
-                    primary_answer.strip(),
-                    "",
-                    artifact_text,
-                ]
-            ).strip()
+            primary_answer = _join_markdown_sections(primary_answer, artifact_text)
 
     if primary_answer is None and status == "completed" and task_shape == "schema_summary":
         for step in reversed(flat_steps):

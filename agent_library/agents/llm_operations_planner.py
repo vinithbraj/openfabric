@@ -415,6 +415,8 @@ def _normalize_task_shape(question: str, raw: Any = None, *, target_agent: str |
     if isinstance(raw, str):
         normalized = raw.strip().lower()
         if normalized in TASK_SHAPES:
+            if normalized in {"count", "boolean_check"} and inferred != normalized:
+                return inferred
             if normalized == "count" and _looks_like_mixed_count_and_detail_request(question):
                 return inferred
             if inferred == "save_artifact" and normalized != "save_artifact":
@@ -448,6 +450,8 @@ def _infer_task_shape(question: str, *, target_agent: str | None = None, present
     if _looks_like_mixed_count_and_detail_request(text):
         return "list" if fmt == "markdown_table" or family == "sql_runner" else "lookup"
     if len(compound_parts) > 1 and (count_part_count > 1 or (count_part_count and boolean_part_count)):
+        return "lookup"
+    if len(compound_parts) > 1 and boolean_part_count and boolean_part_count < len(compound_parts):
         return "lookup"
     if any(token in text for token in ("how many", "count ", "number of", "total number", "total count")):
         return "count"
@@ -1102,6 +1106,64 @@ def _looks_like_slurm_question(question: str) -> bool:
     )
 
 
+def _looks_like_local_hardware_question(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    tokens = _tokenize(question)
+    if "nvidia-smi" in text:
+        return True
+    local_scope_tokens = {
+        "machine",
+        "system",
+        "host",
+        "local",
+        "installed",
+        "hardware",
+        "driver",
+        "drivers",
+        "cuda",
+        "memory",
+        "vram",
+        "pcie",
+        "pci",
+        "spec",
+        "specs",
+        "detail",
+        "details",
+    }
+    gpu_tokens = {
+        "gpu",
+        "gpus",
+        "nvidia",
+        "geforce",
+        "rtx",
+        "tesla",
+        "quadro",
+    }
+    slurm_scope_tokens = {
+        "slurm",
+        "cluster",
+        "clusters",
+        "partition",
+        "partitions",
+        "node",
+        "nodes",
+        "job",
+        "jobs",
+        "queue",
+        "queued",
+        "reservation",
+        "reservations",
+        "sinfo",
+        "squeue",
+        "hpc",
+    }
+    if tokens & slurm_scope_tokens:
+        return False
+    if "this machine" in text or "this system" in text or "on this machine" in text or "on this system" in text:
+        return True
+    return bool(tokens & gpu_tokens) and bool(tokens & local_scope_tokens)
+
+
 def _select_target_agent(question: str, capabilities: dict) -> str | None:
     question_lc = question.lower()
     question_tokens = _tokenize(question)
@@ -1136,6 +1198,8 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
         priority_boosts["shell_runner"] += 15
     if _looks_like_repo_file_scan(question):
         priority_boosts["shell_runner"] += 20
+    if _looks_like_local_hardware_question(question):
+        priority_boosts["shell_runner"] += 24
     if looks_like_sql:
         priority_boosts["sql_runner"] += 12
     if looks_like_sql_export:
@@ -1286,6 +1350,18 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
 
     if "show listening ports" in task_lc or "listening ports" in task_lc:
         return "ss -ltnp"
+
+    if "nvidia-smi" in task_lc and any(token in task_lc for token in ("installed", "available", "exists", "check if", "check whether", "whether")):
+        return "command -v nvidia-smi"
+
+    if (
+        "nvidia-smi" in task_lc
+        or (
+            any(token in task_lc for token in ("gpu", "gpus", "nvidia"))
+            and any(token in task_lc for token in ("spec", "specs", "detail", "details", "driver", "drivers", "cuda", "memory", "vram"))
+        )
+    ):
+        return "nvidia-smi -q"
 
     if "top-level directories" in task_lc or "top level directories" in task_lc:
         return 'find . -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" | sort'
@@ -1543,6 +1619,10 @@ SHELL_COMMAND_OVERRIDE_MARKERS = (
     "usable free space",
     "physical drives",
     "non physical drives",
+    "nvidia-smi",
+    "gpu specs",
+    "gpu spec",
+    "gpu specifications",
 )
 
 
@@ -2121,15 +2201,25 @@ def _split_compound_request(question: str) -> list[str]:
         flags=re.IGNORECASE,
     )
     parts = [
-        re.sub(r"^(?:and|then|also)\s+", "", part.strip(" ,;"), flags=re.IGNORECASE)
+        _sanitize_task_text(part)
         for part in separator_re.split(text)
-        if part and part.strip(" ,;")
+        if part and _sanitize_task_text(part)
     ]
     return parts or [text]
 
 
+def _sanitize_task_text(text: str) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "").strip(" ,;:."))
+    if not compact:
+        return ""
+    compact = re.sub(r"^(?:and|then|also)\s+", "", compact, flags=re.IGNORECASE)
+    compact = re.sub(r"\s+(?:and|then|also)\s*$", "", compact, flags=re.IGNORECASE)
+    compact = re.sub(r"\s+", " ", compact).strip(" ,;:.")
+    return compact
+
+
 def _normalize_compound_shell_part(part: str, question: str) -> str:
-    compact = re.sub(r"\s+", " ", str(part or "").strip(" ,;"))
+    compact = _sanitize_task_text(part)
     if not compact:
         return compact
     compact_lc = compact.lower()
@@ -2151,6 +2241,12 @@ def _normalize_compound_shell_part(part: str, question: str) -> str:
     if "git" in question_lc and "git" not in compact_lc:
         if any(token in compact_lc for token in ("branch", "commit", "commits", "working tree", "status", "log")):
             compact = f"git {compact}".strip()
+    if "nvidia-smi" in question_lc and "nvidia-smi" not in compact_lc:
+        if any(
+            token in compact_lc
+            for token in ("gpu", "gpus", "nvidia", "cuda", "driver", "drivers", "spec", "specs", "detail", "details", "memory", "vram")
+        ):
+            compact = f"{compact} using nvidia-smi".strip()
     return compact
 
 
@@ -2470,7 +2566,7 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
                 normalized.append(
                     {
                         "id": group_id,
-                        "task": step.get("task", "").strip() or question,
+                        "task": _sanitize_task_text(step.get("task", "").strip()) or question,
                         "steps": normalized_nested,
                     }
                 )
@@ -2478,7 +2574,7 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             continue
 
         target_agent = step.get("target_agent")
-        task = step.get("task", "").strip()
+        task = _sanitize_task_text(step.get("task", "").strip())
         command = step.get("command")
         instruction = step.get("instruction")
         invoked_agent = None
