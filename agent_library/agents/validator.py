@@ -146,6 +146,20 @@ def _heuristic_validate(payload: dict):
                 missing_requirements.append("count")
             if not has_state:
                 missing_requirements.append("state breakdown")
+    elif _task_requires_count_and_identifiers(task_text):
+        evidence_candidates = _workflow_evidence_candidates(payload, result)
+        has_count = any(_structured_count_like(candidate) for candidate in evidence_candidates)
+        has_identifiers = any(_contains_identifier_evidence(candidate) for candidate in evidence_candidates)
+        if has_count and has_identifiers:
+            verdict = "valid"
+            reason = "Detected both count and identifier information."
+        else:
+            verdict = "invalid"
+            reason = "The workflow did not include both the requested count and identifier list."
+            if not has_count:
+                missing_requirements.append("count")
+            if not has_identifiers:
+                missing_requirements.append("identifier list")
     elif task_shape == "count":
         if _structured_count_like(result):
             verdict = "valid"
@@ -200,6 +214,8 @@ def _heuristic_validate(payload: dict):
     ]
     if _task_requires_count_and_state(task_text):
         trace.append("Detected compound count/state intent from the workflow task.")
+    if _task_requires_count_and_identifiers(task_text):
+        trace.append("Detected compound count/identifier intent from the workflow task.")
     if error:
         trace.append(f"Observed execution error: {error}")
     if verdict == "valid":
@@ -317,6 +333,42 @@ def _contains_state_evidence(result: Any) -> bool:
     )
 
 
+def _contains_identifier_evidence(result: Any) -> bool:
+    if isinstance(result, str):
+        lines = [line.strip() for line in result.splitlines() if line.strip()]
+        if len(lines) >= 2 and all(re.fullmatch(r"[A-Za-z0-9_.:-]+", line) for line in lines):
+            return True
+        if any("job id" in line.lower() for line in lines):
+            return True
+        return False
+    if isinstance(result, list):
+        return any(_contains_identifier_evidence(item) for item in result)
+    if isinstance(result, dict):
+        for key in ("job_id", "job_ids", "ids", "identifier", "identifiers"):
+            candidate = result.get(key)
+            if candidate not in (None, "", [], {}):
+                if _contains_identifier_evidence(candidate):
+                    return True
+        excerpt = result.get("excerpt")
+        if isinstance(excerpt, str) and _contains_identifier_evidence(excerpt):
+            return True
+        rows = result.get("rows")
+        if isinstance(rows, list) and rows:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                for key, candidate in row.items():
+                    if "id" in str(key).lower() and candidate not in (None, "", [], {}):
+                        return True
+        nested = result.get("result")
+        if nested is not None and nested is not result and _contains_identifier_evidence(nested):
+            return True
+        reduced = result.get("reduced_result") or result.get("refined_answer")
+        if isinstance(reduced, str) and _contains_identifier_evidence(reduced):
+            return True
+    return False
+
+
 def _looks_like_collection_output(result: Any) -> bool:
     if isinstance(result, list):
         return True
@@ -367,6 +419,40 @@ def _task_requires_count_and_state(step_task: str) -> bool:
     return any(token in text for token in ("how many", "count ", "number of", "total ")) and any(
         token in text for token in (" state", " states", "status", "breakdown")
     )
+
+
+def _task_requires_count_and_identifiers(task_text: str) -> bool:
+    text = str(task_text or "").lower()
+    has_count = any(token in text for token in ("how many", "count ", "number of", "total "))
+    has_identifier_request = "job id" in text or bool(re.search(r"\bids\b", text))
+    return has_count and has_identifier_request
+
+
+def _workflow_evidence_candidates(payload: dict, result: Any) -> list[Any]:
+    candidates: list[Any] = []
+    if result not in (None, "", [], {}):
+        candidates.append(result)
+    steps = payload.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, dict) or step.get("status") != "completed":
+                continue
+            for key in ("result", "value", "summary", "payload"):
+                candidate = step.get(key)
+                if candidate not in (None, "", [], {}):
+                    candidates.append(candidate)
+    available_context = payload.get("available_context")
+    if isinstance(available_context, dict):
+        step_results = available_context.get("__step_results__")
+        if isinstance(step_results, list):
+            for step in step_results:
+                if not isinstance(step, dict) or step.get("status") != "completed":
+                    continue
+                for key in ("value", "result", "summary", "evidence"):
+                    candidate = step.get(key)
+                    if candidate not in (None, "", [], {}):
+                        candidates.append(candidate)
+    return candidates
 
 
 def _heuristic_validate_step(payload: dict):

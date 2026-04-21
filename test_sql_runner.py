@@ -72,6 +72,30 @@ POSTGRES_SCHEMA = {
 }
 
 
+DICOM_COUNT_SCHEMA = {
+    "dialect": "postgres",
+    "tables": [
+        {
+            "schema": "dicom",
+            "name": "patients",
+            "columns": [
+                {"name": "patient_id", "type": "text", "nullable": False},
+            ],
+            "foreign_keys": [],
+        },
+        {
+            "schema": "dicom",
+            "name": "studies",
+            "columns": [
+                {"name": "study_uid", "type": "text", "nullable": False},
+                {"name": "patient_id", "type": "text", "nullable": True},
+            ],
+            "foreign_keys": [],
+        },
+    ],
+}
+
+
 class PostgresSafeSqlTests(unittest.TestCase):
     def test_sql_llm_transport_uses_dummy_key_for_local_base_url(self):
         with patch.dict(
@@ -276,6 +300,24 @@ class PostgresSafeSqlTests(unittest.TestCase):
         self.assertIsNotNone(selection)
         self.assertEqual(selection["primitive_id"], "sql.table.row_count")
         self.assertEqual(selection["parameters"]["table_name"], "dicom.patients")
+
+    def test_heuristic_sql_selection_maps_entity_count_to_table_row_count(self):
+        selection = _heuristic_sql_selection("count patients in the dicom_mock database", DICOM_COUNT_SCHEMA)
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection["primitive_id"], "sql.table.row_count")
+        self.assertEqual(selection["parameters"]["schema_name"], "dicom")
+        self.assertEqual(selection["parameters"]["table_name"], "patients")
+
+    def test_heuristic_sql_selection_maps_distinct_entity_count_to_table_row_count(self):
+        selection = _heuristic_sql_selection("Count the number of distinct patients in the dicom_mock database", DICOM_COUNT_SCHEMA)
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection["primitive_id"], "sql.table.row_count")
+        self.assertEqual(selection["parameters"]["schema_name"], "dicom")
+        self.assertEqual(selection["parameters"]["table_name"], "patients")
+
+    def test_heuristic_sql_selection_does_not_overreach_grouped_patient_count_questions(self):
+        selection = _heuristic_sql_selection("how many patients have more than 2 studies", DICOM_COUNT_SCHEMA)
+        self.assertIsNone(selection)
 
     def test_heuristic_sql_selection_scopes_column_listing_to_table(self):
         selection = _heuristic_sql_selection("list all columns in dicom.patients", POSTGRES_SCHEMA)

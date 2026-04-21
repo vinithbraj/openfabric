@@ -66,6 +66,44 @@ class DataReducerTests(unittest.TestCase):
         self.assertEqual(payload["node"]["step_id"], "step1")
         self.assertEqual(payload["node"]["scope"], "step")
 
+    def test_data_reducer_omits_empty_local_reduction_command_for_summary_results(self):
+        with patch(
+            "agent_library.agents.data_reducer.execute_reduction_request",
+            return_value=types.SimpleNamespace(
+                reduced_result="There are 8 tables in the dicom schema.",
+                strategy="summary",
+                local_reduction_command="",
+                attempts=1,
+                error="",
+            ),
+        ):
+            response = handle_event(
+                types.SimpleNamespace(
+                    event="data.reduce",
+                    payload={
+                        "task": "List the tables in the dicom schema and tell me how many there are.",
+                        "original_task": "List the tables in the dicom schema and tell me how many there are.",
+                        "step_id": "step1",
+                        "target_agent": "sql_runner_dicom_mock",
+                        "source_event": "sql.result",
+                        "reduction_request": {
+                            "kind": "sql.summary",
+                            "task": "List the tables in the dicom schema and tell me how many there are.",
+                            "source_sql": "select table_name from information_schema.tables where table_schema = 'dicom'",
+                            "columns": ["table_name"],
+                            "row_count": 8,
+                            "sample_rows": [{"table_name": "patients"}],
+                        },
+                        "input_data": {"rows": [{"table_name": "patients"}]},
+                    },
+                )
+            )
+
+        payload = response["emits"][0]["payload"]
+        self.assertEqual(payload["strategy"], "summary")
+        self.assertEqual(payload["reduced_result"], "There are 8 tables in the dicom schema.")
+        self.assertNotIn("local_reduction_command", payload)
+
     def test_data_reducer_runs_local_command_against_input_data(self):
         class _Completed:
             def __init__(self, returncode, stdout="", stderr=""):

@@ -1,4 +1,5 @@
 import json
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -278,6 +279,15 @@ def looks_like_node_inventory_summary_task(task: str) -> bool:
     return has_nodes and asks_for_count and asks_for_state
 
 
+def looks_like_job_id_list_task(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    mentions_ids = "job id" in text or re.search(r"\bjob ids\b", text) or re.search(r"\bids\b", text)
+    mentions_jobs = any(token in text for token in ("job", "jobs", "slurm", "queue", "pending", "running"))
+    return bool(mentions_ids and mentions_jobs)
+
+
 def deterministic_line_count_reducer_command(label: str) -> str:
     script = f"""
 import sys
@@ -470,6 +480,31 @@ print("\\n".join(lines_out))
     return f"python3 -c {shlex.quote(script)}"
 
 
+def deterministic_job_id_list_reducer_command() -> str:
+    script = """
+import sys
+
+job_ids = []
+seen = set()
+for line in sys.stdin.read().splitlines():
+    compact = line.strip()
+    if not compact:
+        continue
+    job_id = compact.split("|", 1)[0].strip()
+    if not job_id or job_id in seen:
+        continue
+    seen.add(job_id)
+    job_ids.append(job_id)
+
+if not job_ids:
+    print("No matching job IDs were returned.")
+    raise SystemExit(0)
+
+print("\\n".join(job_ids))
+""".strip()
+    return f"python3 -c {shlex.quote(script)}"
+
+
 def build_shell_reduction_request(task: str, original_command: str, stdout: str) -> dict[str, Any] | None:
     if not isinstance(stdout, str) or len(stdout) < 5000 or not str(task or "").strip():
         return None
@@ -539,6 +574,13 @@ def build_slurm_reduction_request(
             "task": task,
             "source_command": command,
             "state_index": 2,
+            "input_format": "text",
+        }
+    if looks_like_job_id_list_task(task):
+        return {
+            "kind": "slurm.job_id_list",
+            "task": task,
+            "source_command": command,
             "input_format": "text",
         }
     if normalized_primitive_id == "slurm.cluster.node_inventory_summary" or (
@@ -703,6 +745,21 @@ def execute_reduction_request(request: dict[str, Any], input_data: Any) -> Reduc
         reduction = run_local_reducer_loop(
             input_data,
             lambda previous_command, previous_error: deterministic_node_inventory_reducer_command(str(request.get("task") or "")),
+            max_attempts=1,
+            validate_output=lambda output: bool(output.strip()),
+        )
+        return ReductionExecutionResult(
+            reduced_result=reduction.output or None,
+            strategy="deterministic_local_reduction_command",
+            local_reduction_command=reduction.command,
+            attempts=reduction.attempts,
+            error=reduction.error,
+        )
+
+    if kind == "slurm.job_id_list":
+        reduction = run_local_reducer_loop(
+            input_data,
+            lambda previous_command, previous_error: deterministic_job_id_list_reducer_command(),
             max_attempts=1,
             validate_output=lambda output: bool(output.strip()),
         )

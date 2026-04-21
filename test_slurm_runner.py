@@ -221,6 +221,46 @@ class SlurmRunnerTests(unittest.TestCase):
         self.assertIsNone(payload["reduced_result"])
         llm_fallback.assert_not_called()
 
+    def test_handle_event_marks_job_id_list_requests_for_reduction(self):
+        req = EventRequest(
+            event="task.plan",
+            payload={
+                "task": "list the pending job IDs for user vinith in the Slurm cluster",
+                "target_agent": "slurm_runner_cluster",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": "list the pending job IDs for user vinith in the Slurm cluster",
+                },
+            },
+        )
+
+        with patch("agent_library.agents.slurm_runner._slurm_gateway_ready", return_value=True), patch(
+            "agent_library.agents.slurm_runner._get_slurm_context",
+            return_value={"partitions": ["hpc", "gpu"], "node_states": {}, "allowed_commands": ["squeue"]},
+        ), patch(
+            "agent_library.agents.slurm_runner._heuristic_slurm_selection",
+            return_value={
+                "primitive_id": "slurm.jobs.queue_list",
+                "selection_reason": "heuristic",
+                "parameters": {"user": "vinith", "job_states": ["PENDING"]},
+                "fallback_command": "",
+                "fallback_args": [],
+                "fallback_reason": "",
+            },
+        ), patch(
+            "agent_library.agents.slurm_runner._build_deterministic_slurm_plan",
+            return_value={"primitive_id": "slurm.jobs.queue_list", "command": "squeue", "args": ["-h", "-o", "%i|%u|%T|%P|%j"], "reason": "deterministic"},
+        ), patch(
+            "agent_library.agents.slurm_runner._gateway_execute",
+            return_value={"returncode": 0, "stdout": "101|vinith|PENDING|hpc|align\n104|vinith|PENDING|gpu|sim\n", "stderr": "", "duration_ms": 11},
+        ):
+            response = handle_event(req)
+
+        payload = response["emits"][0]["payload"]
+        self.assertEqual(payload["execution_strategy"], "deterministic")
+        self.assertEqual(payload["deterministic_primitive"], "slurm.jobs.queue_list")
+        self.assertEqual(payload["reduction_request"]["kind"], "slurm.job_id_list")
+
     def test_handle_event_uses_selector_fallback_after_deterministic_failure(self):
         req = EventRequest(
             event="task.plan",

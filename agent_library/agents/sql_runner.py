@@ -427,6 +427,129 @@ def _quoted_columns_for_selection(table: dict[str, Any], dialect: str, columns: 
     return resolved
 
 
+def _simple_table_aliases(table_name: str) -> set[str]:
+    raw = str(table_name or "").strip().lower()
+    if not raw:
+        return set()
+    aliases = {raw}
+    if raw.endswith("ies") and len(raw) > 3:
+        aliases.add(raw[:-3] + "y")
+    elif raw.endswith("s") and len(raw) > 2:
+        aliases.add(raw[:-1])
+    else:
+        aliases.add(raw + "s")
+    return {alias for alias in aliases if alias}
+
+
+def _heuristic_entity_row_count_selection(task: str, schema: dict) -> dict[str, Any] | None:
+    text = str(task or "").strip().lower()
+    if not text:
+        return None
+    if not any(token in text for token in ("count ", "how many", "number of", "total count", "total number")):
+        return None
+    disqualifiers = (
+        " distinct ",
+        " each ",
+        " per ",
+        " group by ",
+        " grouped by ",
+        " grouped ",
+        " having ",
+        " more than ",
+        " less than ",
+        " at least ",
+        " at most ",
+        " top ",
+        " average ",
+        " avg ",
+        " median ",
+        " percent ",
+        " ratio ",
+        " by ",
+    )
+    padded = f" {text} "
+    if any(token in padded for token in disqualifiers):
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for table in schema.get("tables", []):
+        if not isinstance(table, dict):
+            continue
+        table_name = str(table.get("name") or "").strip()
+        if not table_name:
+            continue
+        aliases = _simple_table_aliases(table_name)
+        if any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases):
+            matches.append(table)
+
+    if len(matches) != 1:
+        return None
+
+    matched = matches[0]
+    return {
+        "primitive_id": "sql.table.row_count",
+        "selection_reason": "Heuristic entity-count match against a concrete table name.",
+        "parameters": {
+            "schema_name": str(matched.get("schema") or "").strip(),
+            "table_name": str(matched.get("name") or "").strip(),
+        },
+    }
+
+
+def _heuristic_distinct_entity_row_count_selection(task: str, schema: dict) -> dict[str, Any] | None:
+    text = str(task or "").strip().lower()
+    if not text or "distinct" not in text:
+        return None
+    if not any(token in text for token in ("count ", "how many", "number of", "total count", "total number")):
+        return None
+    padded = f" {text} "
+    disqualifiers = (
+        " each ",
+        " per ",
+        " group by ",
+        " grouped by ",
+        " grouped ",
+        " having ",
+        " more than ",
+        " less than ",
+        " at least ",
+        " at most ",
+        " top ",
+        " average ",
+        " avg ",
+        " median ",
+        " percent ",
+        " ratio ",
+        " by ",
+    )
+    if any(token in padded for token in disqualifiers):
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for table in schema.get("tables", []):
+        if not isinstance(table, dict):
+            continue
+        table_name = str(table.get("name") or "").strip()
+        if not table_name:
+            continue
+        aliases = _simple_table_aliases(table_name)
+        if any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases):
+            matches.append(table)
+
+    if len(matches) != 1:
+        return None
+
+    matched = matches[0]
+    return {
+        "primitive_id": "sql.table.row_count",
+        "selection_reason": "Heuristic distinct-entity count matched a concrete entity table.",
+        "parameters": {
+            "schema_name": str(matched.get("schema") or "").strip(),
+            "table_name": str(matched.get("name") or "").strip(),
+        },
+    }
+
+
 def _heuristic_sql_selection(task: str, schema: dict) -> dict[str, Any] | None:
     text = str(task or "").strip().lower()
     if not text:
@@ -459,6 +582,12 @@ def _heuristic_sql_selection(task: str, schema: dict) -> dict[str, Any] | None:
             "selection_reason": "Heuristic sample-rows match.",
             "parameters": {"table_name": table_name},
         }
+    distinct_entity_row_count = _heuristic_distinct_entity_row_count_selection(task, schema)
+    if distinct_entity_row_count is not None:
+        return distinct_entity_row_count
+    entity_row_count = _heuristic_entity_row_count_selection(task, schema)
+    if entity_row_count is not None:
+        return entity_row_count
     return None
 
 

@@ -608,6 +608,25 @@ class Engine:
             return payload.get("detail", "")
         if event_name == "answer.final":
             return payload.get("answer", "")
+        if event_name == "sql.result":
+            reduced = payload.get("reduced_result") or payload.get("refined_answer")
+            if reduced not in (None, "", [], {}):
+                return reduced
+            result = payload.get("result")
+            if isinstance(result, dict):
+                rows = result.get("rows")
+                columns = result.get("columns")
+                if isinstance(rows, list) and len(rows) == 1 and rows and isinstance(rows[0], dict):
+                    row = rows[0]
+                    if isinstance(columns, list) and len(columns) == 1:
+                        scalar = row.get(columns[0])
+                        if scalar not in (None, "", [], {}):
+                            return scalar
+                    if len(row) == 1:
+                        scalar = next(iter(row.values()))
+                        if scalar not in (None, "", [], {}):
+                            return scalar
+            return payload
         return payload
 
     def _resolve_template_string(self, value: str, context: dict):
@@ -1579,6 +1598,47 @@ class Engine:
             token in text for token in (" state", " states", "status", "breakdown")
         )
 
+    def _task_requires_count_and_identifiers(self, task_text: str) -> bool:
+        text = str(task_text or "").lower()
+        has_count = any(token in text for token in ("how many", "count ", "number of", "total "))
+        has_identifier_request = "job id" in text or bool(re.search(r"\bids\b", text))
+        return has_count and has_identifier_request
+
+    def _contains_identifier_evidence(self, value: Any) -> bool:
+        if isinstance(value, str):
+            lines = [line.strip() for line in value.splitlines() if line.strip()]
+            if len(lines) >= 2 and all(re.fullmatch(r"[A-Za-z0-9_.:-]+", line) for line in lines):
+                return True
+            if any("job id" in line.lower() for line in lines):
+                return True
+            return False
+        if isinstance(value, list):
+            return any(self._contains_identifier_evidence(item) for item in value)
+        if isinstance(value, dict):
+            for key in ("job_id", "job_ids", "ids", "identifier", "identifiers"):
+                candidate = value.get(key)
+                if candidate not in (None, "", [], {}):
+                    if self._contains_identifier_evidence(candidate):
+                        return True
+            excerpt = value.get("excerpt")
+            if isinstance(excerpt, str) and self._contains_identifier_evidence(excerpt):
+                return True
+            rows = value.get("rows")
+            if isinstance(rows, list) and rows:
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    for key, candidate in row.items():
+                        if "id" in str(key).lower() and candidate not in (None, "", [], {}):
+                            return True
+            nested = value.get("result")
+            if nested not in (None, value) and self._contains_identifier_evidence(nested):
+                return True
+            reduced = value.get("reduced_result") or value.get("refined_answer")
+            if isinstance(reduced, str) and self._contains_identifier_evidence(reduced):
+                return True
+        return False
+
     def _infer_task_shape(self, task_text: str, fallback_shape: str, primary_event: str | None = None) -> str:
         text = str(task_text or "").strip().lower()
         inherited_shape = str(fallback_shape or "").strip().lower()
@@ -1642,6 +1702,36 @@ class Engine:
                     "Detected compound count/state intent from the workflow task.",
                     f"Count evidence detected: {has_count}.",
                     f"State evidence detected: {has_state}.",
+                ],
+            }
+        elif self._task_requires_count_and_identifiers(task_text):
+            evidence_values = [result]
+            for item in prior_results:
+                if not isinstance(item, dict):
+                    continue
+                evidence_values.extend(
+                    candidate
+                    for candidate in (item.get("value"), item.get("result"), item.get("summary"))
+                    if candidate not in (None, "", [], {})
+                )
+            has_count = any(self._structured_count_like(item) for item in evidence_values)
+            has_identifiers = any(self._contains_identifier_evidence(item) for item in evidence_values)
+            shape_assessment = {
+                "verdict": "valid" if has_count and has_identifiers else "invalid",
+                "reason": (
+                    "Combined count and identifier output detected."
+                    if has_count and has_identifiers
+                    else "Count-and-identifier task did not include both the requested count and identifier list."
+                ),
+                "missing_requirements": [
+                    requirement
+                    for requirement, present in (("count", has_count), ("identifier list", has_identifiers))
+                    if not present
+                ],
+                "trace": [
+                    "Detected compound count/identifier intent from the workflow task.",
+                    f"Count evidence detected: {has_count}.",
+                    f"Identifier evidence detected: {has_identifiers}.",
                 ],
             }
         valid = completed and shape_assessment["verdict"] == "valid"
@@ -1880,8 +1970,6 @@ class Engine:
             "step_id": step_id,
             "target_agent": step_payload.get("target_agent", ""),
             "source_event": primary_event or "",
-            "reduction_request": primary_payload.get("reduction_request") if isinstance(primary_payload, dict) else None,
-            "local_reduction_command": primary_payload.get("local_reduction_command") if isinstance(primary_payload, dict) else None,
             "existing_reduced_result": (
                 primary_payload.get("reduced_result") or primary_payload.get("refined_answer")
                 if isinstance(primary_payload, dict)
@@ -1909,6 +1997,13 @@ class Engine:
                 status="pending",
             ),
         }
+        if isinstance(primary_payload, dict):
+            reduction_request = primary_payload.get("reduction_request")
+            if isinstance(reduction_request, dict):
+                reducer_payload["reduction_request"] = reduction_request
+            local_reduction_command = primary_payload.get("local_reduction_command")
+            if isinstance(local_reduction_command, str) and local_reduction_command.strip():
+                reducer_payload["local_reduction_command"] = local_reduction_command.strip()
         if isinstance(primary_payload, dict):
             reducer_payload["source_payload"] = primary_payload
         contract_name = self.spec["events"]["data.reduce"]["contract"]

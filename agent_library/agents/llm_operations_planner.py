@@ -1475,6 +1475,8 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
         return 'find . -type f \\( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.sql" \\) | sort'
 
     if "count" in task_lc and "python" in task_lc and "file" in task_lc:
+        if "repository root" in task_lc:
+            return 'find . -maxdepth 1 -type f -name "*.py" | wc -l'
         code = "\n".join(
             [
                 "import pathlib",
@@ -1483,6 +1485,19 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
             ]
         )
         return "python3 - <<'PY'\n" + code + "\nPY"
+
+    if (
+        any(token in task_lc for token in ("list", "show"))
+        and "python" in task_lc
+        and "file" in task_lc
+        and any(token in task_lc for token in ("alphabetical", "alphabetically", "sorted"))
+        and any(token in task_lc for token in ("first", "top"))
+    ):
+        limit_match = re.search(r"\b(?:first|top)\s+(\d+)\b", task_lc)
+        limit = limit_match.group(1) if limit_match else "5"
+        if "repository root" in task_lc:
+            return f'find . -maxdepth 1 -type f -name "*.py" -printf "%f\\n" | sort | head -n {limit}'
+        return f'find . -type f -name "*.py" | sort | head -n {limit}'
 
     if "largest" in task_lc and "python" in task_lc and "file" in task_lc:
         limit_match = re.search(r"\b(?:top|largest)\s+(\d+)\b", task_lc)
@@ -1771,6 +1786,83 @@ for mount in mounts:
 print(f"{total / (1024 ** 3):.2f}")
 """.strip()
     return f"python3 -c {shlex.quote(code)}"
+
+
+def _build_dependency_results_difference_command() -> str:
+    code = """
+import json
+import re
+import sys
+
+payload = json.load(sys.stdin)
+items = payload.get("dependency_results") if isinstance(payload, dict) else []
+numbers = []
+
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    candidates = [item.get("value"), item.get("result"), item.get("summary")]
+    evidence = item.get("evidence")
+    if isinstance(evidence, dict):
+        candidates.append(evidence.get("summary_text"))
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text or "\\n" in text:
+            continue
+        match = re.fullmatch(r"-?\\d+(?:\\.\\d+)?", text)
+        if not match:
+            match = re.fullmatch(r"[^:]+:\\s*(-?\\d+(?:\\.\\d+)?)", text)
+        if not match:
+            continue
+        value = float(match.group(1) if match.lastindex else match.group(0))
+        numbers.append(value)
+        break
+
+if len(numbers) < 2:
+    raise SystemExit("Unable to compute the difference from dependency_results.")
+
+diff = abs(numbers[0] - numbers[1])
+print(int(diff) if diff.is_integer() else diff)
+""".strip()
+    return f"python3 -c {shlex.quote(code)}"
+
+
+def _looks_like_root_python_inventory_request(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    return (
+        "repository root" in text
+        and "python" in text
+        and "file" in text
+        and any(token in text for token in ("list", "show"))
+        and any(token in text for token in ("alphabetical", "alphabetically", "sorted"))
+        and any(token in text for token in ("first", "top"))
+        and any(token in text for token in ("count", "total count", "total number", "how many"))
+    )
+
+
+def _root_python_inventory_fallback_steps() -> list[dict]:
+    return [
+        {
+            "id": "step1",
+            "target_agent": "shell_runner",
+            "task": "list the first five Python files alphabetically in the repository root",
+            "instruction": {
+                "operation": "run_command",
+                "command": 'find . -maxdepth 1 -type f -name "*.py" -printf "%f\\n" | sort | head -n 5',
+                "capture": {"mode": "stdout_stripped"},
+            },
+        },
+        {
+            "id": "step2",
+            "target_agent": "shell_runner",
+            "task": "count Python files in the repository root",
+            "instruction": {
+                "operation": "run_command",
+                "command": 'find . -maxdepth 1 -type f -name "*.py" | wc -l',
+                "capture": {"mode": "stdout_stripped"},
+            },
+        },
+    ]
 
 
 def _storage_fallback_steps(question: str, capabilities: dict) -> list[dict]:
@@ -2174,6 +2266,8 @@ def _fallback_steps(question: str, capabilities: dict):
                     },
                 }
             ]
+    if _looks_like_root_python_inventory_request(question):
+        return _root_python_inventory_fallback_steps()
     mixed_parts = _mixed_count_and_detail_parts(question)
     if mixed_parts is not None and _looks_like_sql_question(question, capabilities):
         target_agent = _select_sql_target_agent(question, capabilities)
@@ -2295,7 +2389,7 @@ def _split_compound_request(question: str) -> list[str]:
     if not text:
         return []
     separator_re = re.compile(
-        r"\s*(?:;|,?\s+and\s+|,?\s+then\s+|,\s+also\s+)(?=(?:what\b|how\b|count\b|list\b|show\b|find\b|which\b|is\b|are\b|does\b|do\b|did\b|can\b|has\b|have\b|current\b|last\b|latest\b|get\b|provide\b|check\b|create\b|copy\b|save\b|write\b|tail\b|open\b|read\b))",
+        r"\s*(?:;|,?\s+and\s+|,?\s+then\s+|,\s+also\s+)(?=(?:what\b|how\b|count\b|list\b|show\b|find\b|which\b|is\b|are\b|does\b|do\b|did\b|can\b|has\b|have\b|current\b|last\b|latest\b|get\b|provide\b|check\b|create\b|copy\b|save\b|write\b|tail\b|open\b|read\b|tell\b|report\b|give\b))",
         flags=re.IGNORECASE,
     )
     parts = [
@@ -2314,6 +2408,22 @@ def _sanitize_task_text(text: str) -> str:
     compact = re.sub(r"\s+(?:and|then|also)\s*$", "", compact, flags=re.IGNORECASE)
     compact = re.sub(r"\s+", " ", compact).strip(" ,;:.")
     return compact
+
+
+def _normalized_sql_query_question(task: str, question: str) -> str:
+    task_text = _sanitize_task_text(task)
+    question_text = _sanitize_task_text(question)
+    if not question_text:
+        return task_text or question_text
+    if not task_text:
+        return question_text
+
+    task_lc = task_text.lower()
+    question_lc = question_text.lower()
+    count_like_task = any(marker in task_lc for marker in ("count ", "how many", "number of", "total count", "total number"))
+    if count_like_task and "distinct" in question_lc and "distinct" not in task_lc:
+        return task_text
+    return question_text
 
 
 def _normalize_compound_shell_part(part: str, question: str) -> str:
@@ -2349,6 +2459,101 @@ def _normalize_compound_shell_part(part: str, question: str) -> str:
     return compact
 
 
+def _contextualize_shell_followup_task(task: str, question: str) -> str:
+    compact = _sanitize_task_text(task)
+    if not compact:
+        return compact
+    compact_lc = compact.lower()
+    question_lc = str(question or "").lower()
+    wants_count = any(marker in compact_lc for marker in ("count", "total count", "number of", "how many"))
+    if (
+        wants_count
+        and "python" not in compact_lc
+        and "file" not in compact_lc
+        and "python" in question_lc
+        and "file" in question_lc
+    ):
+        location = " in the repository root" if "repository root" in question_lc else ""
+        return f"count Python files{location}"
+    return compact
+
+
+SLURM_STATE_ALIASES = (
+    ("pending", "pending"),
+    ("queued", "pending"),
+    ("running", "running"),
+    ("completed", "completed"),
+    ("failed", "failed"),
+    ("cancelled", "cancelled"),
+    ("suspended", "suspended"),
+    ("held", "held"),
+)
+
+
+def _slurm_request_context(question: str) -> dict[str, str]:
+    text = str(question or "").strip()
+    lowered = text.lower()
+    context = {
+        "user": "",
+        "state": "",
+        "partition": "",
+        "cluster_scope": "yes" if any(token in lowered for token in ("slurm", "cluster", "scheduler")) else "",
+    }
+    for pattern in (
+        r"\buser\s+([a-zA-Z0-9_.-]+)\b",
+        r"\bjobs?\s+for\s+([a-zA-Z0-9_.-]+)\b",
+        r"\bfor\s+user\s+([a-zA-Z0-9_.-]+)\b",
+        r"\bdoes\s+([a-zA-Z0-9_.-]+)\s+have\b",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            context["user"] = match.group(1)
+            break
+    partition_match = re.search(r"\bpartition\s+([a-zA-Z0-9_.-]+)\b", text, flags=re.IGNORECASE)
+    if partition_match:
+        context["partition"] = partition_match.group(1)
+    for token, normalized in SLURM_STATE_ALIASES:
+        if token in lowered:
+            context["state"] = normalized
+            break
+    return context
+
+
+def _contextualize_slurm_followup_task(task: str, question: str) -> str:
+    compact = _sanitize_task_text(task)
+    if not compact or not _looks_like_slurm_question(question):
+        return compact
+    lowered = compact.lower()
+    if any(token in lowered for token in ("pending", "running", "completed", "failed", "cancelled", "suspended", "held", "queued")):
+        return compact
+    if "slurm" in lowered or "cluster" in lowered or "scheduler" in lowered:
+        return compact
+    context = _slurm_request_context(question)
+    needs_user_context = bool(context["user"]) and "user" not in lowered and context["user"].lower() not in lowered
+    needs_state_context = bool(context["state"]) and context["state"] not in lowered
+    if not needs_user_context and not needs_state_context:
+        return compact
+    if "job id" in lowered or re.search(r"\bids\b", lowered):
+        rewritten = "list the"
+        if context["state"]:
+            rewritten += f" {context['state']}"
+        rewritten += " job IDs"
+    elif re.search(r"\bjobs?\b", lowered):
+        rewritten = "list the"
+        if context["state"]:
+            rewritten += f" {context['state']}"
+        rewritten += " jobs"
+    else:
+        return compact
+    if context["user"]:
+        rewritten += f" for user {context['user']}"
+    if context["partition"]:
+        rewritten += f" in partition {context['partition']}"
+    elif context["cluster_scope"]:
+        rewritten += " in the Slurm cluster"
+    return rewritten
+
+
 def _compound_fallback_steps(question: str, capabilities: dict):
     parts = _split_compound_request(question)
     if len(parts) < 2:
@@ -2367,8 +2572,13 @@ def _compound_fallback_steps(question: str, capabilities: dict):
                 tail = tail_match.group(1) if tail_match else "20"
                 followup_task = f"show the last {tail} lines of {{prev}}"
         normalized_part = _normalize_compound_shell_part(part, question)
+        normalized_part = _contextualize_shell_followup_task(normalized_part, question)
         target_agent = _select_target_agent(normalized_part, capabilities) or _select_target_agent(part, capabilities)
         normalized_lc = normalized_part.lower()
+        if _looks_like_workspace_file_question(normalized_part) or _looks_like_repo_file_scan(normalized_part):
+            target_agent = "shell_runner"
+        if "python" in normalized_lc and "file" in normalized_lc:
+            target_agent = "shell_runner"
         if not target_agent and any(
             token in normalized_lc
             for token in ("docker", "container", "containers", "image", "images", "installed", "available", "git", "file", "files", "port", "ports", "log", "logs")
@@ -2382,6 +2592,10 @@ def _compound_fallback_steps(question: str, capabilities: dict):
         if not target_agent or target_agent in {"ops_planner", "synthesizer"}:
             return []
         effective_task = followup_task or normalized_part
+        if _agent_family(target_agent) == "slurm_runner":
+            effective_task = _contextualize_slurm_followup_task(effective_task, question)
+        if target_agent == "shell_runner":
+            effective_task = _contextualize_shell_followup_task(effective_task, question)
         if followup_task:
             target_agent = "shell_runner"
         instruction = _normalize_agent_instruction(target_agent, effective_task, None, None, index)
@@ -2708,6 +2922,12 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             and (_looks_like_repo_file_scan(task or question) or (_looks_like_workspace_file_question(task or question) and not _looks_like_sql_question(task or question, capabilities)))
         ):
             target_agent = "shell_runner"
+        if _agent_family(target_agent) == "slurm_runner" and (
+            _looks_like_repo_file_scan(task or question)
+            or _looks_like_workspace_file_question(task or question)
+            or ("python" in (task or question).lower() and "file" in (task or question).lower())
+        ):
+            target_agent = "shell_runner"
         if _agent_family(target_agent) == "sql_runner" and (
             _looks_like_slurm_elapsed_summary_question(task or question)
             or _looks_like_slurm_node_inventory_summary_question(task or question)
@@ -2721,10 +2941,25 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             "target_agent": target_agent,
             "task": task or question,
         }
+        if target_agent == "shell_runner":
+            normalized_step["task"] = _contextualize_shell_followup_task(normalized_step["task"], question)
+        if _agent_family(target_agent) == "slurm_runner":
+            normalized_step["task"] = _contextualize_slurm_followup_task(normalized_step["task"], question)
         clean_depends_on = []
         depends_on = step.get("depends_on")
         if isinstance(depends_on, list):
             clean_depends_on = [item for item in depends_on if isinstance(item, str) and item.strip()]
+        if (
+            target_agent == "shell_runner"
+            and len(clean_depends_on) >= 2
+            and any(token in question.lower() for token in ("difference", "compare", "versus", " vs "))
+        ):
+            normalized_step["task"] = "compute the absolute difference between the previous counts"
+            instruction = {
+                "operation": "run_command",
+                "command": _build_dependency_results_difference_command(),
+                "capture": {"mode": "stdout_stripped"},
+            }
         if (
             target_agent == "shell_runner"
             and clean_depends_on
@@ -2755,6 +2990,23 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
         )
         if not isinstance(normalized_instruction, dict) or not normalized_instruction:
             continue
+        if (
+            _agent_family(target_agent) == "slurm_runner"
+            and normalized_instruction.get("operation") == "query_from_request"
+            and isinstance(normalized_instruction.get("question"), str)
+        ):
+            normalized_instruction = dict(normalized_instruction)
+            normalized_instruction["question"] = normalized_step["task"]
+        if (
+            _agent_family(target_agent) == "sql_runner"
+            and normalized_instruction.get("operation") == "query_from_request"
+            and isinstance(normalized_instruction.get("question"), str)
+        ):
+            normalized_instruction = dict(normalized_instruction)
+            normalized_instruction["question"] = _normalized_sql_query_question(
+                normalized_step["task"],
+                normalized_instruction["question"],
+            )
         if target_agent == "shell_runner":
             previous_step_id = normalized[-1]["id"] if normalized else None
             normalized_instruction = _normalize_followup_shell_instruction(normalized_instruction, previous_step_id)
@@ -2787,6 +3039,44 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
     normalized = _recover_compound_steps(question, normalized, capabilities)
     normalized = _expand_mixed_sql_steps(question, normalized, capabilities)
     return _expand_sql_export_steps(question, normalized, capabilities)
+
+
+def _workflow_replan_allowed_families(payload: dict, capabilities: dict) -> set[str]:
+    if str(payload.get("step_id") or "").strip() != "__workflow__":
+        return set()
+    question = str(payload.get("task") or "").strip()
+    task_families = set()
+    if _looks_like_slurm_question(question):
+        task_families.add("slurm_runner")
+    if _looks_like_sql_question(question, capabilities):
+        task_families.add("sql_runner")
+    available_context = payload.get("available_context") if isinstance(payload.get("available_context"), dict) else {}
+    last_steps = available_context.get("last_steps")
+    if isinstance(last_steps, list):
+        step_families = {
+            _agent_family(str(step.get("target_agent") or ""))
+            for step in last_steps
+            if isinstance(step, dict)
+        }
+        step_families.discard("")
+        if len(step_families) == 1:
+            task_families |= step_families
+    return task_families if len(task_families) == 1 else set()
+
+
+def _replan_steps_respect_workflow_context(payload: dict, steps: list[dict], capabilities: dict) -> bool:
+    allowed_families = _workflow_replan_allowed_families(payload, capabilities)
+    if not allowed_families:
+        return True
+    candidate_families = {
+        _agent_family(str(step.get("target_agent") or ""))
+        for step in _flatten_plan_steps(steps)
+        if isinstance(step, dict)
+    }
+    candidate_families.discard("")
+    if not candidate_families:
+        return False
+    return candidate_families.issubset(allowed_families)
 
 
 def _normalize_presentation(question: str, presentation: dict | None):
@@ -3022,6 +3312,12 @@ def handle_event(req: EventRequest):
             decision = _llm_replan(req.payload, CAPABILITIES)
             if decision is not None and decision["replace_step_id"] == replace_step_id:
                 steps = _normalize_steps(str(req.payload.get("task") or ""), decision.get("steps", []), CAPABILITIES)
+                if steps and not _replan_steps_respect_workflow_context(req.payload, steps, CAPABILITIES):
+                    _debug_log(
+                        "Discarding workflow replan candidate that drifted to the wrong agent family: "
+                        + json.dumps({"task": req.payload.get("task"), "steps": steps}, ensure_ascii=True)
+                    )
+                    steps = []
         except Exception as exc:
             _debug_log(f"Planner replan failed. Error: {type(exc).__name__}: {exc}")
         if not steps:

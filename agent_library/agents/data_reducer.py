@@ -45,8 +45,9 @@ def _emit_reduced_result(
         "reduced_result": reduced_result,
         "strategy": strategy,
         "attempts": attempts,
-        "local_reduction_command": command or None,
     }
+    if isinstance(command, str) and command.strip():
+        result_payload["local_reduction_command"] = command.strip()
     if error:
         result_payload["error"] = error
     return {"emits": [{"event": "data.reduced", "payload": result_payload}]}

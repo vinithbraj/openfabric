@@ -390,6 +390,7 @@ def _extract_sql_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[st
                     "total_matching_rows": result.get("total_matching_rows"),
                     "truncated": result.get("truncated"),
                     "limit": result.get("limit"),
+                    "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
                 }
             )
     return results
@@ -416,6 +417,143 @@ def _extract_general_results_from_steps(steps: list[dict[str, Any]]) -> list[dic
         if event in {"slurm.result", "shell.result", "task.result", "file.content"}:
             results.append((event, payload))
     return results
+
+
+def _step_agent_family(step: dict[str, Any]) -> str:
+    target_agent = str(step.get("target_agent") or "")
+    event = str(step.get("event") or "")
+    if target_agent.startswith("sql_runner") or event == "sql.result":
+        return "sql_runner"
+    if target_agent.startswith("slurm_runner") or event == "slurm.result":
+        return "slurm_runner"
+    if target_agent == "shell_runner" or event == "shell.result":
+        return "shell_runner"
+    return target_agent or event
+
+
+def _single_line_label_value(text: Any) -> tuple[str, str] | None:
+    clean = _clean_terminal_output(text)
+    if not clean or "\n" in clean:
+        return None
+    match = re.fullmatch(r"\s*([^:]{1,80}):\s*(-?\d+(?:\.\d+)?|.+?)\s*", clean)
+    if not match:
+        return None
+    label = match.group(1).strip()
+    value = match.group(2).strip()
+    if not label or not value:
+        return None
+    return label, value
+
+
+def _summary_numeric_value(text: Any) -> float | None:
+    clean = _clean_terminal_output(text)
+    if not clean or "\n" in clean:
+        return None
+    match = re.fullmatch(r"-?\d+(?:\.\d+)?", clean)
+    if not match:
+        match = re.fullmatch(r"[^:]+:\s*(-?\d+(?:\.\d+)?)", clean)
+    if not match:
+        return None
+    raw = match.group(1) if match.lastindex else match.group(0)
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _workflow_step_summary_label(step: dict[str, Any]) -> str:
+    if step.get("event") == "shell.result":
+        return _shell_fact_label(step)
+    task = _clean_shell_task_text(step.get("task") or "")
+    if not task:
+        return "Result"
+    return task[:1].upper() + task[1:]
+
+
+def _workflow_step_summary_value(step: dict[str, Any]) -> str | None:
+    reduced = _step_payload_field(step, "reduced_result") or _step_payload_field(step, "refined_answer")
+    if isinstance(reduced, str) and reduced.strip():
+        return reduced.strip()
+    if step.get("event") == "sql.result":
+        payload = step.get("payload")
+        if isinstance(payload, dict):
+            result = payload.get("result")
+            if isinstance(result, dict):
+                scalar = _extract_scalar_sql_value(result)
+                if scalar is not None:
+                    return str(scalar)
+    if step.get("event") == "shell.result":
+        stdout = _step_clean_stdout(step)
+        fact = _shell_fact_value(stdout)
+        if fact is not None:
+            return fact
+    detail = _step_payload_field(step, "detail")
+    if isinstance(detail, str) and detail.strip() and "\n" not in detail.strip():
+        return detail.strip()
+    return None
+
+
+def _format_multi_agent_workflow_answer(steps: list[dict[str, Any]], task: str = "") -> str | None:
+    completed_steps = [
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("status") == "completed"
+    ]
+    if len(completed_steps) < 2:
+        return None
+
+    summary_items: list[tuple[str, str]] = []
+    detail_sections: list[str] = []
+    numeric_values: list[float] = []
+    seen: set[tuple[str, str]] = set()
+
+    for step in completed_steps:
+        rendered_detail = None
+        if step.get("event") == "shell.result":
+            rendered_detail = _format_shell_detail_answer(step)
+        value = _workflow_step_summary_value(step)
+        if isinstance(value, str) and "\n" in value:
+            rendered_multiline = _format_simple_line_list_answer(value, _workflow_step_summary_label(step))
+            if rendered_multiline:
+                detail_sections.append(rendered_multiline)
+                value = None
+        if value is None:
+            if rendered_detail:
+                detail_sections.append(rendered_detail)
+            continue
+        label = _workflow_step_summary_label(step)
+        labeled_value = _single_line_label_value(value)
+        if labeled_value is not None and label.lower() in {"count", "result"}:
+            label, value = labeled_value
+        item = (label, value)
+        if item in seen:
+            continue
+        seen.add(item)
+        summary_items.append(item)
+        numeric = _summary_numeric_value(value)
+        if numeric is not None:
+            numeric_values.append(numeric)
+        if rendered_detail and rendered_detail not in detail_sections and "\n" in _step_clean_stdout(step):
+            detail_sections.append(rendered_detail)
+
+    task_lc = str(task or "").lower()
+    has_difference_summary = any("difference" in label.lower() for label, _ in summary_items)
+    if not has_difference_summary and "difference" in task_lc and len(numeric_values) >= 2:
+        diff = abs(numeric_values[0] - numeric_values[1])
+        diff_text = str(int(diff)) if float(diff).is_integer() else str(diff)
+        summary_items.append(("Difference", diff_text))
+
+    if not summary_items and not detail_sections:
+        return None
+
+    summary_section = ""
+    if summary_items:
+        summary_section = _markdown_section(
+            "Summary",
+            [f"- **{label}:** `{value}`" for label, value in summary_items],
+        )
+    details_section = _markdown_section("Details", "\n\n".join(detail_sections)) if detail_sections else ""
+    return _join_markdown_sections(summary_section, details_section)
 
 
 def _step_clean_stdout(step: dict[str, Any]) -> str:
@@ -448,6 +586,8 @@ def _shell_fact_value(text: str) -> str | None:
 def _shell_fact_label(step: dict[str, Any]) -> str:
     task = _clean_shell_task_text(step.get("task") or "")
     task_lc = task.lower()
+    if "difference" in task_lc:
+        return "Difference"
     if "docker" in task_lc and any(token in task_lc for token in ("installed", "available")):
         return "Docker installed"
     if "count" in task_lc and "container" in task_lc:
@@ -533,6 +673,24 @@ def _format_size_path_table_answer(text: Any, intro: str = "") -> str | None:
     return "\n".join(lines).strip()
 
 
+def _format_simple_line_list_answer(text: Any, intro: str = "") -> str | None:
+    clean = _clean_terminal_output(text)
+    if not clean:
+        return None
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    if len(lines) < 2 or len(lines) > 50:
+        return None
+    if any(len(line) > 200 for line in lines):
+        return None
+    if any("|" in line for line in lines):
+        return None
+    rendered: list[str] = []
+    if isinstance(intro, str) and intro.strip():
+        rendered.extend([f"#### {intro.strip()}", ""])
+    rendered.extend(f"- `{line}`" for line in lines)
+    return "\n".join(rendered).strip()
+
+
 def _format_labeled_stdout_answer(text: Any, intro: str = "") -> str | None:
     clean = _clean_terminal_output(text)
     if not clean:
@@ -580,6 +738,9 @@ def _format_shell_detail_answer(step: dict[str, Any]) -> str | None:
             lines.append("")
         lines.extend(f"- {path}" for path in linked_paths)
         return "\n".join(lines).strip()
+    rendered = _format_simple_line_list_answer(stdout, intro)
+    if rendered:
+        return rendered
     return None
 
 
@@ -717,6 +878,9 @@ def _format_fixed_width_table_answer(text: Any, intro: str = "") -> str | None:
 
 
 def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
+    reduced = result.get("reduced_result") or result.get("refined_answer")
+    if isinstance(reduced, str) and reduced.strip():
+        return reduced.strip()
     columns = result.get("columns", [])
     rows = result.get("rows", [])
     row_count = result.get("total_matching_rows", result.get("row_count"))
@@ -995,7 +1159,32 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
     flat_steps = _flatten_workflow_steps(steps if isinstance(steps, list) else [])
     artifact_paths = _artifact_paths_from_steps(steps if isinstance(steps, list) else [])
     sql_results = _extract_sql_results_from_steps(steps if isinstance(steps, list) else [])
+    completed_steps = [step for step in flat_steps if step.get("status") == "completed"]
+    completed_families = {
+        family for family in (_step_agent_family(step) for step in completed_steps) if family
+    }
+    task_lc = str(task or "").lower()
+    prefer_multi_agent_summary = (
+        len(completed_steps) > 1
+        and task_shape in {"lookup", "count", "compare"}
+        and (
+            len(completed_families) > 1
+            or any(token in task_lc for token in ("both", "all three", "all 3", "difference", "compare", "versus", " vs "))
+        )
+    )
     primary_answer = None
+    reduced_step_answers = []
+    for step in flat_steps:
+        if step.get("status") != "completed":
+            continue
+        reduced = _step_payload_field(step, "reduced_result") or _step_payload_field(step, "refined_answer")
+        if isinstance(reduced, str) and reduced.strip():
+            reduced_step_answers.append(
+                {
+                    "task": str(step.get("task") or "").strip(),
+                    "answer": reduced.strip(),
+                }
+            )
     if status != "completed":
         error = payload.get("error")
         if isinstance(error, str) and error.strip():
@@ -1018,11 +1207,36 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
             else:
                 primary_answer = artifact_text
     else:
-        if status == "completed" and sql_results:
+        if (
+            status == "completed"
+            and reduced_step_answers
+            and task_shape in {"count", "schema_summary"}
+            and not prefer_multi_agent_summary
+        ):
+            unique_answers = []
+            seen_answers = set()
+            for item in reduced_step_answers:
+                answer = item["answer"]
+                if answer in seen_answers:
+                    continue
+                seen_answers.add(answer)
+                unique_answers.append(item)
+            if len(unique_answers) == 1:
+                primary_answer = unique_answers[0]["answer"]
+            elif unique_answers:
+                primary_answer = _markdown_section(
+                    "Summary",
+                    [f"- **{item['task'] or 'Result'}:** {item['answer']}" for item in unique_answers],
+                )
+        if primary_answer is None and status == "completed" and prefer_multi_agent_summary:
+            primary_answer = _format_multi_agent_workflow_answer(completed_steps, task)
+        if primary_answer is None and status == "completed" and sql_results:
             primary_answer = _format_multi_sql_workflow_answer(sql_results, task) or _format_sql_result_answer(sql_results[-1], task)
         shell_steps = [step for step in flat_steps if step.get("status") == "completed" and step.get("event") == "shell.result"]
         if primary_answer is None and shell_steps:
             primary_answer = _format_compound_shell_workflow_answer(shell_steps, task)
+        if primary_answer is None and status == "completed" and len(completed_steps) > 1:
+            primary_answer = _format_multi_agent_workflow_answer(completed_steps, task)
         for step in reversed(flat_steps):
             if primary_answer:
                 break
@@ -1208,12 +1422,14 @@ def _fallback_answer(req: EventRequest) -> str:
         return _format_shell_answer(command, returncode, stdout, stderr)
 
     if req.event == "sql.result":
-        result = req.payload.get("result")
-        if isinstance(result, dict):
-            return _format_sql_result_answer(result)
         reduced = req.payload.get("reduced_result") or req.payload.get("refined_answer")
         if isinstance(reduced, str) and reduced.strip():
             return reduced.strip()
+        result = req.payload.get("result")
+        if isinstance(result, dict):
+            enriched_result = dict(result)
+            enriched_result.setdefault("reduced_result", reduced)
+            return _format_sql_result_answer(enriched_result)
         schema = req.payload.get("schema")
         if isinstance(schema, dict):
             return _format_schema_answer(schema, str(req.payload.get("detail") or ""))
