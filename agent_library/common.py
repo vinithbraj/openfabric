@@ -1,6 +1,11 @@
 import subprocess
+import os
+import json
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Callable, Dict, List
+from urllib.error import URLError, HTTPError
+from urllib.request import Request, urlopen
 
 from pydantic import BaseModel
 
@@ -85,9 +90,73 @@ def _to_json(value: Any) -> str:
 
 
 def json_dumps(value: Any) -> str:
-    import json
-
     return json.dumps(value, ensure_ascii=True, indent=2, default=str)
+
+
+@lru_cache(maxsize=16)
+def _list_openai_compatible_models(base_url: str, api_key: str, timeout_seconds: float) -> tuple[str, ...]:
+    models_url = f"{base_url.rstrip('/')}/models"
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = Request(models_url, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (URLError, HTTPError, TimeoutError, ValueError, json.JSONDecodeError):
+        return ()
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return ()
+    model_ids: list[str] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if isinstance(model_id, str) and model_id.strip():
+            model_ids.append(model_id.strip())
+    return tuple(model_ids)
+
+
+def _discover_openai_compatible_model(base_url: str, api_key: str, timeout_seconds: float) -> str | None:
+    model_ids = _list_openai_compatible_models(base_url, api_key, timeout_seconds)
+    return model_ids[0] if model_ids else None
+
+
+def shared_llm_api_settings(
+    default_model: str = "gpt-4o-mini",
+    *,
+    timeout_seconds: float | None = None,
+) -> tuple[str, str, float, str]:
+    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("LLM_OPS_BASE_URL")
+    explicit_model = os.getenv("LLM_OPS_MODEL")
+    timeout = timeout_seconds
+    if timeout is None:
+        raw_timeout = os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300")
+        try:
+            timeout = float(raw_timeout)
+        except ValueError:
+            timeout = 300.0
+
+    if api_key and api_key.startswith("sk-") and api_key.lower() != "dummy":
+        model = explicit_model or default_model
+        return api_key, "https://api.openai.com/v1", float(timeout), model
+
+    resolved_base_url = (base_url or "http://127.0.0.1:8000/v1").rstrip("/")
+    resolved_api_key = api_key or "dummy"
+    available_models = _list_openai_compatible_models(
+        resolved_base_url,
+        resolved_api_key,
+        float(timeout),
+    )
+    discovered_model = available_models[0] if available_models else None
+    normalized_explicit_model = explicit_model.strip() if isinstance(explicit_model, str) and explicit_model.strip() else None
+    if normalized_explicit_model and available_models and normalized_explicit_model not in available_models:
+        normalized_explicit_model = discovered_model
+    model = normalized_explicit_model or discovered_model or default_model
+    return resolved_api_key, resolved_base_url, float(timeout), model
 
 
 @dataclass(frozen=True)

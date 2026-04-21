@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlparse
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, task_plan_context
+from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, shared_llm_api_settings, task_plan_context
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -93,11 +93,11 @@ def _elapsed_ms(start: float) -> float:
 
 
 def _llm_api_settings():
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL") or "https://api.openai.com/v1"
-    model = os.getenv("LLM_OPS_MODEL") or "gpt-4o-mini"
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-    return api_key, base_url.rstrip("/"), timeout_seconds, model
+    return shared_llm_api_settings("gpt-4o-mini")
+
+
+def _sql_llm_transport_settings(default_model: str) -> tuple[str, str, float, str]:
+    return shared_llm_api_settings(default_model)
 
 
 def _llm_summarize_rows(task: str, sql: str, columns: list[str], rows: list[dict[str, Any]]) -> str:
@@ -216,7 +216,7 @@ def _should_reduce_sql_result(task: str, result: dict[str, Any]) -> bool:
     rows = result.get("rows")
     if not isinstance(rows, list) or not rows:
         return False
-    row_count = result.get("row_count")
+    row_count = result.get("total_matching_rows", result.get("row_count"))
     row_total = row_count if isinstance(row_count, int) else len(rows)
     task_lc = task.lower()
     return (
@@ -241,6 +241,7 @@ def _llm_reduce_sql_result(
             "columns": columns,
             "rows": rows,
             "row_count": row_count,
+            "returned_row_count": len(rows),
         },
         lambda previous_command, previous_error: _llm_generate_sql_reduction_command(
             task,
@@ -341,6 +342,24 @@ def _rows_from_cursor(cursor, limit: int):
         else:
             rows.append({columns[index]: _json_safe(value) for index, value in enumerate(raw)})
     return columns, rows
+
+
+def _count_query_rows(conn, sql: str):
+    count_sql = f"SELECT COUNT(*) AS total_matching_rows FROM ({sql.rstrip().rstrip(';')}) AS openfabric_count_subquery"
+    with closing(conn.cursor()) as cursor:
+        try:
+            cursor.execute(count_sql)
+        except Exception:
+            _rollback_quietly(conn)
+            return None
+        row = cursor.fetchone()
+    if isinstance(row, dict):
+        value = row.get("total_matching_rows")
+    elif isinstance(row, (list, tuple)) and row:
+        value = row[0]
+    else:
+        value = None
+    return int(value) if isinstance(value, int) else None
 
 
 def _json_safe(value: Any):
@@ -553,6 +572,8 @@ def _schema_focus_terms(focus: str | None, task: str | None) -> set[str]:
     tokens = set()
     for text in (focus or "", task or ""):
         lowered = str(text).lower()
+        if re.search(r"\bschemas\b", lowered) or "schema names" in lowered:
+            tokens.add("schemas")
         if "table" in lowered:
             tokens.add("tables")
         if "column" in lowered:
@@ -564,9 +585,41 @@ def _schema_focus_terms(focus: str | None, task: str | None) -> set[str]:
     return tokens
 
 
+def _schemas_only_schema_request(focus: str | None, task: str | None) -> bool:
+    terms = _schema_focus_terms(focus, task)
+    return "schemas" in terms and "tables" not in terms and "columns" not in terms and "relationships" not in terms
+
+
 def _tables_only_schema_request(focus: str | None, task: str | None) -> bool:
     terms = _schema_focus_terms(focus, task)
-    return "tables" in terms and "columns" not in terms and "relationships" not in terms
+    return "tables" in terms and "schemas" not in terms and "columns" not in terms and "relationships" not in terms
+
+
+def _columns_only_schema_request(focus: str | None, task: str | None) -> bool:
+    terms = _schema_focus_terms(focus, task)
+    return "columns" in terms and "schemas" not in terms and "tables" not in terms and "relationships" not in terms
+
+
+def _relationships_only_schema_request(focus: str | None, task: str | None) -> bool:
+    terms = _schema_focus_terms(focus, task)
+    return "relationships" in terms and "schemas" not in terms and "tables" not in terms and "columns" not in terms
+
+
+def _schema_schemas_result(schema: dict) -> dict[str, Any]:
+    seen = sorted(
+        {
+            str(table.get("schema") or "").strip()
+            for table in schema.get("tables", [])
+            if str(table.get("schema") or "").strip()
+        }
+    )
+    rows = [{"schema": name} for name in seen]
+    return {
+        "columns": ["schema"],
+        "rows": rows,
+        "row_count": len(rows),
+        "limit": len(rows),
+    }
 
 
 def _schema_tables_result(schema: dict) -> dict[str, Any]:
@@ -585,6 +638,67 @@ def _schema_tables_result(schema: dict) -> dict[str, Any]:
         "row_count": len(rows),
         "limit": len(rows),
     }
+
+
+def _schema_columns_result(schema: dict) -> dict[str, Any]:
+    rows = []
+    for table in schema.get("tables", []):
+        schema_name = table.get("schema")
+        table_name = table.get("name")
+        for column in table.get("columns", []):
+            rows.append(
+                {
+                    "schema": schema_name,
+                    "table": table_name,
+                    "column": column.get("name"),
+                    "type": column.get("type"),
+                    "nullable": column.get("nullable"),
+                }
+            )
+    return {
+        "columns": ["schema", "table", "column", "type", "nullable"],
+        "rows": rows,
+        "row_count": len(rows),
+        "limit": len(rows),
+    }
+
+
+def _schema_relationships_result(schema: dict) -> dict[str, Any]:
+    rows = []
+    for table in schema.get("tables", []):
+        schema_name = table.get("schema")
+        table_name = table.get("name")
+        for foreign_key in table.get("foreign_keys", []):
+            ref_schema = foreign_key.get("references_schema")
+            ref_table = foreign_key.get("references_table")
+            ref_column = foreign_key.get("references_column")
+            qualified_ref = ".".join(part for part in (str(ref_schema or "").strip(), str(ref_table or "").strip()) if part)
+            rows.append(
+                {
+                    "schema": schema_name,
+                    "table": table_name,
+                    "column": foreign_key.get("column"),
+                    "references": f"{qualified_ref}.{ref_column}" if qualified_ref and ref_column else qualified_ref or ref_column,
+                }
+            )
+    return {
+        "columns": ["schema", "table", "column", "references"],
+        "rows": rows,
+        "row_count": len(rows),
+        "limit": len(rows),
+    }
+
+
+def _focused_schema_result(focus: str | None, task: str | None, schema: dict) -> tuple[str, dict[str, Any]] | None:
+    if _schemas_only_schema_request(focus, task):
+        return "Database schemas listed.", _schema_schemas_result(schema)
+    if _tables_only_schema_request(focus, task):
+        return "Database tables listed.", _schema_tables_result(schema)
+    if _columns_only_schema_request(focus, task):
+        return "Database columns listed.", _schema_columns_result(schema)
+    if _relationships_only_schema_request(focus, task):
+        return "Database relationships listed.", _schema_relationships_result(schema)
+    return None
 
 
 def _schema_identifier_catalog(schema: dict) -> str:
@@ -843,20 +957,7 @@ def _same_query_specs(left: list[dict[str, str]], right: list[dict[str, str]]) -
 
 
 def _llm_sql_queries(task: str, schema: dict) -> list[dict[str, str]]:
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-    if not api_key:
-        raise RuntimeError("LLM_OPS_API_KEY is not set")
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = _sql_llm_transport_settings("gpt-4o-mini")
 
     prompt = (
         "You generate read-only SQL for a configured database.\n"
@@ -931,20 +1032,7 @@ def _repair_sql_query(
     previous_repair_sql: str = "",
     previous_repair_error: str = "",
 ) -> list[dict[str, str]]:
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-    if not api_key:
-        raise RuntimeError("LLM_OPS_API_KEY is not set")
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = _sql_llm_transport_settings("gpt-4o-mini")
 
     prompt = (
         "You repair one read-only SQL query after execution failed.\n"
@@ -1019,7 +1107,20 @@ def _execute_sql(conn, sql: str, limit: int, schema: dict):
             _rollback_quietly(conn)
             raise
         columns, rows = _rows_from_cursor(cursor, limit)
-    return {"sql": sql, "columns": columns, "rows": rows, "row_count": len(rows), "limit": limit}
+    returned_row_count = len(rows)
+    total_matching_rows = _count_query_rows(conn, sql)
+    if not isinstance(total_matching_rows, int):
+        total_matching_rows = returned_row_count
+    return {
+        "sql": sql,
+        "columns": columns,
+        "rows": rows,
+        "row_count": total_matching_rows,
+        "returned_row_count": returned_row_count,
+        "total_matching_rows": total_matching_rows,
+        "truncated": total_matching_rows > returned_row_count,
+        "limit": limit,
+    }
 
 
 def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int, schema: dict):
@@ -1043,7 +1144,7 @@ def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int, sc
             rows.append(
                 {
                     "query": label,
-                    "row_count": result.get("row_count", 0),
+                    "row_count": result.get("total_matching_rows", result.get("row_count", 0)),
                     "result": json.dumps(result_rows, ensure_ascii=True),
                 }
             )
@@ -1057,6 +1158,9 @@ def _execute_sql_queries(conn, query_specs: list[dict[str, str]], limit: int, sc
         "columns": columns,
         "rows": rows,
         "row_count": len(rows),
+        "returned_row_count": len(rows),
+        "total_matching_rows": len(rows),
+        "truncated": False,
         "limit": limit,
         "queries": query_results,
     }
@@ -1244,15 +1348,21 @@ def handle_event(req: EventRequest):
             if operation == "inspect_schema" or (_is_schema_request(classification_task) and not provided_sql):
                 focus = instruction.get("focus") if isinstance(instruction, dict) else None
                 stats["total_ms"] = _elapsed_ms(total_started)
-                if _tables_only_schema_request(focus if isinstance(focus, str) else None, classification_task):
+                focused_schema = _focused_schema_result(
+                    focus if isinstance(focus, str) else None,
+                    classification_task,
+                    schema,
+                )
+                if focused_schema is not None:
+                    detail, focused_result = focused_schema
                     return {
                         "emits": [
                             {
                                 "event": "sql.result",
                                 "payload": {
-                                    "detail": "Database tables listed.",
+                                    "detail": detail,
                                     "stats": stats,
-                                    "result": _schema_tables_result(schema),
+                                    "result": focused_result,
                                 },
                             }
                         ]
@@ -1323,7 +1433,7 @@ def handle_event(req: EventRequest):
             if result and result.get("rows"):
                 rows = result.get("rows", [])
                 columns = result.get("columns", [])
-                row_count = result.get("row_count", len(rows))
+                row_count = result.get("total_matching_rows", result.get("row_count", len(rows)))
                 if _should_reduce_sql_result(execution_task, result):
                     reduced_result, local_reduction_command = _llm_reduce_sql_result(
                         execution_task,

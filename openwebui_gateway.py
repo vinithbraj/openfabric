@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import requests
 
-from agent_library.common import EventRequest
+from agent_library.common import EventRequest, shared_llm_api_settings
 from agent_library.agents.synthesizer import _build_prompt as _build_synthesis_prompt
 from agent_library.agents.synthesizer import _fallback_answer as _fallback_synthesis_answer
 from runtime.engine import Engine
@@ -122,10 +122,7 @@ app = FastAPI(title="OpenFabric Open WebUI Gateway")
 
 
 def _llm_config():
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY") or "dummy"
-    base_url = os.getenv("LLM_OPS_BASE_URL") or "http://127.0.0.1:8000/v1"
-    model = os.getenv("LLM_OPS_MODEL") or "deepseek-ai/deepseek-coder-6.7b-instruct"
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
+    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
     return api_key, base_url.rstrip("/"), model, timeout_seconds
 
 
@@ -459,19 +456,7 @@ def _text_stream_parts(text: str, chunk_size: int = 96) -> Iterator[str]:
 
 
 def _synthesis_llm_config():
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY") or "dummy"
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_SYNTH_MODEL") or os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
     return api_key, base_url.rstrip("/"), model, timeout_seconds
 
 
@@ -523,17 +508,74 @@ def _payload_for_synthesis(event_name: str, payload: dict) -> dict:
     return sanitized
 
 
+def _gateway_step_field(step: dict[str, Any], field: str) -> Any:
+    if field in step:
+        return step.get(field)
+    payload = step.get("payload")
+    if isinstance(payload, dict) and field in payload:
+        return payload.get(field)
+    evidence = step.get("evidence")
+    if isinstance(evidence, dict):
+        evidence_payload = evidence.get("payload")
+        if isinstance(evidence_payload, dict) and field in evidence_payload:
+            return evidence_payload.get(field)
+    return None
+
+
+def _flatten_gateway_steps(steps: Any) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    if not isinstance(steps, list):
+        return flattened
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        flattened.append(step)
+        flattened.extend(_flatten_gateway_steps(step.get("steps")))
+    return flattened
+
+
+def _workflow_has_grounded_shell_output(payload: dict[str, Any]) -> bool:
+    for step in _flatten_gateway_steps(payload.get("steps")):
+        if step.get("status") != "completed":
+            continue
+        event = step.get("event")
+        if event not in {"shell.result", "slurm.result", "file.content"}:
+            continue
+        stdout = (
+            _gateway_step_field(step, "stdout")
+            or _gateway_step_field(step, "stdout_excerpt")
+            or _gateway_step_field(step, "content")
+        )
+        if isinstance(stdout, str) and stdout.strip():
+            return True
+    return False
+
+
+def _workflow_requests_internal_steps(payload: dict[str, Any]) -> bool:
+    presentation = payload.get("presentation")
+    return isinstance(presentation, dict) and bool(presentation.get("include_internal_steps"))
+
+
+def _should_use_gateway_direct_fallback(event_name: str, payload: dict) -> bool:
+    if event_name in {"task.result", "clarification.required", "shell.result", "file.content"}:
+        return True
+    if event_name == "workflow.result":
+        return _workflow_has_grounded_shell_output(payload) or _workflow_requests_internal_steps(payload)
+    return False
+
+
 def _stream_synthesis_parts(
     event_name: str,
     payload: dict,
     cancel_event: threading.Event | None = None,
     response_holder: dict[str, Any] | None = None,
 ) -> Iterator[str]:
+    raw_req = EventRequest(event=event_name, payload=copy.deepcopy(payload))
     req = EventRequest(event=event_name, payload=_payload_for_synthesis(event_name, payload))
     if cancel_event is not None and cancel_event.is_set():
         return
-    if event_name in {"task.result", "clarification.required"}:
-        direct_answer = _fallback_synthesis_answer(req)
+    if _should_use_gateway_direct_fallback(event_name, payload):
+        direct_answer = _fallback_synthesis_answer(raw_req)
         if isinstance(direct_answer, str) and direct_answer.strip():
             yield from _text_stream_parts(direct_answer.strip(), chunk_size=32)
             return
@@ -640,10 +682,44 @@ def _trace_block(lines: list[str], *, separator: bool = True) -> str:
     return "\n".join(clean_lines).rstrip() + suffix
 
 
+def _blockquote_lines(text: str) -> list[str]:
+    clean = str(text or "").strip()
+    if not clean:
+        return []
+    return [f"> {line}" if line else ">" for line in clean.splitlines()]
+
+
+def _trace_tone(label: str) -> str:
+    label_lc = label.strip().lower()
+    if any(token in label_lc for token in ("failed", "error")):
+        return "failure"
+    if any(token in label_lc for token in ("validation", "retry", "clarification", "trying")):
+        return "validation"
+    if any(token in label_lc for token in ("running", "completed step", "shell result", "sql result", "workflow complete", "completed")):
+        return "execution"
+    if any(token in label_lc for token in ("plan", "planning", "replanning")):
+        return "planning"
+    if "thinking" in label_lc:
+        return "thinking"
+    return "neutral"
+
+
+def _trace_badge(tone: str) -> str:
+    return {
+        "thinking": "🟣",
+        "planning": "🟦",
+        "execution": "🟩",
+        "validation": "🟨",
+        "failure": "🟥",
+        "neutral": "⬜",
+    }.get(tone, "⬜")
+
+
 def _trace_title(label: str, summary: str | None = None) -> str:
+    title = f"### {_trace_badge(_trace_tone(label))} {label}"
     if isinstance(summary, str) and summary.strip():
-        return f"**{label}**\n{summary.strip()}"
-    return f"**{label}**"
+        return f"{title}\n\n" + "\n".join(_blockquote_lines(summary.strip()))
+    return title
 
 
 def _trace_kv_lines(*items: tuple[str, Any]) -> list[str]:
@@ -654,7 +730,7 @@ def _trace_kv_lines(*items: tuple[str, Any]) -> list[str]:
         text = str(value).strip()
         if not text:
             continue
-        lines.append(f"`{label}` {text}")
+        lines.append(f"**{label.title()}:** {text}")
     return lines
 
 
@@ -663,7 +739,10 @@ def _trace_snippet(label: str, value: Any, limit: int = 700) -> list[str]:
     if not text:
         return []
     text = _truncate_progress(text, limit)
-    return [f"**{label}**", "", *_format_preformatted_markdown(text)]
+    label_lc = label.lower()
+    if any(token in label_lc for token in ("command", "output", "sql")):
+        return _format_console_section(label, text)
+    return _format_callout_section(label, text)
 
 
 def _trace_bullets(items: list[str], *, prefix: str = "- ") -> list[str]:
@@ -671,7 +750,7 @@ def _trace_bullets(items: list[str], *, prefix: str = "- ") -> list[str]:
 
 
 def _narration_block(text: str) -> str:
-    return _trace_block([text])
+    return _trace_block(_blockquote_lines(text))
 
 
 def _narration_for_event(event_name: str, payload: dict, state: dict[str, Any]) -> str | None:
@@ -681,12 +760,12 @@ def _narration_for_event(event_name: str, payload: dict, state: dict[str, Any]) 
         options = payload.get("options")
         if isinstance(options, list) and len(options) > 1:
             return _narration_block(
-                f"I found {len(options)} viable workflow options. I’ll start with the strongest one and only fall back if validation says it missed the mark."
+                f"{len(options)} viable workflow options were found. The strongest path will run first, with fallback only if validation says it missed the mark."
             )
         steps = payload.get("steps")
         if isinstance(steps, list) and steps:
             return _narration_block(
-                f"I broke this into {len(steps)} planned step(s) so the execution stays structured and easier to recover if something fails."
+                f"The request was broken into {len(steps)} planned step(s) so execution stays structured and easier to recover if something fails."
             )
         return None
     if event_name == "step.progress":
@@ -697,55 +776,55 @@ def _narration_for_event(event_name: str, payload: dict, state: dict[str, Any]) 
         if stage == "started":
             state["last_running_step"] = step_id
             return _narration_block(
-                f"I’m handing `{step_id}` to {_agent_label(target)} now and watching the result before moving on.\n`focus` {_truncate_progress(task, 180)}"
+                f"Running {step_id} with {_agent_label(target)}.\nFocus: {_truncate_progress(task, 180)}"
             )
         if stage == "completed":
             detail = None
             result = payload.get("result")
             if isinstance(result, dict):
                 detail = result.get("detail")
-            detail_text = f"\n`result` `{_truncate_progress(detail, 180)}`" if isinstance(detail, str) and detail.strip() else ""
-            return _narration_block(f"`{step_id}` came back successfully, so I can use that output for whatever depends on it next.{detail_text}")
+            detail_text = f"\nResult: {_truncate_progress(detail, 180)}" if isinstance(detail, str) and detail.strip() else ""
+            return _narration_block(f"{step_id} completed successfully, so its output can be used for whatever depends on it next.{detail_text}")
         if stage == "failed":
             reason = payload.get("error") or payload.get("message")
-            reason_text = f"\n`issue` `{_truncate_progress(str(reason), 180)}`" if reason else ""
-            return _narration_block(f"`{step_id}` did not complete cleanly. I’m treating that as a signal to inspect, replan, or fall back.{reason_text}")
+            reason_text = f"\nIssue: {_truncate_progress(str(reason), 180)}" if reason else ""
+            return _narration_block(f"{step_id} did not complete cleanly. That becomes a signal to inspect, replan, or fall back.{reason_text}")
         if stage == "replanning":
-            return _narration_block(f"The current step was too coarse or blocked, so I’m decomposing it into a smaller plan before trying again.")
+            return _narration_block("The current step was too coarse or blocked, so it is being decomposed into a smaller plan before trying again.")
     if event_name == "validation.progress":
         stage = payload.get("stage")
         option_id = payload.get("option_id")
         if stage == "option_started":
-            return _narration_block(f"I’m now trying `{option_id or 'this option'}` and will validate it against the original request before accepting it.")
+            return _narration_block(f"Trying {option_id or 'this option'} and validating it against the original request before accepting it.")
         if stage == "started":
-            return _narration_block("Execution finished for this option. I’m checking whether it actually answered the request, not just whether the steps ran.")
+            return _narration_block("Execution finished for this option. Now checking whether it actually answered the request, not just whether the steps ran.")
         if stage == "failed":
             reason = payload.get("reason")
-            reason_text = f"\n`validator` `{_truncate_progress(str(reason), 180)}`" if reason else ""
-            return _narration_block(f"This option executed, but it still doesn’t fully satisfy the request, so I’m not accepting it yet.{reason_text}")
+            reason_text = f"\nValidator note: {_truncate_progress(str(reason), 180)}" if reason else ""
+            return _narration_block(f"This option executed, but it still does not fully satisfy the request, so it will not be accepted yet.{reason_text}")
         if stage == "retrying":
-            return _narration_block("I’m carrying forward what I learned from the failed attempt and trying the next workflow option.")
+            return _narration_block("Using what was learned from the failed attempt and trying the next workflow option.")
         if stage == "passed":
             return _narration_block("This attempt satisfies the request closely enough to promote it to the final answer.")
     if event_name == "clarification.required":
-        return _narration_block("I hit a point where guessing would be risky, so I’m surfacing the exact clarification needed instead of fabricating a result.")
+        return _narration_block("A point was reached where guessing would be risky, so the exact clarification needed is surfaced instead of fabricating a result.")
     if event_name == "workflow.result":
         status = payload.get("status")
         attempts = payload.get("attempts")
         selected = payload.get("selected_option")
         if isinstance(attempts, list) and len(attempts) > 1 and isinstance(selected, dict):
             return _narration_block(
-                f"I tested multiple workflow options and `{selected.get('id', 'the selected option')}` was the first one that validated successfully."
+                f"Multiple workflow options were tested, and {selected.get('id', 'the selected option')} was the first one that validated successfully."
             )
         if status == "completed":
-            return _narration_block("The execution path is complete, so I’m switching from orchestration to the final user-facing answer.")
+            return _narration_block("The execution path is complete, so presentation now shifts from orchestration to the final user-facing answer.")
         if status == "failed":
-            return _narration_block("None of the attempted workflows validated successfully, so I’m surfacing the failure state instead of pretending the task succeeded.")
+            return _narration_block("None of the attempted workflows validated successfully, so the failure state is surfaced instead of pretending the task succeeded.")
     return None
 
 
 def _agent_label(agent: Any) -> str:
-    return f"`{agent}`" if isinstance(agent, str) and agent else "`agent`"
+    return f"**{agent}**" if isinstance(agent, str) and agent else "**agent**"
 
 
 def _task_label(task: Any) -> str:
@@ -836,26 +915,94 @@ def _output_excerpt(value: Any, limit: int = 900) -> str:
 
 def _format_preformatted_markdown(value: Any) -> list[str]:
     text = "" if value is None else str(value)
-    fence = "```"
-    while fence in text:
-        fence += "`"
-    return [fence, text, fence]
+    if not text:
+        return [">"]
+    return [(f"> {line}" if line else ">") for line in text.splitlines()]
+
+
+def _format_console_section(label: str, value: Any) -> list[str]:
+    text = "" if value is None else str(value).rstrip()
+    if not text:
+        return []
+    return [f"**{label}:**", "", "```text", text, "```"]
+
+
+def _format_callout_section(label: str, value: Any) -> list[str]:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return []
+    if "\n" not in text:
+        return [f"**{label}:** `{text}`"]
+    return _format_console_section(label, text)
+
+
+def _candidate_file_path(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or "\n" in text:
+        return None
+    if text.startswith(("http://", "https://", "app://", "file://")):
+        return None
+    candidate = text.strip("`")
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {"'", '"'}:
+        candidate = candidate[1:-1].strip()
+    if not candidate or candidate.endswith(("/", "\\")):
+        return None
+    normalized = os.path.expanduser(candidate)
+    has_separator = "/" in normalized or "\\" in normalized
+    if not has_separator and not normalized.startswith("."):
+        return None
+    basename = os.path.basename(normalized.replace("\\", "/"))
+    if not basename or basename in {".", ".."}:
+        return None
+    absolute_candidate = os.path.abspath(normalized)
+    if not os.path.isfile(absolute_candidate):
+        return None
+    return candidate
+
+
+def _markdown_link_for_file_path(value: Any) -> str | None:
+    candidate = _candidate_file_path(value)
+    if not candidate:
+        return None
+    absolute_target = os.path.abspath(os.path.expanduser(candidate))
+    target = f"<{absolute_target}>" if " " in absolute_target else absolute_target
+    label = candidate.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    return f"[{label}]({target})"
+
+
+def _extract_file_paths_from_text(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    lines = [line.strip() for line in _clean_terminal_output(value).splitlines() if line.strip()]
+    if not lines or len(lines) > 20:
+        return []
+    linked = []
+    for line in lines:
+        link = _markdown_link_for_file_path(line)
+        if not link:
+            return []
+        linked.append(link)
+    return linked
 
 
 def _command_output_details(command: str, stdout: Any, stderr: Any, returncode: Any = None) -> str:
-    lines = ["Command and output", ""]
+    linked_paths = _extract_file_paths_from_text(stdout)
+    lines = _format_console_section("Command", command.strip())
     if returncode is not None:
-        lines.extend([f"Exit code: {returncode}", ""])
-    lines.extend(["Command:", ""])
-    lines.append(command.strip())
+        lines.extend(["", f"**Exit code:** `{returncode}`"])
     clean_stdout = _clean_terminal_output(stdout) or "<empty>"
-    lines.extend(["", "Output:", ""])
-    lines.append(clean_stdout)
+    if linked_paths:
+        lines.extend(["", "**Files**"])
+        lines.extend([f"- {path}" for path in linked_paths])
+    lines.extend([""])
+    lines.extend(_format_console_section("Output", clean_stdout))
     clean_stderr = _clean_terminal_output(stderr)
     if clean_stderr:
-        lines.extend(["", "Error output:", ""])
-        lines.append(clean_stderr)
-    return "\n".join(_format_preformatted_markdown("\n".join(lines)))
+        lines.extend([""])
+        lines.extend(_format_console_section("Error output", clean_stderr))
+    return "\n".join(lines)
 
 
 def _shell_details_for_event(event_name: str, payload: dict) -> str:
@@ -893,8 +1040,7 @@ def _shell_status(returncode: Any) -> str:
 
 
 def _append_collapsed_command(lines: list[str], command: str, summary: str = "Command"):
-    lines.extend([f"**{summary}**", ""])
-    lines.extend(_format_preformatted_markdown(command.strip()))
+    lines.extend(_format_callout_section(summary, command.strip()))
 
 
 def _append_shell_result(lines: list[str], result: dict, duration: str | None = None):
@@ -911,15 +1057,14 @@ def _append_shell_result(lines: list[str], result: dict, duration: str | None = 
     if summary:
         lines.append(summary)
     if isinstance(command, str) and command.strip():
-        lines.extend(["**Command**", ""])
-        lines.extend(_format_preformatted_markdown(command.strip()))
+        lines.extend(_format_callout_section("Command", command.strip()))
     if stdout:
-        lines.extend(["", "**Output**", ""])
-        lines.extend(_format_preformatted_markdown(stdout))
+        lines.extend([""])
+        lines.extend(_format_callout_section("Output", stdout))
     if stderr:
         warning_label = "**Warnings**" if returncode == 0 else "**Error output**"
-        lines.extend(["", warning_label, ""])
-        lines.extend(_format_preformatted_markdown(stderr))
+        lines.extend([""])
+        lines.extend(_format_callout_section(warning_label.replace("**", ""), stderr))
 
 
 def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
@@ -937,16 +1082,16 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                 label = option.get("label", option_id)
                 reason = option.get("reason")
                 step_count = option.get("step_count")
-                summary = f"`{option_id}` {label}"
+                summary = f"**{option_id}** {label}"
                 if step_count is not None:
-                    summary += f" · `{step_count}` step(s)"
+                    summary += f" · {step_count} step(s)"
                 if isinstance(reason, str) and reason.strip():
                     summary += f" · {_truncate_progress(reason, 180)}"
                 lines.append(f"- {summary}")
         if isinstance(options, list) and options:
             selected_option_id = payload.get("selected_option_id")
             if isinstance(selected_option_id, str) and selected_option_id.strip():
-                lines.append(f"`selected` `{selected_option_id}`")
+                lines.append(f"**Selected option:** {selected_option_id}")
         steps = payload.get("steps", [])
         if isinstance(steps, list):
             lines.append("**Planned steps**")
@@ -958,21 +1103,21 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                     continue
                 target = step.get("target_agent")
                 lines.append(
-                    f"- `{step.get('id', 'step')}` via {_agent_label(target)}: {_task_label(task)}"
+                    f"- **{step.get('id', 'step')}** via {_agent_label(target)}: {_task_label(task)}"
                 )
         return _trace_block(lines)
     if event_name == "validation.progress":
         stage = payload.get("stage", "")
         option_id = payload.get("option_id", "option")
         option_label = payload.get("option_label")
-        label = f"`{option_id}`"
+        label = f"**{option_id}**"
         if isinstance(option_label, str) and option_label.strip():
             label += f" {option_label.strip()}"
         if stage == "option_started":
             lines = [_trace_title("Trying workflow option", str(label))]
             reason = payload.get("reason")
             if isinstance(reason, str) and reason.strip():
-                lines.extend(_trace_kv_lines(("reason", f"`{_truncate_progress(reason, 240)}`")))
+                lines.extend(_trace_kv_lines(("reason", _truncate_progress(reason, 240))))
             return _trace_block(lines)
         if stage == "started":
             return _trace_block([_trace_title("Validation", f"Checking whether {label} satisfied the request.")])
@@ -980,7 +1125,7 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             lines = [_trace_title("Validation passed", str(label))]
             reason = payload.get("reason")
             if isinstance(reason, str) and reason.strip():
-                lines.extend(_trace_kv_lines(("reason", f"`{_truncate_progress(reason, 240)}`")))
+                lines.extend(_trace_kv_lines(("reason", _truncate_progress(reason, 240))))
             trace = payload.get("trace")
             if isinstance(trace, list):
                 lines.append("**Checks**")
@@ -990,7 +1135,7 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             lines = [_trace_title("Validation failed", str(label))]
             reason = payload.get("reason")
             if isinstance(reason, str) and reason.strip():
-                lines.extend(_trace_kv_lines(("reason", f"`{_truncate_progress(reason, 240)}`")))
+                lines.extend(_trace_kv_lines(("reason", _truncate_progress(reason, 240))))
             trace = payload.get("trace")
             if isinstance(trace, list):
                 lines.append("**Checks**")
@@ -1188,14 +1333,6 @@ def _stream_response(client_request: Request, question: str, model: str):
                         final_answer_streamed = True
                     return
 
-                narration = _narration_for_event(event_name, payload, narration_state)
-                if narration and _stream_progress_enabled():
-                    events.put(_stream_chunk(completion_id, created, model, narration))
-
-                progress = _format_progress(event_name, payload, depth)
-                if progress and _stream_progress_enabled():
-                    events.put(_stream_chunk(completion_id, created, model, progress))
-
                 if (
                     not final_answer_streamed
                     and event_name in SYNTHESIZER_EVENTS
@@ -1212,7 +1349,9 @@ def _stream_response(client_request: Request, question: str, model: str):
                         events.put(_stream_chunk(completion_id, created, model, part))
                     if cancel_event.is_set():
                         raise ClientCancelled("Client disconnected.")
-                    shell_details = _shell_details_for_event(event_name, payload)
+                    shell_details = None
+                    if not _should_use_gateway_direct_fallback(event_name, payload):
+                        shell_details = _shell_details_for_event(event_name, payload)
                     if shell_details:
                         events.put(
                             _stream_chunk(
@@ -1223,6 +1362,15 @@ def _stream_response(client_request: Request, question: str, model: str):
                             )
                         )
                     final_answer_streamed = True
+                    return
+
+                narration = _narration_for_event(event_name, payload, narration_state)
+                if narration and _stream_progress_enabled():
+                    events.put(_stream_chunk(completion_id, created, model, narration))
+
+                progress = _format_progress(event_name, payload, depth)
+                if progress and _stream_progress_enabled():
+                    events.put(_stream_chunk(completion_id, created, model, progress))
 
             answer = gateway.ask(
                 question,

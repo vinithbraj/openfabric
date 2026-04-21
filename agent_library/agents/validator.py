@@ -5,7 +5,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings
 from runtime.console import log_debug
 
 app = FastAPI()
@@ -77,20 +77,7 @@ def _extract_json_object(text: str):
 
 
 def _llm_validate(payload: dict):
-    api_key = os.getenv("VALIDATOR_API_KEY") or os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("VALIDATOR_BASE_URL") or os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("VALIDATOR_MODEL") or os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("VALIDATOR_TIMEOUT_SECONDS", os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300")))
-    if not api_key:
-        raise RuntimeError("VALIDATOR_API_KEY is not set")
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1-mini"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
     prompt = (
         "You are a strict workflow validator.\n"
         "Judge whether the workflow attempt actually satisfied the original user request.\n"
@@ -130,6 +117,7 @@ def _llm_validate(payload: dict):
 def _heuristic_validate(payload: dict):
     status = str(payload.get("workflow_status") or "").strip()
     task_shape = str(payload.get("task_shape") or "").strip().lower() or "lookup"
+    task_text = str(payload.get("task") or "").strip().lower()
     error = payload.get("error")
     result = payload.get("result")
     steps = payload.get("steps", [])
@@ -153,7 +141,7 @@ def _heuristic_validate(payload: dict):
             reason = "Count task completed, but the result is not yet clearly reduced to a scalar."
             missing_requirements = ["scalar count"]
     elif task_shape == "boolean_check":
-        if isinstance(result, bool) or (isinstance(result, str) and result.strip().lower() in {"true", "false", "yes", "no", "0", "1"}):
+        if _looks_like_boolean_result(task_text, result):
             verdict = "valid"
             reason = "Detected a boolean-like result."
         else:
@@ -169,12 +157,10 @@ def _heuristic_validate(payload: dict):
             reason = "Save task did not return an artifact path."
             missing_requirements = ["artifact path"]
     elif task_shape in {"list", "compare"}:
-        if isinstance(result, list) and result:
+        collection_reason = _collection_result_reason(result)
+        if collection_reason:
             verdict = "valid"
-            reason = "Detected a non-empty list result."
-        elif isinstance(result, dict) and isinstance(result.get("rows"), list) and result["rows"]:
-            verdict = "valid"
-            reason = "Detected non-empty structured rows."
+            reason = collection_reason
         elif has_material_result:
             verdict = "uncertain"
             reason = "List/compare task has output, but the structure is ambiguous."
@@ -214,6 +200,38 @@ def _heuristic_validate(payload: dict):
         "missing_requirements": missing_requirements,
         "trace": trace,
     }
+
+
+def _looks_like_boolean_result(task_text: str, result: Any) -> bool:
+    if isinstance(result, bool):
+        return True
+    if not isinstance(result, str):
+        return False
+    compact = result.strip().lower()
+    if compact in {"true", "false", "yes", "no", "0", "1"}:
+        return True
+    return bool(compact) and any(token in task_text for token in {"installed", "available", "exists", "exist"}) and ("/" in compact or "\\" in compact)
+
+
+def _collection_result_reason(result: Any) -> str:
+    if isinstance(result, list) and result:
+        return "Detected a non-empty list result."
+    if isinstance(result, dict) and isinstance(result.get("rows"), list) and result["rows"]:
+        return "Detected non-empty structured rows."
+    if (
+        isinstance(result, dict)
+        and isinstance(result.get("result"), dict)
+        and isinstance(result["result"].get("rows"), list)
+        and result["result"]["rows"]
+    ):
+        return "Detected non-empty structured rows nested in the workflow result."
+    if isinstance(result, str):
+        lines = [line for line in result.splitlines() if line.strip()]
+        if len(lines) > 1:
+            return "Detected non-empty multi-line shell output compatible with a list result."
+        if lines:
+            return "Detected a non-empty singleton result compatible with a list task."
+    return ""
 
 
 def _reduced_validation_payload(payload: dict):

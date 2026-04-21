@@ -1,0 +1,37 @@
+[
+  {
+    "patient_id": "PAT_19",
+    "patient_name": "Patient_19",
+    "sex": "M",
+    "birth_date": "1961-01-08",
+    "study_count": 5
+  },
+  {
+    "patient_id": "PAT_2",
+    "patient_name": "Patient_2",
+    "sex": "M",
+    "birth_date": "1967-11-30",
+    "study_count": 3
+  },
+  {
+    "patient_id": "PAT_26",
+    "patient_name": "Patient_26",
+    "sex": "M",
+    "birth_date": "1965-07-27",
+    "study_count": 3
+  },
+  {
+    "patient_id": "PAT_3",
+    "patient_name": "Patient_3",
+    "sex": "F",
+    "birth_date": "1975-03-29",
+    "study_count": 4
+  },
+  {
+    "patient_id": "PAT_33",
+    "patient_name": "Patient_33",
+    "sex": "F",
+    "birth_date": "1953-11-13",
+    "study_count": 3
+  }
+]

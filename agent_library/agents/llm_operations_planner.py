@@ -1,12 +1,13 @@
 import json
 import os
 import re
+import shlex
 from typing import Any, Dict, List
 
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings
 from runtime.console import log_debug
 
 app = FastAPI()
@@ -52,7 +53,7 @@ SUPPORTED_EVENT_SCHEMAS = {
     "planner.replan.result": '{"replace_step_id":"step1","reason":"...","steps":[{"id":"step1_1","target_agent":"shell_runner","task":"..."}]}',
 }
 DEFAULT_ALLOWED_EVENTS = set(SUPPORTED_EVENT_SCHEMAS.keys())
-CAPABILITIES = {"agents": [], "available_events": sorted(DEFAULT_ALLOWED_EVENTS)}
+CAPABILITIES = {"agents": [], "available_events": sorted(DEFAULT_ALLOWED_EVENTS), "execution_policy": {}}
 
 
 def _debug_enabled() -> bool:
@@ -106,6 +107,22 @@ def _format_discovered_agents(capabilities: dict) -> str:
     return "\n".join(lines) if lines else "- unknown: No discovered agents"
 
 
+def _format_execution_policy(capabilities: dict) -> str:
+    policy = capabilities.get("execution_policy")
+    if not isinstance(policy, dict) or not policy:
+        return "- none"
+    lines = []
+    if "allow_python_package_installs" in policy:
+        lines.append(f"- allow_python_package_installs={bool(policy.get('allow_python_package_installs'))}")
+    tool = policy.get("python_package_install_tool")
+    if isinstance(tool, str) and tool.strip():
+        lines.append(f"- python_package_install_tool={tool.strip()}")
+    scope = policy.get("install_scope")
+    if isinstance(scope, str) and scope.strip():
+        lines.append(f"- install_scope={scope.strip()}")
+    return "\n".join(lines) if lines else "- none"
+
+
 def _build_prompt(question: str, capabilities: dict) -> str:
     return (
         "You are the routing planner for an operations assistant.\n"
@@ -122,6 +139,7 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "3) Each step MUST have id and task. Leaf steps MUST have target_agent. Group steps may omit target_agent when they contain nested steps.\n"
         "4) Every leaf step MUST include an instruction object with an agent-native operation and inputs.\n"
         "5) For shell_runner use instruction.operation=run_command with fields such as command, input, and capture.\n"
+        "5a) For shell_runner tasks that need structured parsing, aggregation, generation, or file creation from prior results, prefer a single python3 heredoc snippet over brittle shell pipelines.\n"
         "   Example capture objects: {\"mode\":\"stdout_first_line\"}, {\"mode\":\"stdout_stripped\"}, {\"mode\":\"json\"}, {\"mode\":\"json_field\",\"field\":\"envs\"}.\n"
         "   For conditional checks, prefer machine-readable JSON output and set allow_returncodes when a nonzero exit code is expected and should not fail the workflow.\n"
         "6) For sql_runner use instruction.operation values like inspect_schema, query_from_request, execute_sql, or sample_rows.\n"
@@ -139,6 +157,7 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "16) when is optional. Use it for conditional execution such as {\"$from\":\"step1.returncode\",\"not_equals\":0}.\n"
         "17) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
         "18) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
+        "18a) If execution requires a missing Python dependency and runtime policy allows it, shell_runner may install the required Python package into the current Python environment to complete the task.\n"
         "19) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
         "20) For Slurm, HPC cluster, scheduler, queue, node, partition, reservation, fairshare, or job-control questions, prefer slurm_runner.\n"
         "20a) For Slurm and SQL requests involving counts, averages, stats, or filtering, prefer a SINGLE step using the native agent (slurm_runner or sql_runner) with operation=query_from_request. Avoid decomposing these into shell_runner pipes (grep, wc, etc.) as native agents handle large datasets more reliably.\n"
@@ -170,6 +189,8 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         '- "book a flight to NYC" -> {"processable":false,"reason":"no travel booking capability","steps":[]}\n'
         "Discovered runtime agents:\n"
         f"{_format_discovered_agents(capabilities)}\n"
+        "Runtime execution policy:\n"
+        f"{_format_execution_policy(capabilities)}\n"
         f'User request: "{question}"'
     )
 
@@ -191,9 +212,12 @@ def _build_replan_prompt(payload: dict, capabilities: dict) -> str:
         "6) Prefer diagnostic or introspection subtasks before repeating the same failed action.\n"
         "7) For SQL/database/schema/table/column/relationship/data questions, prefer sql_runner.\n"
         "8) For shell/machine/workspace/container/process/repo operations, prefer shell_runner and explicit commands when possible.\n"
+        "8a) If runtime policy allows Python package installation, you may replan through shell_runner steps that install a missing Python package when that is necessary to complete the task.\n"
         "9) Tolerate minor typos and informal phrasing.\n"
         "Discovered runtime agents:\n"
         f"{_format_discovered_agents(capabilities)}\n"
+        "Runtime execution policy:\n"
+        f"{_format_execution_policy(capabilities)}\n"
         "Replan request JSON:\n"
         f"{json.dumps(payload, indent=2)}"
     )
@@ -387,30 +411,53 @@ TASK_SHAPES = {
 
 
 def _normalize_task_shape(question: str, raw: Any = None, *, target_agent: str | None = None, presentation: dict | None = None) -> str:
+    inferred = _infer_task_shape(question, target_agent=target_agent, presentation=presentation)
     if isinstance(raw, str):
         normalized = raw.strip().lower()
         if normalized in TASK_SHAPES:
+            if normalized == "count" and _looks_like_mixed_count_and_detail_request(question):
+                return inferred
+            if inferred == "save_artifact" and normalized != "save_artifact":
+                return inferred
             return normalized
-    return _infer_task_shape(question, target_agent=target_agent, presentation=presentation)
+    return inferred
 
 
 def _infer_task_shape(question: str, *, target_agent: str | None = None, presentation: dict | None = None) -> str:
     text = str(question or "").strip().lower()
     family = _agent_family(target_agent or "") if isinstance(target_agent, str) else ""
     fmt = presentation.get("format") if isinstance(presentation, dict) else None
+    compound_parts = _split_compound_request(text)
+    count_part_count = sum(1 for part in compound_parts if any(marker in part for marker in COUNT_REQUEST_MARKERS))
+    boolean_part_count = sum(
+        1
+        for part in compound_parts
+        if (
+            any(token in part for token in ("whether", "check if", "check whether", "exists", "exist", "is there", "are there"))
+            or re.match(r"^(?:is|are|does|do|did|can|has|have|was|were)\b", part)
+        )
+    )
 
     if _extract_save_output_path(text) or (
-        any(token in text for token in ("save", "write", "export", "store"))
-        and any(token in text for token in ("file", "path", ".txt", ".csv", ".json", ".md"))
+        any(token in text for token in ("save", "write", "export", "store", "create"))
+        and any(token in text for token in ("file", "path", "location", ".txt", ".csv", ".json", ".md"))
     ):
         return "save_artifact"
     if _planner_is_schema_request(text):
         return "schema_summary"
+    if _looks_like_mixed_count_and_detail_request(text):
+        return "list" if fmt == "markdown_table" or family == "sql_runner" else "lookup"
+    if len(compound_parts) > 1 and (count_part_count > 1 or (count_part_count and boolean_part_count)):
+        return "lookup"
     if any(token in text for token in ("how many", "count ", "number of", "total number", "total count")):
         return "count"
-    if any(token in text for token in ("whether", "check if", "check whether", "exists", "exist", "is there", "are there")):
+    if (
+        " and whether " not in text
+        and " and check whether " not in text
+        and any(token in text for token in ("whether", "check if", "check whether", "exists", "exist", "is there", "are there"))
+    ):
         return "boolean_check"
-    if re.match(r"^(?:is|are|does|do|did|can|has|have|was|were)\b", text):
+    if " and " not in text and re.match(r"^(?:is|are|does|do|did|can|has|have|was|were)\b", text):
         return "boolean_check"
     if any(token in text for token in ("compare", "difference", "different", "versus", " vs ")):
         return "compare"
@@ -493,23 +540,7 @@ def _parse_steps(steps: list):
 
 
 def _llm_decide(question: str, capabilities):
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-
-    if not api_key:
-        raise RuntimeError("LLM_OPS_API_KEY is not set")
-
-    # If a real OpenAI key is present, prefer OpenAI endpoint over local defaults.
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -559,22 +590,7 @@ def _llm_decide(question: str, capabilities):
 
 
 def _llm_replan(payload: dict, capabilities: dict):
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-
-    if not api_key:
-        raise RuntimeError("LLM_OPS_API_KEY is not set")
-
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
 
     response = requests.post(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -796,6 +812,12 @@ def _agent_search_blob(agent: Dict[str, Any]) -> str:
             parts.append(value)
         elif isinstance(value, list):
             parts.append(" ".join(entry for entry in value if isinstance(entry, str)))
+    for key in ("routing_hints", "domain_hints", "schema_hints", "entity_hints"):
+        value = agent.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, list):
+            parts.append(" ".join(entry for entry in value if isinstance(entry, str)))
     methods = agent.get("methods", [])
     if isinstance(methods, list):
         for method in methods:
@@ -846,8 +868,72 @@ def _configured_database_tokens(capabilities: dict) -> set[str]:
     return tokens
 
 
+def _agent_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _sql_agent_hint_tokens(agent: dict) -> set[str]:
+    tokens: set[str] = set()
+    for key in ("routing_hints", "domain_hints", "schema_hints", "entity_hints"):
+        value = agent.get(key)
+        if isinstance(value, str):
+            tokens.update(_tokenize(value))
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    tokens.update(_tokenize(item))
+    return tokens
+
+
+def _sql_agent_priority(agent: dict) -> int:
+    return _agent_int(agent.get("routing_priority"), 0)
+
+
 def _looks_like_sql_question(question: str, capabilities: dict) -> bool:
     tokens = _tokenize(question)
+    text = str(question or "").strip().lower()
+    if _looks_like_repo_file_scan(question):
+        strong_sql_tokens = {
+            "schema",
+            "schemas",
+            "table",
+            "tables",
+            "column",
+            "columns",
+            "query",
+            "queries",
+            "join",
+            "relationships",
+        }
+        data_entity_tokens = {
+            "patient",
+            "patients",
+            "study",
+            "studies",
+            "user",
+            "users",
+            "customer",
+            "customers",
+            "order",
+            "orders",
+            "record",
+            "records",
+            "row",
+            "rows",
+            "detail",
+            "details",
+        }
+        if not (tokens & strong_sql_tokens) and not (tokens & data_entity_tokens) and not (tokens & _configured_database_tokens(capabilities)):
+            return False
     sql_tokens = {
         "sql",
         "database",
@@ -867,7 +953,125 @@ def _looks_like_sql_question(question: str, capabilities: dict) -> bool:
         return True
     if tokens & _configured_database_tokens(capabilities):
         return True
+    if _has_agent_family(capabilities, "sql_runner"):
+        entity_tokens = {
+            "patient",
+            "patients",
+            "study",
+            "studies",
+            "user",
+            "users",
+            "customer",
+            "customers",
+            "order",
+            "orders",
+            "record",
+            "records",
+            "row",
+            "rows",
+            "detail",
+            "details",
+        }
+        filter_tokens = {
+            "count",
+            "counts",
+            "list",
+            "show",
+            "having",
+            "where",
+            "group",
+            "filter",
+            "greater",
+            "less",
+            "over",
+            "under",
+        }
+        if (tokens & entity_tokens) and (
+            (tokens & filter_tokens)
+            or "more than" in text
+            or "less than" in text
+            or "all their details" in text
+        ):
+            return True
     return False
+
+
+def _looks_like_workspace_file_question(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    tokens = _tokenize(question)
+    pathlike = bool(re.search(r"\.(?:log|txt|md|py|sh|json|yaml|yml|csv|ini|cfg)\b", text))
+    file_tokens = {
+        "file",
+        "files",
+        "path",
+        "paths",
+        "directory",
+        "directories",
+        "folder",
+        "folders",
+        "repo",
+        "repository",
+        "workspace",
+        "log",
+        "logs",
+    }
+    action_tokens = {
+        "find",
+        "tail",
+        "head",
+        "grep",
+        "search",
+        "show",
+        "open",
+        "read",
+        "newest",
+        "latest",
+        "current",
+    }
+    return bool(pathlike or (tokens & file_tokens)) and bool(
+        (tokens & action_tokens) or "current directory" in text or "this repo" in text
+    )
+
+
+def _looks_like_repo_file_scan(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    tokens = _tokenize(question)
+    repo_scope_tokens = {"repo", "repository", "workspace", "directory", "directories", "folder", "folders"}
+    file_scope_tokens = {"file", "files", "path", "paths", "log", "logs"}
+    file_action_tokens = {"find", "list", "show", "search", "open", "read"}
+    return bool(tokens & file_scope_tokens) and (
+        "this repo" in text
+        or "current directory" in text
+        or bool(tokens & repo_scope_tokens)
+    ) and bool(tokens & file_action_tokens)
+
+
+def _looks_like_notification_request(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    return bool(
+        re.search(r"\b(notify|notification|alert|remind|reminder)\b", text)
+        or re.search(r"\b(send|message|ping|tell)\s+(?:me|us|team|channel)\b", text)
+    )
+
+
+UNSAFE_MACHINE_REQUEST_PATTERNS = [
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\brm\s+-rf\b",
+    r"\bmkfs\b",
+    r"\bdd\s+if=",
+    r"\bdelete all docker containers\b",
+    r"\bremove all docker containers\b",
+    r"\bdestroy all docker containers\b",
+    r"\bkill all docker containers\b",
+    r"\bstop all docker containers\b",
+    r"\bdocker\s+(?:rm|rmi|kill|stop|system prune)\b",
+]
+
+
+def _is_unsafe_machine_request(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    return any(re.search(pattern, text) for pattern in UNSAFE_MACHINE_REQUEST_PATTERNS)
 
 
 def _looks_like_slurm_question(question: str) -> bool:
@@ -923,16 +1127,24 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
         "slurm_runner": 0,
         "notifier": 0,
     }
+    looks_like_sql = _looks_like_sql_question(question, capabilities)
+    looks_like_sql_export = _looks_like_sql_export_request(question, capabilities)
 
-    if any(token in question_tokens for token in {"docker", "container", "containers", "git", "grep", "rg", "find", "list", "logs", "restart", "stop", "start", "ps", "ports"}):
+    if any(token in question_tokens for token in {"docker", "container", "containers", "image", "images", "installed", "available", "git", "grep", "rg", "find", "list", "logs", "restart", "stop", "start", "ps", "ports", "tail", "head", "line", "lines"}):
         priority_boosts["shell_runner"] += 10
-    if _looks_like_sql_question(question, capabilities):
+    if _looks_like_workspace_file_question(question) and not looks_like_sql:
+        priority_boosts["shell_runner"] += 15
+    if _looks_like_repo_file_scan(question):
+        priority_boosts["shell_runner"] += 20
+    if looks_like_sql:
         priority_boosts["sql_runner"] += 12
+    if looks_like_sql_export:
+        priority_boosts["sql_runner"] += 18
     if _looks_like_slurm_question(question):
         priority_boosts["slurm_runner"] += 12
     if re.search(r"\b(add|subtract|multiply|divide|calculate|compute|sum)\b", question_lc) or len(re.findall(r"\b\d+(?:\.\d+)?\b", question_lc)) >= 2:
         priority_boosts["shell_runner"] += 10
-    if any(token in question_tokens for token in {"notify", "notification", "alert", "remind", "message"}):
+    if _looks_like_notification_request(question):
         priority_boosts["notifier"] += 10
 
     best_name = None
@@ -949,9 +1161,84 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
     return best_name
 
 
+def _select_sql_target_agent(question: str, capabilities: dict) -> str | None:
+    sql_agents = [
+        agent
+        for agent in capabilities.get("agents", [])
+        if isinstance(agent, dict)
+        and isinstance(agent.get("name"), str)
+        and _agent_family(agent["name"]) == "sql_runner"
+        and "task.plan" in agent.get("subscribes_to", [])
+    ]
+    if not sql_agents:
+        return None
+    if len(sql_agents) == 1:
+        return str(sql_agents[0]["name"])
+
+    question_tokens = _tokenize(question)
+    question_lc = str(question or "").strip().lower()
+    best_name = None
+    best_score = float("-inf")
+    for agent in sql_agents:
+        name = str(agent["name"])
+        alias_tokens = set()
+        for key in ("database_name", "argument_name"):
+            value = agent.get(key)
+            if isinstance(value, str):
+                alias_tokens.update(_tokenize(value))
+        aliases = agent.get("database_aliases")
+        if isinstance(aliases, list):
+            for item in aliases:
+                if isinstance(item, str):
+                    alias_tokens.update(_tokenize(item))
+        hint_tokens = _sql_agent_hint_tokens(agent)
+        score = len(question_tokens & alias_tokens) * 25
+        score += len(question_tokens & hint_tokens) * 12
+        score += len(question_tokens & _tokenize(_agent_search_blob(agent)))
+        score += _sql_agent_priority(agent)
+        database_name = str(agent.get("database_name") or "").strip().lower()
+        if database_name and database_name in question_lc:
+            score += 100
+        if database_name == "dicom_mock" and question_tokens & {"mrn", "dicom", "rtplan", "rtstruct", "rtdose", "series", "instances"}:
+            score += 20
+        if score > best_score:
+            best_score = score
+            best_name = name
+    return best_name
+
+
 def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
     task_lc = task.lower().strip()
     save_path = _extract_save_output_path(task)
+
+    if "current git branch" in task_lc and "working tree" in task_lc and "clean" in task_lc:
+        return 'printf "Branch: %s\\nWorking tree clean: %s\\n" "$(git branch --show-current)" "$(git diff --quiet && echo true || echo false)"'
+
+    if ("newest log file" in task_lc or "latest log file" in task_lc) and (
+        ("last" in task_lc or "tail" in task_lc) and ("line" in task_lc or "lines" in task_lc)
+    ):
+        tail_match = re.search(r"\b(?:last|tail)\s+(\d+)\b", task_lc)
+        tail = tail_match.group(1) if tail_match else "20"
+        return (
+            'file=$(find . -type f -name "*.log" -printf "%T@ %p\\n" 2>/dev/null | sort -nr | head -n 1 | cut -d" " -f2-)'
+            f' && if [ -n "$file" ]; then printf "%s\\n" "$file"; tail -n {tail} "$file";'
+            ' else printf "%s\\n" "No matching log file found."; fi'
+        )
+
+    create_copy_match = re.search(
+        r"file named\s+([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)\s+with\s+(.+?)\s*,\s*copy it to\s+([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)",
+        task,
+        flags=re.IGNORECASE,
+    )
+    if create_copy_match and any(token in task_lc for token in ("path", "paths", "location")):
+        source_path = create_copy_match.group(1)
+        file_content = create_copy_match.group(2).strip().strip("\"'")
+        target_path = create_copy_match.group(3)
+        return (
+            f"printf \"%s\\n\" {json.dumps(file_content)} > {shlex.quote(source_path)}"
+            f" && cp {shlex.quote(source_path)} {shlex.quote(target_path)}"
+            f' && printf "%s\\n%s\\n" "$(realpath {shlex.quote(source_path)})" "$(realpath {shlex.quote(target_path)})"'
+        )
 
     if save_path and any(token in task_lc for token in {"list", "save", "write", "create"}):
         return _build_save_rows_command(save_path)
@@ -961,10 +1248,10 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
             tail_match = re.search(r"\b(?:last|tail)\s+(\d+)\b", task_lc)
             tail = tail_match.group(1) if tail_match else "50"
             return f"docker logs --tail {tail} {{{{prev}}}}"
-        if "tail" in task_lc:
+        if "tail" in task_lc or "line" in task_lc or "lines" in task_lc:
             tail_match = re.search(r"\b(?:last|tail)\s+(\d+)\b", task_lc)
             tail = tail_match.group(1) if tail_match else "20"
-            return f"tail -n {tail} {{{{prev}}}}"
+            return f'if [ -n "{{{{prev}}}}" ]; then tail -n {tail} "{{{{prev}}}}"; else printf "%s\\n" "No matching log file found."; fi'
         if "grep" in task_lc or "filter" in task_lc:
             grep_match = re.search(r"(?:grep|filter)(?:\s+for)?\s+(.+)$", task, flags=re.IGNORECASE)
             if grep_match:
@@ -978,6 +1265,10 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
             return 'printf "%s\\n" "{{prev}}" | grep -ic "error"'
 
     if "docker" in task_lc or "container" in task_lc or "containers" in task_lc:
+        if "count" in task_lc and ("container" in task_lc or "containers" in task_lc):
+            return "docker ps -aq | wc -l"
+        if "count" in task_lc and ("image" in task_lc or "images" in task_lc):
+            return "docker image ls -q | wc -l"
         if "running" in task_lc and "all" not in task_lc:
             return "docker ps"
         if "all" in task_lc and ("container" in task_lc or "containers" in task_lc):
@@ -991,13 +1282,25 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
             return 'docker ps --filter name=vllm --format "{{.ID}}"'
 
     if "newest log file" in task_lc or ("latest log file" in task_lc):
-        return 'find . -type f -name "*.log" -printf "%T@ %p\\n" | sort -nr | head -n 1 | cut -d" " -f2-'
+        return 'find . -type f -name "*.log" -printf "%T@ %p\\n" 2>/dev/null | sort -nr | head -n 1 | cut -d" " -f2-'
 
     if "show listening ports" in task_lc or "listening ports" in task_lc:
         return "ss -ltnp"
 
+    if "top-level directories" in task_lc or "top level directories" in task_lc:
+        return 'find . -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" | sort'
+
     if "current branch" in task_lc:
         return "git branch --show-current"
+
+    if "working tree clean" in task_lc:
+        return 'if git diff --quiet && git diff --cached --quiet; then echo true; else echo false; fi'
+
+    if "last commit message" in task_lc:
+        return "git log --format=%s -n 1"
+
+    if "last commit" in task_lc and "message" not in task_lc:
+        return "git log --oneline -n 1"
 
     if "git status" in task_lc or (task_lc == "status" and step_index == 1):
         return "git status --short"
@@ -1008,8 +1311,41 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
     if "docker images" in task_lc or (task_lc == "images"):
         return "docker images"
 
+    if ("docker" in task_lc) and any(token in task_lc for token in {"installed", "available"}):
+        return 'if command -v docker >/dev/null 2>&1; then echo true; else echo false; fi'
+
     if "docker compose" in task_lc and "ps" in task_lc:
         return "docker compose ps"
+
+    if "database files" in task_lc or ("database" in task_lc and "files" in task_lc):
+        return 'find . -type f \\( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.sql" \\) | sort'
+
+    if "count" in task_lc and "python" in task_lc and "file" in task_lc:
+        code = "\n".join(
+            [
+                "import pathlib",
+                "count = sum(1 for path in pathlib.Path('.').rglob('*.py') if path.is_file())",
+                "print(count)",
+            ]
+        )
+        return "python3 - <<'PY'\n" + code + "\nPY"
+
+    if "largest" in task_lc and "python" in task_lc and "file" in task_lc:
+        limit_match = re.search(r"\b(?:top|largest)\s+(\d+)\b", task_lc)
+        limit = limit_match.group(1) if limit_match else "3"
+        code = "\n".join(
+            [
+                "import pathlib",
+                f"limit = int({limit})",
+                "rows = []",
+                "for path in pathlib.Path('.').rglob('*.py'):",
+                "    if path.is_file():",
+                "        rows.append((path.stat().st_size, str(path)))",
+                "for size, path in sorted(rows, reverse=True)[:limit]:",
+                "    print(f\"{size}\\t{path}\")",
+            ]
+        )
+        return "python3 - <<'PY'\n" + code + "\nPY"
 
     ext_match = re.search(r"files?\s+with\s+extension\s+([a-z0-9]+)\b", task_lc)
     if ext_match:
@@ -1061,17 +1397,106 @@ def _extract_save_output_path(text: str) -> str | None:
     return None
 
 
+EXPORT_REQUEST_MARKERS = (
+    "save",
+    "write",
+    "create",
+    "export",
+    "download",
+)
+
+
+EXPORT_TARGET_MARKERS = (
+    "file",
+    "report",
+    "output",
+    "artifact",
+)
+
+
+EXPORT_LOCATION_MARKERS = (
+    "location",
+    "path",
+    "where",
+    "review",
+)
+
+
+def _slugify_export_task(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", str(text or "").strip().lower()).strip("_")
+    if not slug:
+        return "query_results"
+    return slug[:80].rstrip("_")
+
+
+def _looks_like_sql_export_request(question: str, capabilities: dict) -> bool:
+    if not _looks_like_sql_question(question, capabilities):
+        return False
+    text = re.sub(r"\s+", " ", str(question or "").strip().lower())
+    has_export_verb = any(marker in text for marker in EXPORT_REQUEST_MARKERS)
+    has_target = any(marker in text for marker in EXPORT_TARGET_MARKERS)
+    has_location = any(marker in text for marker in EXPORT_LOCATION_MARKERS)
+    return bool(_extract_save_output_path(text)) or (has_export_verb and has_target) or (has_export_verb and has_location)
+
+
+def _default_export_output_path(question: str) -> str:
+    base_question = re.split(
+        r"\b(?:and\s+(?:save|write|create|export|download)|then\s+(?:save|write|create|export|download))\b",
+        str(question or ""),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    slug = _slugify_export_task(base_question or question)
+    return f"artifacts/exports/{slug}.json"
+
+
+def _resolve_save_output_path(question: str, capabilities: dict) -> str | None:
+    explicit = _extract_save_output_path(question)
+    if explicit:
+        return explicit
+    if _looks_like_sql_export_request(question, capabilities):
+        return _default_export_output_path(question)
+    return None
+
+
 def _build_save_rows_command(path: str) -> str:
-    safe_path = json.dumps(path)
+    script = "\n".join(
+        [
+            "import csv",
+            "import json",
+            "import pathlib",
+            "import sys",
+            "",
+            "input_path = pathlib.Path(sys.argv[1])",
+            "raw = input_path.read_text(encoding='utf-8').strip()",
+            "rows = json.loads(raw) if raw else []",
+            f"path = pathlib.Path({json.dumps(path)})",
+            "path.parent.mkdir(parents=True, exist_ok=True)",
+            "suffix = path.suffix.lower()",
+            "normalized = rows if isinstance(rows, list) else [rows]",
+            "normalized = [row if isinstance(row, dict) else {'value': row} for row in normalized]",
+            "if suffix == '.csv':",
+            "    fieldnames = []",
+            "    for row in normalized:",
+            "        for key in row.keys():",
+            "            if key not in fieldnames:",
+            "                fieldnames.append(key)",
+            "    with path.open('w', newline='', encoding='utf-8') as handle:",
+            "        writer = csv.DictWriter(handle, fieldnames=fieldnames or ['value'])",
+            "        writer.writeheader()",
+            "        writer.writerows(normalized)",
+            "else:",
+            "    path.write_text(json.dumps(normalized, indent=2, ensure_ascii=True, default=str), encoding='utf-8')",
+            "print(path.resolve())",
+        ]
+    )
     return (
-        "python3 -c 'import json,sys,pathlib; "
-        "rows=json.load(sys.stdin); "
-        "lines=[(f\"{row.get(\\\"PatientID\\\", \\\"\\\")}: {row.get(\\\"PatientName\\\", \\\"\\\")}\".strip(\": \") "
-        "if isinstance(row, dict) and (row.get(\"PatientID\") or row.get(\"PatientName\")) "
-        "else (json.dumps(row, ensure_ascii=True) if isinstance(row, dict) else str(row))) for row in rows]; "
-        f"path=pathlib.Path({safe_path}); "
-        "path.write_text(\"\\n\".join(lines)); "
-        "print(path.resolve())'"
+        "tmp_json=$(mktemp) && "
+        "cat > \"$tmp_json\" && "
+        "python3 - \"$tmp_json\" <<'PY'\n"
+        f"{script}\n"
+        "PY\n"
+        "status=$?; rm -f \"$tmp_json\"; exit $status"
     )
 
 
@@ -1100,6 +1525,195 @@ def _derive_shell_result_mode(task: str, command: str | None) -> str | None:
     return None
 
 
+SHELL_COMMAND_OVERRIDE_MARKERS = (
+    "top-level directories",
+    "top level directories",
+    "database files",
+    "docker is installed",
+    "docker installed",
+    "docker available",
+    "newest log file",
+    "latest log file",
+    "current branch",
+    "working tree",
+    "file path",
+    "file paths",
+    "location of the file",
+    "free space",
+    "usable free space",
+    "physical drives",
+    "non physical drives",
+)
+
+
+def _should_override_shell_command(task_lc: str) -> bool:
+    return any(marker in task_lc for marker in SHELL_COMMAND_OVERRIDE_MARKERS)
+
+
+def _looks_like_storage_free_space_request(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    if not text:
+        return False
+    has_space_intent = ("free space" in text) or ("disk space" in text) or ("storage" in text and "free" in text)
+    has_drive_scope = any(token in text for token in ("drive", "drives", "disk", "disks", "mount", "mounts", "physical drives", "physical disks"))
+    wants_total = any(token in text for token in ("total", "across all", "all drives", "usable free space", "how much"))
+    return has_space_intent and has_drive_scope and wants_total
+
+
+def _build_physical_mount_discovery_command() -> str:
+    code = """
+import json
+import sys
+
+data = json.load(sys.stdin)
+mounts = []
+
+def walk(devices, physical_root=None):
+    for dev in devices or []:
+        dtype = str(dev.get("type") or "")
+        name = str(dev.get("name") or "")
+        current = name if dtype == "disk" else physical_root
+        if current:
+            for mount in dev.get("mountpoints") or []:
+                if isinstance(mount, str):
+                    mount = mount.strip()
+                    if mount and mount != "[SWAP]":
+                        mounts.append(mount)
+        walk(dev.get("children") or [], current)
+
+walk(data.get("blockdevices") or [])
+print(json.dumps(sorted(set(mounts))))
+""".strip()
+    return f"lsblk -J -o NAME,TYPE,MOUNTPOINTS | python3 -c {shlex.quote(code)}"
+
+
+def _build_total_free_space_command_gb() -> str:
+    code = """
+import json
+import os
+import sys
+
+mounts = json.load(sys.stdin)
+total = 0
+seen = set()
+
+for mount in mounts:
+    if not isinstance(mount, str):
+        continue
+    mount = mount.strip()
+    if not mount or mount in seen:
+        continue
+    seen.add(mount)
+    try:
+        stat = os.statvfs(mount)
+    except OSError:
+        continue
+    total += stat.f_frsize * stat.f_bavail
+
+print(f"{total / (1024 ** 3):.2f}")
+""".strip()
+    return f"python3 -c {shlex.quote(code)}"
+
+
+def _storage_fallback_steps(question: str, capabilities: dict) -> list[dict]:
+    if not _looks_like_storage_free_space_request(question):
+        return []
+    return [
+        {
+            "id": "step1",
+            "target_agent": "shell_runner",
+            "task": "list mounted filesystems backed by physical drives",
+            "instruction": {
+                "operation": "run_command",
+                "command": _build_physical_mount_discovery_command(),
+                "capture": {"mode": "stdout_stripped"},
+            },
+        },
+        {
+            "id": "step2",
+            "target_agent": "shell_runner",
+            "task": "total usable free space across physical drives (GB)",
+            "instruction": {
+                "operation": "run_command",
+                "command": _build_total_free_space_command_gb(),
+                "input": {"$from": "step1.value"},
+                "capture": {"mode": "stdout_stripped"},
+            },
+            "depends_on": ["step1"],
+        },
+    ]
+
+
+def _derive_shell_instruction(task: str, index: int) -> dict | None:
+    command = _derive_shell_command(task, index)
+    if not isinstance(command, str) or not command.strip():
+        return None
+    instruction: dict[str, Any] = {"operation": "run_command", "command": command.strip()}
+    derived_mode = _derive_shell_result_mode(task, instruction["command"])
+    if derived_mode:
+        instruction["capture"] = {"mode": derived_mode}
+    env_name = _extract_conda_env_name(task, instruction.get("command"))
+    if env_name and _is_conda_env_existence_task(task, instruction.get("command")):
+        instruction["command"] = _build_conda_env_exists_command(env_name)
+        instruction["capture"] = {"mode": "json"}
+        instruction["allow_returncodes"] = [0, 1]
+    return instruction
+
+
+def _normalize_shell_instruction(task: str, instruction: dict | None, command: str | None, index: int):
+    task_lc = task.lower()
+    derived_instruction = _derive_shell_instruction(task, index)
+    shell_instruction = instruction if isinstance(instruction, dict) and instruction.get("operation") == "run_command" else None
+
+    if (
+        shell_instruction is not None
+        and isinstance(shell_instruction.get("command"), str)
+        and derived_instruction
+        and _should_override_shell_command(task_lc)
+    ):
+        shell_instruction = {
+            **shell_instruction,
+            "command": derived_instruction["command"],
+        }
+        if "capture" in derived_instruction and not isinstance(shell_instruction.get("capture"), dict):
+            shell_instruction["capture"] = derived_instruction["capture"]
+        if "allow_returncodes" in derived_instruction:
+            shell_instruction["allow_returncodes"] = derived_instruction["allow_returncodes"]
+
+    if shell_instruction is None:
+        if isinstance(command, str) and command.strip():
+            stripped = command.strip()
+            if derived_instruction and _should_override_shell_command(task_lc):
+                stripped = str(derived_instruction["command"])
+            if _looks_like_metadata_command(stripped):
+                return None
+            shell_instruction = {"operation": "run_command", "command": stripped}
+        else:
+            shell_instruction = dict(derived_instruction) if isinstance(derived_instruction, dict) else None
+
+    if not isinstance(shell_instruction, dict):
+        return None
+
+    capture = shell_instruction.get("capture")
+    if not isinstance(capture, dict):
+        derived_mode = _derive_shell_result_mode(task, shell_instruction.get("command"))
+        if derived_mode:
+            shell_instruction = {
+                **shell_instruction,
+                "capture": {"mode": derived_mode},
+            }
+
+    env_name = _extract_conda_env_name(task, shell_instruction.get("command"))
+    if env_name and _is_conda_env_existence_task(task, shell_instruction.get("command")):
+        shell_instruction = {
+            **shell_instruction,
+            "command": _build_conda_env_exists_command(env_name),
+            "capture": {"mode": "json"},
+            "allow_returncodes": [0, 1],
+        }
+    return shell_instruction
+
+
 def _derive_presentation(question: str) -> dict:
     question_lc = question.lower()
     presentation = {
@@ -1109,7 +1723,16 @@ def _derive_presentation(question: str) -> dict:
         "include_context": True,
         "include_internal_steps": False,
     }
-    if any(token in question_lc for token in ("table", "tabulate", "columns", "rows", "compare", "comparison", "status", "list")):
+    docker_listing_request = (
+        "docker" in question_lc
+        and any(token in question_lc for token in ("container", "containers"))
+        and any(token in question_lc for token in ("list", "show"))
+        and "table" not in question_lc
+    )
+    if docker_listing_request:
+        presentation["format"] = "markdown"
+        presentation["task"] = "Show the raw Docker command output clearly in a preformatted block."
+    elif any(token in question_lc for token in ("table", "tabulate", "columns", "rows", "compare", "comparison", "status", "list")):
         presentation["format"] = "markdown_table"
         presentation["task"] = "Render the result as a clean Markdown table with helpful context."
     elif any(token in question_lc for token in ("json", "raw json")):
@@ -1122,7 +1745,25 @@ def _derive_presentation(question: str) -> dict:
     elif any(token in question_lc for token in ("brief", "concise", "short")):
         presentation["include_context"] = False
 
-    if any(token in question_lc for token in ("show command", "commands used", "how did", "debug", "workflow", "steps")):
+    if any(
+        token in question_lc
+        for token in (
+            "show command",
+            "commands used",
+            "how did",
+            "debug",
+            "workflow",
+            "steps",
+            "stage",
+            "stages",
+            "raw output",
+            "raw outputs",
+            "stdout",
+            "stderr",
+            "log output",
+            "logs",
+        )
+    ):
         presentation["include_internal_steps"] = True
     return presentation
 
@@ -1198,36 +1839,7 @@ def _normalize_agent_instruction(target_agent: str, task: str, instruction: dict
         return {"operation": "query_from_request", "question": task}
 
     if target_agent == "shell_runner":
-        shell_instruction = instruction if isinstance(instruction, dict) and instruction.get("operation") == "run_command" else None
-        if shell_instruction is None:
-            if isinstance(command, str) and command.strip():
-                stripped = command.strip()
-                if _looks_like_metadata_command(stripped):
-                    return None
-                shell_instruction = {"operation": "run_command", "command": stripped}
-            else:
-                derived = _derive_shell_command(task, index)
-                if derived:
-                    shell_instruction = {"operation": "run_command", "command": derived}
-        if not isinstance(shell_instruction, dict):
-            return None
-        capture = shell_instruction.get("capture")
-        if not isinstance(capture, dict):
-            derived_mode = _derive_shell_result_mode(task, shell_instruction.get("command"))
-            if derived_mode:
-                shell_instruction = {
-                    **shell_instruction,
-                    "capture": {"mode": derived_mode},
-                }
-        env_name = _extract_conda_env_name(task, shell_instruction.get("command"))
-        if env_name and _is_conda_env_existence_task(task, shell_instruction.get("command")):
-            shell_instruction = {
-                **shell_instruction,
-                "command": _build_conda_env_exists_command(env_name),
-                "capture": {"mode": "json"},
-                "allow_returncodes": [0, 1],
-            }
-        return shell_instruction
+        return _normalize_shell_instruction(task, instruction, command, index)
 
     if target_agent == "filesystem":
         if _is_presentation_only_task(task):
@@ -1253,6 +1865,24 @@ def _looks_like_metadata_command(command: str) -> bool:
             r"^[a-zA-Z_][\w.-]*\s+emits\s+event\s+[a-zA-Z_][\w.-]*$",
         )
     )
+
+
+FOLLOWUP_PLACEHOLDER_RE = re.compile(
+    r"\{(file_path|filepath|path|file|filename|value|result|prev|previous|container_id|container_name|branch)\}",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_followup_shell_instruction(instruction: dict, prior_step_id: str | None = None) -> dict:
+    if not isinstance(instruction, dict):
+        return instruction
+    normalized = dict(instruction)
+    command = normalized.get("command")
+    if isinstance(command, str) and command.strip():
+        rewritten = FOLLOWUP_PLACEHOLDER_RE.sub("{{prev}}", command)
+        if rewritten != command:
+            normalized["command"] = rewritten
+    return normalized
 
 
 def _extract_conda_env_name(task: str, command: str | None = None) -> str | None:
@@ -1366,6 +1996,24 @@ def _format_capability_answer(capabilities: dict) -> str:
 
 
 def _fallback_steps(question: str, capabilities: dict):
+    mixed_parts = _mixed_count_and_detail_parts(question)
+    if mixed_parts is not None and _looks_like_sql_question(question, capabilities):
+        target_agent = _select_sql_target_agent(question, capabilities)
+        if target_agent and _agent_family(target_agent) == "sql_runner":
+            return [
+                {
+                    "id": "step1",
+                    "target_agent": target_agent,
+                    "task": "List the qualifying rows with requested details",
+                    "instruction": {
+                        "operation": "query_from_request",
+                        "question": _mixed_count_detail_sql_question(question),
+                    },
+                },
+            ]
+    storage_steps = _storage_fallback_steps(question, capabilities)
+    if storage_steps:
+        return storage_steps
     compound_steps = _compound_fallback_steps(question, capabilities)
     if compound_steps:
         return compound_steps
@@ -1396,9 +2044,49 @@ def _sql_fallback_steps(question: str, capabilities: dict):
 def _sql_fallback_steps_for_task(planning_question: str, task_question: str, capabilities: dict):
     if not _looks_like_sql_question(planning_question, capabilities):
         return []
-    target_agent = _select_target_agent(planning_question, capabilities)
+    target_agent = _select_sql_target_agent(planning_question, capabilities)
     if not target_agent or _agent_family(target_agent) != "sql_runner":
         return []
+    export_path = _resolve_save_output_path(task_question, capabilities)
+    if _planner_is_schema_request(task_question):
+        schema_step = {
+            "id": "step1",
+            "target_agent": target_agent,
+            "task": task_question.strip(),
+            "instruction": {
+                "operation": "inspect_schema",
+                "focus": task_question.strip(),
+            },
+        }
+        if export_path and _looks_like_save_list_sql_request(task_question, capabilities):
+            return [schema_step, _build_save_rows_step("step1", export_path, 2)]
+        return [schema_step]
+    if export_path and _looks_like_save_list_sql_request(task_question, capabilities):
+        return [
+            {
+                "id": "step1",
+                "target_agent": target_agent,
+                "task": "List the qualifying rows with requested details",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": _list_query_from_request(task_question),
+                },
+            },
+            _build_save_rows_step("step1", export_path, 2),
+        ]
+    mixed_parts = _mixed_count_and_detail_parts(task_question)
+    if mixed_parts is not None:
+        return [
+            {
+                "id": "step1",
+                "target_agent": target_agent,
+                "task": "List the qualifying rows with requested details",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": _mixed_count_detail_sql_question(task_question),
+                },
+            },
+        ]
     return [
         {
             "id": "step1",
@@ -1424,40 +2112,46 @@ def _current_request_from_context(question: str) -> str:
     return current or question
 
 
-COMPOUND_REQUEST_MARKER_RE = re.compile(
-    r"\b(?:how many|count|list|show|find|which|what(?:\s+is|\s+are)?)\b",
-    flags=re.IGNORECASE,
-)
-
-
 def _split_compound_request(question: str) -> list[str]:
     text = re.sub(r"\s+", " ", question).strip()
     if not text:
         return []
-
-    matches = list(COMPOUND_REQUEST_MARKER_RE.finditer(text))
-    if len(matches) < 2:
-        return [text]
-
-    split_points = [0]
-    lower_text = text.lower()
-    for match in matches[1:]:
-        prefix = lower_text[split_points[-1] : match.start()]
-        if any(separator in prefix for separator in (" and ", ", and ", ";", ",")):
-            split_points.append(match.start())
-
-    if len(split_points) < 2:
-        return [text]
-
-    parts = []
-    split_points.append(len(text))
-    for start, end in zip(split_points, split_points[1:]):
-        part = text[start:end].strip(" ,;")
-        part = re.sub(r"\s+(?:,?\s*and|;)\s*$", "", part, flags=re.IGNORECASE)
-        part = re.sub(r"^(?:and|then|also)\s+", "", part, flags=re.IGNORECASE)
-        if part:
-            parts.append(part)
+    separator_re = re.compile(
+        r"\s*(?:;|,?\s+and\s+|,?\s+then\s+|,\s+also\s+)(?=(?:what\b|how\b|count\b|list\b|show\b|find\b|which\b|is\b|are\b|does\b|do\b|did\b|can\b|has\b|have\b|current\b|last\b|latest\b|get\b|provide\b|check\b|create\b|copy\b|save\b|write\b|tail\b|open\b|read\b))",
+        flags=re.IGNORECASE,
+    )
+    parts = [
+        re.sub(r"^(?:and|then|also)\s+", "", part.strip(" ,;"), flags=re.IGNORECASE)
+        for part in separator_re.split(text)
+        if part and part.strip(" ,;")
+    ]
     return parts or [text]
+
+
+def _normalize_compound_shell_part(part: str, question: str) -> str:
+    compact = re.sub(r"\s+", " ", str(part or "").strip(" ,;"))
+    if not compact:
+        return compact
+    compact_lc = compact.lower()
+    question_lc = str(question or "").lower()
+    if any(marker in compact_lc for marker in COUNT_REQUEST_MARKERS):
+        entity = _strip_count_request_prefix(compact)
+        entity_lc = entity.lower()
+        if "docker" in question_lc and "docker" not in entity_lc:
+            if re.search(r"\bcontainers?\b", entity_lc):
+                entity = f"docker {entity}"
+            elif re.search(r"\bimages?\b", entity_lc):
+                entity = f"docker {entity}"
+        compact = f"count {entity}".strip()
+    elif "docker" in question_lc and "docker" not in compact_lc:
+        if re.search(r"\bcontainers?\b", compact_lc):
+            compact = re.sub(r"\bcontainers?\b", lambda m: f"docker {m.group(0)}", compact, count=1, flags=re.IGNORECASE)
+        elif re.search(r"\bimages?\b", compact_lc):
+            compact = re.sub(r"\bimages?\b", lambda m: f"docker {m.group(0)}", compact, count=1, flags=re.IGNORECASE)
+    if "git" in question_lc and "git" not in compact_lc:
+        if any(token in compact_lc for token in ("branch", "commit", "commits", "working tree", "status", "log")):
+            compact = f"git {compact}".strip()
+    return compact
 
 
 def _compound_fallback_steps(question: str, capabilities: dict):
@@ -1467,18 +2161,45 @@ def _compound_fallback_steps(question: str, capabilities: dict):
 
     steps = []
     for index, part in enumerate(parts, start=1):
-        target_agent = _select_target_agent(part, capabilities)
+        previous_step = steps[-1] if steps else None
+        previous_target = str(previous_step.get("target_agent") or "") if isinstance(previous_step, dict) else ""
+        previous_step_id = str(previous_step.get("id") or "") if isinstance(previous_step, dict) else ""
+        followup_task = None
+        part_lc = part.lower()
+        if previous_target == "shell_runner":
+            if ("last" in part_lc or "tail" in part_lc) and ("line" in part_lc or "lines" in part_lc):
+                tail_match = re.search(r"\b(?:last|tail)\s+(\d+)\b", part_lc)
+                tail = tail_match.group(1) if tail_match else "20"
+                followup_task = f"show the last {tail} lines of {{prev}}"
+        normalized_part = _normalize_compound_shell_part(part, question)
+        target_agent = _select_target_agent(normalized_part, capabilities) or _select_target_agent(part, capabilities)
+        normalized_lc = normalized_part.lower()
+        if not target_agent and any(
+            token in normalized_lc
+            for token in ("docker", "container", "containers", "image", "images", "installed", "available", "git", "file", "files", "port", "ports", "log", "logs")
+        ):
+            target_agent = "shell_runner"
+        if not target_agent and any(
+            token in normalized_lc
+            for token in ("branch", "commit", "commits", "working tree", "status")
+        ):
+            target_agent = "shell_runner"
         if not target_agent or target_agent in {"ops_planner", "synthesizer"}:
             return []
-        instruction = _normalize_agent_instruction(target_agent, part, None, None, index)
+        effective_task = followup_task or normalized_part
+        if followup_task:
+            target_agent = "shell_runner"
+        instruction = _normalize_agent_instruction(target_agent, effective_task, None, None, index)
         if not isinstance(instruction, dict) or not instruction:
             return []
         step = {
             "id": f"step{index}",
             "target_agent": target_agent,
-            "task": part,
+            "task": effective_task,
             "instruction": instruction,
         }
+        if followup_task and previous_step_id:
+            step["depends_on"] = [previous_step_id]
         steps.append(step)
     return steps
 
@@ -1492,6 +2213,8 @@ def _recover_compound_steps(question: str, steps: list[dict], capabilities: dict
 
     original_task = str(steps[0].get("task") or "").strip().lower()
     split_tasks = {str(step.get("task") or "").strip().lower() for step in compound_steps}
+    if original_task == question.strip().lower():
+        return compound_steps
     if original_task and original_task in split_tasks:
         return compound_steps
     if original_task != question.strip().lower():
@@ -1502,76 +2225,235 @@ def _recover_compound_steps(question: str, steps: list[dict], capabilities: dict
 def _looks_like_save_list_sql_request(question: str, capabilities: dict) -> bool:
     question_lc = question.lower()
     return (
-        _looks_like_sql_question(question, capabilities)
-        and bool(re.search(r"\b(?:save|write)\b", question_lc))
+        _looks_like_sql_export_request(question, capabilities)
         and bool(re.search(r"\b(?:list|llist|users|patients|rows|results|tables|schema)\b", question_lc))
     )
 
 
+DETAIL_REQUEST_MARKERS = (
+    "provide",
+    "show",
+    "list",
+    "include",
+    "return",
+    "with their",
+    "including",
+    "details",
+    "detail",
+    "mrn",
+    "name",
+    "names",
+    "rows",
+    "columns",
+    "fields",
+    "attributes",
+)
+
+
+COUNT_REQUEST_MARKERS = (
+    "how many",
+    "count ",
+    "count of",
+    "number of",
+    "total number",
+    "total count",
+)
+
+
+DETAIL_SPLIT_MARKERS = (
+    " and provide ",
+    " and show ",
+    " and list ",
+    " and include ",
+    " and return ",
+    " including ",
+    " with their ",
+)
+
+
+def _looks_like_mixed_count_and_detail_request(question: str) -> bool:
+    text = re.sub(r"\s+", " ", str(question or "").strip().lower())
+    if not text:
+        return False
+    has_count = any(marker in text for marker in COUNT_REQUEST_MARKERS)
+    if not has_count:
+        return False
+    return any(marker in text for marker in DETAIL_REQUEST_MARKERS)
+
+
+def _strip_count_request_prefix(text: str) -> str:
+    compact = re.sub(r"\s+", " ", text).strip(" ,")
+    patterns = (
+        r"^what\s+is\s+the\s+count\s+of\s+",
+        r"^what\s+is\s+count\s+of\s+",
+        r"^what\s+is\s+the\s+number\s+of\s+",
+        r"^what\s+is\s+the\s+total\s+count\s+of\s+",
+        r"^count of\s+",
+        r"^count\s+of\s+",
+        r"^count\s+",
+        r"^how many\s+",
+        r"^number of\s+",
+        r"^total number of\s+",
+        r"^total count of\s+",
+    )
+    for pattern in patterns:
+        rewritten = re.sub(pattern, "", compact, flags=re.IGNORECASE).strip(" ,")
+        if rewritten != compact:
+            return rewritten
+    return compact
+
+
+def _mixed_count_and_detail_parts(question: str) -> tuple[str, str] | None:
+    text = re.sub(r"\s+", " ", str(question or "").strip())
+    if not _looks_like_mixed_count_and_detail_request(text):
+        return None
+    lower_text = text.lower()
+    split_index = -1
+    split_marker = ""
+    for marker in DETAIL_SPLIT_MARKERS:
+        index = lower_text.find(marker)
+        if index != -1 and (split_index == -1 or index < split_index):
+            split_index = index
+            split_marker = marker
+    if split_index != -1:
+        count_part = text[:split_index].strip(" ,")
+        detail_part = text[split_index + len(split_marker) :].strip(" ,")
+    else:
+        count_part = text
+        detail_part = ""
+    count_question = count_part
+    if not any(marker in count_question.lower() for marker in COUNT_REQUEST_MARKERS):
+        count_question = f"count {count_question}".strip()
+    entity_part = _strip_count_request_prefix(count_part) or count_part
+    detail_clause = detail_part.strip()
+    if detail_clause:
+        detail_clause = re.sub(r"^(?:me\s+)?their\s+", "their ", detail_clause, flags=re.IGNORECASE)
+        detail_clause = re.sub(r"^(?:the\s+)?", "", detail_clause, flags=re.IGNORECASE)
+        detail_question = (
+            f"list {entity_part} and include {detail_clause}. "
+            "Include the qualifying aggregate count used for filtering as a returned column. "
+            "Return one row per matching result and do not return only an aggregate count."
+        )
+    else:
+        detail_question = (
+            f"list {entity_part}. "
+            "Include the qualifying aggregate count used for filtering as a returned column. "
+            "Return one row per matching result and include identifying and relevant detail columns. "
+            "Do not return only an aggregate count."
+        )
+    return count_question.strip(), detail_question.strip()
+
+
+def _mixed_count_detail_sql_question(question: str) -> str:
+    compact = re.sub(r"\s+", " ", str(question or "").strip()).strip(" ,")
+    return (
+        f"{compact}. "
+        "Return one row per matching result with identifying and requested detail columns. "
+        "Preserve the exact filtering criteria from the request, including aggregate filters such as counts or thresholds. "
+        "Include the qualifying aggregate used for filtering as a returned column when relevant. "
+        "Do not broaden the result set and do not return only an aggregate count."
+    ).strip()
+
+
+def _expand_mixed_sql_steps(question: str, steps: list[dict], capabilities: dict) -> list[dict]:
+    if not steps or not _looks_like_sql_question(question, capabilities):
+        return steps
+    parts = _mixed_count_and_detail_parts(question)
+    if parts is None:
+        return steps
+    if len(steps) == 1 and _agent_family(str(steps[0].get("target_agent"))) == "sql_runner":
+        return steps
+    if not all(_agent_family(str(step.get("target_agent"))) == "sql_runner" for step in steps):
+        return steps
+    sql_step = steps[-1]
+    target_agent = sql_step.get("target_agent")
+    step1_id = str(sql_step.get("id") or "step1")
+    return [
+        {
+            "id": step1_id,
+            "target_agent": target_agent,
+            "task": "List the qualifying rows with requested details",
+            "instruction": {
+                "operation": "query_from_request",
+                "question": _mixed_count_detail_sql_question(question),
+            },
+        },
+    ]
+
+
 def _list_query_from_request(question: str) -> str:
     compact = re.sub(r"\s+", " ", question).strip()
-    compact = re.split(r"\s*,\s*(?:create|save|write)\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    compact = re.split(r"\b(?:and then|then)\b\s+(?:create|save|write)\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    compact = re.split(r"\s*,\s*(?:create|save|write|export|download)\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    compact = re.split(r"\b(?:and then|then)\b\s+(?:create|save|write|export|download)\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    compact = re.split(r"\s+and\s+(?:create|save|write|export|download)\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    compact = re.split(r"\s+and\s+provide\s+(?:me\s+)?(?:the\s+)?(?:location|path)\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    compact = re.split(r"\s+so\s+i\s+can\s+review\b", compact, maxsplit=1, flags=re.IGNORECASE)[0].strip(" ,.")
     return (
-        f"{compact}. Return one row per matching patient and include PatientID and PatientName. "
+        f"{compact}. Return one row per matching result and include all relevant detail columns. "
         "Do not return only an aggregate count."
     )
 
 
-def _align_sql_steps_with_downstream_needs(question: str, steps: list[dict], capabilities: dict) -> list[dict]:
-    if not steps or not _looks_like_save_list_sql_request(question, capabilities):
+def _expand_sql_export_steps(question: str, steps: list[dict], capabilities: dict) -> list[dict]:
+    if not _looks_like_save_list_sql_request(question, capabilities):
         return steps
 
-    save_path = _extract_save_output_path(question)
+    save_path = _resolve_save_output_path(question, capabilities)
     if not save_path:
         return steps
 
+    sql_steps = [step for step in steps if _agent_family(str(step.get("target_agent"))) == "sql_runner"]
+    if not sql_steps:
+        target_agent = _select_sql_target_agent(question, capabilities)
+        if not target_agent or _agent_family(target_agent) != "sql_runner":
+            return steps
+        return [
+            {
+                "id": "step1",
+                "target_agent": target_agent,
+                "task": "List the qualifying rows with requested details",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": _list_query_from_request(question),
+                },
+            },
+            _build_save_rows_step("step1", save_path, 2),
+        ]
+
+    export_source_step_id = str(sql_steps[-1].get("id") or "step1")
     aligned = []
-    saw_sql_list_rewrite = False
     saw_save_step = False
-    first_sql_step_id = None
     for index, step in enumerate(steps):
         updated = dict(step)
         target_agent = updated.get("target_agent")
         instruction = updated.get("instruction")
-        if first_sql_step_id is None and _agent_family(str(target_agent)) == "sql_runner":
-            first_sql_step_id = str(updated.get("id") or f"step{index+1}")
         if (
-            not saw_sql_list_rewrite
+            str(updated.get("id") or "") == export_source_step_id
             and _agent_family(str(target_agent)) == "sql_runner"
             and isinstance(instruction, dict)
             and instruction.get("operation") == "query_from_request"
         ):
-            downstream = steps[index + 1] if index + 1 < len(steps) else None
-            if isinstance(downstream, dict) and str(downstream.get("target_agent")) == "shell_runner":
-                downstream_task = str(downstream.get("task") or "")
-                if _extract_save_output_path(downstream_task):
-                    updated_instruction = dict(instruction)
-                    updated_instruction["question"] = _list_query_from_request(question)
-                    updated["instruction"] = updated_instruction
-                    updated["task"] = "List the qualifying patients from mydb with identifying columns for export"
-                    saw_sql_list_rewrite = True
+            updated_instruction = dict(instruction)
+            updated_instruction["question"] = _list_query_from_request(question)
+            updated["instruction"] = updated_instruction
+            updated["task"] = "List the qualifying rows with requested details for export"
 
-        if (
-            str(updated.get("target_agent")) == "shell_runner"
-            and _extract_save_output_path(str(updated.get("task") or ""))
+        if str(updated.get("target_agent")) == "shell_runner" and any(
+            marker in str(updated.get("task") or "").lower()
+            for marker in EXPORT_REQUEST_MARKERS + EXPORT_TARGET_MARKERS
         ):
             saw_save_step = True
-            command = _derive_shell_command(str(updated.get("task") or ""), index + 1)
-            if command:
-                input_ref = None
-                if isinstance(updated.get("instruction"), dict):
-                    input_ref = updated["instruction"].get("input")
-                updated["instruction"] = {
-                    "operation": "run_command",
-                    "command": command,
-                    "capture": {"mode": "stdout_stripped"},
-                }
-                if input_ref is not None:
-                    updated["instruction"]["input"] = input_ref
+            updated["task"] = f"Save the exported rows to {save_path} and print the absolute file path"
+            updated["instruction"] = {
+                "operation": "run_command",
+                "command": _build_save_rows_command(save_path),
+                "input": {"$from": f"{export_source_step_id}.rows"},
+                "capture": {"mode": "stdout_stripped"},
+            }
+            updated["depends_on"] = [export_source_step_id]
         aligned.append(updated)
-    if first_sql_step_id and not saw_save_step:
-        aligned.append(_build_save_rows_step(first_sql_step_id, save_path, len(aligned) + 1))
+    if not saw_save_step:
+        aligned.append(_build_save_rows_step(export_source_step_id, save_path, len(aligned) + 1))
     return aligned
 
 
@@ -1618,6 +2500,15 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             target_agent = _select_target_agent(task or question, capabilities)
         if not target_agent or target_agent in {"ops_planner", "synthesizer"}:
             continue
+        if _agent_family(target_agent) == "notifier" and not _looks_like_notification_request(task or question):
+            target_agent = "shell_runner" if _looks_like_workspace_file_question(task or question) or "git" in (task or question).lower() else _select_target_agent(question, capabilities)
+            if not target_agent or _agent_family(target_agent) == "notifier":
+                target_agent = "shell_runner"
+        if (
+            _agent_family(target_agent) == "sql_runner"
+            and (_looks_like_repo_file_scan(task or question) or (_looks_like_workspace_file_question(task or question) and not _looks_like_sql_question(task or question, capabilities)))
+        ):
+            target_agent = "shell_runner"
         if _is_presentation_only_task(task or question):
             continue
         normalized_step = {
@@ -1625,6 +2516,20 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             "target_agent": target_agent,
             "task": task or question,
         }
+        clean_depends_on = []
+        depends_on = step.get("depends_on")
+        if isinstance(depends_on, list):
+            clean_depends_on = [item for item in depends_on if isinstance(item, str) and item.strip()]
+        if (
+            target_agent == "shell_runner"
+            and clean_depends_on
+            and "{{prev}}" not in normalized_step["task"].lower()
+        ):
+            task_lc = normalized_step["task"].lower()
+            if ("last" in task_lc or "tail" in task_lc) and ("line" in task_lc or "lines" in task_lc):
+                tail_match = re.search(r"\b(?:last|tail)\s+(\d+)\b", task_lc)
+                tail = tail_match.group(1) if tail_match else "20"
+                normalized_step["task"] = f"show the last {tail} lines of {{prev}}"
         result_mode = step.get("result_mode")
         if target_agent == "shell_runner" and isinstance(instruction, dict) and isinstance(result_mode, str) and result_mode.strip():
             normalized_instruction = dict(instruction)
@@ -1645,6 +2550,9 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
         )
         if not isinstance(normalized_instruction, dict) or not normalized_instruction:
             continue
+        if target_agent == "shell_runner":
+            previous_step_id = normalized[-1]["id"] if normalized else None
+            normalized_instruction = _normalize_followup_shell_instruction(normalized_instruction, previous_step_id)
         if _step_semantic_drift(question, target_agent, normalized_step["task"], normalized_instruction):
             _debug_log(
                 "Rejecting semantically drifted step and recovering to original request: "
@@ -1664,22 +2572,27 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             normalized_step["task"] = question
             normalized_instruction = recovered_instruction
         normalized_step["instruction"] = normalized_instruction
-        depends_on = step.get("depends_on")
-        if isinstance(depends_on, list):
-            clean_depends_on = [item for item in depends_on if isinstance(item, str) and item.strip()]
-            if clean_depends_on:
-                normalized_step["depends_on"] = clean_depends_on
+        if clean_depends_on:
+            normalized_step["depends_on"] = clean_depends_on
         when = step.get("when")
         if isinstance(when, dict) and when:
             normalized_step["when"] = when
         normalized.append(normalized_step)
         available_step_ids.add(normalized_step["id"])
     normalized = _recover_compound_steps(question, normalized, capabilities)
-    return _align_sql_steps_with_downstream_needs(question, normalized, capabilities)
+    normalized = _expand_mixed_sql_steps(question, normalized, capabilities)
+    return _expand_sql_export_steps(question, normalized, capabilities)
 
 
 def _normalize_presentation(question: str, presentation: dict | None):
     normalized = _derive_presentation(question)
+    question_lc = question.lower()
+    docker_listing_request = (
+        "docker" in question_lc
+        and any(token in question_lc for token in ("container", "containers"))
+        and any(token in question_lc for token in ("list", "show"))
+        and "table" not in question_lc
+    )
     if not isinstance(presentation, dict):
         return normalized
 
@@ -1697,7 +2610,16 @@ def _normalize_presentation(question: str, presentation: dict | None):
     for key in ("include_context", "include_internal_steps"):
         value = presentation.get(key)
         if isinstance(value, bool):
-            normalized[key] = value
+            normalized[key] = normalized[key] or value if key == "include_internal_steps" else value
+    if (
+        _looks_like_sql_question(question, CAPABILITIES)
+        and not _planner_is_schema_request(question)
+        and normalized.get("format") == "markdown_table"
+    ):
+        normalized["task"] = "Show grounded SQL results in a clean Markdown table."
+    if docker_listing_request:
+        normalized["format"] = "markdown"
+        normalized["task"] = "Show the raw Docker command output clearly in a preformatted block."
     return normalized
 
 
@@ -1706,6 +2628,14 @@ def _steps_signature(steps: list[dict]) -> str:
 
 
 def _build_primary_plan(question: str, decision: dict, capabilities: dict):
+    if _looks_like_sql_export_request(question, capabilities):
+        sql_export_steps = _sql_fallback_steps(question, capabilities)
+        if sql_export_steps:
+            return sql_export_steps
+    if _should_override_shell_command(question.lower()):
+        deterministic_shell_steps = _fallback_steps(question, capabilities)
+        if deterministic_shell_steps:
+            return deterministic_shell_steps
     raw_primary = decision.get("steps", [])
     primary_steps = _normalize_steps(question, raw_primary, capabilities) if raw_primary else []
     if primary_steps:
@@ -1801,6 +2731,38 @@ def _sql_plan_emits(question: str, allowed_events: set[str], task_question: str 
     return emits
 
 
+def _fallback_plan_emits(question: str, allowed_events: set[str], task_question: str | None = None):
+    task_question = task_question or _current_request_from_context(question)
+    if "task.plan" not in allowed_events:
+        return None
+    steps = _fallback_steps(task_question, CAPABILITIES)
+    if not steps:
+        return None
+    presentation = _normalize_presentation(task_question, None)
+    payload = {
+        "task": task_question,
+        "task_shape": _infer_task_shape(
+            task_question,
+            target_agent=steps[0]["target_agent"] if len(steps) == 1 else None,
+            presentation=presentation,
+        ),
+        "steps": steps,
+        "presentation": presentation,
+    }
+    if len(steps) == 1:
+        payload["target_agent"] = steps[0]["target_agent"]
+    emits = []
+    if "plan.progress" in allowed_events:
+        emits.append(
+            {
+                "event": "plan.progress",
+                "payload": _plan_progress_payload(task_question, steps, presentation),
+            }
+        )
+    emits.append({"event": "task.plan", "payload": payload})
+    return emits
+
+
 def _fallback_replan_steps(payload: dict, capabilities: dict):
     task = str(payload.get("task") or "").strip()
     if not task:
@@ -1828,6 +2790,8 @@ def handle_event(req: EventRequest):
         if isinstance(agents, list):
             CAPABILITIES["agents"] = agents
             CAPABILITIES["available_events"] = _derive_available_events(agents)
+        execution_policy = req.payload.get("execution_policy")
+        CAPABILITIES["execution_policy"] = execution_policy if isinstance(execution_policy, dict) else {}
         return {"emits": []}
 
     if req.event == "planner.replan.request":
@@ -1889,6 +2853,20 @@ def handle_event(req: EventRequest):
     question = req.payload["question"]
     current_question = _current_request_from_context(question)
     allowed_events = set(CAPABILITIES.get("available_events", DEFAULT_ALLOWED_EVENTS))
+    if _is_unsafe_machine_request(current_question) and "task.result" in allowed_events:
+        return {
+            "emits": [
+                {
+                    "event": "task.result",
+                    "payload": {
+                        "detail": (
+                            "I won’t autonomously plan high-risk destructive machine operations. "
+                            "Please use a safer, more specific alternative."
+                        )
+                    },
+                }
+            ]
+        }
     if _is_capability_question(current_question) and "task.result" in allowed_events:
         return {
             "emits": [
@@ -1946,6 +2924,10 @@ def handle_event(req: EventRequest):
         _debug_log(f"LLM planning failed. Error: {type(exc).__name__}: {exc}")
 
     emits = _sql_plan_emits(question, allowed_events, current_question)
+    if emits is not None:
+        return {"emits": emits}
+
+    emits = _fallback_plan_emits(question, allowed_events, current_question)
     if emits is not None:
         return {"emits": emits}
 

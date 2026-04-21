@@ -10,8 +10,12 @@ fi
 
 export LLM_OPS_API_KEY="${LLM_OPS_API_KEY:-dummy}"
 export LLM_OPS_BASE_URL="${LLM_OPS_BASE_URL:-http://127.0.0.1:8000/v1}"
-export LLM_OPS_MODEL="${LLM_OPS_MODEL:-deepseek-ai/deepseek-coder-6.7b-instruct}"
-export LLM_OPS_SYNTH_MODEL="${LLM_OPS_SYNTH_MODEL:-$LLM_OPS_MODEL}"
+if [[ -n "${LLM_OPS_MODEL:-}" ]]; then
+  export LLM_OPS_MODEL
+fi
+if [[ -n "${LLM_OPS_SYNTH_MODEL:-}" ]]; then
+  export LLM_OPS_SYNTH_MODEL
+fi
 
 HOST="${OPENFABRIC_GATEWAY_HOST:-0.0.0.0}"
 PORT="${OPENFABRIC_GATEWAY_PORT:-8310}"

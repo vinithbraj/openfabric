@@ -93,6 +93,58 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(payload["verdict"], "uncertain")
         self.assertFalse(payload["retry_recommended"])
 
+    def test_validation_accepts_multiline_shell_output_for_list_tasks(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "task": "list all running docker containers",
+                    "task_shape": "list",
+                    "workflow_status": "completed",
+                    "result": "CONTAINER ID   IMAGE   NAMES\n123abc   postgres:16   postgres_db",
+                    "steps": [{"id": "step1", "status": "completed"}],
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+        self.assertFalse(payload["retry_recommended"])
+
+    def test_validation_accepts_singleton_path_for_list_task(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "task": "list database files in this repo",
+                    "task_shape": "list",
+                    "workflow_status": "completed",
+                    "result": "./services/postgres/pgadmin_data/pgadmin4.db",
+                    "steps": [{"id": "step1", "status": "completed"}],
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+
+    def test_validation_accepts_installation_path_for_boolean_check(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "task": "show whether docker is installed",
+                    "task_shape": "boolean_check",
+                    "workflow_status": "completed",
+                    "result": "/bin/docker",
+                    "steps": [{"id": "step1", "status": "completed"}],
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+
 
 if __name__ == "__main__":
     unittest.main()

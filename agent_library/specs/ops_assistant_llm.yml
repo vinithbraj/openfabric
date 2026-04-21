@@ -17,6 +17,11 @@ arguments:
           database_name: "mydb"
           database_aliases:
             - "mydb"
+          routing_priority: 10
+          routing_hints:
+            - "default app database"
+            - "general relational data"
+            - "core sample database"
           routing_notes:
             - "Use this SQL agent for requests that mention database 'mydb'."
             - "Use this SQL agent for schema introspection and read-only data questions for mydb."
@@ -32,6 +37,11 @@ arguments:
           database_aliases:
             - "dicom_mock"
             - "dicom mock"
+          routing_priority: 50
+          routing_hints:
+            - "dicom imaging patients studies series instances mrn modality"
+            - "radiology oncology rtplan rtstruct rtdose dicom tags"
+            - "primary healthcare dataset"
           routing_notes:
             - "Use this SQL agent for requests that mention database 'dicom_mock'."
             - "Use this SQL agent for schema introspection and read-only data questions for dicom_mock."
@@ -428,6 +438,14 @@ contracts:
       message:
         type: string
       command:
+        type: string
+      stdout:
+        type: string
+      stdout_excerpt:
+        type: string
+      stderr:
+        type: string
+      stderr_excerpt:
         type: string
       sql:
         type: string

@@ -28,6 +28,11 @@ class Engine:
         "max_uncertain_attempts": 1,
         "max_validation_llm_calls": 1,
     }
+    DEFAULT_EXECUTION_POLICY = {
+        "allow_python_package_installs": True,
+        "python_package_install_tool": "python -m pip",
+        "install_scope": "current_python_environment",
+    }
 
     def __init__(self, spec: dict, global_timeout_seconds: float | None = None):
         self.spec = copy.deepcopy(spec)
@@ -76,8 +81,25 @@ class Engine:
     def _emit_system_capabilities(self):
         if "system.capabilities" not in self.spec.get("events", {}):
             return
-        payload = {"agents": self._build_agent_catalog()}
+        payload = {
+            "agents": self._build_agent_catalog(),
+            "execution_policy": self._build_execution_policy(),
+        }
         self.emit("system.capabilities", payload)
+
+    def _build_execution_policy(self):
+        allow_python_installs = os.getenv("OPENFABRIC_ALLOW_PYTHON_PACKAGE_INSTALLS", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        install_tool = os.getenv("OPENFABRIC_PYTHON_PACKAGE_INSTALL_TOOL", "python -m pip").strip() or "python -m pip"
+        return {
+            **self.DEFAULT_EXECUTION_POLICY,
+            "allow_python_package_installs": allow_python_installs,
+            "python_package_install_tool": install_tool,
+        }
 
     def _build_agent_catalog(self):
         catalog = []
@@ -237,6 +259,14 @@ class Engine:
             ]
             log_boot(f"starting HTTP agent '{agent_name}': {' '.join(command)}")
             process_env = os.environ.copy()
+            process_env.setdefault(
+                "OPENFABRIC_ALLOW_PYTHON_PACKAGE_INSTALLS",
+                "1" if self._build_execution_policy().get("allow_python_package_installs") else "0",
+            )
+            process_env.setdefault(
+                "OPENFABRIC_PYTHON_PACKAGE_INSTALL_TOOL",
+                str(self._build_execution_policy().get("python_package_install_tool") or "python -m pip"),
+            )
             env_cfg = autostart_cfg.get("env")
             if isinstance(env_cfg, dict):
                 for key, value in env_cfg.items():
@@ -630,9 +660,11 @@ class Engine:
                 result_payload["presentation"] = presentation
             if isinstance(last_attempt, dict):
                 result_payload["selected_option"] = last_attempt.get("option")
-                result_payload["error"] = last_attempt.get("error") or (
+                resolved_error = last_attempt.get("error") or (
                     last_attempt.get("validation", {}) or {}
                 ).get("reason")
+                if isinstance(resolved_error, str) and resolved_error.strip():
+                    result_payload["error"] = resolved_error.strip()
             self.emit("workflow.result", result_payload, depth + 1)
             return
 
@@ -737,7 +769,7 @@ class Engine:
         for event_name, event_payload in emitted:
             if event_name == "planner.replan.result":
                 replan_result = event_payload
-            else:
+            elif event_name == "plan.progress":
                 auxiliary.append((event_name, event_payload))
         for event_name, event_payload in auxiliary:
             self.emit(event_name, event_payload, depth + 1)
@@ -947,7 +979,6 @@ class Engine:
             "validation_llm_budget_remaining": validation_llm_budget_remaining,
             "steps": [self._compact_value(step, text_limit=240, row_limit=4) for step in workflow.get("steps", []) if isinstance(step, dict)],
             "result": self._compact_value(workflow.get("result"), text_limit=240, row_limit=4),
-            "error": workflow.get("error"),
             "presentation": workflow_payload.get("presentation", {}),
             "available_context": {
                 key: self._compact_value(value, text_limit=180, row_limit=3)
@@ -955,6 +986,8 @@ class Engine:
                 if key != "original_task" and not key.endswith(".event")
             },
         }
+        if isinstance(workflow.get("error"), str) and workflow.get("error").strip():
+            request_payload["error"] = workflow.get("error").strip()
         contract_name = self.spec["events"]["validation.request"]["contract"]
         self.contracts.validate_payload(contract_name, request_payload)
         log_event("validation.request", request_payload, depth + 1)
@@ -997,6 +1030,16 @@ class Engine:
         command = extra.pop("command", step_payload.get("command"))
         if isinstance(command, str) and command.strip():
             payload["command"] = command
+
+        stdout = extra.pop("stdout", None)
+        if isinstance(stdout, str) and stdout.strip():
+            payload["stdout"] = self._compact_text(stdout, 1000)
+            payload["stdout_excerpt"] = self._compact_text(stdout, 500)
+
+        stderr = extra.pop("stderr", None)
+        if isinstance(stderr, str) and stderr.strip():
+            payload["stderr"] = self._compact_text(stderr, 600)
+            payload["stderr_excerpt"] = self._compact_text(stderr, 300)
             
         local_reduction_command = extra.pop("local_reduction_command", None)
         if isinstance(local_reduction_command, str) and local_reduction_command.strip():
@@ -1066,6 +1109,9 @@ class Engine:
                 "ok",
                 "kind",
                 "row_count",
+                "returned_row_count",
+                "total_matching_rows",
+                "truncated",
                 "columns",
                 "limit",
                 "stats",
@@ -1114,7 +1160,9 @@ class Engine:
                     "returncode": payload.get("returncode"),
                     "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
                     "local_reduction_command": payload.get("local_reduction_command"),
+                    "stdout": self._compact_text(payload.get("stdout"), 1000),
                     "stdout_excerpt": self._compact_text(payload.get("stdout"), 500),
+                    "stderr": self._compact_text(payload.get("stderr"), 600),
                     "stderr_excerpt": self._compact_text(payload.get("stderr"), 300),
                     "stats": self._compact_value(payload.get("stats"), text_limit=120),
                     "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3),
@@ -1142,7 +1190,9 @@ class Engine:
                     "returncode": payload.get("returncode"),
                     "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
                     "local_reduction_command": payload.get("local_reduction_command"),
+                    "stdout": self._compact_text(payload.get("stdout"), 1000),
                     "stdout_excerpt": self._compact_text(payload.get("stdout"), 500),
+                    "stderr": self._compact_text(payload.get("stderr"), 600),
                     "stderr_excerpt": self._compact_text(payload.get("stderr"), 300),
                     "stats": self._compact_value(payload.get("stats"), text_limit=120),
                     "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3),
@@ -1199,6 +1249,10 @@ class Engine:
                 summary["stats"] = stats
             if isinstance(result, dict):
                 summary["row_count"] = result.get("row_count")
+                summary["returned_row_count"] = result.get("returned_row_count")
+                summary["total_matching_rows"] = result.get("total_matching_rows")
+                summary["truncated"] = result.get("truncated")
+                summary["limit"] = result.get("limit")
                 summary["columns"] = result.get("columns", [])
                 summary["rows"] = self._compact_rows(result.get("rows", []), 5)
                 summary["reduced_result"] = payload.get("reduced_result") or payload.get("refined_answer")
@@ -1290,6 +1344,8 @@ class Engine:
         if primary_event == "shell.result" and isinstance(primary_payload, dict):
             envelope["command"] = primary_payload.get("command")
             envelope["returncode"] = primary_payload.get("returncode")
+            envelope["stdout"] = self._compact_text(primary_payload.get("stdout"), 1000)
+            envelope["stderr"] = self._compact_text(primary_payload.get("stderr"), 600)
             envelope["stdout_excerpt"] = self._compact_text(primary_payload.get("stdout"), 500)
             envelope["stderr_excerpt"] = self._compact_text(primary_payload.get("stderr"), 300)
         if primary_event == "sql.result" and isinstance(primary_payload, dict):
@@ -1297,11 +1353,28 @@ class Engine:
             result = primary_payload.get("result")
             if isinstance(result, dict):
                 envelope["row_count"] = result.get("row_count")
+                envelope["returned_row_count"] = result.get("returned_row_count")
+                envelope["total_matching_rows"] = result.get("total_matching_rows")
+                envelope["truncated"] = result.get("truncated")
+                envelope["limit"] = result.get("limit")
                 envelope["columns"] = result.get("columns")
                 envelope["rows"] = self._compact_rows(result.get("rows"), 5)
+        if primary_event == "task.result" and isinstance(primary_payload, dict):
+            result = primary_payload.get("result")
+            if isinstance(result, dict):
+                if isinstance(result.get("rows"), list):
+                    envelope["rows"] = self._compact_rows(result.get("rows"), 5)
+                if isinstance(result.get("columns"), list):
+                    envelope["columns"] = result.get("columns")
+                if result.get("row_count") is not None:
+                    envelope["row_count"] = result.get("row_count")
+                if result.get("exists") is not None:
+                    envelope["exists"] = result.get("exists")
         if primary_event == "slurm.result" and isinstance(primary_payload, dict):
             envelope["command"] = primary_payload.get("command")
             envelope["returncode"] = primary_payload.get("returncode")
+            envelope["stdout"] = self._compact_text(primary_payload.get("stdout"), 1000)
+            envelope["stderr"] = self._compact_text(primary_payload.get("stderr"), 600)
             envelope["stdout_excerpt"] = self._compact_text(primary_payload.get("stdout"), 500)
             envelope["stderr_excerpt"] = self._compact_text(primary_payload.get("stderr"), 300)
         return envelope
@@ -1397,7 +1470,7 @@ class Engine:
         for event_name, event_payload in emitted:
             if event_name == "planner.replan.result":
                 replan_result = event_payload
-            else:
+            elif event_name == "plan.progress":
                 auxiliary.append((event_name, event_payload))
         for event_name, event_payload in auxiliary:
             self.emit(event_name, event_payload, depth + 1)
@@ -1700,6 +1773,8 @@ class Engine:
                     result=result_summary,
                     error=error,
                     sql=primary_payload.get("sql") if isinstance(primary_payload, dict) else None,
+                    stdout=primary_payload.get("stdout") if isinstance(primary_payload, dict) else None,
+                    stderr=primary_payload.get("stderr") if isinstance(primary_payload, dict) else None,
                 )
                 records.append(
                     {
@@ -1756,6 +1831,8 @@ class Engine:
                 sql=primary_payload.get("sql") if isinstance(primary_payload, dict) else None,
                 command=primary_payload.get("command") if isinstance(primary_payload, dict) else None,
                 local_reduction_command=primary_payload.get("local_reduction_command") if isinstance(primary_payload, dict) else None,
+                stdout=primary_payload.get("stdout") if isinstance(primary_payload, dict) else None,
+                stderr=primary_payload.get("stderr") if isinstance(primary_payload, dict) else None,
             )
             self._record_context_value(context, step_id, primary_event, primary_payload, primary_value)
             self._record_step_result(

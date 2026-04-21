@@ -3,12 +3,14 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from typing import Any
 
 from fastapi import FastAPI
 import requests
 
-from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, serialize_for_stdin, task_plan_context
+from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, serialize_for_stdin, shared_llm_api_settings, task_plan_context
+from agent_library.agents.llm_operations_planner import _derive_shell_command as _planner_derive_shell_command
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -78,6 +80,7 @@ AGENT_METADATA = {
         "Covers workspace and filesystem operations, process and network inspection, services, containers, repositories, builds, tests, package commands, arithmetic, and text/data transformations.",
         "Prefer workspace-scoped commands and explicit user intent for mutating operations.",
         "Reject destructive, privileged, ambiguous, or unsafe commands according to runtime safety checks.",
+        "If runtime policy allows it, this agent may install missing Python packages into the active Python environment when that is necessary to complete a user task.",
         "Can derive shell commands from natural-language task plans using an LLM preprocessing step.",
         "If a task cannot be mapped to a safe local shell command, emit nothing for task.plan.",
     ],
@@ -112,7 +115,7 @@ AGENT_METADATA = {
                 "restart container named web",
                 "commit all git changes with message 'update shell prompt'",
             ],
-            "anti_patterns": ["delete system files", "install packages globally"],
+            "anti_patterns": ["delete system files", "modify system package managers without explicit need"],
         }
     ],
 }
@@ -126,6 +129,7 @@ SHELL_CAPABILITIES = {
         "inspect and manage local processes, ports, services, and containers when explicitly requested",
         "inspect and operate on the current repository, including git status, branch, log, stage, commit, and push",
         "run project-local build, test, lint, package, and diagnostic commands",
+        "install Python packages into the current runtime when needed to satisfy a task",
         "inspect system state with read-only commands such as ps, pgrep, ss, netstat, df, du, env, uname, and date",
     ],
     "disallowed_operations": [
@@ -146,6 +150,19 @@ BLOCKED_PATTERNS = [
     r"\bsudo\b",
     r":\(\)\s*{\s*:\|:&\s*};:",
     r">\s*/dev/sd[a-z]",
+]
+
+ENVIRONMENT_MUTATION_PATTERNS = [
+    r"\bdocker\s+(?:rm|rmi|kill|stop|system\s+prune|container\s+prune|image\s+prune|volume\s+prune|network\s+prune)\b",
+    r"\bdocker\s+(?:container|image|volume|network)\s+(?:rm|prune)\b",
+    r"\bdocker\s+compose\s+(?:down|rm|stop)\b",
+    r"\b(?:killall|pkill)\b",
+    r"\bsystemctl\s+(?:stop|restart|reload|disable)\b",
+    r"\bservice\s+\S+\s+(?:stop|restart|reload)\b",
+    r"\bscancel\b",
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bgit\s+clean\s+-[^\n]*f",
+    r"\bgit\s+push\b[^\n]*--force(?:-with-lease)?\b",
 ]
 
 METADATA_COMMAND_PATTERNS = [
@@ -174,6 +191,12 @@ def _needs_decomposition(detail: str):
     }
 
 
+NONFATAL_SCAN_ERROR_PATTERNS = (
+    "permission denied",
+    "operation not permitted",
+)
+
+
 def _debug_enabled() -> bool:
     return os.getenv("LLM_OPS_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 
@@ -183,12 +206,140 @@ def _debug_log(message: str):
         log_debug("SHELL_DEBUG", message)
 
 
+def _python_package_installs_allowed() -> bool:
+    return os.getenv("OPENFABRIC_ALLOW_PYTHON_PACKAGE_INSTALLS", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _is_python_command(command: str) -> bool:
+    if not isinstance(command, str):
+        return False
+    command_lc = command.lower()
+    return bool(re.search(r"(?:^|[;&(]\s*)(python(?:3(?:\.\d+)?)?)\b", command_lc)) or "py -" in command_lc
+
+
+def _extract_missing_python_module(stdout: str, stderr: str) -> str | None:
+    combined = "\n".join(part for part in (stdout, stderr) if isinstance(part, str) and part.strip())
+    patterns = [
+        r"ModuleNotFoundError:\s+No module named ['\"]([^'\"]+)['\"]",
+        r"ImportError:\s+No module named ['\"]?([A-Za-z0-9_.-]+)['\"]?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, combined)
+        if match:
+            module = match.group(1).strip()
+            if module:
+                return module
+    return None
+
+
+def _module_package_candidates(module_name: str) -> list[str]:
+    module = str(module_name or "").strip()
+    if not module:
+        return []
+    base = module.split(".", 1)[0]
+    mapped = {
+        "yaml": "PyYAML",
+        "cv2": "opencv-python",
+        "PIL": "Pillow",
+        "bs4": "beautifulsoup4",
+        "sklearn": "scikit-learn",
+        "Crypto": "pycryptodome",
+        "dotenv": "python-dotenv",
+        "dateutil": "python-dateutil",
+    }.get(base)
+    candidates = [mapped] if mapped else []
+    candidates.extend([base, base.replace("_", "-")])
+    seen = set()
+    unique = []
+    for item in candidates:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
+def _python_install_command(command: str, package_name: str) -> str:
+    interpreter = "python3"
+    if isinstance(command, str):
+        match = re.search(r"(python(?:3(?:\.\d+)?)?)\b", command)
+        if match:
+            interpreter = match.group(1)
+    configured_tool = os.getenv("OPENFABRIC_PYTHON_PACKAGE_INSTALL_TOOL", "").strip()
+    if configured_tool:
+        if "{interpreter}" in configured_tool:
+            tool = configured_tool.format(interpreter=interpreter)
+        else:
+            tool = configured_tool
+    else:
+        tool = f"{interpreter} -m pip"
+    return f"{tool} install {shlex.quote(package_name)}"
+
+
+def _run_shell_subprocess(command: str, stdin_text: str = "", timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/bash", "-lc", command],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _attempt_python_dependency_repair(command: str, stdin_text: str, completed: subprocess.CompletedProcess[str]) -> tuple[subprocess.CompletedProcess[str], str | None, str | None]:
+    if not _python_package_installs_allowed() or not _is_python_command(command):
+        return completed, None, None
+    missing_module = _extract_missing_python_module(completed.stdout or "", completed.stderr or "")
+    if not missing_module:
+        return completed, None, None
+
+    for package_name in _module_package_candidates(missing_module):
+        install_command = _python_install_command(command, package_name)
+        try:
+            install_result = _run_shell_subprocess(install_command, timeout=180)
+        except subprocess.TimeoutExpired:
+            continue
+        if install_result.returncode != 0:
+            continue
+        try:
+            repaired = _run_shell_subprocess(command, stdin_text=stdin_text, timeout=30)
+        except subprocess.TimeoutExpired:
+            return completed, install_command, f"Installed Python package `{package_name}` but rerun timed out."
+        detail = f"Automatically installed Python package `{package_name}` to satisfy missing module `{missing_module}`."
+        return repaired, install_command, detail
+
+    return completed, None, None
+
+
+def _normalize_partial_success(command: str, completed: subprocess.CompletedProcess[str]) -> tuple[int, str | None]:
+    if completed.returncode in (0, None):
+        return int(completed.returncode or 0), None
+    if not isinstance(command, str) or not command.strip():
+        return completed.returncode, None
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    if not stdout.strip() or not stderr.strip():
+        return completed.returncode, None
+
+    command_lc = command.strip().lower()
+    if not command_lc.startswith("find "):
+        return completed.returncode, None
+
+    stderr_lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not stderr_lines:
+        return completed.returncode, None
+    if all(any(pattern in line.lower() for pattern in NONFATAL_SCAN_ERROR_PATTERNS) for line in stderr_lines):
+        return 0, "find returned partial results and only reported non-fatal permission warnings."
+    return completed.returncode, None
+
+
 def _llm_api_settings():
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL") or "https://api.openai.com/v1"
-    model = os.getenv("LLM_OPS_MODEL") or "gpt-4o-mini"
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-    return api_key, base_url.rstrip("/"), timeout_seconds, model
+    return shared_llm_api_settings("gpt-4o-mini")
 
 
 def _llm_generate_reduction_command(
@@ -273,6 +424,11 @@ def _llm_summarize_locally(task: str, original_cmd: str, stdout: str) -> tuple[s
 def _is_blocked(command: str) -> bool:
     command_lc = command.lower()
     return any(re.search(pattern, command_lc) for pattern in BLOCKED_PATTERNS)
+
+
+def _is_environment_mutation(command: str) -> bool:
+    command_lc = command.lower()
+    return any(re.search(pattern, command_lc) for pattern in ENVIRONMENT_MUTATION_PATTERNS)
 
 
 def _looks_like_metadata_not_command(command: str) -> bool:
@@ -396,6 +552,9 @@ def _build_preprocess_prompt(task: str, structured_input: Any = None):
         "- If structured workflow input JSON is provided below, the derived command will receive that exact JSON on stdin at execution time.\n"
         "- When the task asks to inspect, filter, count, search, compare, summarize, or validate prior results, prefer operating on the provided stdin JSON instead of fetching data again.\n"
         "- Treat references such as 'this list', 'these rows', 'that output', or 'the previous result' as referring to the provided workflow input JSON.\n"
+        "- When the task is generation-heavy or needs stable parsing, aggregation, formatting, or file creation, prefer a single python3 heredoc snippet over brittle shell pipelines.\n"
+        "- Python snippets should print the final user-visible answer or the absolute saved file path explicitly.\n"
+        "- If a Python command needs a missing third-party package, you may use python -m pip install to add it to the current Python environment when necessary.\n"
         "- Use workspace-scoped commands by default.\n"
         "- Use standard local tools directly when they fit; examples include sh/bash, printf, awk, sed, grep, rg, find, sort, uniq, wc, cat, head, tail, xargs, python -c, git, docker, ps, ss, date, du, df, make, npm, pytest, and project-local scripts.\n"
         "- Interpret 'current directory' as '.'.\n"
@@ -425,6 +584,8 @@ def _build_preprocess_prompt(task: str, structured_input: Any = None):
         '{"processable":true,"command":"cat Readme.md","reason":"read file request"}\n'
         '{"processable":true,"command":"printf \\"%s\\\\n\\" \\"Hello world\\" > vinith.txt && realpath vinith.txt","reason":"create file and return path"}\n'
         '{"processable":true,"command":"printf \\"%s\\\\n\\" \\"$((2 + 3 * 5))\\"","reason":"arithmetic"}\n'
+        "{\"processable\":true,\"command\":\"python3 - <<'PY'\\nimport json,sys\\nrows=json.load(sys.stdin)\\nprint(sum(1 for row in rows if row.get(\\\"status\\\") == \\\"active\\\"))\\nPY\",\"reason\":\"structured aggregation from stdin\"}\n"
+        '{"processable":true,"command":"python3 -m pip install pyyaml && python3 - <<\\"PY\\"\\nimport yaml\\nprint(yaml.safe_load(\\"a: 1\\")[\\"a\\"])\\nPY","reason":"install missing python dependency when required"}\n'
         '{"processable":true,"command":"docker ps","reason":"running containers"}\n'
         '{"processable":true,"command":"docker logs --tail 200 vllm","reason":"container logs request"}\n'
         '{"processable":true,"command":"git status","reason":"git inspection"}\n'
@@ -442,22 +603,7 @@ def _build_preprocess_prompt(task: str, structured_input: Any = None):
 
 
 def _llm_preprocess(task: str, structured_input: Any = None):
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-
-    if not api_key:
-        raise RuntimeError("LLM_OPS_API_KEY is not set")
-
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = _llm_api_settings()
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -534,6 +680,10 @@ def _looks_like_shell_command(text: str) -> bool:
 def _derive_command_from_task(task: str, structured_input: Any = None):
     if _is_introspection_request(task):
         return None
+    if structured_input in (None, "", [], {}):
+        deterministic = _planner_derive_shell_command(task, 1)
+        if isinstance(deterministic, str) and deterministic.strip():
+            return deterministic.strip()
     decision_raw = _llm_preprocess(task, structured_input)
     decision = _parse_decision(decision_raw)
     if decision is None or not decision["processable"]:
@@ -562,6 +712,22 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
             ]
         }
 
+    if _is_environment_mutation(command):
+        return {
+            "emits": [
+                {
+                    "event": "task.result",
+                    "payload": {
+                        "detail": (
+                            "Rejected environment-altering command. "
+                            "This shell agent currently allows inspection plus workspace-local file operations, "
+                            "but blocks destructive or service/container control commands."
+                        )
+                    },
+                }
+            ]
+        }
+
     try:
         shlex.split(command)
     except ValueError as exc:
@@ -580,44 +746,49 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
 
     try:
         stdin_text = serialize_for_stdin(stdin_data)
-        completed = subprocess.run(
-            ["/bin/bash", "-lc", command],
-            input=stdin_text,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        completed = _run_shell_subprocess(command, stdin_text=stdin_text, timeout=30)
     except subprocess.TimeoutExpired:
         return {
             "emits": [
                 {
                     "event": "task.result",
-                    "payload": {"detail": "Command timed out after 10 seconds"},
+                    "payload": {"detail": "Command timed out after 30 seconds"},
                 }
             ]
         }
 
+    completed, install_command, install_detail = _attempt_python_dependency_repair(command, stdin_text, completed)
+
     # Attempt local reduction for large outputs (Phase 9)
     refined_answer = ""
     local_reduction_command = ""
-    if task and completed.returncode == 0 and len(completed.stdout) > 5000:
+    effective_returncode, partial_success_reason = _normalize_partial_success(command, completed)
+    if task and effective_returncode == 0 and len(completed.stdout) > 5000:
         refined_answer, local_reduction_command = _llm_summarize_locally(task, command, completed.stdout)
         if refined_answer:
             _debug_log(f"Local reduction successful. Summary: {refined_answer[:100]}...")
     
+    payload = {
+        "command": command,
+        "install_command": install_command,
+        "local_reduction_command": local_reduction_command or None,
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+        "returncode": effective_returncode,
+        "reduced_result": refined_answer or None,
+        "refined_answer": refined_answer or None,
+    }
+    if effective_returncode != completed.returncode:
+        payload["raw_returncode"] = completed.returncode
+    details = [item for item in (install_detail, partial_success_reason) if isinstance(item, str) and item.strip()]
+    if details:
+        payload["detail"] = " ".join(details)
+
     return {
         "emits": [
             {
                 "event": "shell.result",
-                "payload": {
-                    "command": command,
-                    "local_reduction_command": local_reduction_command or None,
-                    "stdout": completed.stdout.strip(),
-                    "stderr": completed.stderr.strip(),
-                    "returncode": completed.returncode,
-                    "reduced_result": refined_answer or None,
-                    "refined_answer": refined_answer or None,
-                },
+                "payload": payload,
             }
         ]
     }
@@ -660,6 +831,10 @@ def handle_event(req: EventRequest):
             command_raw = instruction.get("command")
             if isinstance(command_raw, str) and command_raw.strip():
                 return _execute_command(command_raw.strip(), structured_input, task=task)
+
+        command_raw = req.payload.get("command")
+        if isinstance(command_raw, str) and command_raw.strip():
+            return _execute_command(command_raw.strip(), structured_input, task=task)
         
         if not task:
             return {"emits": []}

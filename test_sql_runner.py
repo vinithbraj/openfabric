@@ -38,13 +38,16 @@ from agent_library.agents.sql_runner import (
     _execute_sql,
     _postgres_safe_sql,
     _repair_sql_with_retries,
+    _schema_schemas_result,
     _schema_tables_result,
+    _schemas_only_schema_request,
     _should_reduce_sql_result,
     _tables_only_schema_request,
     _same_query_specs,
     _single_sql_query_spec_from_object,
     _strict_sql_query_specs_from_object,
     _sql_repair_max_attempts,
+    _sql_llm_transport_settings,
 )
 
 
@@ -65,9 +68,48 @@ POSTGRES_SCHEMA = {
 
 
 class PostgresSafeSqlTests(unittest.TestCase):
+    def test_sql_llm_transport_uses_dummy_key_for_local_base_url(self):
+        with patch.dict(
+            "os.environ",
+            {"LLM_OPS_BASE_URL": "http://127.0.0.1:8000/v1"},
+            clear=True,
+        ):
+            api_key, base_url, timeout_seconds, model = _sql_llm_transport_settings("gpt-4o-mini")
+        self.assertEqual(api_key, "dummy")
+        self.assertEqual(base_url, "http://127.0.0.1:8000/v1")
+        self.assertEqual(timeout_seconds, 300.0)
+        self.assertEqual(model, "gpt-4o-mini")
+
+    def test_sql_llm_transport_defaults_to_shared_local_transport_without_key(self):
+        with patch.dict("os.environ", {}, clear=True):
+            api_key, base_url, timeout_seconds, model = _sql_llm_transport_settings("gpt-4o-mini")
+        self.assertEqual(api_key, "dummy")
+        self.assertEqual(base_url, "http://127.0.0.1:8000/v1")
+        self.assertEqual(timeout_seconds, 300.0)
+        self.assertEqual(model, "gpt-4o-mini")
+
     def test_tables_only_schema_request_detects_table_listing(self):
         self.assertTrue(_tables_only_schema_request("tables", "give me a list of all the tables in mydb"))
         self.assertFalse(_tables_only_schema_request("tables, columns, and relationships", "show database schema"))
+
+    def test_schemas_only_schema_request_detects_schema_listing(self):
+        self.assertTrue(_schemas_only_schema_request("schemas", "list all schemas in dicom_mock"))
+        self.assertFalse(_schemas_only_schema_request("schema and tables", "show database schema and tables"))
+
+    def test_schema_schemas_result_returns_unique_schema_rows(self):
+        result = _schema_schemas_result(
+            {
+                "dialect": "postgres",
+                "tables": [
+                    {"schema": "flathr", "name": "Patient", "type": "table"},
+                    {"schema": "flathr", "name": "Study", "type": "table"},
+                    {"schema": "public", "name": "resources", "type": "table"},
+                ],
+            }
+        )
+        self.assertEqual(result["columns"], ["schema"])
+        self.assertEqual(result["row_count"], 2)
+        self.assertEqual(result["rows"], [{"schema": "flathr"}, {"schema": "public"}])
 
     def test_schema_tables_result_returns_compact_table_rows(self):
         result = _schema_tables_result(

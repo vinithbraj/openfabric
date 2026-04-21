@@ -6,7 +6,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings
 from runtime.console import log_debug
 
 app = FastAPI()
@@ -95,54 +95,144 @@ def _truncate_if_large(value: Any, limit: int = 5000) -> Any:
     return value[:limit] + f"\n\n[... Truncated for synthesis. Actual size: {len(value)} chars. Raw data is visible in the technical details section above. ...]"
 
 
+def _format_preformatted_block(value: Any) -> list[str]:
+    text = "" if value is None else str(value)
+    if not text:
+        return [">"]
+    return [(f"> {line}" if line else ">") for line in text.splitlines()]
+
+
+def _format_console_section(label: str, value: Any) -> list[str]:
+    text = "" if value is None else str(value).rstrip()
+    if not text:
+        return []
+    return [f"**{label}:**", "", "```text", text, "```"]
+
+
+def _format_callout_section(label: str, value: Any) -> list[str]:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return []
+    if "\n" not in text:
+        return [f"**{label}:** `{text}`"]
+    return _format_console_section(label, text)
+
+
+def _extract_file_paths_from_text(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    lines = [line.strip() for line in _clean_terminal_output(value).splitlines() if line.strip()]
+    if not lines or len(lines) > 20:
+        return []
+    linked = []
+    for line in lines:
+        link = _markdown_link_for_file_path(line)
+        if not link:
+            return []
+        linked.append(link)
+    return linked
+
+
+def _extract_labeled_paths_from_text(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    linked = []
+    for line in _clean_terminal_output(value).splitlines():
+        match = re.match(r"\s*([^:]{1,40}):\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        label = match.group(1).strip()
+        path_text = match.group(2).strip()
+        link = _markdown_link_for_file_path(path_text)
+        if link:
+            linked.append(f"- {label}: {link}")
+    return linked
+
+
+def _extract_path_values(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    lines = [line.strip() for line in _clean_terminal_output(value).splitlines() if line.strip()]
+    if not lines or len(lines) > 20:
+        return []
+    paths: list[str] = []
+    for line in lines:
+        candidate = _candidate_file_path(line)
+        if candidate:
+            paths.append(candidate)
+            continue
+        match = re.match(r"\s*[^:]{1,40}:\s+(.+?)\s*$", line)
+        if not match:
+            return []
+        candidate = _candidate_file_path(match.group(1).strip())
+        if not candidate:
+            return []
+        paths.append(candidate)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in paths:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+
 def _command_output_details(command: str, stdout: str, stderr: str, returncode: int | None = None) -> str:
     clean_stdout = _clean_terminal_output(stdout) or "<empty>"
     clean_stderr = _clean_terminal_output(stderr)
-    
-    lines = [
-        "> **Technical Details**",
-        ">",
-        f"> **Command:** `{command.strip()}`"
-    ]
+    linked_paths = _extract_file_paths_from_text(stdout)
+    labeled_paths = _extract_labeled_paths_from_text(stdout)
+
+    lines = _format_console_section("Command", command.strip())
     if returncode is not None:
-        lines.append(f"> **Status:** {'✅ Success' if returncode == 0 else '❌ Error (Exit ' + str(returncode) + ')'}")
-    
-    lines.extend([
-        "",
-        "**Output:**",
-        "```",
-        clean_stdout,
-        "```"
-    ])
-    
+        status_text = "success" if returncode == 0 else f"error (exit {returncode})"
+        lines.extend(["", f"**Status:** `{status_text}`"])
+
+    if linked_paths or labeled_paths:
+        lines.extend(["", "**Files**"])
+        lines.extend([f"- {path}" for path in linked_paths])
+        lines.extend(labeled_paths)
+
+    lines.extend([""])
+    lines.extend(_format_console_section("Output", clean_stdout))
+
     if clean_stderr:
-        lines.extend([
-            "",
-            "**Error details:**",
-            "```",
-            clean_stderr,
-            "```"
-        ])
+        lines.extend([""])
+        lines.extend(_format_console_section("Error output", clean_stderr))
     return "\n".join(lines)
 
 
 def _format_agent_result(payload: dict[str, Any], event_name: str | None = None) -> str:
     """Generic formatter for standard agent result payloads."""
-    # 1. Primary human-readable answer (priority)
-    refined = payload.get("reduced_result") or payload.get("detail") or payload.get("refined_answer")
+    # 1. Raw outputs
+    stdout = payload.get("stdout") or payload.get("stdout_excerpt") or payload.get("content")
+    stderr = payload.get("stderr") or payload.get("stderr_excerpt")
+    if not stdout and isinstance(payload.get("result"), dict):
+        stdout = payload["result"].get("stdout") or payload["result"].get("stdout_excerpt")
+        stderr = payload["result"].get("stderr") or payload["result"].get("stderr_excerpt")
+
+    # 2. Primary human-readable answer (priority)
+    refined = payload.get("reduced_result") or payload.get("refined_answer")
     if not refined and isinstance(payload.get("result"), dict):
         refined = (
             payload["result"].get("reduced_result")
             or payload["result"].get("refined_answer")
-            or payload["result"].get("detail")
         )
+    if not refined:
+        detail = payload.get("detail")
+        if not stdout and isinstance(detail, str) and detail.strip():
+            refined = detail
+        elif not stdout and isinstance(payload.get("result"), dict):
+            nested_detail = payload["result"].get("detail")
+            if isinstance(nested_detail, str) and nested_detail.strip():
+                refined = nested_detail
 
-    # 2. Command/Operation
+    # 3. Command/Operation
     op = payload.get("command") or payload.get("sql") or payload.get("task")
     if not op and isinstance(payload.get("result"), dict):
         op = payload["result"].get("command") or payload["result"].get("sql")
 
-    # 3. Status
+    # 4. Status
     rc = payload.get("returncode")
     if rc is None and isinstance(payload.get("result"), dict):
         rc = payload["result"].get("returncode")
@@ -156,17 +246,14 @@ def _format_agent_result(payload: dict[str, Any], event_name: str | None = None)
     else:
         status = "success"
 
-    # 4. Raw outputs
-    stdout = payload.get("stdout") or payload.get("content")
-    stderr = payload.get("stderr")
-    if not stdout and isinstance(payload.get("result"), dict):
-        stdout = payload["result"].get("stdout")
-        stderr = payload["result"].get("stderr")
-
     # 5. Build the UI
     if refined and isinstance(refined, str) and refined.strip():
         # If we have a nice refined answer, keep it clean
         return refined.strip()
+
+    linked_stdout_path = _markdown_link_for_file_path(stdout)
+    if linked_stdout_path and not stderr and status == "success":
+        return f"File path: {linked_stdout_path}"
 
     # Fallback for raw tool results
     kind_label = f"**{event_name.split('.')[0].title()}** " if event_name else ""
@@ -220,9 +307,52 @@ def _markdown_table(columns: list[str], rows: list[dict[str, Any]], limit: int |
         for column in columns:
             value = row.get(column, "")
             text = "" if value is None else str(value)
-            values.append(text.replace("|", "\\|").replace("\n", " "))
+            linked_path = _markdown_link_for_file_path(text)
+            if linked_path:
+                values.append(linked_path)
+            else:
+                values.append(text.replace("|", "\\|").replace("\n", " "))
         lines.append("| " + " | ".join(values) + " |")
     return "\n".join(lines)
+
+
+def _path_markdown_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _candidate_file_path(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or "\n" in text:
+        return None
+    if text.startswith(("http://", "https://", "app://", "file://")):
+        return None
+    candidate = text.strip("`")
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {"'", '"'}:
+        candidate = candidate[1:-1].strip()
+    if not candidate or candidate.endswith(("/", "\\")):
+        return None
+    normalized = os.path.expanduser(candidate)
+    has_separator = "/" in normalized or "\\" in normalized
+    if not has_separator and not normalized.startswith("."):
+        return None
+    basename = os.path.basename(normalized.replace("\\", "/"))
+    if not basename or basename in {".", ".."}:
+        return None
+    absolute_candidate = os.path.abspath(normalized)
+    if not os.path.isfile(absolute_candidate):
+        return None
+    return candidate
+
+
+def _markdown_link_for_file_path(value: Any) -> str | None:
+    candidate = _candidate_file_path(value)
+    if not candidate:
+        return None
+    absolute_target = os.path.abspath(os.path.expanduser(candidate))
+    target = f"<{absolute_target}>" if " " in absolute_target else absolute_target
+    return f"[{_path_markdown_label(candidate)}]({target})"
 
 
 def _extract_sql_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -241,6 +371,9 @@ def _extract_sql_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[st
                     "columns": result.get("columns", []),
                     "rows": result.get("rows", []),
                     "row_count": result.get("row_count"),
+                    "returned_row_count": result.get("returned_row_count"),
+                    "total_matching_rows": result.get("total_matching_rows"),
+                    "truncated": result.get("truncated"),
                     "limit": result.get("limit"),
                 }
             )
@@ -270,17 +403,278 @@ def _extract_general_results_from_steps(steps: list[dict[str, Any]]) -> list[dic
     return results
 
 
+def _step_clean_stdout(step: dict[str, Any]) -> str:
+    stdout = _step_payload_field(step, "stdout") or _step_payload_field(step, "stdout_excerpt")
+    if isinstance(stdout, dict):
+        excerpt = stdout.get("excerpt")
+        stdout = excerpt if isinstance(excerpt, str) else ""
+    return _clean_terminal_output(stdout)
+
+
+def _shell_fact_value(text: str) -> str | None:
+    clean = _clean_terminal_output(text)
+    if not clean:
+        return None
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
+    value = lines[0]
+    if value.startswith(("[", "{")):
+        return None
+    if value.lower() in {"true", "false"}:
+        return "Yes" if value.lower() == "true" else "No"
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", value):
+        return value
+    if len(value) <= 80:
+        return value
+    return None
+
+
+def _shell_fact_label(step: dict[str, Any]) -> str:
+    task = str(step.get("task") or "").strip()
+    task_lc = task.lower()
+    if "docker" in task_lc and any(token in task_lc for token in ("installed", "available")):
+        return "Docker installed"
+    if "count" in task_lc and "container" in task_lc:
+        return "Container count"
+    if "count" in task_lc and "image" in task_lc:
+        return "Image count"
+    if "count" in task_lc and "python" in task_lc and "file" in task_lc:
+        return "Python file count"
+    if "current branch" in task_lc:
+        return "Current branch"
+    if "last commit message" in task_lc:
+        return "Last commit message"
+    if "working tree clean" in task_lc:
+        return "Working tree clean"
+    if "free space" in task_lc and "gb" in task_lc:
+        return "Total usable free space (GB)"
+    if "free space" in task_lc:
+        return "Total usable free space"
+    if "count" in task_lc:
+        return "Count"
+    return task[:1].upper() + task[1:] if task else "Result"
+
+
+def _format_multi_shell_workflow_answer(steps: list[dict[str, Any]], task: str = "") -> str | None:
+    facts: list[tuple[str, str]] = []
+    for step in steps:
+        if step.get("status") != "completed" or step.get("event") != "shell.result":
+            continue
+        value = _shell_fact_value(_step_clean_stdout(step))
+        if value is None:
+            continue
+        facts.append((_shell_fact_label(step), value))
+    if not facts:
+        return None
+    if len(facts) == 1:
+        label, value = facts[0]
+        return f"**{label}:** `{value}`"
+    return "\n".join(f"- **{label}:** `{value}`" for label, value in facts).strip()
+
+
+def _format_size_path_table_answer(text: Any, intro: str = "") -> str | None:
+    clean = _clean_terminal_output(text)
+    if not clean:
+        return None
+    rows: list[dict[str, Any]] = []
+    for line in clean.splitlines():
+        compact = line.strip()
+        if not compact:
+            continue
+        match = re.match(r"^(\d+)\s+(.+)$", compact)
+        if not match:
+            return None
+        rows.append({"Size (bytes)": match.group(1), "Path": match.group(2).strip()})
+    if not rows:
+        return None
+    lines: list[str] = []
+    if isinstance(intro, str) and intro.strip():
+        lines.extend([intro.strip(), ""])
+    lines.append(_markdown_table(["Size (bytes)", "Path"], rows, limit=50))
+    return "\n".join(lines).strip()
+
+
+def _format_labeled_stdout_answer(text: Any, intro: str = "") -> str | None:
+    clean = _clean_terminal_output(text)
+    if not clean:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for line in clean.splitlines():
+        compact = line.strip()
+        if not compact:
+            continue
+        if ":" not in compact:
+            return None
+        label, value = compact.split(":", 1)
+        label = label.strip()
+        value = value.strip()
+        if not label or not value:
+            return None
+        pairs.append((label, value))
+    if not pairs:
+        return None
+    lines: list[str] = []
+    if isinstance(intro, str) and intro.strip():
+        lines.extend([intro.strip(), ""])
+    lines.extend(f"- **{label}:** `{value}`" for label, value in pairs)
+    return "\n".join(lines).strip()
+
+
+def _format_shell_detail_answer(step: dict[str, Any]) -> str | None:
+    stdout = _step_clean_stdout(step)
+    if not stdout:
+        return None
+    intro = str(step.get("task") or "").strip()
+    rendered = _format_labeled_stdout_answer(stdout, intro)
+    if rendered:
+        return rendered
+    rendered = _format_fixed_width_table_answer(stdout, intro)
+    if rendered:
+        return rendered
+    rendered = _format_size_path_table_answer(stdout, intro)
+    if rendered:
+        return rendered
+    linked_paths = _extract_file_paths_from_text(stdout)
+    if linked_paths:
+        lines = [intro] if intro else []
+        if lines:
+            lines.append("")
+        lines.extend(f"- {path}" for path in linked_paths)
+        return "\n".join(lines).strip()
+    return None
+
+
+def _format_compound_shell_workflow_answer(steps: list[dict[str, Any]], task: str = "") -> str | None:
+    facts: list[tuple[str, str]] = []
+    detail_sections: list[str] = []
+    for step in steps:
+        if step.get("status") != "completed" or step.get("event") != "shell.result":
+            continue
+        reduced = _step_payload_field(step, "reduced_result") or _step_payload_field(step, "refined_answer")
+        value = _shell_fact_value(reduced) if isinstance(reduced, str) else None
+        if value is None:
+            value = _shell_fact_value(_step_clean_stdout(step))
+        if value is not None:
+            facts.append((_shell_fact_label(step), value))
+            continue
+        rendered = _format_shell_detail_answer(step)
+        if rendered:
+            detail_sections.append(rendered)
+    if not facts and not detail_sections:
+        return None
+    lines: list[str] = []
+    if facts:
+        lines.extend(f"- **{label}:** `{value}`" for label, value in facts)
+    if detail_sections:
+        if lines:
+            lines.append("")
+        lines.extend(detail_sections)
+    return "\n".join(lines).strip()
+
+
+def _workflow_requests_internal_steps(payload: dict[str, Any]) -> bool:
+    presentation = payload.get("presentation")
+    return isinstance(presentation, dict) and bool(presentation.get("include_internal_steps"))
+
+
+def _workflow_presentation_format(payload: dict[str, Any]) -> str:
+    presentation = payload.get("presentation")
+    if not isinstance(presentation, dict):
+        return ""
+    value = presentation.get("format")
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def _step_payload_field(step: dict[str, Any], field: str) -> Any:
+    if field in step:
+        return step.get(field)
+    payload = step.get("payload")
+    if isinstance(payload, dict) and field in payload:
+        return payload.get(field)
+    evidence = step.get("evidence")
+    if isinstance(evidence, dict):
+        evidence_payload = evidence.get("payload")
+        if isinstance(evidence_payload, dict) and field in evidence_payload:
+            return evidence_payload.get(field)
+    return None
+
+
+def _extract_fixed_width_columns(header_line: str) -> list[tuple[str, int]]:
+    columns = []
+    for match in re.finditer(r"\S(?:.*?\S)?(?=\s{2,}|$)", header_line):
+        label = match.group(0).strip()
+        if label:
+            columns.append((label, match.start()))
+    return columns
+
+
+def _parse_fixed_width_table(text: Any) -> tuple[list[str], list[dict[str, Any]]] | None:
+    clean = _clean_terminal_output(text)
+    if not clean:
+        return None
+    lines = [line.rstrip() for line in clean.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    header_line = lines[0]
+    column_specs = _extract_fixed_width_columns(header_line)
+    if len(column_specs) < 2:
+        return None
+    columns = [label for label, _ in column_specs]
+    starts = [start for _, start in column_specs]
+    rows: list[dict[str, Any]] = []
+    for line in lines[1:]:
+        row: dict[str, Any] = {}
+        non_empty_cells = 0
+        for index, (label, start) in enumerate(column_specs):
+            end = starts[index + 1] if index + 1 < len(starts) else None
+            cell = line[start:end].strip() if end is not None else line[start:].strip()
+            row[label] = cell
+            if cell:
+                non_empty_cells += 1
+        if non_empty_cells:
+            rows.append(row)
+    if not rows:
+        return None
+    return columns, rows
+
+
+def _format_fixed_width_table_answer(text: Any, intro: str = "") -> str | None:
+    parsed = _parse_fixed_width_table(text)
+    if not parsed:
+        return None
+    columns, rows = parsed
+    lines = []
+    if isinstance(intro, str) and intro.strip():
+        lines.extend([intro.strip(), ""])
+    lines.append(_markdown_table(columns, rows, limit=50))
+    if len(rows) > 50:
+        lines.extend(["", "Showing first 50 rows."])
+    return "\n".join(lines).strip()
+
+
 def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
     columns = result.get("columns", [])
     rows = result.get("rows", [])
-    row_count = result.get("row_count")
+    row_count = result.get("total_matching_rows", result.get("row_count"))
+    returned_row_count = result.get("returned_row_count")
+    if not isinstance(returned_row_count, int):
+        returned_row_count = len(rows) if isinstance(rows, list) else 0
+    truncated = result.get("truncated")
+    if not isinstance(truncated, bool):
+        truncated = isinstance(row_count, int) and row_count > returned_row_count
     sql = result.get("sql", "")
     queries = result.get("queries")
     limit = result.get("limit")
 
     lines = []
-    if task:
-        lines.append(f"Found {row_count if row_count is not None else len(rows)} result row(s).")
+    if isinstance(row_count, int):
+        lines.append(f"Found {row_count} matching result row(s).")
+    elif task:
+        lines.append(f"Returned {returned_row_count} result row(s).")
+    elif returned_row_count:
+        lines.append(f"Returned {returned_row_count} result row(s).")
+    if lines:
         lines.append("")
 
     if isinstance(columns, list) and isinstance(rows, list) and columns:
@@ -288,10 +682,16 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
         lines.append(_markdown_table(columns, rows, table_limit))
         if len(rows) > table_limit:
             lines.append("")
-            lines.append(f"Showing first {table_limit} rows.")
-        elif isinstance(limit, int) and row_count == limit:
+            if isinstance(row_count, int):
+                lines.append(f"Showing first {table_limit} of {returned_row_count} returned row(s).")
+            else:
+                lines.append(f"Showing first {table_limit} rows.")
+        elif truncated:
             lines.append("")
-            lines.append(f"Showing up to {limit} rows.")
+            if isinstance(row_count, int):
+                lines.append(f"Showing {returned_row_count} returned row(s) out of {row_count} matching row(s).")
+            else:
+                lines.append(f"Showing up to {limit if isinstance(limit, int) else returned_row_count} rows.")
     else:
         # Check if this is actually a schema object masquerading as a plain result
         schema_check = result if isinstance(result, dict) else {}
@@ -309,46 +709,220 @@ def _format_sql_result_answer(result: dict[str, Any], task: str = "") -> str:
             if not isinstance(query_sql, str) or not query_sql.strip():
                 continue
             label = query.get("label") or f"Query {index}"
-            lines.extend(["", f"{index}. {label}", "", "```sql", query_sql.strip(), "```"])
+            lines.extend(["", f"{index}. {label}", ""])
+            lines.extend(_format_preformatted_block(query_sql.strip()))
     elif isinstance(sql, str) and sql.strip():
-        lines.extend(["", "**SQL used**", "", "```sql", sql.strip(), "```"])
+        lines.extend(["", "**SQL used**", ""])
+        lines.extend(_format_preformatted_block(sql.strip()))
     return "\n".join(lines).strip()
 
-def _format_schema_answer(schema: dict[str, Any]) -> str:
+
+def _extract_scalar_sql_value(result: dict[str, Any]) -> Any:
+    if not isinstance(result, dict):
+        return None
+    rows = result.get("rows")
+    columns = result.get("columns")
+    if not isinstance(rows, list) or len(rows) != 1:
+        return None
+    if not isinstance(columns, list) or len(columns) != 1:
+        return None
+    row = rows[0]
+    if not isinstance(row, dict):
+        return None
+    return row.get(columns[0])
+
+
+def _format_multi_sql_workflow_answer(results: list[dict[str, Any]], task: str = "") -> str | None:
+    if len(results) < 2:
+        return None
+    scalar_lines = []
+    table_result = None
+    for item in results:
+        scalar_value = _extract_scalar_sql_value(item)
+        if scalar_value is not None:
+            step = item.get("step") if isinstance(item.get("step"), dict) else {}
+            label = str(step.get("task") or task or "Count").strip()
+            scalar_lines.append(f"{label}: `{scalar_value}`")
+        elif table_result is None and isinstance(item.get("rows"), list) and item.get("rows"):
+            table_result = item
+    if table_result is None:
+        return None
+    table_answer = _format_sql_result_answer(table_result, "")
+    lines = []
+    if task:
+        lines.append(task)
+    if scalar_lines:
+        if lines:
+            lines.append("")
+        lines.extend(scalar_lines)
+    if table_answer:
+        if lines:
+            lines.append("")
+        lines.append(table_answer)
+    return "\n".join(lines).strip() or None
+
+
+def _artifact_paths_from_steps(steps: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for step in _flatten_workflow_steps(steps):
+        if step.get("status") != "completed":
+            continue
+        event = step.get("event")
+        if event not in {"shell.result", "task.result"}:
+            continue
+        value = step.get("result")
+        if isinstance(value, str):
+            candidate = value.strip()
+        elif isinstance(value, dict):
+            excerpt = value.get("excerpt")
+            candidate = excerpt.strip() if isinstance(excerpt, str) else ""
+        else:
+            candidate = ""
+        paths.extend(_extract_path_values(candidate))
+        stdout = _step_payload_field(step, "stdout") or _step_payload_field(step, "stdout_excerpt")
+        if isinstance(stdout, str):
+            paths.extend(_extract_path_values(stdout))
+    seen: set[str] = set()
+    unique = []
+    for item in paths:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+def _schema_focus_terms(task: str = "") -> set[str]:
+    lowered = str(task or "").lower()
+    terms = set()
+    if re.search(r"\bschemas\b", lowered) or "schema names" in lowered:
+        terms.add("schemas")
+    if "table" in lowered:
+        terms.add("tables")
+    if "column" in lowered:
+        terms.add("columns")
+    if "relationship" in lowered or "foreign key" in lowered or "relation" in lowered:
+        terms.add("relationships")
+    if "schema" in lowered:
+        terms.add("schema")
+    return terms
+
+
+def _schema_focus_result(schema: dict[str, Any], task: str = "") -> dict[str, Any] | None:
+    tables = schema.get("tables")
+    if not isinstance(tables, list):
+        return None
+    terms = _schema_focus_terms(task)
+    if "schemas" in terms and "tables" not in terms and "columns" not in terms and "relationships" not in terms:
+        names = sorted({str(table.get("schema") or "").strip() for table in tables if str(table.get("schema") or "").strip()})
+        return {
+            "columns": ["schema"],
+            "rows": [{"schema": name} for name in names],
+            "row_count": len(names),
+            "limit": len(names),
+        }
+    if "tables" in terms and "schemas" not in terms and "columns" not in terms and "relationships" not in terms:
+        rows = [
+            {
+                "schema": table.get("schema"),
+                "table": table.get("name"),
+                "type": table.get("type", "table"),
+            }
+            for table in tables
+        ]
+        return {
+            "columns": ["schema", "table", "type"],
+            "rows": rows,
+            "row_count": len(rows),
+            "limit": len(rows),
+        }
+    if "columns" in terms and "schemas" not in terms and "tables" not in terms and "relationships" not in terms:
+        rows = []
+        for table in tables:
+            for column in table.get("columns", []):
+                rows.append(
+                    {
+                        "schema": table.get("schema"),
+                        "table": table.get("name"),
+                        "column": column.get("name"),
+                        "type": column.get("type"),
+                        "nullable": column.get("nullable"),
+                    }
+                )
+        return {
+            "columns": ["schema", "table", "column", "type", "nullable"],
+            "rows": rows,
+            "row_count": len(rows),
+            "limit": len(rows),
+        }
+    if "relationships" in terms and "schemas" not in terms and "tables" not in terms and "columns" not in terms:
+        rows = []
+        for table in tables:
+            for foreign_key in table.get("foreign_keys", []):
+                ref_schema = str(foreign_key.get("references_schema") or "").strip()
+                ref_table = str(foreign_key.get("references_table") or "").strip()
+                ref_column = str(foreign_key.get("references_column") or "").strip()
+                qualified_ref = ".".join(part for part in (ref_schema, ref_table) if part)
+                if ref_column:
+                    qualified_ref = f"{qualified_ref}.{ref_column}" if qualified_ref else ref_column
+                rows.append(
+                    {
+                        "schema": table.get("schema"),
+                        "table": table.get("name"),
+                        "column": foreign_key.get("column"),
+                        "references": qualified_ref,
+                    }
+                )
+        return {
+            "columns": ["schema", "table", "column", "references"],
+            "rows": rows,
+            "row_count": len(rows),
+            "limit": len(rows),
+        }
+    return None
+
+
+def _format_schema_answer(schema: dict[str, Any], task: str = "") -> str:
     """Produce a compact Markdown summary of a SQL schema object."""
+    focused_result = _schema_focus_result(schema, task)
+    if isinstance(focused_result, dict):
+        return _format_sql_result_answer(focused_result, task)
+
     dialect = schema.get("dialect", "unknown")
-    tables = schema.get("tables", {})
-    if not isinstance(tables, dict):
+    tables = schema.get("tables", [])
+    if not isinstance(tables, list):
         return json.dumps(schema, indent=2, ensure_ascii=True)
 
-    lines = [f"**Database schema** (`{dialect}`)\n"]
-    for table_name, table_info in sorted(tables.items()):
-        if not isinstance(table_info, dict):
-            continue
-        columns = table_info.get("columns", [])
-        pks = table_info.get("primary_keys", [])
-        fks = table_info.get("foreign_keys", [])
-        col_names = ", ".join(
-            f"`{c['name']}`" if isinstance(c, dict) else f"`{c}`" for c in columns
+    schema_names = sorted({str(table.get("schema") or "").strip() for table in tables if str(table.get("schema") or "").strip()})
+    summary_rows = []
+    for table in tables:
+        foreign_keys = table.get("foreign_keys", [])
+        columns = table.get("columns", [])
+        summary_rows.append(
+            {
+                "schema": table.get("schema"),
+                "table": table.get("name"),
+                "columns": len(columns) if isinstance(columns, list) else 0,
+                "relationships": len(foreign_keys) if isinstance(foreign_keys, list) else 0,
+            }
         )
-        pk_str = ", ".join(f"`{k}`" for k in pks) if pks else "—"
-        fk_str = ""
-        if fks:
-            fk_parts = []
-            for fk in fks:
-                if isinstance(fk, dict):
-                    src = fk.get("constrained_columns", [])
-                    ref = fk.get("referred_table", "?")
-                    fk_parts.append(f"{', '.join(src)} → {ref}")
-            if fk_parts:
-                fk_str = f"  FK: {'; '.join(fk_parts)}\n"
-        lines.append(f"**{table_name}** ({len(columns)} columns, PK: {pk_str})")
-        if col_names:
-            lines.append(f"  Columns: {col_names}")
-        if fk_str:
-            lines.append(fk_str.rstrip())
-        lines.append("")
+
+    lines = [f"**Database schema** (`{dialect}`)"]
+    if schema_names:
+        lines.extend(["", f"Schemas: {', '.join(f'`{name}`' for name in schema_names)}"])
+    if summary_rows:
+        lines.extend(["", _markdown_table(["schema", "table", "columns", "relationships"], summary_rows, limit=50)])
+        if len(summary_rows) > 50:
+            lines.extend(["", "Showing first 50 tables."])
     return "\n".join(lines).strip()
+
+
+def _format_schema_payload_answer(payload: dict[str, Any], task: str = "") -> str | None:
+    result = payload.get("result")
+    if isinstance(result, dict):
+        return _format_sql_result_answer(result, task)
+    schema = payload.get("schema")
+    if isinstance(schema, dict):
+        return _format_schema_answer(schema, task)
+    return None
 
 
 def _format_slurm_result_answer(payload: dict[str, Any]) -> str:
@@ -358,70 +932,200 @@ def _format_slurm_result_answer(payload: dict[str, Any]) -> str:
 def _format_workflow_answer(payload: dict[str, Any]) -> str:
     task = payload.get("task", "")
     status = payload.get("status", "unknown")
+    task_shape = str(payload.get("task_shape") or "").strip().lower()
+    include_internal_steps = _workflow_requests_internal_steps(payload)
+    presentation_format = _workflow_presentation_format(payload)
     steps = payload.get("steps", [])
     flat_steps = _flatten_workflow_steps(steps if isinstance(steps, list) else [])
-    for step in reversed(flat_steps):
-        step_payload = step.get("payload")
-        if not isinstance(step_payload, dict):
-            continue
-        reduced = step_payload.get("reduced_result") or step_payload.get("refined_answer")
-        if isinstance(reduced, str) and reduced.strip():
-            return reduced.strip()
+    artifact_paths = _artifact_paths_from_steps(steps if isinstance(steps, list) else [])
     sql_results = _extract_sql_results_from_steps(steps if isinstance(steps, list) else [])
-    if status == "completed" and sql_results:
-        return _format_sql_result_answer(sql_results[-1], task)
+    primary_answer = None
+    if status != "completed":
+        error = payload.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+    if task_shape == "save_artifact" and status == "completed":
+        if sql_results:
+            scalar_value = _extract_scalar_sql_value(sql_results[-1]) if len(sql_results) == 1 else None
+            if scalar_value is not None:
+                primary_answer = f"Result: `{scalar_value}`"
+            else:
+                primary_answer = _format_multi_sql_workflow_answer(sql_results, task) or _format_sql_result_answer(sql_results[-1], task)
+        if artifact_paths:
+            artifact_links = [(_markdown_link_for_file_path(path) or path) for path in artifact_paths]
+            artifact_text = (
+                f"Saved results to: {artifact_links[0]}"
+                if len(artifact_links) == 1
+                else "\n".join(["Saved files:", *[f"- {link}" for link in artifact_links]])
+            )
+            if isinstance(primary_answer, str) and primary_answer.strip():
+                primary_answer = "\n".join(
+                    [
+                        primary_answer.strip(),
+                        "",
+                        artifact_text,
+                    ]
+                ).strip()
+            else:
+                primary_answer = artifact_text
+    else:
+        if status == "completed" and sql_results:
+            primary_answer = _format_multi_sql_workflow_answer(sql_results, task) or _format_sql_result_answer(sql_results[-1], task)
+        shell_steps = [step for step in flat_steps if step.get("status") == "completed" and step.get("event") == "shell.result"]
+        if primary_answer is None and shell_steps:
+            primary_answer = _format_compound_shell_workflow_answer(shell_steps, task)
+        for step in reversed(flat_steps):
+            if primary_answer:
+                break
+            reduced = _step_payload_field(step, "reduced_result") or _step_payload_field(step, "refined_answer")
+            if isinstance(reduced, str) and reduced.strip():
+                primary_answer = reduced.strip()
+                break
+    if (
+        task_shape != "save_artifact"
+        and artifact_paths
+        and isinstance(primary_answer, str)
+        and primary_answer.strip()
+    ):
+        artifact_links = [(_markdown_link_for_file_path(path) or path) for path in artifact_paths]
+        artifact_text = (
+            f"Saved results to: {artifact_links[0]}"
+            if len(artifact_links) == 1
+            else "\n".join(["Saved files:", *[f"- {link}" for link in artifact_links]])
+        )
+        if artifact_text not in primary_answer:
+            primary_answer = "\n".join(
+                [
+                    primary_answer.strip(),
+                    "",
+                    artifact_text,
+                ]
+            ).strip()
+
+    if primary_answer is None and status == "completed" and task_shape == "schema_summary":
+        for step in reversed(flat_steps):
+            if step.get("event") != "sql.result":
+                continue
+            step_payload = step.get("payload")
+            if not isinstance(step_payload, dict):
+                continue
+            rendered = _format_schema_payload_answer(step_payload, task)
+            if rendered:
+                primary_answer = rendered
+                break
 
     slurm_results = _extract_slurm_results_from_steps(steps if isinstance(steps, list) else [])
-    if status == "completed" and slurm_results:
-        return _format_slurm_result_answer(slurm_results[-1])
+    if primary_answer is None and status == "completed" and slurm_results:
+        primary_answer = _format_slurm_result_answer(slurm_results[-1])
+
+    if primary_answer is None and status == "completed" and presentation_format == "markdown_table":
+        for step in reversed(flat_steps):
+            if step.get("event") not in {"shell.result", "slurm.result"}:
+                continue
+            stdout = _step_payload_field(step, "stdout") or _step_payload_field(step, "stdout_excerpt")
+            rendered = _format_fixed_width_table_answer(stdout, task)
+            if rendered:
+                primary_answer = rendered
+                break
+
+    if primary_answer is None and status == "completed":
+        primary_answer = _format_multi_shell_workflow_answer(flat_steps, task)
 
     general_results = _extract_general_results_from_steps(steps if isinstance(steps, list) else [])
-    if status == "completed" and general_results:
+    if primary_answer is None and status == "completed" and general_results:
         event, payload = general_results[-1]
-        return _format_agent_result(payload, event)
+        primary_answer = _format_agent_result(payload, event)
+
+    if primary_answer and not include_internal_steps:
+        return primary_answer
 
     lines = [
-        f"Workflow {status}: {task}".strip(),
-        "",
-        "| Step | Agent | Status | Result |",
-        "| --- | --- | --- | --- |",
+        primary_answer.strip() if isinstance(primary_answer, str) and primary_answer.strip() else f"Workflow {status}: {task}".strip(),
     ]
-    for step in flat_steps:
-        result = step.get("result")
-        if isinstance(result, str):
-            result_text = result.strip().replace("\n", "<br>")
-        elif result is None:
-            result_text = step.get("error", "")
-        else:
-            result_text = json.dumps(result, ensure_ascii=True)
-        if len(result_text) > 500:
-            result_text = f"{result_text[:500]}..."
-        lines.append(
-            "| {step_id} | {agent} | {status} | {result} |".format(
-                step_id=step.get("display_id", step.get("id", "")),
-                agent=step.get("target_agent", "workflow"),
-                status=step.get("status", ""),
-                result=result_text or "<empty>",
-            )
+    if not include_internal_steps:
+        lines.extend(
+            [
+                "",
+                "| Step | Agent | Status | Result |",
+                "| --- | --- | --- | --- |",
+            ]
         )
+        for step in flat_steps:
+            result = step.get("result")
+            if isinstance(result, str):
+                result_text = result.strip().replace("\n", "<br>")
+            elif result is None:
+                result_text = step.get("error", "")
+            else:
+                result_text = json.dumps(result, ensure_ascii=True)
+            if len(result_text) > 500:
+                result_text = f"{result_text[:500]}..."
+            lines.append(
+                "| {step_id} | {agent} | {status} | {result} |".format(
+                    step_id=step.get("display_id", step.get("id", "")),
+                    agent=step.get("target_agent", "workflow"),
+                    status=step.get("status", ""),
+                    result=result_text or "<empty>",
+                )
+            )
 
     error = payload.get("error")
     if isinstance(error, str) and error.strip():
         lines.extend(["", f"Error: {error.strip()}"])
 
+    stage_details = []
+    for step in flat_steps:
+        event = step.get("event")
+        if event not in {"shell.result", "slurm.result", "file.content"}:
+            continue
+        command = _step_payload_field(step, "command")
+        content = _step_payload_field(step, "content")
+        stdout = _step_payload_field(step, "stdout") or _step_payload_field(step, "stdout_excerpt")
+        stderr = _step_payload_field(step, "stderr") or _step_payload_field(step, "stderr_excerpt")
+        if event == "file.content":
+            stdout = content or stdout
+        returncode = _step_payload_field(step, "returncode")
+        detail = step.get("detail")
+        stage_lines = [f"**{step.get('display_id', step.get('id', 'step'))}** {step.get('task', '').strip()}".strip()]
+        if isinstance(event, str) and event.strip():
+            stage_lines.append(f"Event: `{event}`")
+        if isinstance(command, str) and command.strip():
+            stage_lines.extend(["", "**Command**", ""])
+            stage_lines.extend(_format_preformatted_block(command.strip()))
+        if returncode is not None:
+            stage_lines.append(f"Return code: `{returncode}`")
+        if isinstance(detail, str) and detail.strip():
+            stage_lines.append(f"Detail: {detail.strip()}")
+        linked_paths = _extract_file_paths_from_text(stdout)
+        labeled_paths = _extract_labeled_paths_from_text(stdout)
+        if linked_paths or labeled_paths:
+            stage_lines.append("Files:")
+            stage_lines.extend([f"- {path}" for path in linked_paths])
+            stage_lines.extend(labeled_paths)
+        if isinstance(stdout, str) and stdout.strip():
+            stage_lines.extend(["", "**Output**", ""])
+            stage_lines.extend(_format_preformatted_block(_clean_terminal_output(stdout) or stdout.strip()))
+        if isinstance(stderr, str) and stderr.strip():
+            stage_lines.extend(["", "**Error output**", ""])
+            stage_lines.extend(_format_preformatted_block(_clean_terminal_output(stderr) or stderr.strip()))
+        if len(stage_lines) > 1:
+            stage_details.append("\n".join(stage_lines))
+
+    if include_internal_steps and stage_details:
+        lines.extend(["", "**Stage Outputs**", "", *stage_details])
+
     shell_details = []
     for step in flat_steps:
-        step_payload = step.get("payload")
-        if not isinstance(step_payload, dict) or step.get("event") != "shell.result":
+        if step.get("event") != "shell.result":
             continue
-        command = step_payload.get("command")
+        command = _step_payload_field(step, "command")
         if not isinstance(command, str) or not command.strip():
             continue
         detail = _command_output_details(
             command,
-            step_payload.get("stdout", ""),
-            step_payload.get("stderr", ""),
-            step_payload.get("returncode"),
+            str(_step_payload_field(step, "stdout") or _step_payload_field(step, "stdout_excerpt") or ""),
+            str(_step_payload_field(step, "stderr") or _step_payload_field(step, "stderr_excerpt") or ""),
+            _step_payload_field(step, "returncode"),
         )
         shell_details.append(
             "\n".join(
@@ -450,7 +1154,8 @@ def _fallback_answer(req: EventRequest) -> str:
     if req.event == "file.content":
         path = req.payload["path"]
         content = req.payload["content"]
-        return f"File '{path}' content preview:\n{content}"
+        linked_path = _markdown_link_for_file_path(path) or path
+        return f"File {linked_path} content preview:\n{content}"
 
     if req.event == "shell.result":
         command = req.payload["command"]
@@ -460,12 +1165,15 @@ def _fallback_answer(req: EventRequest) -> str:
         return _format_shell_answer(command, returncode, stdout, stderr)
 
     if req.event == "sql.result":
-        reduced = req.payload.get("reduced_result") or req.payload.get("refined_answer")
-        if isinstance(reduced, str) and reduced.strip():
-            return reduced.strip()
         result = req.payload.get("result")
         if isinstance(result, dict):
             return _format_sql_result_answer(result)
+        reduced = req.payload.get("reduced_result") or req.payload.get("refined_answer")
+        if isinstance(reduced, str) and reduced.strip():
+            return reduced.strip()
+        schema = req.payload.get("schema")
+        if isinstance(schema, dict):
+            return _format_schema_answer(schema, str(req.payload.get("detail") or ""))
         return f"SQL result:\n{json.dumps(result, indent=2, ensure_ascii=True)}"
 
     if req.event == "slurm.result":
@@ -495,6 +1203,46 @@ def _fallback_answer(req: EventRequest) -> str:
         return f"Notification: {detail}"
 
     return ""
+
+
+def _should_use_grounded_workflow_fallback(payload: dict[str, Any]) -> bool:
+    steps = payload.get("steps", [])
+    flat_steps = _flatten_workflow_steps(steps if isinstance(steps, list) else [])
+    for step in flat_steps:
+        if step.get("status") != "completed":
+            continue
+        event = step.get("event")
+        step_payload = step.get("payload")
+        if not isinstance(step_payload, dict):
+            continue
+        if event in {"shell.result", "slurm.result", "file.content"}:
+            reduced = step_payload.get("reduced_result") or step_payload.get("refined_answer")
+            if isinstance(reduced, str) and reduced.strip():
+                continue
+            stdout = (
+                step_payload.get("stdout")
+                or step_payload.get("stdout_excerpt")
+                or step_payload.get("content")
+            )
+            if isinstance(stdout, str) and stdout.strip():
+                return True
+    return False
+
+
+def _should_use_grounded_sql_fallback(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("result"), dict) or isinstance(payload.get("schema"), dict):
+        return True
+    return False
+
+
+def _workflow_has_grounded_sql_output(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("task_shape") or "").strip().lower() == "schema_summary":
+        return True
+    return bool(_extract_sql_results_from_steps(payload.get("steps", []) if isinstance(payload.get("steps"), list) else []))
 
 
 def _build_source_payload(req: EventRequest) -> dict[str, Any]:
@@ -533,6 +1281,9 @@ def _build_source_payload(req: EventRequest) -> dict[str, Any]:
                             "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
                             "rows": compact_rows,
                             "row_count": result.get("row_count"),
+                            "returned_row_count": result.get("returned_row_count"),
+                            "total_matching_rows": result.get("total_matching_rows"),
+                            "truncated": result.get("truncated"),
                             "limit": result.get("limit"),
                             "note": "Rows truncated for synthesis" if len(rows) > 5 else None
                         }
@@ -725,22 +1476,7 @@ def _build_prompt(req: EventRequest) -> str:
 
 
 def _llm_synthesize(req: EventRequest) -> str | None:
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_SYNTH_MODEL") or os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-
-    if not api_key:
-        raise RuntimeError("LLM_OPS_API_KEY is not set")
-
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
 
     prompt = _build_prompt(req)
     _debug_log("Constructed synthesizer prompt:")
@@ -779,6 +1515,17 @@ def _synthesize(req: EventRequest) -> str:
         question = req.payload.get("question")
         if isinstance(question, str) and question.strip():
             return _fallback_answer(req)
+    if req.event == "sql.result" and _should_use_grounded_sql_fallback(req.payload):
+        return _fallback_answer(req)
+    if req.event == "workflow.result" and (
+        str(req.payload.get("status") or "").strip().lower() != "completed"
+        or
+        _should_use_grounded_workflow_fallback(req.payload)
+        or _workflow_has_grounded_sql_output(req.payload)
+        or str(req.payload.get("task_shape") or "").strip().lower() == "save_artifact"
+        or _workflow_requests_internal_steps(req.payload)
+    ):
+        return _fallback_answer(req)
     try:
         answer = _llm_synthesize(req)
         if answer:

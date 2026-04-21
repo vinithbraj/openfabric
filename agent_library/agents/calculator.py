@@ -6,7 +6,7 @@ from typing import Any, List
 from fastapi import FastAPI
 import requests
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -176,22 +176,7 @@ def _build_preprocess_prompt(task: str):
 
 
 def _llm_preprocess(task: str):
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = float(os.getenv("LLM_OPS_TIMEOUT_SECONDS", "300"))
-
-    if not api_key:
-        raise RuntimeError("LLM_OPS_API_KEY is not set")
-
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
+    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}

@@ -102,6 +102,33 @@ class ShellRunnerDataFlowTests(unittest.TestCase):
         self.assertEqual(emitted["event"], "shell.result")
         self.assertEqual(emitted["payload"]["stdout"], "false")
 
+    def test_find_permission_warnings_with_stdout_are_treated_as_partial_success(self):
+        class _Completed:
+            stdout = "./ok.sh\n"
+            stderr = "find: './private': Permission denied\n"
+            returncode = 1
+
+        with patch("agent_library.agents.shell_runner.subprocess.run", return_value=_Completed()):
+            response = handle_event(
+                types.SimpleNamespace(
+                    event="task.plan",
+                    payload={
+                        "task": "find all shell scripts in this repo",
+                        "target_agent": "shell_runner",
+                        "instruction": {
+                            "operation": "run_command",
+                            "command": 'find . -type f -name "*.sh"',
+                        },
+                    },
+                )
+            )
+
+        emitted = response["emits"][0]
+        self.assertEqual(emitted["event"], "shell.result")
+        self.assertEqual(emitted["payload"]["returncode"], 0)
+        self.assertEqual(emitted["payload"]["raw_returncode"], 1)
+        self.assertIn("partial results", emitted["payload"]["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

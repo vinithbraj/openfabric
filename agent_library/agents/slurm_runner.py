@@ -8,7 +8,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, task_plan_context
+from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, shared_llm_api_settings, task_plan_context
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -237,21 +237,7 @@ def _slurm_command_catalog_text() -> str:
 
 
 def _llm_api_settings() -> tuple[str, str, float, str]:
-    api_key = os.getenv("LLM_OPS_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("LLM_OPS_BASE_URL")
-    model = os.getenv("LLM_OPS_MODEL")
-    timeout_seconds = _llm_timeout_seconds()
-    if not api_key:
-        raise RuntimeError("LLM_OPS_API_KEY is not set")
-    if api_key.startswith("sk-") and api_key.lower() != "dummy":
-        base_url = "https://api.openai.com/v1"
-        if not model:
-            model = "gpt-4.1"
-    elif not base_url:
-        base_url = "https://api.openai.com/v1"
-    if not model:
-        model = "gpt-4o-mini"
-    return api_key, base_url.rstrip("/"), timeout_seconds, model
+    return shared_llm_api_settings("gpt-4o-mini", timeout_seconds=_llm_timeout_seconds())
 
 
 def _is_usage_error(stderr: str) -> bool:

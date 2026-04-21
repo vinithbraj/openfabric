@@ -117,6 +117,25 @@ class _FallbackPlannerAdapter:
         ]
 
 
+class _NoRecoveryPlannerAdapter:
+    def __init__(self, _config):
+        pass
+
+    def handle(self, event_name, payload):
+        if event_name != "planner.replan.request":
+            return []
+        return [
+            (
+                "task.result",
+                {
+                    "detail": payload.get("reason") or "Planner could not further decompose the failed step.",
+                    "status": "failed",
+                    "error": payload.get("reason") or "Planner could not further decompose the failed step.",
+                },
+            )
+        ]
+
+
 TEST_SPEC = {
     "contracts": {
         "TaskPlan": {
@@ -264,11 +283,57 @@ class EngineValidationTests(unittest.TestCase):
         ADAPTER_REGISTRY["test_validator"] = _ValidatorAdapter
         ADAPTER_REGISTRY["test_recorder"] = _RecorderAdapter
         ADAPTER_REGISTRY["test_fallback_planner"] = _FallbackPlannerAdapter
+        ADAPTER_REGISTRY["test_no_recovery_planner"] = _NoRecoveryPlannerAdapter
         _RecorderAdapter.events = []
 
     def tearDown(self):
         ADAPTER_REGISTRY.clear()
         ADAPTER_REGISTRY.update(self.original_registry)
+
+    def test_structured_step_result_exposes_shell_stdout_alias_for_followup_references(self):
+        engine = Engine(TEST_SPEC)
+        context = {"__step_results__": [], "__step_results_by_id__": {}}
+        envelope = engine._structured_step_result(
+            "step1",
+            {"task": "show branch", "target_agent": "shell_runner"},
+            "shell.result",
+            {"command": "git branch --show-current", "stdout": "main\n", "stderr": "", "returncode": 0},
+            "main",
+            "completed",
+            1.0,
+        )
+        engine._record_step_result(context, envelope)
+        self.assertEqual(engine._resolve_reference_path("step1.stdout", context), "main")
+
+    def test_structured_step_result_exposes_rows_alias_for_followup_references(self):
+        engine = Engine(TEST_SPEC)
+        context = {"__step_results__": [], "__step_results_by_id__": {}}
+        envelope = engine._structured_step_result(
+            "step1",
+            {"task": "query rows", "target_agent": "sql_runner_mydb"},
+            "task.result",
+            {"detail": "Rows ready.", "result": {"rows": [{"name": "alice"}], "columns": ["name"], "row_count": 1}},
+            {"rows": [{"name": "alice"}]},
+            "completed",
+            1.0,
+        )
+        engine._record_step_result(context, envelope)
+        self.assertEqual(engine._resolve_reference_path("step1.rows.0.name", context), "alice")
+
+    def test_compact_event_payload_preserves_shell_output_for_workflow_grounding(self):
+        engine = Engine(TEST_SPEC)
+        compact = engine._compact_event_payload(
+            "shell.result",
+            {
+                "command": "docker ps -a",
+                "stdout": "CONTAINER ID   IMAGE   NAMES\n123abc   postgres:16   postgres_db",
+                "stderr": "",
+                "returncode": 0,
+            },
+        )
+        self.assertEqual(compact["command"], "docker ps -a")
+        self.assertIn("postgres_db", compact["stdout"])
+        self.assertIn("postgres_db", compact["stdout_excerpt"])
 
     def test_engine_derives_fallback_only_after_validator_rejects_primary_attempt(self):
         engine = Engine(TEST_SPEC)
@@ -343,6 +408,33 @@ class EngineValidationTests(unittest.TestCase):
         self.assertIn("narrower target", clarification.get("question", ""))
         replan_requests = [payload for event_name, payload in _RecorderAdapter.events if event_name == "planner.replan.request" and payload.get("task") == "uncertain goal"]
         self.assertEqual(len(replan_requests), 0)
+
+    def test_engine_does_not_forward_internal_replan_task_result_side_channel(self):
+        spec = copy.deepcopy(TEST_SPEC)
+        spec["agents"]["fallback_planner"]["runtime"]["adapter"] = "test_no_recovery_planner"
+        spec["agents"]["recorder"]["subscribes_to"].append("task.result")
+        engine = Engine(spec)
+        engine.setup()
+        engine.emit(
+            "task.plan",
+            {
+                "task": "produce the final answer",
+                "task_shape": "lookup",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "target_agent": "executor",
+                        "task": "primary attempt",
+                        "instruction": {"operation": "run_command", "command": "primary"},
+                    }
+                ],
+            },
+        )
+        recorded_task_results = [payload for event_name, payload in _RecorderAdapter.events if event_name == "task.result"]
+        self.assertEqual(recorded_task_results, [])
+        workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
+        self.assertEqual(len(workflow_events), 1)
+        self.assertEqual(workflow_events[0]["status"], "failed")
 
 
 if __name__ == "__main__":
