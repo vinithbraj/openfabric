@@ -74,6 +74,8 @@ contracts:
     properties:
       path:
         type: string
+      node:
+        type: object
 
   FileContent:
     type: object
@@ -83,6 +85,8 @@ contracts:
         type: string
       content:
         type: string
+      node:
+        type: object
 
   ShellExecRequest:
     type: object
@@ -90,6 +94,8 @@ contracts:
     properties:
       command:
         type: string
+      node:
+        type: object
 
   ShellResult:
     type: object
@@ -180,6 +186,8 @@ contracts:
         type: string
       message:
         type: string
+      node:
+        type: object
 
   TaskPlan:
     type: object
@@ -328,6 +336,8 @@ contracts:
         type: array
         items:
           type: object
+      node:
+        type: object
 
   ClarificationRequired:
     type: object
@@ -371,6 +381,8 @@ contracts:
         items:
           type: object
       presentation:
+        type: object
+      node:
         type: object
 
   ValidationRequest:
@@ -578,6 +590,8 @@ contracts:
     properties:
       detail:
         type: string
+      node:
+        type: object
 
   WorkflowResult:
     type: object
@@ -604,6 +618,8 @@ contracts:
         type: object
       graph:
         type: object
+      node:
+        type: object
 
   FinalAnswer:
     type: object
@@ -611,6 +627,8 @@ contracts:
     properties:
       answer:
         type: string
+      node:
+        type: object
 
   SystemCapabilities:
     type: object

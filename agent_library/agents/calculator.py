@@ -6,7 +6,7 @@ from typing import Any, List
 from fastapi import FastAPI
 import requests
 
-from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -280,6 +280,7 @@ def _format_result(function: str, operands: List[float], kind: str, value: Any):
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("calculator", "executor")
 def handle_event(req: EventRequest):
     if req.event != "task.plan":
         return {"emits": []}

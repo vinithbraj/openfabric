@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse
+from agent_library.common import EventRequest, EventResponse, with_node_envelope
 
 app = FastAPI()
 
@@ -18,6 +18,7 @@ AGENT_METADATA = {
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("planner", "router")
 def handle_event(req: EventRequest):
     if req.event == "user.ask":
         question = req.payload["question"]

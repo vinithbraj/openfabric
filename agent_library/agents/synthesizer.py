@@ -6,7 +6,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
 from runtime.console import log_debug
 
 app = FastAPI()
@@ -1579,6 +1579,7 @@ def _synthesize(req: EventRequest) -> str:
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("synthesizer", "synthesizer")
 def handle_event(req: EventRequest):
     if req.event not in {"research.result", "task.result", "file.content", "shell.result", "sql.result", "slurm.result", "notify.result", "workflow.result", "clarification.required"}:
         return {"emits": []}

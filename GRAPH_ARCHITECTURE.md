@@ -132,6 +132,15 @@ Implemented in this change:
 - expose `Engine.list_runs(...)`, `Engine.inspect_run(...)`, and `Engine.render_run_graph(...)` for programmatic debugging and replay-adjacent tooling
 - add CLI inspection commands for listing runs, dumping a run inspection payload, and rendering stored workflow graphs as Mermaid or JSON
 
+### Phase 8
+
+Implemented in this change:
+
+- extend shared node-envelope coverage to the remaining non-core agents in [agent_library/agents/](/home/vinith/Desktop/Workspace/openfabric/agent_library/agents)
+- propagate node metadata through planner, operations planner, filesystem, notifier, retriever, calculator, and synthesizer outputs
+- make the final `answer.final` path emit a first-class synthesizer node envelope
+- expand spec contracts so planner-facing requests and user-facing final answers accept the common `node` schema
+
 ## Current Mapping
 
 Today’s runtime already maps naturally to the target graph:
@@ -162,6 +171,5 @@ The runtime now exposes the following execution chains directly in the graph:
 
 The main remaining architectural gaps before production are:
 
-- extend the stricter common envelope to the remaining non-core agents and answer/synthesis paths
 - surface the graph through a dedicated visualization or UI layer
 - add stronger production observability around timings, metrics, and audit queries on top of the persisted run store

@@ -3,7 +3,7 @@ import re
 
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, task_plan_context
+from agent_library.common import EventRequest, EventResponse, task_plan_context, with_node_envelope
 
 app = FastAPI()
 
@@ -62,6 +62,7 @@ def _extract_filepath(task: str):
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("filesystem", "filesystem")
 def handle_event(req: EventRequest):
     if req.event == "file.read":
         raw_path = req.payload["path"]

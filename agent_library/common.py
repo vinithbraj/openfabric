@@ -175,6 +175,112 @@ def _nonempty(value: Any) -> bool:
     return value not in (None, "", [], {})
 
 
+def _first_nonempty(*values: Any) -> Any:
+    for value in values:
+        if _nonempty(value):
+            return value
+    return None
+
+
+def _coerce_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text if text else None
+
+
+def _derive_payload_task(payload: Dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    instruction = payload.get("instruction") if isinstance(payload.get("instruction"), dict) else {}
+    return _first_nonempty(
+        _coerce_text(payload.get("task")),
+        _coerce_text(payload.get("original_task")),
+        _coerce_text(payload.get("question")),
+        _coerce_text(payload.get("query")),
+        _coerce_text(payload.get("message")),
+        _coerce_text(instruction.get("question")),
+        _coerce_text(instruction.get("path")),
+        _coerce_text(instruction.get("message")),
+        _coerce_text(payload.get("path")),
+    )
+
+
+def _derive_original_task(payload: Dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    return _first_nonempty(
+        _coerce_text(payload.get("original_task")),
+        _coerce_text(payload.get("task")),
+        _coerce_text(payload.get("question")),
+        _coerce_text(payload.get("query")),
+        _coerce_text(payload.get("message")),
+    )
+
+
+def _derive_node_operation(
+    request_event: str,
+    emitted_event: str,
+    request_payload: Dict[str, Any],
+    request_node: Dict[str, Any],
+    emitted_node: Dict[str, Any],
+    instruction: Dict[str, Any],
+    reduction_request: Dict[str, Any],
+    *,
+    role: str,
+) -> str | None:
+    if isinstance(instruction.get("operation"), str) and instruction.get("operation").strip():
+        return instruction.get("operation").strip()
+    if isinstance(request_payload.get("operation"), str) and request_payload.get("operation").strip():
+        return request_payload.get("operation").strip()
+    if isinstance(request_payload.get("validation_scope"), str) and request_payload.get("validation_scope").strip():
+        return f"validate_{request_payload.get('validation_scope').strip()}"
+    if isinstance(reduction_request.get("kind"), str) and reduction_request.get("kind").strip():
+        return reduction_request.get("kind").strip()
+    if request_event == "data.reduce":
+        return "reduce_step_output"
+    if isinstance(request_node.get("operation"), str) and request_node.get("operation").strip():
+        return request_node.get("operation").strip()
+    if isinstance(emitted_node.get("operation"), str) and emitted_node.get("operation").strip():
+        return emitted_node.get("operation").strip()
+
+    if role == "synthesizer":
+        return "synthesize_answer"
+    if role == "router":
+        if request_event == "planner.replan.request" or emitted_event == "planner.replan.result":
+            return "replan_step"
+        if request_event == "system.capabilities":
+            return "publish_capabilities"
+        return "plan_request"
+    if role == "filesystem":
+        return "read_file"
+    if role == "notifier":
+        return "send_notification"
+
+    event_defaults = {
+        "research.query": "lookup_research",
+        "research.result": "lookup_research",
+        "file.read": "read_file",
+        "file.content": "read_file",
+        "shell.exec": "run_command",
+        "shell.result": "run_command",
+        "sql.query": "query_sql",
+        "sql.result": "query_sql",
+        "slurm.query": "query_slurm",
+        "slurm.result": "query_slurm",
+        "notify.send": "send_notification",
+        "notify.result": "send_notification",
+        "task.plan": "execute_task",
+        "task.result": "complete_task",
+        "answer.final": "synthesize_answer",
+        "plan.progress": "plan_request",
+    }
+    return _first_nonempty(
+        event_defaults.get(request_event),
+        event_defaults.get(emitted_event),
+    )
+
+
 def _derived_node_status(role: str, emitted_payload: Dict[str, Any]) -> str:
     status = emitted_payload.get("status")
     if isinstance(status, str) and status.strip():
@@ -212,18 +318,6 @@ def build_node_envelope(
     instruction = request_payload.get("instruction") if isinstance(request_payload.get("instruction"), dict) else {}
     reduction_request = request_payload.get("reduction_request") if isinstance(request_payload.get("reduction_request"), dict) else {}
 
-    operation = None
-    if isinstance(instruction.get("operation"), str) and instruction.get("operation").strip():
-        operation = instruction.get("operation").strip()
-    elif isinstance(request_payload.get("operation"), str) and request_payload.get("operation").strip():
-        operation = request_payload.get("operation").strip()
-    elif isinstance(request_payload.get("validation_scope"), str) and request_payload.get("validation_scope").strip():
-        operation = f"validate_{request_payload.get('validation_scope').strip()}"
-    elif isinstance(reduction_request.get("kind"), str) and reduction_request.get("kind").strip():
-        operation = reduction_request.get("kind").strip()
-    elif request_event == "data.reduce":
-        operation = "reduce_step_output"
-
     if isinstance(request_payload.get("validation_scope"), str) and request_payload.get("validation_scope").strip():
         scope = request_payload.get("validation_scope").strip()
     elif _nonempty(request_payload.get("step_id")) or _nonempty(emitted_payload.get("step_id")):
@@ -236,14 +330,53 @@ def build_node_envelope(
         "role": role,
         "request_event": request_event,
         "emitted_event": emitted_event,
-        "run_id": request_payload.get("run_id") or emitted_payload.get("run_id") or request_node.get("run_id") or emitted_node.get("run_id"),
-        "attempt": request_payload.get("attempt") or emitted_payload.get("attempt") or request_node.get("attempt") or emitted_node.get("attempt"),
-        "step_id": request_payload.get("step_id") or emitted_payload.get("step_id") or request_node.get("step_id") or emitted_node.get("step_id"),
-        "task": request_payload.get("task") or emitted_payload.get("task") or request_node.get("task") or emitted_node.get("task"),
-        "original_task": request_payload.get("original_task") or emitted_payload.get("original_task") or request_node.get("original_task") or emitted_node.get("original_task"),
-        "target_agent": request_payload.get("target_agent") or emitted_payload.get("target_agent") or request_node.get("target_agent") or emitted_node.get("target_agent"),
+        "run_id": _first_nonempty(
+            request_payload.get("run_id"),
+            emitted_payload.get("run_id"),
+            request_node.get("run_id"),
+            emitted_node.get("run_id"),
+        ),
+        "attempt": _first_nonempty(
+            request_payload.get("attempt"),
+            emitted_payload.get("attempt"),
+            request_node.get("attempt"),
+            emitted_node.get("attempt"),
+        ),
+        "step_id": _first_nonempty(
+            request_payload.get("step_id"),
+            emitted_payload.get("step_id"),
+            request_node.get("step_id"),
+            emitted_node.get("step_id"),
+        ),
+        "task": _first_nonempty(
+            _derive_payload_task(request_payload),
+            _derive_payload_task(emitted_payload),
+            _coerce_text(request_node.get("task")),
+            _coerce_text(emitted_node.get("task")),
+        ),
+        "original_task": _first_nonempty(
+            _derive_original_task(request_payload),
+            _derive_original_task(emitted_payload),
+            _coerce_text(request_node.get("original_task")),
+            _coerce_text(emitted_node.get("original_task")),
+        ),
+        "target_agent": _first_nonempty(
+            request_payload.get("target_agent"),
+            emitted_payload.get("target_agent"),
+            request_node.get("target_agent"),
+            emitted_node.get("target_agent"),
+        ),
         "scope": scope,
-        "operation": operation or request_node.get("operation") or emitted_node.get("operation"),
+        "operation": _derive_node_operation(
+            request_event,
+            emitted_event,
+            request_payload,
+            request_node,
+            emitted_node,
+            instruction,
+            reduction_request,
+            role=role,
+        ),
         "status": _derived_node_status(role, emitted_payload),
     }
     sanitized = {key: value for key, value in envelope.items() if _nonempty(value)}

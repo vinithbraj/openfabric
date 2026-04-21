@@ -17,6 +17,8 @@ contracts:
     properties:
       query:
         type: string
+      node:
+        type: object
 
   SearchResult:
     type: object
@@ -24,6 +26,8 @@ contracts:
     properties:
       content:
         type: string
+      node:
+        type: object
 
   TaskPlan:
     type: object
@@ -31,6 +35,8 @@ contracts:
     properties:
       task:
         type: string
+      node:
+        type: object
 
   TaskResult:
     type: object
@@ -38,6 +44,8 @@ contracts:
     properties:
       detail:
         type: string
+      node:
+        type: object
 
   FinalAnswer:
     type: object
@@ -45,6 +53,8 @@ contracts:
     properties:
       answer:
         type: string
+      node:
+        type: object
 
 events:
   user.ask:

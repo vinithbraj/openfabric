@@ -17,6 +17,8 @@ contracts:
     properties:
       path:
         type: string
+      node:
+        type: object
 
   FileContent:
     type: object
@@ -26,6 +28,8 @@ contracts:
         type: string
       content:
         type: string
+      node:
+        type: object
 
   ShellExecRequest:
     type: object
@@ -33,6 +37,8 @@ contracts:
     properties:
       command:
         type: string
+      node:
+        type: object
 
   ShellResult:
     type: object
@@ -46,6 +52,8 @@ contracts:
         type: string
       returncode:
         type: number
+      node:
+        type: object
 
   NotifySend:
     type: object
@@ -55,6 +63,8 @@ contracts:
         type: string
       message:
         type: string
+      node:
+        type: object
 
   TaskResult:
     type: object
@@ -62,6 +72,8 @@ contracts:
     properties:
       detail:
         type: string
+      node:
+        type: object
 
   NotifyResult:
     type: object
@@ -69,6 +81,8 @@ contracts:
     properties:
       detail:
         type: string
+      node:
+        type: object
 
   FinalAnswer:
     type: object
@@ -76,6 +90,8 @@ contracts:
     properties:
       answer:
         type: string
+      node:
+        type: object
 
 events:
   user.ask:

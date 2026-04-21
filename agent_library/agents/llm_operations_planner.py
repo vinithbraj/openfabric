@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
 from runtime.console import log_debug
 
 app = FastAPI()
@@ -2999,6 +2999,7 @@ def _fallback_replan_steps(payload: dict, capabilities: dict):
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("ops_planner", "router")
 def handle_event(req: EventRequest):
     if req.event == "system.capabilities":
         agents = req.payload.get("agents", [])

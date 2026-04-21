@@ -3,7 +3,7 @@ import re
 
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, task_plan_context
+from agent_library.common import EventRequest, EventResponse, task_plan_context, with_node_envelope
 
 app = FastAPI()
 
@@ -60,6 +60,7 @@ def _extract_message_from_task(task: str):
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("notifier", "notifier")
 def handle_event(req: EventRequest):
     if req.event == "notify.send":
         channel = req.payload["channel"]
