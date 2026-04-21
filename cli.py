@@ -44,6 +44,11 @@ def _build_parser():
         "--show-run-graph",
         help="Render the persisted workflow graph for a run id and exit.",
     )
+    mode_group.add_argument(
+        "--serve-runs-ui",
+        action="store_true",
+        help="Serve a browser UI for persisted runs and execution graphs.",
+    )
     parser.add_argument(
         "--run-status",
         help="Optional status filter for --list-runs.",
@@ -59,6 +64,17 @@ def _build_parser():
         choices=("mermaid", "json"),
         default="mermaid",
         help="Output format for --show-run-graph.",
+    )
+    parser.add_argument(
+        "--ui-host",
+        default="127.0.0.1",
+        help="Host bind address for --serve-runs-ui.",
+    )
+    parser.add_argument(
+        "--ui-port",
+        type=int,
+        default=8787,
+        help="Port for --serve-runs-ui.",
     )
     return parser
 
@@ -87,7 +103,12 @@ def main():
     args = parser.parse_args()
 
     try:
-        if args.list_runs or args.show_run or args.show_run_graph:
+        if args.list_runs or args.show_run or args.show_run_graph or args.serve_runs_ui:
+            if args.serve_runs_ui:
+                from runtime.run_visualizer import serve_run_visualizer
+
+                serve_run_visualizer(host=args.ui_host, port=args.ui_port)
+                return
             store = RunStore()
             if args.list_runs:
                 for summary in store.list_runs(limit=args.run_limit, status=args.run_status):
@@ -120,7 +141,7 @@ def main():
             return
 
         if not args.spec_path:
-            parser.error("spec_path is required unless you are using --list-runs, --show-run, or --show-run-graph")
+            parser.error("spec_path is required unless you are using --list-runs, --show-run, --show-run-graph, or --serve-runs-ui")
 
         spec = load_spec(args.spec_path, selected_agents=args.selected_agents)
         validate_semantics(spec)

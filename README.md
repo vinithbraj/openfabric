@@ -208,6 +208,8 @@ python cli.py --list-runs --run-status completed
 python cli.py --show-run 20260421T010203Z_abcd1234ef56
 python cli.py --show-run-graph 20260421T010203Z_abcd1234ef56
 python cli.py --show-run-graph 20260421T010203Z_abcd1234ef56 --graph-format json
+python cli.py --serve-runs-ui
+python cli.py --serve-runs-ui --ui-port 8787
 ```
 
 Each persisted run directory now includes:
@@ -217,6 +219,8 @@ Each persisted run directory now includes:
 - `summary.json`: compact inspection summary
 - `graph.json`: persisted workflow execution graph
 - `graph.mmd`: Mermaid flowchart rendering of the workflow graph
+
+The browser UI serves a run list, summary cards, timeline checkpoints, Mermaid text, and an interactive SVG graph renderer over the persisted workflow graph.
 
 ## LLM Configuration
 

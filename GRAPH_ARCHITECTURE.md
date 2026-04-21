@@ -141,6 +141,15 @@ Implemented in this change:
 - make the final `answer.final` path emit a first-class synthesizer node envelope
 - expand spec contracts so planner-facing requests and user-facing final answers accept the common `node` schema
 
+### Phase 9
+
+Implemented in this change:
+
+- add a dedicated persisted-run visualization app in [runtime/run_visualizer.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_visualizer.py)
+- expose `/api/runs`, `/api/runs/{run_id}`, and graph-format endpoints backed by [runtime/run_store.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_store.py)
+- render a browser UI with run filtering, summary cards, timeline checkpoints, Mermaid export, and an interactive SVG graph view
+- expose the dashboard from the CLI with `python cli.py --serve-runs-ui`
+
 ## Current Mapping
 
 Today’s runtime already maps naturally to the target graph:
@@ -171,5 +180,5 @@ The runtime now exposes the following execution chains directly in the graph:
 
 The main remaining architectural gaps before production are:
 
-- surface the graph through a dedicated visualization or UI layer
 - add stronger production observability around timings, metrics, and audit queries on top of the persisted run store
+- harden the visualization layer with authentication, multi-user deployment posture, and larger-run pagination/virtualization
