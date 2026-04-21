@@ -62,6 +62,7 @@ from runtime.engine import Engine
 from runtime.registry import ADAPTER_REGISTRY
 from runtime.run_store import RunStore
 from runtime.run_visualizer import (
+    _parse_bool_query,
     build_graph_index,
     build_graph_view_model,
     build_run_visualization_payload,
@@ -193,12 +194,21 @@ class RunVisualizerTests(unittest.TestCase):
         self.assertIn("/api/runs", html)
         self.assertIn("graph-shell", html)
         self.assertIn("run-search", html)
+        self.assertIn("run-min-duration", html)
+        self.assertIn("run-slow-step", html)
+        self.assertIn("run-recovery", html)
+        self.assertIn("run-reset", html)
+        self.assertIn("run-filter-summary", html)
         self.assertIn("node-search", html)
         self.assertIn("graph-legend", html)
         self.assertIn("signal-shell", html)
         self.assertIn("agent-metrics-shell", html)
         self.assertIn("failure-shell", html)
         self.assertIn("auto-refresh", html)
+        self.assertIn("copy-run-link", html)
+        self.assertIn("download-run-json", html)
+        self.assertIn("download-graph-json", html)
+        self.assertIn("download-mermaid", html)
         self.assertIn("/tmp/openfabric_runs", html)
 
     def test_graph_endpoint_disables_response_model_generation(self):
@@ -210,6 +220,14 @@ class RunVisualizerTests(unittest.TestCase):
         ]
         self.assertEqual(len(graph_routes), 1)
         self.assertIsNone(graph_routes[0]["kwargs"].get("response_model"))
+
+    def test_parse_bool_query_normalizes_common_values(self):
+        self.assertTrue(_parse_bool_query("true"))
+        self.assertTrue(_parse_bool_query("YES"))
+        self.assertFalse(_parse_bool_query("false"))
+        self.assertFalse(_parse_bool_query("0"))
+        self.assertIsNone(_parse_bool_query(""))
+        self.assertIsNone(_parse_bool_query("maybe"))
 
 
 if __name__ == "__main__":

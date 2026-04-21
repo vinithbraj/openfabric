@@ -34,6 +34,15 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _parse_bool_query(value: str) -> bool | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
 def _node_title(node: dict[str, Any]) -> str:
     for key in ("label", "task", "agent_name", "node_id"):
         value = node.get(key)
@@ -332,6 +341,8 @@ def list_run_visualizations(
     min_duration_ms: float | None = None,
     max_duration_ms: float | None = None,
     slow_step_ms: float | None = None,
+    resumable: bool | None = None,
+    replayable: bool | None = None,
 ) -> dict[str, Any]:
     runs = run_store.list_runs(
         limit=limit,
@@ -342,6 +353,8 @@ def list_run_visualizations(
         min_duration_ms=min_duration_ms,
         max_duration_ms=max_duration_ms,
         slow_step_ms=slow_step_ms,
+        resumable=resumable,
+        replayable=replayable,
     )
     return {
         "schema_version": VISUALIZER_SCHEMA_VERSION,
@@ -484,7 +497,9 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
     }}
 
     .controls input,
-    .controls select {{
+    .controls select,
+    .controls button,
+    .hero-actions button {{
       width: 100%;
       border: 1px solid rgba(48, 43, 37, 0.12);
       border-radius: 14px;
@@ -492,6 +507,32 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       font: inherit;
       background: rgba(255, 255, 255, 0.75);
       color: var(--ink);
+    }}
+
+    .controls button,
+    .hero-actions button {{
+      cursor: pointer;
+      font-weight: 600;
+      transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+    }}
+
+    .controls button:hover,
+    .hero-actions button:hover {{
+      transform: translateY(-1px);
+      border-color: rgba(15, 118, 110, 0.28);
+      background: rgba(255, 255, 255, 0.9);
+    }}
+
+    .control-row {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }}
+
+    .control-summary {{
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
     }}
 
     .run-list {{
@@ -578,6 +619,30 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       align-items: flex-start;
       justify-content: space-between;
       gap: 16px;
+    }}
+
+    .hero-side {{
+      display: grid;
+      justify-items: end;
+      gap: 10px;
+      min-width: 220px;
+    }}
+
+    .hero-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }}
+
+    .hero-actions button {{
+      width: auto;
+      min-height: 38px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--muted);
+      font-size: 12px;
     }}
 
     .hero h2 {{
@@ -979,6 +1044,19 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       .graph-toolbar {{
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }}
+
+      .hero-title {{
+        flex-direction: column;
+      }}
+
+      .hero-side {{
+        width: 100%;
+        justify-items: start;
+      }}
+
+      .hero-actions {{
+        justify-content: flex-start;
+      }}
     }}
 
     @media (max-width: 720px) {{
@@ -992,6 +1070,10 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       }}
 
       .signal-grid {{
+        grid-template-columns: 1fr;
+      }}
+
+      .control-row {{
         grid-template-columns: 1fr;
       }}
 
@@ -1011,18 +1093,36 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       </div>
       <div class="controls">
         <input id="run-search" type="search" placeholder="Search task, run id, status" />
-        <select id="run-status">
-          <option value="">All statuses</option>
-          <option value="completed">completed</option>
-          <option value="running">running</option>
-          <option value="failed">failed</option>
-          <option value="needs_clarification">needs_clarification</option>
-        </select>
         <input id="run-agent" type="search" placeholder="Filter by agent name" />
-        <select id="run-errors">
-          <option value="">Any error state</option>
-          <option value="true">Errors only</option>
+        <div class="control-row">
+          <select id="run-status">
+            <option value="">All statuses</option>
+            <option value="completed">completed</option>
+            <option value="running">running</option>
+            <option value="failed">failed</option>
+            <option value="needs_clarification">needs_clarification</option>
+          </select>
+          <select id="run-errors">
+            <option value="">Any error state</option>
+            <option value="true">Errors only</option>
+            <option value="false">No errors</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <input id="run-min-duration" type="number" min="0" step="100" placeholder="Min run duration ms" />
+          <input id="run-slow-step" type="number" min="0" step="100" placeholder="Slow step threshold ms" />
+        </div>
+        <select id="run-recovery">
+          <option value="">Any recovery state</option>
+          <option value="resumable">Resumable only</option>
+          <option value="replayable">Replayable only</option>
+          <option value="final">Final only</option>
         </select>
+        <div class="control-row">
+          <button id="run-refresh" type="button">Refresh Runs</button>
+          <button id="run-reset" type="button">Reset Filters</button>
+        </div>
+        <div id="run-filter-summary" class="control-summary">Loading persisted runs…</div>
       </div>
       <div id="run-list" class="run-list">
         <div class="loading">Loading persisted runs...</div>
@@ -1037,7 +1137,15 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
             <h2 id="hero-title">Select a persisted run</h2>
             <p id="hero-subtitle">The dashboard renders workflow state, timeline checkpoints, and the execution graph from the persisted run store.</p>
           </div>
-          <div id="hero-status" class="chip">idle</div>
+          <div class="hero-side">
+            <div id="hero-status" class="chip">idle</div>
+            <div class="hero-actions">
+              <button id="copy-run-link" type="button">Copy Link</button>
+              <button id="download-run-json" type="button">Run JSON</button>
+              <button id="download-graph-json" type="button">Graph JSON</button>
+              <button id="download-mermaid" type="button">Mermaid</button>
+            </div>
+          </div>
         </div>
         <div id="summary-grid" class="summary-grid"></div>
       </section>
@@ -1193,8 +1301,49 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
         .replaceAll('"', '&quot;');
     }}
 
+    function normalizedNumberInput(value) {{
+      const raw = String(value ?? '').trim();
+      if (!raw) return '';
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed < 0) {{
+        return '';
+      }}
+      return String(parsed);
+    }}
+
+    function currentRunFilters() {{
+      return {{
+        search: document.getElementById('run-search').value.trim(),
+        status: document.getElementById('run-status').value,
+        agent: document.getElementById('run-agent').value.trim(),
+        hasErrors: document.getElementById('run-errors').value,
+        minDurationMs: normalizedNumberInput(document.getElementById('run-min-duration').value),
+        slowStepMs: normalizedNumberInput(document.getElementById('run-slow-step').value),
+        recovery: document.getElementById('run-recovery').value,
+      }};
+    }}
+
+    function applyInitialFilters() {{
+      const mappings = [
+        ['run-search', 'q'],
+        ['run-status', 'status'],
+        ['run-agent', 'agent'],
+        ['run-errors', 'has_errors'],
+        ['run-min-duration', 'min_duration_ms'],
+        ['run-slow-step', 'slow_step_ms'],
+        ['run-recovery', 'recovery'],
+      ];
+      for (const [elementId, queryKey] of mappings) {{
+        const value = initialParams.get(queryKey);
+        if (value != null) {{
+          document.getElementById(elementId).value = value;
+        }}
+      }}
+    }}
+
     function setUrlState() {{
       const url = new URL(window.location.href);
+      const filters = currentRunFilters();
       if (state.selectedRunId) {{
         url.searchParams.set('run_id', state.selectedRunId);
       }} else {{
@@ -1204,6 +1353,41 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
         url.searchParams.set('node_id', state.selectedNodeId);
       }} else {{
         url.searchParams.delete('node_id');
+      }}
+      if (filters.search) {{
+        url.searchParams.set('q', filters.search);
+      }} else {{
+        url.searchParams.delete('q');
+      }}
+      if (filters.status) {{
+        url.searchParams.set('status', filters.status);
+      }} else {{
+        url.searchParams.delete('status');
+      }}
+      if (filters.agent) {{
+        url.searchParams.set('agent', filters.agent);
+      }} else {{
+        url.searchParams.delete('agent');
+      }}
+      if (filters.hasErrors) {{
+        url.searchParams.set('has_errors', filters.hasErrors);
+      }} else {{
+        url.searchParams.delete('has_errors');
+      }}
+      if (filters.minDurationMs) {{
+        url.searchParams.set('min_duration_ms', filters.minDurationMs);
+      }} else {{
+        url.searchParams.delete('min_duration_ms');
+      }}
+      if (filters.slowStepMs) {{
+        url.searchParams.set('slow_step_ms', filters.slowStepMs);
+      }} else {{
+        url.searchParams.delete('slow_step_ms');
+      }}
+      if (filters.recovery) {{
+        url.searchParams.set('recovery', filters.recovery);
+      }} else {{
+        url.searchParams.delete('recovery');
       }}
       window.history.replaceState({{}}, '', url.toString());
     }}
@@ -1233,6 +1417,37 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       return response.json();
     }}
 
+    function downloadText(filename, text, mimeType = 'text/plain;charset=utf-8') {{
+      const blob = new Blob([text], {{ type: mimeType }});
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 250);
+    }}
+
+    function downloadJson(filename, payload) {{
+      downloadText(filename, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+    }}
+
+    function renderRunFilterSummary() {{
+      const shell = document.getElementById('run-filter-summary');
+      const filters = currentRunFilters();
+      const activeFilters = [];
+      if (filters.search) activeFilters.push(`search "${{filters.search}}"`);
+      if (filters.status) activeFilters.push(`status=${{filters.status}}`);
+      if (filters.agent) activeFilters.push(`agent=${{filters.agent}}`);
+      if (filters.hasErrors) activeFilters.push(filters.hasErrors === 'true' ? 'errors only' : 'no errors');
+      if (filters.minDurationMs) activeFilters.push(`min run ${{formatDuration(filters.minDurationMs)}}`);
+      if (filters.slowStepMs) activeFilters.push(`slow step >= ${{formatDuration(filters.slowStepMs)}}`);
+      if (filters.recovery) activeFilters.push(`recovery=${{filters.recovery}}`);
+      const base = `${{state.filteredRuns.length}} of ${{state.runs.length}} runs shown`;
+      shell.textContent = activeFilters.length ? `${{base}} | ${{activeFilters.join(' | ')}}` : base;
+    }}
+
     function clearAutoRefresh() {{
       if (state.autoRefreshHandle) {{
         clearTimeout(state.autoRefreshHandle);
@@ -1260,14 +1475,22 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
     }}
 
     async function loadRuns(options = {{}}) {{
-      const status = document.getElementById('run-status').value;
-      const agent = document.getElementById('run-agent').value.trim();
-      const hasErrors = document.getElementById('run-errors').value;
+      const filters = currentRunFilters();
       const query = new URLSearchParams();
       query.set('limit', '150');
-      if (status) query.set('status', status);
-      if (agent) query.set('agent', agent);
-      if (hasErrors) query.set('has_errors', hasErrors);
+      if (filters.status) query.set('status', filters.status);
+      if (filters.agent) query.set('agent', filters.agent);
+      if (filters.hasErrors) query.set('has_errors', filters.hasErrors);
+      if (filters.minDurationMs) query.set('min_duration_ms', filters.minDurationMs);
+      if (filters.slowStepMs) query.set('slow_step_ms', filters.slowStepMs);
+      if (filters.recovery === 'resumable') {{
+        query.set('resumable', 'true');
+      }} else if (filters.recovery === 'replayable') {{
+        query.set('replayable', 'true');
+      }} else if (filters.recovery === 'final') {{
+        query.set('resumable', 'false');
+        query.set('replayable', 'false');
+      }}
       const payload = await fetchJson(`/api/runs?${{query.toString()}}`);
       state.runs = Array.isArray(payload.runs) ? payload.runs : [];
       applyRunFilter();
@@ -1289,7 +1512,7 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
     }}
 
     function applyRunFilter() {{
-      const needle = document.getElementById('run-search').value.trim().toLowerCase();
+      const needle = currentRunFilters().search.toLowerCase();
       state.filteredRuns = state.runs.filter((run) => {{
         if (!needle) return true;
         const haystack = [
@@ -1301,7 +1524,22 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
         ].join(' ').toLowerCase();
         return haystack.includes(needle);
       }});
+      renderRunFilterSummary();
+      setUrlState();
       renderRunList();
+    }}
+
+    function resetRunFilters() {{
+      document.getElementById('run-search').value = '';
+      document.getElementById('run-status').value = '';
+      document.getElementById('run-agent').value = '';
+      document.getElementById('run-errors').value = '';
+      document.getElementById('run-min-duration').value = '';
+      document.getElementById('run-slow-step').value = '';
+      document.getElementById('run-recovery').value = '';
+      loadRuns({{ preferredRunId: state.selectedRunId || undefined }}).catch((error) => {{
+        document.getElementById('run-list').innerHTML = `<div class="empty">Failed to reset filters: ${{escapeHtml(error.message)}}</div>`;
+      }});
     }}
 
     function renderRunList() {{
@@ -1315,6 +1553,7 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
         const activeStep = run.active_step_id ? `<span class="chip">active ${{
           escapeHtml(run.active_step_id)
         }}</span>` : '';
+        const recoveryLabel = run.resumable ? 'resumable' : (run.replayable ? 'replayable' : 'final');
         const errorChip = Number(run.error_count || 0) > 0
           ? `<span class="chip">${{escapeHtml(String(run.error_count))}} errors</span>`
           : '';
@@ -1327,6 +1566,7 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
             <div class="run-task">${{escapeHtml(run.task || '(no task)')}}</div>
             <div class="run-meta">
               <span class="chip">${{escapeHtml(run.status || 'unknown')}}</span>
+              <span class="chip">${{escapeHtml(recoveryLabel)}}</span>
               <span class="chip">${{formatCount(run.attempt_count || 0, 'attempts')}}</span>
               ${{durationChip}}
               ${{errorChip}}
@@ -1388,6 +1628,39 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       document.getElementById('mermaid-detail').textContent = payload.graph_mermaid || 'No Mermaid diagram stored.';
       setUrlState();
       scheduleAutoRefresh();
+    }}
+
+    async function copySelectedRunLink() {{
+      if (!state.selectedRunId) return;
+      const url = new URL(window.location.href);
+      try {{
+        await navigator.clipboard.writeText(url.toString());
+        document.getElementById('copy-run-link').textContent = 'Copied';
+        window.setTimeout(() => {{
+          document.getElementById('copy-run-link').textContent = 'Copy Link';
+        }}, 1200);
+      }} catch (_error) {{
+        downloadText(`run-${{state.selectedRunId}}-link.txt`, `${{url.toString()}}\n`);
+      }}
+    }}
+
+    function exportSelectedRunJson() {{
+      if (!state.selectedVisualization || !state.selectedRunId) return;
+      downloadJson(`run-${{state.selectedRunId}}.json`, state.selectedVisualization);
+    }}
+
+    function exportSelectedGraphJson() {{
+      if (!state.selectedVisualization || !state.selectedRunId) return;
+      downloadJson(`run-${{state.selectedRunId}}-graph.json`, state.selectedVisualization.graph || {{}});
+    }}
+
+    function exportSelectedMermaid() {{
+      if (!state.selectedVisualization || !state.selectedRunId) return;
+      downloadText(
+        `run-${{state.selectedRunId}}-graph.mmd`,
+        state.selectedVisualization.graph_mermaid || 'flowchart TD\n',
+        'text/plain;charset=utf-8'
+      );
     }}
 
     function syncGraphFilters(graphIndex) {{
@@ -1831,10 +2104,20 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       `;
     }}
 
+    applyInitialFilters();
     document.getElementById('run-search').addEventListener('input', applyRunFilter);
-    document.getElementById('run-status').addEventListener('change', loadRuns);
-    document.getElementById('run-agent').addEventListener('input', loadRuns);
-    document.getElementById('run-errors').addEventListener('change', loadRuns);
+    document.getElementById('run-status').addEventListener('change', () => loadRuns());
+    document.getElementById('run-agent').addEventListener('input', () => loadRuns());
+    document.getElementById('run-errors').addEventListener('change', () => loadRuns());
+    document.getElementById('run-min-duration').addEventListener('change', () => loadRuns());
+    document.getElementById('run-slow-step').addEventListener('change', () => loadRuns());
+    document.getElementById('run-recovery').addEventListener('change', () => loadRuns());
+    document.getElementById('run-refresh').addEventListener('click', () => loadRuns());
+    document.getElementById('run-reset').addEventListener('click', resetRunFilters);
+    document.getElementById('copy-run-link').addEventListener('click', copySelectedRunLink);
+    document.getElementById('download-run-json').addEventListener('click', exportSelectedRunJson);
+    document.getElementById('download-graph-json').addEventListener('click', exportSelectedGraphJson);
+    document.getElementById('download-mermaid').addEventListener('click', exportSelectedMermaid);
     document.getElementById('node-search').addEventListener('input', () => renderGraph(currentGraphView()));
     document.getElementById('node-kind-filter').addEventListener('change', () => renderGraph(currentGraphView()));
     document.getElementById('node-status-filter').addEventListener('change', () => renderGraph(currentGraphView()));
@@ -1871,10 +2154,12 @@ def create_run_visualizer_app(run_store: RunStore | None = None) -> FastAPI:
         min_duration_ms: float | None = None,
         max_duration_ms: float | None = None,
         slow_step_ms: float | None = None,
+        resumable: str = "",
+        replayable: str = "",
     ) -> JSONResponse:
-        error_filter = None
-        if str(has_errors).strip().lower() in {"1", "true", "yes", "errors"}:
-            error_filter = True
+        error_filter = _parse_bool_query(has_errors)
+        resumable_filter = _parse_bool_query(resumable)
+        replayable_filter = _parse_bool_query(replayable)
         payload = list_run_visualizations(
             store,
             limit=max(1, min(limit, 500)),
@@ -1885,6 +2170,8 @@ def create_run_visualizer_app(run_store: RunStore | None = None) -> FastAPI:
             min_duration_ms=min_duration_ms,
             max_duration_ms=max_duration_ms,
             slow_step_ms=slow_step_ms,
+            resumable=resumable_filter,
+            replayable=replayable_filter,
         )
         return JSONResponse(payload)
 
