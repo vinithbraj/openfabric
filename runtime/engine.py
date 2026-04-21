@@ -252,6 +252,38 @@ class Engine:
         session["updated_at"] = self._now_iso()
         session["state_path"] = self.run_store.save(copy.deepcopy(session), stage=stage)
 
+    def _node_request(
+        self,
+        *,
+        agent: str,
+        role: str,
+        request_event: str,
+        task: str = "",
+        original_task: str = "",
+        step_id: str = "",
+        target_agent: str = "",
+        run_id: str = "",
+        attempt: int | None = None,
+        scope: str = "",
+        operation: str = "",
+        status: str = "",
+    ) -> dict:
+        envelope = {
+            "agent": agent,
+            "role": role,
+            "request_event": request_event,
+            "task": task,
+            "original_task": original_task,
+            "step_id": step_id,
+            "target_agent": target_agent,
+            "run_id": run_id,
+            "attempt": attempt,
+            "scope": scope,
+            "operation": operation,
+            "status": status,
+        }
+        return {key: value for key, value in envelope.items() if value not in (None, "", [], {})}
+
     def _new_run_session(self, payload: dict, plan_options: list[dict], limits: dict) -> dict:
         run_id = str(payload.get("run_id") or "").strip() or self._new_run_id()
         session_payload = copy.deepcopy(payload)
@@ -650,6 +682,7 @@ class Engine:
             return
 
         active_payload = copy.deepcopy(session.get("payload") or payload)
+        active_payload["run_id"] = session.get("run_id")
         plan_options = [
             option
             for option in (session.get("plan_options") or incoming_plan_options)
@@ -715,6 +748,7 @@ class Engine:
             option_payload["selected_option_id"] = option.get("id")
             option_payload["selected_option_label"] = option.get("label")
             option_payload["__attempts_so_far__"] = index
+            option_payload["attempt"] = index
             workflow_state = attempt_record.get("workflow_state") if isinstance(attempt_record.get("workflow_state"), dict) else None
             if workflow_state is None:
                 self._emit_validation_progress(
@@ -1646,6 +1680,7 @@ class Engine:
             )
 
         request_payload = {
+            "run_id": workflow_payload.get("run_id", ""),
             "validation_scope": "step",
             "task": workflow_payload.get("task", ""),
             "original_task": workflow_payload.get("task", ""),
@@ -1674,6 +1709,20 @@ class Engine:
                 for key, value in context.items()
                 if key != "original_task" and not key.endswith(".event")
             },
+            "node": self._node_request(
+                agent="validator",
+                role="validator",
+                request_event="validation.request",
+                task=str(step_payload.get("task") or ""),
+                original_task=str(workflow_payload.get("task") or ""),
+                step_id=step_id,
+                target_agent=str(step_payload.get("target_agent") or ""),
+                run_id=str(workflow_payload.get("run_id") or ""),
+                attempt=workflow_payload.get("attempt") if isinstance(workflow_payload.get("attempt"), int) else None,
+                scope="step",
+                operation="validate_step",
+                status="pending",
+            ),
         }
         contract_name = self.spec["events"]["validation.request"]["contract"]
         self.contracts.validate_payload(contract_name, request_payload)
@@ -1771,6 +1820,8 @@ class Engine:
         if not self._step_has_reduction_candidate(primary_event, primary_payload):
             return None
         reducer_payload = {
+            "run_id": workflow_payload.get("run_id", ""),
+            "attempt": workflow_payload.get("attempt"),
             "task": step_payload.get("task", ""),
             "original_task": workflow_payload.get("task", ""),
             "step_id": step_id,
@@ -1790,6 +1841,20 @@ class Engine:
                 for key, value in context.items()
                 if key != "original_task" and not key.endswith(".event")
             },
+            "node": self._node_request(
+                agent="data_reducer",
+                role="reducer",
+                request_event="data.reduce",
+                task=str(step_payload.get("task") or ""),
+                original_task=str(workflow_payload.get("task") or ""),
+                step_id=step_id,
+                target_agent=str(step_payload.get("target_agent") or ""),
+                run_id=str(workflow_payload.get("run_id") or ""),
+                attempt=workflow_payload.get("attempt") if isinstance(workflow_payload.get("attempt"), int) else None,
+                scope="step",
+                operation="reduce_step_output",
+                status="pending",
+            ),
         }
         if isinstance(primary_payload, dict):
             reducer_payload["source_payload"] = primary_payload
@@ -1983,6 +2048,7 @@ class Engine:
             return result
 
         request_payload = {
+            "run_id": workflow_payload.get("run_id", ""),
             "task": workflow_payload.get("task", ""),
             "task_shape": self._infer_task_shape(str(workflow_payload.get("task") or ""), str(workflow_payload.get("task_shape") or "")),
             "attempt": attempt,
@@ -2000,6 +2066,18 @@ class Engine:
                 for key, value in context.items()
                 if key != "original_task" and not key.endswith(".event")
             },
+            "node": self._node_request(
+                agent="validator",
+                role="validator",
+                request_event="validation.request",
+                task=str(workflow_payload.get("task") or ""),
+                original_task=str(workflow_payload.get("task") or ""),
+                run_id=str(workflow_payload.get("run_id") or ""),
+                attempt=attempt,
+                scope="workflow",
+                operation="validate_workflow",
+                status="pending",
+            ),
         }
         if isinstance(workflow.get("error"), str) and workflow.get("error").strip():
             request_payload["error"] = workflow.get("error").strip()
@@ -2140,6 +2218,7 @@ class Engine:
                 "reduction_request",
                 "reduction_strategy",
                 "reduction",
+                "node",
                 "note",
                 "error",
                 "status",
@@ -2187,6 +2266,7 @@ class Engine:
                     "stderr_excerpt": self._compact_text(payload.get("stderr"), 300),
                     "stats": self._compact_value(payload.get("stats"), text_limit=120),
                     "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3),
+                    "node": self._compact_value(payload.get("node"), text_limit=160, row_limit=4),
                 }
             )
             return compact
@@ -2203,6 +2283,7 @@ class Engine:
                     "schema": self._compact_schema(payload.get("schema")),
                     "stats": self._compact_value(payload.get("stats"), text_limit=120),
                     "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=5),
+                    "node": self._compact_value(payload.get("node"), text_limit=160, row_limit=4),
                 }
             )
             return compact
@@ -2223,6 +2304,7 @@ class Engine:
                     "stderr_excerpt": self._compact_text(payload.get("stderr"), 300),
                     "stats": self._compact_value(payload.get("stats"), text_limit=120),
                     "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3),
+                    "node": self._compact_value(payload.get("node"), text_limit=160, row_limit=4),
                 }
             )
             return compact
@@ -2239,6 +2321,7 @@ class Engine:
                     "reduction_request": self._compact_value(payload.get("reduction_request"), text_limit=180, row_limit=3),
                     "reduction_strategy": payload.get("reduction_strategy"),
                     "reduction": self._compact_value(payload.get("reduction"), text_limit=180, row_limit=3),
+                    "node": self._compact_value(payload.get("node"), text_limit=160, row_limit=4),
                 }
             )
             return compact
@@ -2410,6 +2493,8 @@ class Engine:
             envelope["when"] = self._compact_value(when, text_limit=180, row_limit=3)
         if isinstance(validation_result, dict):
             envelope["validation"] = self._compact_value(validation_result, text_limit=180, row_limit=3)
+        if isinstance(primary_payload, dict) and isinstance(primary_payload.get("node"), dict):
+            envelope["node"] = self._compact_value(primary_payload.get("node"), text_limit=160, row_limit=4)
         if primary_event == "shell.result" and isinstance(primary_payload, dict):
             envelope["command"] = primary_payload.get("command")
             envelope["returncode"] = primary_payload.get("returncode")
@@ -2628,6 +2713,8 @@ class Engine:
                 "step_id": step_id,
                 "presentation": workflow_payload.get("presentation", {}),
                 "task_shape": workflow_payload.get("task_shape", ""),
+                "run_id": workflow_payload.get("run_id", ""),
+                "attempt": workflow_payload.get("attempt"),
             }
             log_event("task.plan", nested_payload, depth + 1)
             nested = self._execute_workflow_steps(nested_steps, nested_payload, nested_context, depth + 1)
@@ -2650,6 +2737,10 @@ class Engine:
         step_payload.setdefault("task", workflow_payload.get("task", ""))
         if isinstance(workflow_payload.get("task_shape"), str) and workflow_payload.get("task_shape"):
             step_payload.setdefault("task_shape", workflow_payload.get("task_shape"))
+        if workflow_payload.get("run_id") not in (None, ""):
+            step_payload.setdefault("run_id", workflow_payload.get("run_id"))
+        if workflow_payload.get("attempt") not in (None, ""):
+            step_payload.setdefault("attempt", workflow_payload.get("attempt"))
         step_payload["step_id"] = step_id
         step_payload["original_task"] = workflow_payload.get("task", context.get("original_task", ""))
         prior_step_results = self._prior_step_results(context)
@@ -2663,6 +2754,21 @@ class Engine:
             step_payload["depends_on"] = [item for item in raw_step.get("depends_on") if isinstance(item, str)]
         if isinstance(raw_step.get("when"), dict) and raw_step.get("when"):
             step_payload["when"] = raw_step.get("when")
+        instruction = step_payload.get("instruction") if isinstance(step_payload.get("instruction"), dict) else {}
+        step_payload["node"] = self._node_request(
+            agent=str(step_payload.get("target_agent") or ""),
+            role="executor",
+            request_event="task.plan",
+            task=str(step_payload.get("task") or ""),
+            original_task=str(step_payload.get("original_task") or ""),
+            step_id=step_id,
+            target_agent=str(step_payload.get("target_agent") or ""),
+            run_id=str(step_payload.get("run_id") or ""),
+            attempt=step_payload.get("attempt") if isinstance(step_payload.get("attempt"), int) else None,
+            scope="step",
+            operation=str(instruction.get("operation") or ""),
+            status="pending",
+        )
         if not self._evaluate_when(raw_step.get("when"), context):
             return {
                 "kind": "skipped",

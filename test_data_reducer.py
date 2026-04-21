@@ -59,6 +59,12 @@ class DataReducerTests(unittest.TestCase):
         self.assertEqual(payload["reduced_result"], "Matching jobs: 2")
         self.assertEqual(payload["strategy"], "deterministic_local_reduction_command")
         self.assertIn("python3 -c", payload["local_reduction_command"])
+        self.assertEqual(payload["node"]["agent"], "data_reducer")
+        self.assertEqual(payload["node"]["role"], "reducer")
+        self.assertEqual(payload["node"]["request_event"], "data.reduce")
+        self.assertEqual(payload["node"]["emitted_event"], "data.reduced")
+        self.assertEqual(payload["node"]["step_id"], "step1")
+        self.assertEqual(payload["node"]["scope"], "step")
 
     def test_data_reducer_runs_local_command_against_input_data(self):
         class _Completed:

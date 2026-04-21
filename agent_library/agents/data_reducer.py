@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, serialize_for_stdin
+from agent_library.common import EventRequest, EventResponse, serialize_for_stdin, with_node_envelope
 from agent_library.reduction import execute_reduction_request, looks_like_safe_reducer_command
 
 app = FastAPI()
@@ -69,6 +69,7 @@ def _run_reduction_command(command: str, input_data: Any) -> tuple[str, str]:
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("data_reducer", "reducer")
 def handle_event(req: EventRequest):
     if req.event != "data.reduce":
         return {"emits": []}

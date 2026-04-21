@@ -343,6 +343,7 @@ TEST_SPEC = {
             "required": ["task", "workflow_status"],
             "properties": {
                 "task": {"type": "string"},
+                "run_id": {"type": "string"},
                 "task_shape": {"type": "string"},
                 "validation_llm_budget_remaining": {"type": "number"},
                 "workflow_status": {"type": "string"},
@@ -350,6 +351,7 @@ TEST_SPEC = {
                 "steps": {"type": "array"},
                 "result": {},
                 "error": {"type": "string"},
+                "node": {"type": "object"},
             },
         },
         "ValidationResult": {
@@ -368,6 +370,8 @@ TEST_SPEC = {
             "type": "object",
             "required": ["task", "step_id", "source_event"],
             "properties": {
+                "run_id": {"type": "string"},
+                "attempt": {"type": "number"},
                 "task": {"type": "string"},
                 "original_task": {"type": "string"},
                 "step_id": {"type": "string"},
@@ -380,6 +384,7 @@ TEST_SPEC = {
                 "source_value": {},
                 "source_payload": {"type": "object"},
                 "available_context": {"type": "object"},
+                "node": {"type": "object"},
             },
         },
         "DataReducedResult": {
@@ -397,6 +402,7 @@ TEST_SPEC = {
                 "attempts": {"type": "number"},
                 "local_reduction_command": {"type": "string"},
                 "error": {"type": "string"},
+                "node": {"type": "object"},
             },
         },
         "ValidationProgress": {
@@ -667,6 +673,10 @@ class EngineValidationTests(unittest.TestCase):
             validation_requests[0]["steps"],
             [{"result": "partial answer", "status": "completed"}],
         )
+        self.assertEqual(validation_requests[0]["node"]["agent"], "validator")
+        self.assertEqual(validation_requests[0]["node"]["role"], "validator")
+        self.assertEqual(validation_requests[0]["node"]["scope"], "workflow")
+        self.assertEqual(validation_requests[0]["node"]["status"], "pending")
         replan_requests = [payload for event_name, payload in _RecorderAdapter.events if event_name == "planner.replan.request"]
         self.assertEqual(len(replan_requests), 1)
         self.assertEqual(replan_requests[0]["step_id"], "__workflow__")
@@ -830,6 +840,9 @@ class EngineValidationTests(unittest.TestCase):
         self.assertEqual(len(step_validation_requests), 2)
         self.assertEqual(step_validation_requests[0]["step_task"], "bad count step")
         self.assertEqual(step_validation_requests[1]["step_task"], "fixed count and state step")
+        self.assertEqual(step_validation_requests[0]["node"]["agent"], "validator")
+        self.assertEqual(step_validation_requests[0]["node"]["role"], "validator")
+        self.assertEqual(step_validation_requests[0]["node"]["step_id"], "step1")
         graph_node_ids = {item["node_id"] for item in workflow["graph"]["nodes"]}
         self.assertTrue(any(item.endswith(":step:step1:router") for item in graph_node_ids))
         self.assertTrue(any(item.endswith(":step:step1:router:replan") for item in graph_node_ids))
@@ -859,6 +872,9 @@ class EngineValidationTests(unittest.TestCase):
         self.assertEqual(reduction_requests[0]["source_event"], "shell.result")
         self.assertEqual(reduction_requests[0]["input_data"], "alpha\nbeta\n")
         self.assertEqual(reduction_requests[0]["reduction_request"]["kind"], "shell.local_reducer")
+        self.assertEqual(reduction_requests[0]["node"]["agent"], "data_reducer")
+        self.assertEqual(reduction_requests[0]["node"]["role"], "reducer")
+        self.assertEqual(reduction_requests[0]["node"]["step_id"], "step1")
 
         workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
         self.assertEqual(len(workflow_events), 1)

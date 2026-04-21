@@ -2,7 +2,7 @@ import subprocess
 import os
 import json
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any, Callable, Dict, List
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
@@ -169,6 +169,146 @@ class LocalReductionResult:
     @property
     def succeeded(self) -> bool:
         return bool(self.output and self.command)
+
+
+def _nonempty(value: Any) -> bool:
+    return value not in (None, "", [], {})
+
+
+def _derived_node_status(role: str, emitted_payload: Dict[str, Any]) -> str:
+    status = emitted_payload.get("status")
+    if isinstance(status, str) and status.strip():
+        return status.strip()
+    if role == "validator":
+        verdict = emitted_payload.get("verdict")
+        if isinstance(verdict, str) and verdict.strip():
+            return verdict.strip()
+        if emitted_payload.get("valid") is True:
+            return "valid"
+        if emitted_payload.get("valid") is False:
+            return "invalid"
+    if role == "reducer":
+        if _nonempty(emitted_payload.get("reduced_result")):
+            return "completed"
+        if _nonempty(emitted_payload.get("error")):
+            return "failed"
+        return "noop"
+    return "completed"
+
+
+def build_node_envelope(
+    request_event: str,
+    request_payload: Dict[str, Any] | None,
+    emitted_event: str,
+    emitted_payload: Dict[str, Any] | None,
+    *,
+    agent_name: str,
+    role: str,
+) -> Dict[str, Any]:
+    request_payload = request_payload if isinstance(request_payload, dict) else {}
+    emitted_payload = emitted_payload if isinstance(emitted_payload, dict) else {}
+    request_node = request_payload.get("node") if isinstance(request_payload.get("node"), dict) else {}
+    emitted_node = emitted_payload.get("node") if isinstance(emitted_payload.get("node"), dict) else {}
+    instruction = request_payload.get("instruction") if isinstance(request_payload.get("instruction"), dict) else {}
+    reduction_request = request_payload.get("reduction_request") if isinstance(request_payload.get("reduction_request"), dict) else {}
+
+    operation = None
+    if isinstance(instruction.get("operation"), str) and instruction.get("operation").strip():
+        operation = instruction.get("operation").strip()
+    elif isinstance(request_payload.get("operation"), str) and request_payload.get("operation").strip():
+        operation = request_payload.get("operation").strip()
+    elif isinstance(request_payload.get("validation_scope"), str) and request_payload.get("validation_scope").strip():
+        operation = f"validate_{request_payload.get('validation_scope').strip()}"
+    elif isinstance(reduction_request.get("kind"), str) and reduction_request.get("kind").strip():
+        operation = reduction_request.get("kind").strip()
+    elif request_event == "data.reduce":
+        operation = "reduce_step_output"
+
+    if isinstance(request_payload.get("validation_scope"), str) and request_payload.get("validation_scope").strip():
+        scope = request_payload.get("validation_scope").strip()
+    elif _nonempty(request_payload.get("step_id")) or _nonempty(emitted_payload.get("step_id")):
+        scope = "step"
+    else:
+        scope = "workflow"
+
+    envelope = {
+        "agent": agent_name,
+        "role": role,
+        "request_event": request_event,
+        "emitted_event": emitted_event,
+        "run_id": request_payload.get("run_id") or emitted_payload.get("run_id") or request_node.get("run_id") or emitted_node.get("run_id"),
+        "attempt": request_payload.get("attempt") or emitted_payload.get("attempt") or request_node.get("attempt") or emitted_node.get("attempt"),
+        "step_id": request_payload.get("step_id") or emitted_payload.get("step_id") or request_node.get("step_id") or emitted_node.get("step_id"),
+        "task": request_payload.get("task") or emitted_payload.get("task") or request_node.get("task") or emitted_node.get("task"),
+        "original_task": request_payload.get("original_task") or emitted_payload.get("original_task") or request_node.get("original_task") or emitted_node.get("original_task"),
+        "target_agent": request_payload.get("target_agent") or emitted_payload.get("target_agent") or request_node.get("target_agent") or emitted_node.get("target_agent"),
+        "scope": scope,
+        "operation": operation or request_node.get("operation") or emitted_node.get("operation"),
+        "status": _derived_node_status(role, emitted_payload),
+    }
+    sanitized = {key: value for key, value in envelope.items() if _nonempty(value)}
+    merged = dict(request_node)
+    merged.update(emitted_node)
+    merged.update(sanitized)
+    return merged
+
+
+def attach_node_envelopes(
+    response: Dict[str, Any],
+    request_event: str,
+    request_payload: Dict[str, Any] | None,
+    *,
+    agent_name: str,
+    role: str,
+) -> Dict[str, Any]:
+    if not isinstance(response, dict):
+        return response
+    emits = response.get("emits")
+    if not isinstance(emits, list):
+        return response
+
+    updated_emits: List[Dict[str, Any]] = []
+    for item in emits:
+        if not isinstance(item, dict):
+            updated_emits.append(item)
+            continue
+        event_name = item.get("event")
+        payload = item.get("payload")
+        if not isinstance(event_name, str) or not isinstance(payload, dict):
+            updated_emits.append(item)
+            continue
+        updated_payload = dict(payload)
+        updated_payload["node"] = build_node_envelope(
+            request_event,
+            request_payload,
+            event_name,
+            updated_payload,
+            agent_name=agent_name,
+            role=role,
+        )
+        updated_emits.append({"event": event_name, "payload": updated_payload})
+    updated_response = dict(response)
+    updated_response["emits"] = updated_emits
+    return updated_response
+
+
+def with_node_envelope(agent_name: str, role: str):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(req: EventRequest, *args, **kwargs):
+            response = func(req, *args, **kwargs)
+            payload = req.payload if isinstance(req.payload, dict) else {}
+            return attach_node_envelopes(
+                response,
+                req.event,
+                payload,
+                agent_name=agent_name,
+                role=role,
+            )
+
+        return wrapper
+
+    return decorator
 
 
 def serialize_for_stdin(value: Any) -> str | None:

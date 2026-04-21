@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlparse
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, task_plan_context
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, task_plan_context, with_node_envelope
 from agent_library.reduction import (
     build_sql_reduction_request,
     execute_reduction_request,
@@ -1910,6 +1910,7 @@ def _needs_decomposition(detail: str):
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("sql_runner", "executor")
 def handle_event(req: EventRequest):
     if req.event == "sql.query":
         task = str(req.payload.get("question") or req.payload.get("query") or "")

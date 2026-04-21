@@ -9,7 +9,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, task_plan_context
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, task_plan_context, with_node_envelope
 from agent_library.reduction import (
     build_slurm_reduction_request,
     deterministic_elapsed_reducer_command as shared_deterministic_elapsed_reducer_command,
@@ -1568,6 +1568,7 @@ def _result_payload(
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("slurm_runner", "executor")
 def handle_event(req: EventRequest):
     natural_language_request = False
     if req.event == "slurm.query":

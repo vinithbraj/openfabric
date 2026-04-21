@@ -105,6 +105,8 @@ contracts:
         type: number
       reduction_request:
         type: object
+      node:
+        type: object
 
   SqlQuery:
     type: object
@@ -145,6 +147,8 @@ contracts:
       result: {}
       reduction_request:
         type: object
+      node:
+        type: object
 
   SlurmResult:
     type: object
@@ -165,6 +169,8 @@ contracts:
       result: {}
       reduction_request:
         type: object
+      node:
+        type: object
 
   NotifySend:
     type: object
@@ -183,6 +189,8 @@ contracts:
         type: string
       run_id:
         type: string
+      attempt:
+        type: number
       resume_run_id:
         type: string
       task_shape:
@@ -204,6 +212,8 @@ contracts:
         type: string
       target_agent:
         type: string
+      node:
+        type: object
       presentation:
         type: object
         properties:
@@ -273,6 +283,8 @@ contracts:
             type: array
             items:
               type: string
+      node:
+        type: object
 
   PlannerReplanRequest:
     type: object
@@ -365,6 +377,8 @@ contracts:
     type: object
     required: [task, workflow_status]
     properties:
+      run_id:
+        type: string
       validation_scope:
         type: string
       task:
@@ -407,6 +421,8 @@ contracts:
         type: object
       available_context:
         type: object
+      node:
+        type: object
 
   ValidationResult:
     type: object
@@ -428,6 +444,8 @@ contracts:
         type: array
         items:
           type: string
+      node:
+        type: object
 
   ValidationProgress:
     type: object
@@ -489,6 +507,8 @@ contracts:
         type: string
       local_reduction_command:
         type: string
+      node:
+        type: object
       reduction:
         type: object
 
@@ -496,6 +516,10 @@ contracts:
     type: object
     required: [task, step_id, source_event]
     properties:
+      run_id:
+        type: string
+      attempt:
+        type: number
       task:
         type: string
       original_task:
@@ -516,6 +540,8 @@ contracts:
       source_payload:
         type: object
       available_context:
+        type: object
+      node:
         type: object
 
   DataReducedResult:
@@ -543,6 +569,8 @@ contracts:
         type: string
       error:
         type: string
+      node:
+        type: object
 
   NotifyResult:
     type: object

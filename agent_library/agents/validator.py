@@ -6,7 +6,7 @@ from typing import Any
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
 from runtime.console import log_debug
 
 app = FastAPI()
@@ -574,6 +574,7 @@ def _reduced_validation_payload(payload: dict):
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("validator", "validator")
 def handle_event(req: EventRequest):
     if req.event != "validation.request":
         return {"emits": []}

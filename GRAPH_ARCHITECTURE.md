@@ -114,6 +114,15 @@ Implemented in this change:
 - add `Engine.replay_run(run_id)` and `Engine.resume_run(run_id)` for replay and recovery flows
 - attach `run_id` to the workflow graph so stored runs can be correlated with visualized executions
 
+### Phase 6
+
+Implemented in this change:
+
+- add a shared `node` envelope helper in [agent_library/common.py](/home/vinith/Desktop/Workspace/openfabric/agent_library/common.py)
+- standardize core execution-path node metadata across executor, reducer, and validator agents
+- attach `run_id`, `attempt`, `step_id`, `task`, `target_agent`, `operation`, and role metadata to runtime-sent `task.plan`, `validation.request`, and `data.reduce` payloads
+- preserve node metadata inside compacted step payloads so workflow records retain the agent-level execution envelope
+
 ## Current Mapping
 
 Today’s runtime already maps naturally to the target graph:
@@ -144,6 +153,6 @@ The runtime now exposes the following execution chains directly in the graph:
 
 The main remaining architectural gaps before production are:
 
-- standardize a stricter common envelope for every node implementation
+- extend the stricter common envelope to the remaining non-core agents and answer/synthesis paths
 - add richer run inspection and debugging tools on top of the persisted run store
 - surface the graph through a dedicated visualization or UI layer

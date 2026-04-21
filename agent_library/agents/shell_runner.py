@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI
 import requests
 
-from agent_library.common import EventRequest, EventResponse, serialize_for_stdin, shared_llm_api_settings, task_plan_context
+from agent_library.common import EventRequest, EventResponse, serialize_for_stdin, shared_llm_api_settings, task_plan_context, with_node_envelope
 from agent_library.reduction import build_shell_reduction_request, execute_reduction_request, generate_shell_reduction_command
 from agent_library.agents.llm_operations_planner import _derive_shell_command as _planner_derive_shell_command
 from runtime.console import log_debug, log_raw
@@ -741,6 +741,7 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
 
 
 @app.post("/handle", response_model=EventResponse)
+@with_node_envelope("shell_runner", "executor")
 def handle_event(req: EventRequest):
     command = None
     stdin_data = None
