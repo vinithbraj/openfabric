@@ -210,9 +210,6 @@ class SlurmRunnerTests(unittest.TestCase):
         ), patch(
             "agent_library.agents.slurm_runner._gateway_execute",
             return_value={"returncode": 0, "stdout": "1|vinith|PENDING|hpc|job-a\n2|vinith|PENDING|hpc|job-b\n", "stderr": "", "duration_ms": 11},
-        ), patch(
-            "agent_library.agents.slurm_runner._refine_deterministic_slurm_result",
-            return_value=("Matching jobs: 2", "python3 -c 'print(2)'"),
         ), patch("agent_library.agents.slurm_runner._llm_slurm_command") as llm_fallback:
             response = handle_event(req)
 
@@ -220,7 +217,8 @@ class SlurmRunnerTests(unittest.TestCase):
         payload = response["emits"][0]["payload"]
         self.assertEqual(payload["execution_strategy"], "deterministic")
         self.assertEqual(payload["deterministic_primitive"], "slurm.jobs.queue_count")
-        self.assertEqual(payload["reduced_result"], "Matching jobs: 2")
+        self.assertEqual(payload["reduction_request"]["kind"], "slurm.line_count")
+        self.assertIsNone(payload["reduced_result"])
         llm_fallback.assert_not_called()
 
     def test_handle_event_uses_selector_fallback_after_deterministic_failure(self):
@@ -260,15 +258,12 @@ class SlurmRunnerTests(unittest.TestCase):
         ), patch(
             "agent_library.agents.slurm_runner._gateway_execute",
             side_effect=gateway_results,
-        ), patch(
-            "agent_library.agents.slurm_runner._llm_process_result",
-            return_value=("There are 2 pending jobs.", ""),
         ), patch("agent_library.agents.slurm_runner._llm_slurm_command") as llm_fallback:
             response = handle_event(req)
 
         payload = response["emits"][0]["payload"]
         self.assertEqual(payload["execution_strategy"], "selector_fallback_command")
-        self.assertEqual(payload["reduced_result"], "There are 2 pending jobs.")
+        self.assertEqual(payload["reduction_request"]["kind"], "slurm.line_count")
         llm_fallback.assert_not_called()
 
 

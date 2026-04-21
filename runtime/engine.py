@@ -17,6 +17,7 @@ import requests
 from .console import log_boot, log_event, log_event_handler
 from .contracts import ContractRegistry
 from .event_bus import EventBus
+from .graph import build_agent_graph_node, build_capability_graph, build_workflow_graph
 from .registry import ADAPTER_REGISTRY
 
 
@@ -83,9 +84,11 @@ class Engine:
     def _emit_system_capabilities(self):
         if "system.capabilities" not in self.spec.get("events", {}):
             return
+        agent_catalog = self._build_agent_catalog()
         payload = {
-            "agents": self._build_agent_catalog(),
+            "agents": agent_catalog,
             "execution_policy": self._build_execution_policy(),
+            "graph": build_capability_graph(agent_catalog),
         }
         self.emit("system.capabilities", payload)
 
@@ -133,6 +136,7 @@ class Engine:
                 if key in {"description", "methods", "routing_notes"}:
                     continue
                 entry[key] = value
+            entry["graph_node"] = build_agent_graph_node(agent_name, config, metadata)
             catalog.append(entry)
         return catalog
 
@@ -600,24 +604,89 @@ class Engine:
                 "error": workflow.get("error"),
                 "validation": validation,
             }
+            if isinstance(option.get("origin"), dict):
+                attempt_record["option"]["origin"] = self._compact_value(option.get("origin"), text_limit=180, row_limit=3)
+            if isinstance(option.get("derived_from_attempt"), int):
+                attempt_record["option"]["derived_from_attempt"] = option.get("derived_from_attempt")
             attempts.append(attempt_record)
             clarification = workflow.get("clarification")
-            if workflow.get("status") == "needs_clarification" and isinstance(clarification, dict) and deferred_clarification is None:
-                deferred_clarification = clarification
-            if validation.get("verdict") == "uncertain":
-                uncertain_count += 1
-            if validation.get("valid"):
+            if isinstance(clarification, dict) and clarification:
+                attempt_record["clarification"] = clarification
+
+            routing = self._route_workflow_attempt(
+                payload,
+                option,
+                workflow,
+                validation,
+                index,
+                len(plan_options),
+                limits,
+                uncertain_count,
+                replan_count,
+                clarification=clarification if isinstance(clarification, dict) else None,
+            )
+            attempt_record["routing"] = self._compact_routing_record(routing)
+            uncertain_count = max(uncertain_count, int(routing.get("uncertain_count_after", uncertain_count)))
+
+            if routing.get("action") == "accept_attempt":
                 selected_attempt = attempt_record
                 break
-            if validation.get("verdict") == "uncertain" and uncertain_count > limits["max_uncertain_attempts"]:
-                deferred_clarification = self._clarification_from_validation(payload, attempts, attempt_record, "Validation remained uncertain after repeated attempts.")
+
+            if routing.get("action") == "clarify":
+                clarification_payload = clarification if isinstance(clarification, dict) else self._clarification_from_validation(
+                    payload,
+                    attempts,
+                    attempt_record,
+                    "Validation remained uncertain after repeated attempts.",
+                )
+                attempt_record["clarification"] = clarification_payload
+                if deferred_clarification is None:
+                    deferred_clarification = clarification_payload
                 break
-            if index >= len(plan_options) and replan_count < limits["max_replans"] and len(attempts) < limits["max_attempts"]:
-                derived_option = self._derive_fallback_option(payload, plan_options, attempt_record, context, len(attempts), depth)
-                if derived_option is not None:
-                    plan_options.append(derived_option)
-                    replan_count += 1
-            if index < len(plan_options):
+
+            if routing.get("action") == "replan_workflow":
+                derived = self._derive_fallback_option(payload, plan_options, attempt_record, context, len(attempts), depth)
+                if isinstance(derived, dict):
+                    if isinstance(derived.get("replan"), dict):
+                        attempt_record["replan"] = derived.get("replan")
+                    derived_option = derived.get("option")
+                    if isinstance(derived_option, dict):
+                        plan_options.append(derived_option)
+                        replan_count += 1
+                        if isinstance(attempt_record.get("routing"), dict):
+                            attempt_record["routing"]["activated_option_id"] = derived_option.get("id")
+                            attempt_record["routing"]["budget"] = self._compact_value(
+                                self._budget_snapshot(
+                                    limits,
+                                    attempts_used=index,
+                                    replan_count=replan_count,
+                                    uncertain_count=uncertain_count,
+                                    workflow_validation_requests=index,
+                                ),
+                                text_limit=220,
+                                row_limit=3,
+                            )
+                    else:
+                        fallback_reason = str(validation.get("reason") or workflow.get("error") or "Workflow fallback planning failed.").strip()
+                        if validation.get("verdict") == "uncertain":
+                            clarification_payload = self._clarification_from_validation(
+                                payload,
+                                attempts,
+                                attempt_record,
+                                fallback_reason,
+                            )
+                            attempt_record["clarification"] = clarification_payload
+                            if isinstance(attempt_record.get("routing"), dict):
+                                attempt_record["routing"]["action"] = "clarify"
+                                attempt_record["routing"]["clarification_required"] = True
+                            deferred_clarification = clarification_payload
+                            break
+                        if isinstance(attempt_record.get("routing"), dict):
+                            attempt_record["routing"]["action"] = "fail_run"
+                            attempt_record["routing"]["reason"] = fallback_reason
+                        break
+
+            if routing.get("action") in {"try_next_option", "replan_workflow"} and index < len(plan_options):
                 self._emit_validation_progress(
                     "retrying",
                     payload,
@@ -626,9 +695,13 @@ class Engine:
                     option_label=option.get("label"),
                     attempt=index,
                     total_attempts=len(plan_options),
-                    reason=validation.get("reason"),
-                    message="The validator rejected this attempt, so I am trying the next workflow option.",
+                    reason=routing.get("reason") or validation.get("reason"),
+                    message="The workflow router rejected this attempt, so I am trying the next workflow option.",
                 )
+                continue
+
+            if routing.get("action") == "fail_run":
+                break
 
         if selected_attempt is not None:
             if "workflow.result" in self.spec.get("events", {}):
@@ -647,12 +720,31 @@ class Engine:
                     result_payload["presentation"] = presentation
                 if selected_attempt.get("error"):
                     result_payload["error"] = selected_attempt["error"]
+                result_payload["graph"] = build_workflow_graph(
+                    task=payload.get("task", ""),
+                    task_shape=str(payload.get("task_shape") or ""),
+                    status=str(selected_attempt["status"] or ""),
+                    attempts=attempts,
+                    selected_option=selected_attempt["option"],
+                    result=selected_attempt.get("result"),
+                    presentation=presentation if isinstance(presentation, dict) else None,
+                )
                 self.emit("workflow.result", result_payload, depth + 1)
                 return
             return
 
         if deferred_clarification is not None and "clarification.required" in self.spec.get("events", {}):
             deferred_clarification["attempts"] = attempts
+            presentation = payload.get("presentation")
+            deferred_clarification["graph"] = build_workflow_graph(
+                task=payload.get("task", ""),
+                task_shape=str(payload.get("task_shape") or ""),
+                status="needs_clarification",
+                attempts=attempts,
+                selected_option=None,
+                result=(attempts[-1] or {}).get("result") if attempts else None,
+                presentation=presentation if isinstance(presentation, dict) else None,
+            )
             self.emit("clarification.required", deferred_clarification, depth + 1)
             return
 
@@ -677,6 +769,15 @@ class Engine:
                 ).get("reason")
                 if isinstance(resolved_error, str) and resolved_error.strip():
                     result_payload["error"] = resolved_error.strip()
+            result_payload["graph"] = build_workflow_graph(
+                task=payload.get("task", ""),
+                task_shape=str(payload.get("task_shape") or ""),
+                status="failed",
+                attempts=attempts,
+                selected_option=(last_attempt or {}).get("option") if isinstance(last_attempt, dict) else None,
+                result=result_payload.get("result"),
+                presentation=presentation if isinstance(presentation, dict) else None,
+            )
             self.emit("workflow.result", result_payload, depth + 1)
             return
 
@@ -711,6 +812,281 @@ class Engine:
         if isinstance(missing, list) and missing:
             clarification["missing_information"] = [item for item in missing if isinstance(item, str) and item.strip()]
         return clarification
+
+    def _budget_snapshot(
+        self,
+        limits: dict,
+        *,
+        attempts_used: int = 0,
+        replan_count: int = 0,
+        uncertain_count: int = 0,
+        step_replans: dict[str, int] | None = None,
+        workflow_validation_requests: int = 0,
+        step_validation_requests: int = 0,
+    ) -> dict:
+        step_replans = step_replans or {}
+        usage = {
+            "attempts": max(0, attempts_used),
+            "workflow_replans": max(0, replan_count),
+            "uncertain_attempts": max(0, uncertain_count),
+            "workflow_validation_requests": max(0, workflow_validation_requests),
+            "step_validation_requests": max(0, step_validation_requests),
+        }
+        if step_replans:
+            usage["step_replans"] = {
+                key: max(0, int(value))
+                for key, value in step_replans.items()
+                if isinstance(key, str) and isinstance(value, (int, float))
+            }
+        remaining = {
+            "attempts": max(0, limits.get("max_attempts", 0) - usage["attempts"]),
+            "workflow_replans": max(0, limits.get("max_replans", 0) - usage["workflow_replans"]),
+            "uncertain_attempts": max(0, limits.get("max_uncertain_attempts", 0) - usage["uncertain_attempts"]),
+            "workflow_validation_requests": max(0, limits.get("max_validation_llm_calls", 0) - usage["workflow_validation_requests"]),
+            "step_validation_requests": max(0, limits.get("max_step_validation_llm_calls", 0) - usage["step_validation_requests"]),
+        }
+        if "step_replans" in usage:
+            remaining["step_replans"] = {
+                key: max(0, limits.get("max_step_replans", 0) - value)
+                for key, value in usage["step_replans"].items()
+            }
+        return {
+            "limits": copy.deepcopy(limits),
+            "usage": usage,
+            "remaining": remaining,
+        }
+
+    def _compact_routing_record(self, record: dict | None) -> dict | None:
+        if not isinstance(record, dict) or not record:
+            return None
+        compact = {}
+        for key in (
+            "scope",
+            "stage",
+            "action",
+            "reason",
+            "verdict",
+            "valid",
+            "retry_recommended",
+            "failure_class",
+            "attempt",
+            "total_attempts",
+            "option_id",
+            "option_label",
+            "step_id",
+            "target_agent",
+            "event",
+            "remaining_options",
+            "activated_option_id",
+            "clarification_required",
+            "accepted_with_uncertainty",
+            "uncertain_count_after",
+        ):
+            value = record.get(key)
+            if value not in (None, "", [], {}):
+                compact[key] = value
+        budget = record.get("budget")
+        if isinstance(budget, dict) and budget:
+            compact["budget"] = self._compact_value(budget, text_limit=220, row_limit=3)
+        validation = record.get("validation")
+        if isinstance(validation, dict) and validation:
+            compact["validation"] = self._compact_value(validation, text_limit=180, row_limit=3)
+        return compact or None
+
+    def _compact_replan_record(self, record: dict | None) -> dict | None:
+        if not isinstance(record, dict) or not record:
+            return None
+        compact = {}
+        for key in (
+            "scope",
+            "status",
+            "step_id",
+            "replace_step_id",
+            "reason",
+            "failure_class",
+            "event",
+            "derived_option_id",
+            "derived_from_attempt",
+        ):
+            value = record.get(key)
+            if value not in (None, "", [], {}):
+                compact[key] = value
+        request_payload = record.get("request")
+        if isinstance(request_payload, dict) and request_payload:
+            compact["request"] = self._compact_value(request_payload, text_limit=220, row_limit=3)
+        result_payload = record.get("result")
+        if isinstance(result_payload, dict) and result_payload:
+            compact["result"] = self._compact_value(result_payload, text_limit=220, row_limit=3)
+        steps = record.get("steps")
+        if isinstance(steps, list) and steps:
+            compact["steps"] = [self._compact_value(step, text_limit=180, row_limit=3) for step in steps[:3] if isinstance(step, dict)]
+            if len(steps) > 3:
+                compact["steps_note"] = f"Showing first 3 replanned steps out of {len(steps)}."
+        return compact or None
+
+    def _step_runtime_history(self, raw_step: dict, key: str) -> list[dict]:
+        history = raw_step.get(key)
+        if not isinstance(history, list):
+            return []
+        return [item for item in history if isinstance(item, dict)]
+
+    def _attach_step_runtime_metadata(
+        self,
+        raw_step: dict,
+        record: dict,
+        *,
+        routing: dict | None = None,
+        replan: dict | None = None,
+        clarification: dict | None = None,
+    ) -> dict:
+        routing_history = list(self._step_runtime_history(raw_step, "__routing_history__"))
+        replan_history = list(self._step_runtime_history(raw_step, "__replan_history__"))
+        compact_routing = self._compact_routing_record(routing)
+        compact_replan = self._compact_replan_record(replan)
+        if compact_routing:
+            routing_history.append(compact_routing)
+        if compact_replan:
+            replan_history.append(compact_replan)
+        if routing_history:
+            record["routing"] = routing_history[-1]
+            record["routing_history"] = routing_history
+        if replan_history:
+            record["replan"] = replan_history[-1]
+            record["replan_history"] = replan_history
+        if isinstance(clarification, dict) and clarification:
+            record["clarification"] = clarification
+        return record
+
+    def _route_workflow_attempt(
+        self,
+        payload: dict,
+        option: dict,
+        workflow: dict,
+        validation: dict,
+        attempt: int,
+        total_attempts: int,
+        limits: dict,
+        uncertain_count: int,
+        replan_count: int,
+        clarification: dict | None = None,
+    ) -> dict:
+        verdict = str(validation.get("verdict") or ("valid" if validation.get("valid") else "invalid")).strip() or "invalid"
+        projected_uncertain = uncertain_count + (1 if verdict == "uncertain" else 0)
+        remaining_options = max(0, total_attempts - attempt)
+        can_try_next = remaining_options > 0
+        can_replan = remaining_options == 0 and replan_count < limits["max_replans"] and attempt < limits["max_attempts"]
+        action = "fail_run"
+        reason = str(validation.get("reason") or workflow.get("error") or "Workflow output did not clearly satisfy the request.").strip()
+
+        if workflow.get("status") == "needs_clarification" and isinstance(clarification, dict):
+            action = "clarify"
+            reason = str(clarification.get("detail") or clarification.get("question") or reason).strip()
+        elif validation.get("valid"):
+            action = "accept_attempt"
+        elif verdict == "uncertain":
+            if projected_uncertain > limits["max_uncertain_attempts"]:
+                action = "clarify"
+            elif can_try_next:
+                action = "try_next_option"
+            elif can_replan:
+                action = "replan_workflow"
+            else:
+                action = "clarify"
+        elif can_try_next:
+            action = "try_next_option"
+        elif can_replan:
+            action = "replan_workflow"
+
+        return {
+            "scope": "workflow",
+            "stage": "validation",
+            "action": action,
+            "reason": reason,
+            "verdict": verdict,
+            "valid": bool(validation.get("valid")),
+            "retry_recommended": bool(validation.get("retry_recommended")),
+            "attempt": attempt,
+            "total_attempts": total_attempts,
+            "option_id": option.get("id"),
+            "option_label": option.get("label"),
+            "remaining_options": remaining_options,
+            "clarification_required": action == "clarify",
+            "uncertain_count_after": projected_uncertain,
+            "budget": self._budget_snapshot(
+                limits,
+                attempts_used=attempt,
+                replan_count=replan_count,
+                uncertain_count=projected_uncertain,
+                workflow_validation_requests=attempt,
+            ),
+            "validation": self._compact_value(validation, text_limit=180, row_limit=3),
+        }
+
+    def _route_step_attempt(
+        self,
+        step_id: str,
+        step_payload: dict,
+        primary_event: str | None,
+        validation_result: dict | None,
+        error: str,
+        stage: str,
+        limits: dict,
+        step_replans: dict[str, int],
+        step_validation_requests: int,
+        *,
+        needs_clarification: bool = False,
+        failure_class: str | None = None,
+    ) -> dict:
+        step_replan_count = max(0, int(step_replans.get(step_id, 0)))
+        verdict = "failed"
+        valid = False
+        retry_recommended = False
+        accepted_with_uncertainty = False
+
+        if stage == "validation" and isinstance(validation_result, dict):
+            verdict = str(validation_result.get("verdict") or ("valid" if validation_result.get("valid") else "invalid")).strip() or "invalid"
+            valid = bool(validation_result.get("valid"))
+            retry_recommended = bool(validation_result.get("retry_recommended"))
+            accepted_with_uncertainty = verdict == "uncertain" and not retry_recommended
+        elif needs_clarification:
+            verdict = "needs_clarification"
+
+        can_replan = step_replan_count < limits["max_step_replans"]
+        action = "fail_run"
+        resolved_failure_class = failure_class or ("needs_clarification" if needs_clarification else "execution_failed")
+        if stage == "validation":
+            resolved_failure_class = failure_class or ("validation_failed" if not (valid or accepted_with_uncertainty) else "")
+            if valid or accepted_with_uncertainty:
+                action = "accept_step"
+            elif can_replan:
+                action = "replan_step"
+        else:
+            if needs_clarification:
+                action = "clarify"
+            elif can_replan:
+                action = "replan_step"
+
+        return {
+            "scope": "step",
+            "stage": stage,
+            "action": action,
+            "reason": error,
+            "verdict": verdict,
+            "valid": valid,
+            "retry_recommended": retry_recommended,
+            "accepted_with_uncertainty": accepted_with_uncertainty,
+            "failure_class": resolved_failure_class or None,
+            "step_id": step_id,
+            "target_agent": step_payload.get("target_agent", ""),
+            "event": primary_event or "",
+            "clarification_required": action == "clarify",
+            "budget": self._budget_snapshot(
+                limits,
+                step_replans=step_replans,
+                step_validation_requests=step_validation_requests,
+            ),
+            "validation": self._compact_value(validation_result, text_limit=180, row_limit=3) if isinstance(validation_result, dict) else None,
+        }
 
     def _plan_options(self, payload: dict) -> list[dict]:
         raw_options = payload.get("plan_options")
@@ -785,11 +1161,24 @@ class Engine:
                 auxiliary.append((event_name, event_payload))
         for event_name, event_payload in auxiliary:
             self.emit(event_name, event_payload, depth + 1)
+        replan_trace = {
+            "scope": "workflow",
+            "status": "received" if isinstance(replan_result, dict) else "failed",
+            "step_id": "__workflow__",
+            "replace_step_id": replan_result.get("replace_step_id") if isinstance(replan_result, dict) else "__workflow__",
+            "reason": str((replan_result or {}).get("reason") or reason),
+            "failure_class": "execution_failed",
+            "event": "workflow.result",
+            "request": replan_payload,
+            "result": replan_result if isinstance(replan_result, dict) else None,
+            "derived_from_attempt": attempt_count,
+        }
         if not isinstance(replan_result, dict):
-            return None
+            return {"option": None, "replan": self._compact_replan_record(replan_trace)}
         steps = replan_result.get("steps")
         if not isinstance(steps, list) or not steps:
-            return None
+            replan_trace["status"] = "empty"
+            return {"option": None, "replan": self._compact_replan_record(replan_trace)}
         existing_signatures = {
             json.dumps(option.get("steps", []), sort_keys=True, ensure_ascii=True)
             for option in existing
@@ -797,12 +1186,28 @@ class Engine:
         }
         candidate_signature = json.dumps(steps, sort_keys=True, ensure_ascii=True)
         if candidate_signature in existing_signatures:
-            return None
-        return {
-            "id": f"option{len(existing) + 1}",
+            replan_trace["status"] = "duplicate"
+            replan_trace["steps"] = steps
+            return {"option": None, "replan": self._compact_replan_record(replan_trace)}
+        option_id = f"option{len(existing) + 1}"
+        option = {
+            "id": option_id,
             "label": "Recovered fallback",
             "reason": str(replan_result.get("reason") or reason),
             "steps": steps,
+            "derived_from_attempt": attempt_count,
+            "origin": {
+                "kind": "workflow_replan",
+                "derived_from_attempt": attempt_count,
+                "reason": str(replan_result.get("reason") or reason),
+            },
+        }
+        replan_trace["status"] = "derived"
+        replan_trace["derived_option_id"] = option_id
+        replan_trace["steps"] = steps
+        return {
+            "option": option,
+            "replan": self._compact_replan_record(replan_trace),
         }
 
     def _structured_count_like(self, value: Any) -> bool:
@@ -1065,8 +1470,154 @@ class Engine:
                 primary_payload,
                 primary_value,
                 context,
-            )
+        )
         return validation_result
+
+    def _reducer_input_data(self, primary_event: str | None, primary_payload: Any, step_payload: dict) -> Any:
+        if not isinstance(primary_payload, dict):
+            return None
+        reduction_request = primary_payload.get("reduction_request")
+        if isinstance(reduction_request, dict):
+            source_field = str(reduction_request.get("source_field") or "").strip()
+            if source_field == "stderr":
+                stderr = primary_payload.get("stderr")
+                if stderr not in (None, "", [], {}):
+                    return stderr
+            if source_field == "detail":
+                detail = primary_payload.get("detail")
+                if detail not in (None, "", [], {}):
+                    return detail
+        if primary_event in {"shell.result", "slurm.result"}:
+            stdout = primary_payload.get("stdout")
+            if isinstance(stdout, str):
+                return stdout
+        if primary_event == "sql.result":
+            result = primary_payload.get("result")
+            if isinstance(result, dict):
+                rows = result.get("rows")
+                if isinstance(rows, list):
+                    row_count = result.get("total_matching_rows", result.get("row_count"))
+                    return {
+                        "task": step_payload.get("task", ""),
+                        "sql": primary_payload.get("sql", ""),
+                        "columns": result.get("columns", []),
+                        "rows": rows,
+                        "row_count": row_count if isinstance(row_count, int) else len(rows),
+                        "returned_row_count": len(rows),
+                    }
+        if primary_event == "file.content":
+            return primary_payload.get("content")
+        if primary_event == "task.result":
+            if "result" in primary_payload:
+                return primary_payload.get("result")
+            return primary_payload.get("detail")
+        if "result" in primary_payload:
+            return primary_payload.get("result")
+        return primary_payload
+
+    def _step_has_reduction_candidate(self, primary_event: str | None, primary_payload: Any) -> bool:
+        if not primary_event or not isinstance(primary_payload, dict):
+            return False
+        if isinstance(primary_payload.get("reduction_request"), dict):
+            return True
+        if primary_payload.get("local_reduction_command"):
+            return True
+        return primary_payload.get("reduced_result") not in (None, "", [], {}) or primary_payload.get("refined_answer") not in (None, "", [], {})
+
+    def _reduce_step_output(
+        self,
+        workflow_payload: dict,
+        step_id: str,
+        step_payload: dict,
+        primary_event: str | None,
+        primary_payload: Any,
+        primary_value: Any,
+        context: dict,
+        depth: int,
+    ) -> dict | None:
+        if (
+            "data.reduce" not in self.spec.get("events", {})
+            or "data.reduced" not in self.spec.get("events", {})
+            or not self.bus.get_subscribers("data.reduce")
+        ):
+            return None
+        if not self._step_has_reduction_candidate(primary_event, primary_payload):
+            return None
+        reducer_payload = {
+            "task": step_payload.get("task", ""),
+            "original_task": workflow_payload.get("task", ""),
+            "step_id": step_id,
+            "target_agent": step_payload.get("target_agent", ""),
+            "source_event": primary_event or "",
+            "reduction_request": primary_payload.get("reduction_request") if isinstance(primary_payload, dict) else None,
+            "local_reduction_command": primary_payload.get("local_reduction_command") if isinstance(primary_payload, dict) else None,
+            "existing_reduced_result": (
+                primary_payload.get("reduced_result") or primary_payload.get("refined_answer")
+                if isinstance(primary_payload, dict)
+                else None
+            ),
+            "input_data": self._reducer_input_data(primary_event, primary_payload, step_payload),
+            "source_value": self._compact_value(primary_value, text_limit=240, row_limit=4),
+            "available_context": {
+                key: self._compact_value(value, text_limit=180, row_limit=3)
+                for key, value in context.items()
+                if key != "original_task" and not key.endswith(".event")
+            },
+        }
+        if isinstance(primary_payload, dict):
+            reducer_payload["source_payload"] = primary_payload
+        contract_name = self.spec["events"]["data.reduce"]["contract"]
+        self.contracts.validate_payload(contract_name, reducer_payload)
+        log_event("data.reduce", reducer_payload, depth + 1)
+        emitted = self._invoke_subscribers("data.reduce", reducer_payload, depth + 1)
+        reduction_result = None
+        auxiliary = []
+        for event_name, event_payload in emitted:
+            if event_name == "data.reduced":
+                reduction_result = event_payload
+            else:
+                auxiliary.append((event_name, event_payload))
+        for event_name, event_payload in auxiliary:
+            self.emit(event_name, event_payload, depth + 1)
+        return reduction_result if isinstance(reduction_result, dict) else None
+
+    def _prefers_explicit_step_value(self, step_payload: dict) -> bool:
+        if not isinstance(step_payload, dict):
+            return False
+        if isinstance(step_payload.get("result_mode"), str) and step_payload.get("result_mode").strip():
+            return True
+        instruction = step_payload.get("instruction")
+        capture = instruction.get("capture") if isinstance(instruction, dict) else None
+        return isinstance(capture, dict) and bool(capture)
+
+    def _apply_reduction_result(self, primary_event: str | None, primary_payload: Any, reduction_result: dict | None):
+        if not isinstance(primary_payload, dict) or not isinstance(reduction_result, dict):
+            return primary_payload
+        reduced_result = reduction_result.get("reduced_result")
+        if reduced_result in (None, "", [], {}):
+            return primary_payload
+        updated_payload = copy.deepcopy(primary_payload)
+        updated_payload["reduced_result"] = reduced_result
+        updated_payload["refined_answer"] = reduced_result
+        command = reduction_result.get("local_reduction_command")
+        if isinstance(command, str) and command.strip():
+            updated_payload["local_reduction_command"] = command.strip()
+        strategy = reduction_result.get("strategy")
+        if isinstance(strategy, str) and strategy.strip():
+            updated_payload["reduction_strategy"] = strategy.strip()
+        attempts = reduction_result.get("attempts")
+        if isinstance(attempts, (int, float)):
+            updated_payload["reduction_attempts"] = int(attempts)
+        updated_payload["reduction"] = self._compact_value(reduction_result, text_limit=180, row_limit=3)
+        nested_result = updated_payload.get("result")
+        if isinstance(nested_result, dict):
+            nested_result = copy.deepcopy(nested_result)
+            nested_result["reduced_result"] = reduced_result
+            nested_result["refined_answer"] = reduced_result
+            updated_payload["result"] = nested_result
+        if primary_event in {"shell.result", "slurm.result"} and not str(updated_payload.get("detail") or "").strip():
+            updated_payload["detail"] = str(reduced_result)
+        return updated_payload
 
     def _looks_like_scalar(self, value: Any) -> bool:
         if isinstance(value, (int, float, bool)):
@@ -1359,6 +1910,9 @@ class Engine:
                 "schema",
                 "queries",
                 "local_reduction_command",
+                "reduction_request",
+                "reduction_strategy",
+                "reduction",
                 "note",
                 "error",
                 "status",
@@ -1397,6 +1951,9 @@ class Engine:
                     "returncode": payload.get("returncode"),
                     "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
                     "local_reduction_command": payload.get("local_reduction_command"),
+                    "reduction_request": self._compact_value(payload.get("reduction_request"), text_limit=180, row_limit=3),
+                    "reduction_strategy": payload.get("reduction_strategy"),
+                    "reduction": self._compact_value(payload.get("reduction"), text_limit=180, row_limit=3),
                     "stdout": self._compact_text(payload.get("stdout"), 1000),
                     "stdout_excerpt": self._compact_text(payload.get("stdout"), 500),
                     "stderr": self._compact_text(payload.get("stderr"), 600),
@@ -1413,6 +1970,9 @@ class Engine:
                     "sql": self._compact_text(payload.get("sql"), 500),
                     "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
                     "local_reduction_command": payload.get("local_reduction_command"),
+                    "reduction_request": self._compact_value(payload.get("reduction_request"), text_limit=180, row_limit=3),
+                    "reduction_strategy": payload.get("reduction_strategy"),
+                    "reduction": self._compact_value(payload.get("reduction"), text_limit=180, row_limit=3),
                     "schema": self._compact_schema(payload.get("schema")),
                     "stats": self._compact_value(payload.get("stats"), text_limit=120),
                     "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=5),
@@ -1427,6 +1987,9 @@ class Engine:
                     "returncode": payload.get("returncode"),
                     "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
                     "local_reduction_command": payload.get("local_reduction_command"),
+                    "reduction_request": self._compact_value(payload.get("reduction_request"), text_limit=180, row_limit=3),
+                    "reduction_strategy": payload.get("reduction_strategy"),
+                    "reduction": self._compact_value(payload.get("reduction"), text_limit=180, row_limit=3),
                     "stdout": self._compact_text(payload.get("stdout"), 1000),
                     "stdout_excerpt": self._compact_text(payload.get("stdout"), 500),
                     "stderr": self._compact_text(payload.get("stderr"), 600),
@@ -1444,6 +2007,11 @@ class Engine:
                     "error": payload.get("error"),
                     "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=3),
                     "replan_hint": self._compact_value(payload.get("replan_hint"), text_limit=180, row_limit=3),
+                    "reduced_result": payload.get("reduced_result") or payload.get("refined_answer"),
+                    "local_reduction_command": payload.get("local_reduction_command"),
+                    "reduction_request": self._compact_value(payload.get("reduction_request"), text_limit=180, row_limit=3),
+                    "reduction_strategy": payload.get("reduction_strategy"),
+                    "reduction": self._compact_value(payload.get("reduction"), text_limit=180, row_limit=3),
                 }
             )
             return compact
@@ -1564,6 +2132,7 @@ class Engine:
             "reduced_result",
             "refined_answer",
             "local_reduction_command",
+            "reduction_request",
             "error",
             "status",
         ):
@@ -1604,6 +2173,14 @@ class Engine:
             "duration_ms": duration_ms,
             "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
         }
+        if isinstance(step_payload.get("instruction"), dict):
+            envelope["instruction"] = self._compact_value(step_payload.get("instruction"), text_limit=240, row_limit=4)
+        depends_on = step_payload.get("depends_on")
+        if isinstance(depends_on, list) and depends_on:
+            envelope["depends_on"] = [item for item in depends_on if isinstance(item, str)]
+        when = step_payload.get("when")
+        if isinstance(when, dict) and when:
+            envelope["when"] = self._compact_value(when, text_limit=180, row_limit=3)
         if isinstance(validation_result, dict):
             envelope["validation"] = self._compact_value(validation_result, text_limit=180, row_limit=3)
         if primary_event == "shell.result" and isinstance(primary_payload, dict):
@@ -1745,7 +2322,25 @@ class Engine:
                 auxiliary.append((event_name, event_payload))
         for event_name, event_payload in auxiliary:
             self.emit(event_name, event_payload, depth + 1)
-        return replan_result
+        trace = {
+            "scope": "step",
+            "status": "received" if isinstance(replan_result, dict) else "failed",
+            "step_id": step_id,
+            "replace_step_id": replan_result.get("replace_step_id") if isinstance(replan_result, dict) else step_id,
+            "reason": str((replan_result or {}).get("reason") or error),
+            "failure_class": replan_payload.get("failure_class"),
+            "event": primary_event or "",
+            "request": replan_payload,
+            "result": replan_result if isinstance(replan_result, dict) else None,
+        }
+        if isinstance(replan_result, dict) and isinstance(replan_result.get("steps"), list):
+            trace["steps"] = replan_result.get("steps")
+        return {
+            "request": replan_payload,
+            "result": replan_result if isinstance(replan_result, dict) else None,
+            "steps": replan_result.get("steps") if isinstance(replan_result, dict) else None,
+            "trace": self._compact_replan_record(trace),
+        }
 
     def _build_clarification_payload(
         self,
@@ -1821,7 +2416,7 @@ class Engine:
         step_payload = {
             key: value
             for key, value in raw_step.items()
-            if key not in {"id", "depends_on", "steps", "replan_budget", "when"}
+            if key not in {"id", "depends_on", "steps", "replan_budget", "when"} and not str(key).startswith("__")
         }
         step_payload = self._resolve_templates(step_payload, context)
         step_payload = self._resolve_references(step_payload, context)
@@ -1837,6 +2432,10 @@ class Engine:
             step_payload["previous_step_result"] = prior_step_results[-1]
         if dependency_results:
             step_payload["dependency_results"] = dependency_results
+        if isinstance(raw_step.get("depends_on"), list) and raw_step.get("depends_on"):
+            step_payload["depends_on"] = [item for item in raw_step.get("depends_on") if isinstance(item, str)]
+        if isinstance(raw_step.get("when"), dict) and raw_step.get("when"):
+            step_payload["when"] = raw_step.get("when")
         if not self._evaluate_when(raw_step.get("when"), context):
             return {
                 "kind": "skipped",
@@ -1958,6 +2557,13 @@ class Engine:
                         "task": step_payload.get("task", ""),
                         "target_agent": step_payload.get("target_agent"),
                         "status": "skipped",
+                        "instruction": self._compact_value(step_payload.get("instruction"), text_limit=240, row_limit=4)
+                        if isinstance(step_payload.get("instruction"), dict)
+                        else None,
+                        "depends_on": [item for item in step_payload.get("depends_on", []) if isinstance(item, str)],
+                        "when": self._compact_value(step_payload.get("when"), text_limit=180, row_limit=3)
+                        if isinstance(step_payload.get("when"), dict)
+                        else None,
                         "result": None,
                     }
                 )
@@ -1969,15 +2575,24 @@ class Engine:
                 final_value = nested.get("result")
                 self._record_context_value(context, step_id, "task.result", {"result": final_value}, final_value)
                 completed_ids.add(step_id)
+                nested_record = {
+                    "id": step_id,
+                    "task": outcome["task"],
+                    "target_agent": outcome.get("target_agent"),
+                    "status": nested["status"],
+                    "depends_on": [item for item in raw_step.get("depends_on", []) if isinstance(item, str)],
+                    "when": self._compact_value(raw_step.get("when"), text_limit=180, row_limit=3)
+                    if isinstance(raw_step.get("when"), dict)
+                    else None,
+                    "steps": nested["steps"],
+                    "result": final_value,
+                }
                 records.append(
-                    {
-                        "id": step_id,
-                        "task": outcome["task"],
-                        "target_agent": outcome.get("target_agent"),
-                        "status": nested["status"],
-                        "steps": nested["steps"],
-                        "result": final_value,
-                    }
+                    self._attach_step_runtime_metadata(
+                        raw_step,
+                        nested_record,
+                        clarification=nested.get("clarification") if isinstance(nested.get("clarification"), dict) else None,
+                    )
                 )
                 if nested["status"] != "completed":
                     result = {
@@ -2011,6 +2626,13 @@ class Engine:
                         "task": step_payload.get("task", ""),
                         "target_agent": step_payload.get("target_agent"),
                         "status": "failed",
+                        "instruction": self._compact_value(step_payload.get("instruction"), text_limit=240, row_limit=4)
+                        if isinstance(step_payload.get("instruction"), dict)
+                        else None,
+                        "depends_on": [item for item in step_payload.get("depends_on", []) if isinstance(item, str)],
+                        "when": self._compact_value(step_payload.get("when"), text_limit=180, row_limit=3)
+                        if isinstance(step_payload.get("when"), dict)
+                        else None,
                         "error": error,
                         "duration_ms": duration_ms,
                     }
@@ -2037,8 +2659,22 @@ class Engine:
                     else None
                 ) or "Step failed."
                 needs_clarification = isinstance(primary_payload, dict) and primary_payload.get("status") == "needs_clarification"
-                if not needs_clarification and step_replans.get(step_id, 0) < limits["max_step_replans"]:
-                    replan_result = self._request_replan(
+                step_routing = self._route_step_attempt(
+                    step_id,
+                    step_payload,
+                    primary_event,
+                    None,
+                    error,
+                    "execution",
+                    limits,
+                    step_replans,
+                    step_validation_requests,
+                    needs_clarification=needs_clarification,
+                    failure_class="needs_clarification" if needs_clarification else "execution_failed",
+                )
+                replan_envelope = None
+                if step_routing.get("action") == "replan_step":
+                    replan_envelope = self._request_replan(
                         step_id,
                         step_payload,
                         payload,
@@ -2048,7 +2684,7 @@ class Engine:
                         context,
                         depth,
                     )
-                    replanned_steps = replan_result.get("steps") if isinstance(replan_result, dict) else None
+                    replanned_steps = replan_envelope.get("steps") if isinstance(replan_envelope, dict) else None
                     if isinstance(replanned_steps, list) and replanned_steps:
                         step_replans[step_id] = step_replans.get(step_id, 0) + 1
                         self._emit_step_progress(
@@ -2063,6 +2699,16 @@ class Engine:
                             reason=error,
                         )
                         replanned_step = copy.deepcopy(raw_step)
+                        routing_history = list(self._step_runtime_history(replanned_step, "__routing_history__"))
+                        compact_routing = self._compact_routing_record(step_routing)
+                        if compact_routing:
+                            routing_history.append(compact_routing)
+                            replanned_step["__routing_history__"] = routing_history
+                        replan_history = list(self._step_runtime_history(replanned_step, "__replan_history__"))
+                        compact_replan = replan_envelope.get("trace") if isinstance(replan_envelope, dict) else None
+                        if isinstance(compact_replan, dict):
+                            replan_history.append(compact_replan)
+                            replanned_step["__replan_history__"] = replan_history
                         replanned_step["steps"] = replanned_steps
                         pending.insert(ready_index, replanned_step)
                         continue
@@ -2080,24 +2726,7 @@ class Engine:
                     stdout=primary_payload.get("stdout") if isinstance(primary_payload, dict) else None,
                     stderr=primary_payload.get("stderr") if isinstance(primary_payload, dict) else None,
                 )
-                records.append(
-                    {
-                        "id": step_id,
-                        "task": step_payload.get("task", ""),
-                        "target_agent": step_payload.get("target_agent"),
-                        "status": "needs_clarification" if self._step_requests_replan(primary_event or "", primary_payload) else "failed",
-                        "event": primary_event,
-                        "duration_ms": duration_ms,
-                        "payload": self._compact_event_payload(primary_event or "", primary_payload),
-                        "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
-                        "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
-                        "error": error,
-                        "emitted": [
-                            {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
-                            for event_name, event_payload in step_results
-                        ],
-                    }
-                )
+                clarification = None
                 if isinstance(primary_payload, dict) and primary_payload.get("status") == "needs_clarification":
                     clarification = self._build_clarification_payload(
                         step_id,
@@ -2107,6 +2736,39 @@ class Engine:
                         error,
                         context,
                     )
+                failed_record = {
+                    "id": step_id,
+                    "task": step_payload.get("task", ""),
+                    "target_agent": step_payload.get("target_agent"),
+                    "status": "needs_clarification" if self._step_requests_replan(primary_event or "", primary_payload) else "failed",
+                    "instruction": self._compact_value(step_payload.get("instruction"), text_limit=240, row_limit=4)
+                    if isinstance(step_payload.get("instruction"), dict)
+                    else None,
+                    "depends_on": [item for item in step_payload.get("depends_on", []) if isinstance(item, str)],
+                    "when": self._compact_value(step_payload.get("when"), text_limit=180, row_limit=3)
+                    if isinstance(step_payload.get("when"), dict)
+                    else None,
+                    "event": primary_event,
+                    "duration_ms": duration_ms,
+                    "payload": self._compact_event_payload(primary_event or "", primary_payload),
+                    "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
+                    "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
+                    "error": error,
+                    "emitted": [
+                        {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
+                        for event_name, event_payload in step_results
+                    ],
+                }
+                records.append(
+                    self._attach_step_runtime_metadata(
+                        raw_step,
+                        failed_record,
+                        routing=step_routing,
+                        replan=replan_envelope.get("trace") if isinstance(replan_envelope, dict) else None,
+                        clarification=clarification,
+                    )
+                )
+                if isinstance(clarification, dict):
                     return {
                         "status": "needs_clarification",
                         "steps": records,
@@ -2123,6 +2785,34 @@ class Engine:
                     "final_results": step_results,
                 }
 
+            reduction_result = self._reduce_step_output(
+                payload,
+                step_id,
+                step_payload,
+                primary_event,
+                primary_payload,
+                primary_value,
+                context,
+                depth,
+            )
+            if isinstance(reduction_result, dict) and reduction_result.get("reduced_result") not in (None, "", [], {}):
+                primary_payload = self._apply_reduction_result(primary_event, primary_payload, reduction_result)
+                if not self._prefers_explicit_step_value(step_payload):
+                    primary_value = reduction_result.get("reduced_result")
+                result_summary = self._step_result_summary(primary_event or "", primary_payload) if primary_event and isinstance(primary_payload, dict) else result_summary
+                self._emit_step_progress(
+                    "reduced",
+                    step_id,
+                    step_payload,
+                    depth + 1,
+                    message=f"Reduced step {step_id} output through data_reducer.",
+                    event="data.reduced",
+                    duration_ms=duration_ms,
+                    result=self._compact_value(reduction_result.get("reduced_result"), text_limit=180, row_limit=3),
+                    local_reduction_command=reduction_result.get("local_reduction_command"),
+                    reduction=self._compact_value(reduction_result, text_limit=180, row_limit=3),
+                )
+
             step_validation_requests += 1
             step_validation = self._validate_step_attempt(
                 payload,
@@ -2135,13 +2825,23 @@ class Engine:
                 step_validation_requests,
                 depth,
             )
-            step_valid = bool(step_validation.get("valid")) or (
-                step_validation.get("verdict") == "uncertain" and not step_validation.get("retry_recommended")
+            step_routing = self._route_step_attempt(
+                step_id,
+                step_payload,
+                primary_event,
+                step_validation,
+                str(step_validation.get("reason") or "Step output diverged from the requested intent."),
+                "validation",
+                limits,
+                step_replans,
+                step_validation_requests,
+                failure_class="validation_failed",
             )
-            if not step_valid:
+            if step_routing.get("action") != "accept_step":
                 error = str(step_validation.get("reason") or "Step output diverged from the requested intent.")
-                if step_replans.get(step_id, 0) < limits["max_step_replans"]:
-                    replan_result = self._request_replan(
+                replan_envelope = None
+                if step_routing.get("action") == "replan_step":
+                    replan_envelope = self._request_replan(
                         step_id,
                         step_payload,
                         payload,
@@ -2153,7 +2853,7 @@ class Engine:
                         failure_class="validation_failed",
                         validation_result=step_validation,
                     )
-                    replanned_steps = replan_result.get("steps") if isinstance(replan_result, dict) else None
+                    replanned_steps = replan_envelope.get("steps") if isinstance(replan_envelope, dict) else None
                     if isinstance(replanned_steps, list) and replanned_steps:
                         step_replans[step_id] = step_replans.get(step_id, 0) + 1
                         self._emit_step_progress(
@@ -2169,6 +2869,16 @@ class Engine:
                             validation=self._compact_value(step_validation, text_limit=180, row_limit=3),
                         )
                         replanned_step = copy.deepcopy(raw_step)
+                        routing_history = list(self._step_runtime_history(replanned_step, "__routing_history__"))
+                        compact_routing = self._compact_routing_record(step_routing)
+                        if compact_routing:
+                            routing_history.append(compact_routing)
+                            replanned_step["__routing_history__"] = routing_history
+                        replan_history = list(self._step_runtime_history(replanned_step, "__replan_history__"))
+                        compact_replan = replan_envelope.get("trace") if isinstance(replan_envelope, dict) else None
+                        if isinstance(compact_replan, dict):
+                            replan_history.append(compact_replan)
+                            replanned_step["__replan_history__"] = replan_history
                         replanned_step["steps"] = replanned_steps
                         pending.insert(ready_index, replanned_step)
                         continue
@@ -2188,24 +2898,37 @@ class Engine:
                     stdout=primary_payload.get("stdout") if isinstance(primary_payload, dict) else None,
                     stderr=primary_payload.get("stderr") if isinstance(primary_payload, dict) else None,
                 )
+                failed_record = {
+                    "id": step_id,
+                    "task": step_payload.get("task", ""),
+                    "target_agent": step_payload.get("target_agent"),
+                    "status": "failed",
+                    "instruction": self._compact_value(step_payload.get("instruction"), text_limit=240, row_limit=4)
+                    if isinstance(step_payload.get("instruction"), dict)
+                    else None,
+                    "depends_on": [item for item in step_payload.get("depends_on", []) if isinstance(item, str)],
+                    "when": self._compact_value(step_payload.get("when"), text_limit=180, row_limit=3)
+                    if isinstance(step_payload.get("when"), dict)
+                    else None,
+                    "event": primary_event,
+                    "duration_ms": duration_ms,
+                    "payload": self._compact_event_payload(primary_event or "", primary_payload),
+                    "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
+                    "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
+                    "validation": self._compact_value(step_validation, text_limit=180, row_limit=3),
+                    "error": error,
+                    "emitted": [
+                        {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
+                        for event_name, event_payload in step_results
+                    ],
+                }
                 records.append(
-                    {
-                        "id": step_id,
-                        "task": step_payload.get("task", ""),
-                        "target_agent": step_payload.get("target_agent"),
-                        "status": "failed",
-                        "event": primary_event,
-                        "duration_ms": duration_ms,
-                        "payload": self._compact_event_payload(primary_event or "", primary_payload),
-                        "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
-                        "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
-                        "validation": self._compact_value(step_validation, text_limit=180, row_limit=3),
-                        "error": error,
-                        "emitted": [
-                            {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
-                            for event_name, event_payload in step_results
-                        ],
-                    }
+                    self._attach_step_runtime_metadata(
+                        raw_step,
+                        failed_record,
+                        routing=step_routing,
+                        replan=replan_envelope.get("trace") if isinstance(replan_envelope, dict) else None,
+                    )
                 )
                 return {
                     "status": "failed",
@@ -2248,24 +2971,30 @@ class Engine:
             completed_ids.add(step_id)
             final_results = step_results
             final_value = primary_value
-            records.append(
-                {
-                    "id": step_id,
-                    "task": step_payload.get("task", ""),
-                    "target_agent": step_payload.get("target_agent"),
-                    "status": "completed",
-                    "event": primary_event,
-                    "duration_ms": duration_ms,
-                    "payload": self._compact_event_payload(primary_event or "", primary_payload),
-                    "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
-                    "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
-                    "validation": self._compact_value(step_validation, text_limit=180, row_limit=3),
-                    "emitted": [
-                        {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
-                        for event_name, event_payload in step_results
-                    ],
-                }
-            )
+            completed_record = {
+                "id": step_id,
+                "task": step_payload.get("task", ""),
+                "target_agent": step_payload.get("target_agent"),
+                "status": "completed",
+                "instruction": self._compact_value(step_payload.get("instruction"), text_limit=240, row_limit=4)
+                if isinstance(step_payload.get("instruction"), dict)
+                else None,
+                "depends_on": [item for item in step_payload.get("depends_on", []) if isinstance(item, str)],
+                "when": self._compact_value(step_payload.get("when"), text_limit=180, row_limit=3)
+                if isinstance(step_payload.get("when"), dict)
+                else None,
+                "event": primary_event,
+                "duration_ms": duration_ms,
+                "payload": self._compact_event_payload(primary_event or "", primary_payload),
+                "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
+                "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
+                "validation": self._compact_value(step_validation, text_limit=180, row_limit=3),
+                "emitted": [
+                    {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
+                    for event_name, event_payload in step_results
+                ],
+            }
+            records.append(self._attach_step_runtime_metadata(raw_step, completed_record, routing=step_routing))
 
         return {
             "status": "completed",

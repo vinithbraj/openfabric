@@ -78,7 +78,7 @@ class PostgresSafeSqlTests(unittest.TestCase):
             "os.environ",
             {"LLM_OPS_BASE_URL": "http://127.0.0.1:8000/v1"},
             clear=True,
-        ):
+        ), patch("agent_library.common._list_openai_compatible_models", return_value=()):
             api_key, base_url, timeout_seconds, model = _sql_llm_transport_settings("gpt-4o-mini")
         self.assertEqual(api_key, "dummy")
         self.assertEqual(base_url, "http://127.0.0.1:8000/v1")
@@ -86,7 +86,7 @@ class PostgresSafeSqlTests(unittest.TestCase):
         self.assertEqual(model, "gpt-4o-mini")
 
     def test_sql_llm_transport_defaults_to_shared_local_transport_without_key(self):
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True), patch("agent_library.common._list_openai_compatible_models", return_value=()):
             api_key, base_url, timeout_seconds, model = _sql_llm_transport_settings("gpt-4o-mini")
         self.assertEqual(api_key, "dummy")
         self.assertEqual(base_url, "http://127.0.0.1:8000/v1")

@@ -9,7 +9,18 @@ from typing import Any
 import requests
 from fastapi import FastAPI
 
-from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, shared_llm_api_settings, task_plan_context
+from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, task_plan_context
+from agent_library.reduction import (
+    build_slurm_reduction_request,
+    deterministic_elapsed_reducer_command as shared_deterministic_elapsed_reducer_command,
+    deterministic_line_count_reducer_command as shared_deterministic_line_count_reducer_command,
+    deterministic_node_inventory_reducer_command as shared_deterministic_node_inventory_reducer_command,
+    deterministic_state_breakdown_reducer_command as shared_deterministic_state_breakdown_reducer_command,
+    execute_reduction_request,
+    generate_shell_reduction_command,
+    looks_like_elapsed_summary_task,
+    looks_like_node_inventory_summary_task,
+)
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -932,34 +943,11 @@ def _extract_partition_name(task: str) -> str:
 
 
 def _looks_like_elapsed_summary_task(task: str) -> bool:
-    text = str(task or "").strip().lower()
-    if "sacct" not in text and not any(token in text for token in ("slurm", "job", "jobs", "partition")):
-        return False
-    duration_markers = (
-        "how long",
-        "took to complete",
-        "take to complete",
-        "total time",
-        "total elapsed",
-        "elapsed time",
-        "duration",
-        "average time",
-        "avg time",
-        "mean time",
-        "longest",
-        "shortest",
-    )
-    return any(marker in text for marker in duration_markers)
+    return looks_like_elapsed_summary_task(task)
 
 
 def _looks_like_node_inventory_summary_task(task: str) -> bool:
-    text = str(task or "").strip().lower()
-    if not any(token in text for token in ("slurm", "cluster", "sinfo", "scheduler")):
-        return False
-    has_nodes = any(token in text for token in ("node", "nodes", "nodelist", "compute node", "compute nodes"))
-    asks_for_count = any(token in text for token in ("how many", "count", "number of", "total nodes", "total number"))
-    asks_for_state = any(token in text for token in ("state", "states", "status", "statuses"))
-    return has_nodes and asks_for_count and asks_for_state
+    return looks_like_node_inventory_summary_task(task)
 
 
 def _deterministic_slurm_command(task: str) -> dict[str, Any] | None:
@@ -1267,43 +1255,11 @@ def _build_deterministic_slurm_plan(selection: dict[str, Any], task: str, contex
 
 
 def _deterministic_line_count_reducer_command(label: str) -> str:
-    script = f"""
-import sys
-
-lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
-print("{label}: " + str(len(lines)))
-""".strip()
-    return f"python3 -c {shlex.quote(script)}"
+    return shared_deterministic_line_count_reducer_command(label)
 
 
 def _deterministic_state_breakdown_reducer_command(state_index: int) -> str:
-    script = f"""
-import sys
-from collections import Counter
-
-STATE_INDEX = {state_index}
-counts = Counter()
-for line in sys.stdin.read().splitlines():
-    if not line.strip():
-        continue
-    cols = line.split("|")
-    if len(cols) <= STATE_INDEX:
-        continue
-    state = cols[STATE_INDEX].strip().rstrip("*") or "UNKNOWN"
-    counts[state] += 1
-
-if not counts:
-    print("No matching Slurm records were returned.")
-    raise SystemExit(0)
-
-lines_out = []
-total = sum(counts.values())
-lines_out.append(f"Total jobs: {{total}}")
-for state, count in sorted(counts.items()):
-    lines_out.append(f"State {{state}}: {{count}}")
-print("\\n".join(lines_out))
-""".strip()
-    return f"python3 -c {shlex.quote(script)}"
+    return shared_deterministic_state_breakdown_reducer_command(state_index)
 
 
 def _selection_requires_refined_answer(primitive_id: str) -> bool:
@@ -1323,30 +1279,19 @@ def _refine_deterministic_slurm_result(
     stdout: str,
     stderr: str,
 ) -> tuple[str, str]:
-    if primitive_id in {"slurm.cluster.node_inventory_summary", "slurm.jobs.elapsed_summary"}:
-        return _deterministic_reduce_slurm_result(task, command, stdout)
-    if primitive_id in {"slurm.jobs.queue_count", "slurm.jobs.history_count"}:
-        label = "Matching jobs"
-        reduction = run_local_reducer_loop(
-            stdout,
-            lambda previous_command, previous_error: _deterministic_line_count_reducer_command(label),
-            max_attempts=1,
-            validate_output=lambda output: bool(output.strip()),
-        )
-        if reduction.succeeded:
-            return reduction.output, reduction.command
+    reduction_request = build_slurm_reduction_request(
+        task,
+        command,
+        stdout,
+        stderr,
+        primitive_id=primitive_id,
+        natural_language_request=True,
+    )
+    if not isinstance(reduction_request, dict):
         return "", ""
-    if primitive_id == "slurm.jobs.queue_state_breakdown":
-        reduction = run_local_reducer_loop(
-            stdout,
-            lambda previous_command, previous_error: _deterministic_state_breakdown_reducer_command(2),
-            max_attempts=1,
-            validate_output=lambda output: bool(output.strip()),
-        )
-        if reduction.succeeded:
-            return reduction.output, reduction.command
-        return "", ""
-    return _llm_process_result(task, command, stdout, stderr)
+    reduction = execute_reduction_request(reduction_request, stdout)
+    reduced_result = reduction.reduced_result if isinstance(reduction.reduced_result, str) else ""
+    return reduced_result, reduction.local_reduction_command
 
 
 def _llm_slurm_command(task: str, *, allow_deterministic: bool = True) -> dict[str, Any]:
@@ -1509,333 +1454,61 @@ def _llm_generate_local_command(
     previous_error: str = "",
 ) -> str:
     try:
-        api_key, base_url, timeout_seconds, model = _llm_api_settings()
-    except Exception:
-        return ""
-
-    repair_context = ""
-    if previous_error:
-        repair_context = (
-            "- The previous reducer failed. Generate a corrected command that avoids the prior issue.\n"
-            f"- Previous command: {previous_command}\n"
-            f"- Previous error: {previous_error}\n"
+        return generate_shell_reduction_command(
+            task,
+            command,
+            sample_stdout,
+            previous_command,
+            previous_error,
         )
-
-    prompt = (
-        "You are an expert data engineer. I have a large Slurm output but I only want to send the relevant data "
-        "to an LLM for final analysis. Your job is to provide exactly ONE shell command (using awk, grep, tail, head, or jq) "
-        "that will extract or calculate the necessary information from the FULL output locally.\n\n"
-        f"User Question: {task}\n"
-        f"Original Slurm Command: {command}\n"
-        "Sample Data (first few lines):\n"
-        "```\n"
-        f"{sample_stdout}\n"
-        "```\n"
-        "Instructions:\n"
-        "- Return ONLY the shell command string, no markdown, no explanations.\n"
-        "- The command will receive the full Slurm output via STDIN.\n"
-        "- If the user wants a sum of a column, use awk.\n"
-        "- If the user wants to filter lines, use grep.\n"
-        "- If you cannot generate a reliable processing command, return 'NONE'.\n"
-        f"{repair_context}"
-        "Shell Command:"
-    )
-
-    try:
-        response = requests.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You are a shell command generator. Return only the command."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0,
-            },
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
-        cmd = response.json()["choices"][0]["message"]["content"].strip().strip("`").strip()
-        return cmd if cmd and cmd.upper() != "NONE" else ""
     except Exception as exc:
         _debug_log(f"Local command generation failed: {exc}")
         return ""
 
 
 def _deterministic_elapsed_reducer_command(task: str) -> str:
-    task_lc = str(task or "").lower()
-    completed_only = any(token in task_lc for token in ("complete", "completed"))
-    state_filter = "COMPLETED" if completed_only else ""
-    script = f"""
-import sys
-
-STATE_FILTER = {state_filter!r}
-
-def parse_elapsed(value: str):
-    text = (value or "").strip()
-    if not text:
-        return None
-    if text.lower() in {{"unknown", "n/a", "partition_limit", "infinite", "unlimited"}}:
-        return None
-    days = 0
-    if "-" in text:
-        day_text, text = text.split("-", 1)
-        try:
-            days = int(day_text)
-        except ValueError:
-            return None
-    parts = text.split(":")
-    try:
-        numbers = [int(part) for part in parts]
-    except ValueError:
-        return None
-    if len(numbers) == 3:
-        hours, minutes, seconds = numbers
-    elif len(numbers) == 2:
-        hours, minutes, seconds = 0, numbers[0], numbers[1]
-    elif len(numbers) == 1:
-        hours, minutes, seconds = 0, 0, numbers[0]
-    else:
-        return None
-    return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
-
-def format_elapsed(total_seconds: int) -> str:
-    total_seconds = int(total_seconds)
-    days, remainder = divmod(total_seconds, 86400)
-    hours, remainder = divmod(remainder, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if days:
-        return f"{{days}}-{{hours:02d}}:{{minutes:02d}}:{{seconds:02d}}"
-    return f"{{hours:02d}}:{{minutes:02d}}:{{seconds:02d}}"
-
-text = sys.stdin.read()
-lines = [line for line in text.splitlines() if line.strip()]
-if not lines:
-    print("No Slurm job records were returned.")
-    raise SystemExit(0)
-
-header = lines[0].split("|")
-header_map = {{name.strip().lower(): index for index, name in enumerate(header)}}
-elapsed_index = header_map.get("elapsed")
-state_index = header_map.get("state")
-job_id_index = header_map.get("jobid")
-job_name_index = header_map.get("jobname")
-if elapsed_index is None:
-    print("Could not find an Elapsed column in the Slurm output.")
-    raise SystemExit(0)
-
-total_seconds = 0
-count = 0
-skipped = 0
-longest = None
-shortest = None
-for line in lines[1:]:
-    cols = line.split("|")
-    if elapsed_index >= len(cols):
-        skipped += 1
-        continue
-    state = cols[state_index].strip().upper() if state_index is not None and state_index < len(cols) else ""
-    if STATE_FILTER and state != STATE_FILTER:
-        continue
-    seconds = parse_elapsed(cols[elapsed_index])
-    if seconds is None:
-        skipped += 1
-        continue
-    total_seconds += seconds
-    count += 1
-    job_id = cols[job_id_index].strip() if job_id_index is not None and job_id_index < len(cols) else ""
-    job_name = cols[job_name_index].strip() if job_name_index is not None and job_name_index < len(cols) else ""
-    record = (seconds, job_id, job_name)
-    if longest is None or seconds > longest[0]:
-        longest = record
-    if shortest is None or seconds < shortest[0]:
-        shortest = record
-
-if count == 0:
-    if STATE_FILTER:
-        print(f"No matching Slurm jobs were found for state {{STATE_FILTER}}.")
-    else:
-        print("No matching Slurm jobs were found.")
-    raise SystemExit(0)
-
-average_seconds = total_seconds // count
-lines_out = [
-    f"Jobs considered: {{count}}",
-    f"Total elapsed time: {{format_elapsed(total_seconds)}}",
-    f"Average elapsed time: {{format_elapsed(average_seconds)}}",
-]
-if longest is not None:
-    lines_out.append(f"Longest elapsed job: {{longest[1] or longest[2] or 'unknown'}} ({{format_elapsed(longest[0])}})")
-if shortest is not None:
-    lines_out.append(f"Shortest elapsed job: {{shortest[1] or shortest[2] or 'unknown'}} ({{format_elapsed(shortest[0])}})")
-if skipped:
-    lines_out.append(f"Skipped rows without parseable elapsed values: {{skipped}}")
-print("\\n".join(lines_out))
-""".strip()
-    return f"python3 -c {shlex.quote(script)}"
+    return shared_deterministic_elapsed_reducer_command(task)
 
 
 def _deterministic_node_inventory_reducer_command(task: str) -> str:
-    script = """
-import sys
-from collections import Counter
-
-text = sys.stdin.read()
-lines = [line.strip() for line in text.splitlines() if line.strip()]
-if not lines:
-    print("No Slurm node records were returned.")
-    raise SystemExit(0)
-
-state_counts = Counter()
-unique_nodes = set()
-
-for line in lines:
-    if "|" not in line:
-        continue
-    node, state = line.split("|", 1)
-    node = node.strip()
-    state = state.strip().rstrip("*").lower()
-    if not node:
-        continue
-    if node in unique_nodes:
-        continue
-    unique_nodes.add(node)
-    state_counts[state or "unknown"] += 1
-
-if not unique_nodes:
-    print("No Slurm node records were returned.")
-    raise SystemExit(0)
-
-lines_out = [f"Total nodes: {len(unique_nodes)}"]
-for state, count in sorted(state_counts.items()):
-    lines_out.append(f"State {state}: {count}")
-print("\\n".join(lines_out))
-""".strip()
-    return f"python3 -c {shlex.quote(script)}"
+    return shared_deterministic_node_inventory_reducer_command(task)
 
 
 def _deterministic_reduce_slurm_result(task: str, command: str, stdout: str) -> tuple[str, str]:
-    full_command_lc = str(command or "").lower()
+    primitive_id = ""
     if _looks_like_node_inventory_summary_task(task):
-        if not isinstance(stdout, str) or "|" not in stdout:
-            return "", ""
-        if "sinfo" not in full_command_lc:
-            return "", ""
-        reduction = run_local_reducer_loop(
-            stdout,
-            lambda previous_command, previous_error: _deterministic_node_inventory_reducer_command(task),
-            max_attempts=1,
-            validate_output=lambda output: bool(output.strip()),
-        )
-        if reduction.succeeded:
-            return reduction.output, reduction.command
-        return "", ""
-    if not _looks_like_elapsed_summary_task(task):
-        return "", ""
-    if not isinstance(stdout, str) or "Elapsed" not in stdout or "|" not in stdout:
-        return "", ""
-    if "sacct" not in full_command_lc:
-        return "", ""
-    reduction = run_local_reducer_loop(
+        primitive_id = "slurm.cluster.node_inventory_summary"
+    elif _looks_like_elapsed_summary_task(task):
+        primitive_id = "slurm.jobs.elapsed_summary"
+    reduction_request = build_slurm_reduction_request(
+        task,
+        command,
         stdout,
-        lambda previous_command, previous_error: _deterministic_elapsed_reducer_command(task),
-        max_attempts=1,
-        validate_output=lambda output: bool(output.strip()),
+        "",
+        primitive_id=primitive_id,
+        natural_language_request=True,
     )
-    if reduction.succeeded:
-        return reduction.output, reduction.command
-    return "", ""
+    if not isinstance(reduction_request, dict):
+        return "", ""
+    reduction = execute_reduction_request(reduction_request, stdout)
+    reduced_result = reduction.reduced_result if isinstance(reduction.reduced_result, str) else ""
+    return reduced_result, reduction.local_reduction_command
 
 
 def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> tuple[str, str]:
-    deterministic_answer, deterministic_command = _deterministic_reduce_slurm_result(task, command, stdout)
-    if deterministic_answer:
-        return deterministic_answer, deterministic_command
-
-    try:
-        api_key, base_url, timeout_seconds, model = _llm_api_settings()
-    except Exception as exc:
-        _debug_log(f"Synthesis skipped: API settings missing ({exc})")
-        return "", ""
-
-    processed_stdout = stdout
-    is_processed_locally = False
-    local_reduction_command = ""
-    
-    # Only attempt local processing for large outputs or if specifically requested (implied for stats)
-    if len(stdout) > 5000:
-        sample = stdout[:5000]
-        reduction = run_local_reducer_loop(
-            stdout,
-            lambda previous_command, previous_error: _llm_generate_local_command(
-                task,
-                command,
-                sample,
-                previous_command,
-                previous_error,
-            ),
-            validate_output=lambda output: bool(output.strip()),
-        )
-        if reduction.succeeded:
-            processed_stdout = reduction.output
-            is_processed_locally = True
-            local_reduction_command = reduction.command
-            _debug_log(f"Local processing successful. Reduced data size: {len(processed_stdout)}")
-        elif reduction.error:
-            _debug_log(f"Local processing failed after retries: {reduction.error}")
-
-    # Final Synthesis on (potentially reduced) data
-    limit = 50000
-    display_stdout = processed_stdout[:limit]
-    is_truncated = len(processed_stdout) > limit
-    
-    truncation_note = ""
-    if is_truncated:
-        truncation_note = f"\n[NOTE: Data was truncated from {len(processed_stdout)} to {limit} chars for analysis.]\n"
-    elif is_processed_locally:
-        truncation_note = "\n[NOTE: This answer was calculated locally using a generated processing script.]\n"
-
-    prompt = (
-        "You are an expert Slurm output analyzer. Your task is to answer the user's question "
-        "based ONLY on the provided data.\n\n"
-        f"User Question: {task}\n"
-        "Data Preview:\n"
-        "```\n"
-        f"{display_stdout}\n"
-        "```\n"
-        f"{truncation_note}"
-        f"Original Command: {command}\n"
-        f"Errors (if any):\n{stderr}\n\n"
-        "Instructions:\n"
-        "- Provide a concise and factual final answer.\n"
-        "- If the data confirms a calculation (like a sum or count), present it clearly.\n"
-        "Final Answer:"
+    reduction_request = build_slurm_reduction_request(
+        task,
+        command,
+        stdout,
+        stderr,
+        natural_language_request=True,
     )
-
-    try:
-        _debug_log(f"Starting synthesis for task: {task[:50]}...")
-        response = requests.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You are a concise Slurm data processor."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0,
-            },
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
-        answer = response.json()["choices"][0]["message"]["content"].strip()
-        if is_truncated and "truncated" not in answer.lower():
-            answer += " (Note: Based on truncated output)"
-        return answer, local_reduction_command
-    except Exception as exc:
-        _debug_log(f"Synthesis failed: {type(exc).__name__}: {exc}")
+    if not isinstance(reduction_request, dict):
         return "", ""
+    input_data = stdout if reduction_request.get("source_field") != "stderr" else stderr
+    reduction = execute_reduction_request(reduction_request, input_data)
+    reduced_result = reduction.reduced_result if isinstance(reduction.reduced_result, str) else ""
+    return reduced_result, reduction.local_reduction_command
 
 
 def _result_payload(
@@ -1845,6 +1518,7 @@ def _result_payload(
     stats: dict[str, float],
     refined_answer: str = "",
     local_reduction_command: str = "",
+    reduction_request: dict[str, Any] | None = None,
     selection: dict[str, Any] | None = None,
     *,
     execution_strategy: str = "",
@@ -1868,7 +1542,7 @@ def _result_payload(
         result["refined_answer"] = refined_answer
         result["reduced_result"] = refined_answer
 
-    return {
+    payload = {
         "detail": refined_answer or _format_detail(command, returncode),
         "command": " ".join([command, *args]).strip(),
         "local_reduction_command": local_reduction_command or None,
@@ -1888,6 +1562,9 @@ def _result_payload(
         ),
         "fallback_used": execution_strategy in {"selector_fallback_command", "legacy_llm_fallback_command"},
     }
+    if isinstance(reduction_request, dict):
+        payload["reduction_request"] = reduction_request
+    return payload
 
 
 @app.post("/handle", response_model=EventResponse)
@@ -1956,28 +1633,25 @@ def handle_event(req: EventRequest):
                     gateway_started = time.perf_counter()
                     gateway_result = _gateway_execute(command, args)
                     stats["deterministic_gateway_roundtrip_ms"] = _elapsed_ms(gateway_started)
-                    refined_answer = ""
-                    local_reduction_command = ""
+                    reduction_request = None
                     if gateway_result.get("returncode") == 0:
-                        refined_answer, local_reduction_command = _refine_deterministic_slurm_result(
+                        reduction_request = build_slurm_reduction_request(
                             task,
-                            str(selection.get("primitive_id") or ""),
                             " ".join([command, *args]).strip(),
                             str(gateway_result.get("stdout", "") or ""),
                             str(gateway_result.get("stderr", "") or ""),
+                            primitive_id=str(selection.get("primitive_id") or ""),
+                            natural_language_request=natural_language_request,
                         )
-                    if gateway_result.get("returncode") == 0 and (
-                        refined_answer or not _selection_requires_refined_answer(str(selection.get("primitive_id") or ""))
-                    ):
+                    if gateway_result.get("returncode") == 0:
                         stats["total_ms"] = _elapsed_ms(started)
                         payload = _result_payload(
                             command,
                             args,
                             gateway_result,
                             stats,
-                            refined_answer,
-                            local_reduction_command,
-                            selection,
+                            reduction_request=reduction_request,
+                            selection=selection,
                             execution_strategy="deterministic",
                         )
                         return {"emits": [{"event": "slurm.result", "payload": payload}]}
@@ -2044,15 +1718,15 @@ def handle_event(req: EventRequest):
             # If we reach here, we either succeeded or failed in a non-repairable way (or out of retries)
             stats["total_ms"] = _elapsed_ms(started)
 
-            # Optional: Refine the result using an LLM if a specific question was asked
-            refined_answer = ""
-            local_reduction_command = ""
+            reduction_request = None
             if gateway_result.get("returncode") == 0 and natural_language_request and task:
-                refined_answer, local_reduction_command = _llm_process_result(
+                reduction_request = build_slurm_reduction_request(
                     task,
                     " ".join([command, *args]),
-                    gateway_result.get("stdout", ""),
-                    gateway_result.get("stderr", "")
+                    str(gateway_result.get("stdout", "") or ""),
+                    str(gateway_result.get("stderr", "") or ""),
+                    primitive_id=str(selection.get("primitive_id") or "") if isinstance(selection, dict) else "",
+                    natural_language_request=natural_language_request,
                 )
 
             payload = _result_payload(
@@ -2060,9 +1734,8 @@ def handle_event(req: EventRequest):
                 args,
                 gateway_result,
                 stats,
-                refined_answer,
-                local_reduction_command,
-                selection,
+                reduction_request=reduction_request,
+                selection=selection,
                 execution_strategy=execution_strategy,
             )
             if payload["returncode"] != 0:

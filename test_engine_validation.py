@@ -31,6 +31,25 @@ class _ExecAdapter:
             return [("task.result", {"detail": "Step finished with state-only output.", "result": 'The state of the nodes is "idle".'})]
         if task == "fixed count and state step":
             return [("task.result", {"detail": "Recovered node inventory.", "result": "Total nodes: 3\nState idle: 2\nState mixed: 1"})]
+        if task == "reduce raw shell output":
+            return [
+                (
+                    "shell.result",
+                    {
+                        "detail": "Raw shell output ready.",
+                        "command": "printf 'alpha\\nbeta\\n'",
+                        "stdout": "alpha\nbeta\n",
+                        "stderr": "",
+                        "returncode": 0,
+                        "reduction_request": {
+                            "kind": "shell.local_reducer",
+                            "task": "reduce raw shell output",
+                            "source_command": "printf 'alpha\\nbeta\\n'",
+                            "sample": "alpha\nbeta\n",
+                        },
+                    },
+                )
+            ]
         return [("task.result", {"detail": "Unknown task", "status": "failed", "error": "unsupported"})]
 
 
@@ -102,6 +121,20 @@ class _ValidatorAdapter:
                     },
                 )
             ]
+        if "count the lines" in task_text and "reduced lines:" in result_text.lower():
+            return [
+                (
+                    "validation.result",
+                    {
+                        "valid": True,
+                        "verdict": "valid",
+                        "reason": "Reduced shell output now satisfies the requested count.",
+                        "retry_recommended": False,
+                        "missing_requirements": [],
+                        "trace": ["Checked the option output against the original task.", "Detected the reduced shell count."],
+                    },
+                )
+            ]
         if payload.get("option_id") == "option1":
             return [
                 (
@@ -140,6 +173,46 @@ class _RecorderAdapter:
     def handle(self, event_name, payload):
         self.__class__.events.append((event_name, copy.deepcopy(payload)))
         return []
+
+
+class _ReducerAdapter:
+    def __init__(self, _config):
+        pass
+
+    def handle(self, event_name, payload):
+        if event_name != "data.reduce":
+            return []
+        reduced_result = payload.get("existing_reduced_result")
+        reduction_request = payload.get("reduction_request") if isinstance(payload.get("reduction_request"), dict) else {}
+        if reduced_result in (None, "", [], {}):
+            input_data = payload.get("input_data")
+            if isinstance(reduction_request, dict) and reduction_request.get("kind") == "pass_through":
+                reduced_result = input_data
+            elif isinstance(input_data, str):
+                reduced_result = f"Reduced lines: {len([line for line in input_data.splitlines() if line.strip()])}"
+            elif isinstance(input_data, dict) and isinstance(input_data.get("rows"), list):
+                reduced_result = f"Reduced rows: {len(input_data.get('rows', []))}"
+        return [
+            (
+                "data.reduced",
+                {
+                    "step_id": payload.get("step_id"),
+                    "task": payload.get("task", ""),
+                    "original_task": payload.get("original_task", ""),
+                    "target_agent": payload.get("target_agent", ""),
+                    "source_event": payload.get("source_event", ""),
+                    "detail": "Reduced step output.",
+                    "reduced_result": reduced_result,
+                    "strategy": (
+                        "reduction_request"
+                        if reduction_request
+                        else "local_reduction_command" if payload.get("local_reduction_command") else "existing_reduced_result"
+                    ),
+                    "attempts": 1,
+                    "local_reduction_command": payload.get("local_reduction_command"),
+                },
+            )
+        ]
 
 
 class _FallbackPlannerAdapter:
@@ -228,6 +301,19 @@ TEST_SPEC = {
                 "result": {},
             },
         },
+        "ShellResult": {
+            "type": "object",
+            "properties": {
+                "detail": {"type": "string"},
+                "command": {"type": "string"},
+                "stdout": {"type": "string"},
+                "stderr": {"type": "string"},
+                "returncode": {"type": "number"},
+                "local_reduction_command": {"type": "string"},
+                "reduction_request": {"type": "object"},
+                "reduced_result": {},
+            },
+        },
         "ValidationRequest": {
             "type": "object",
             "required": ["task", "workflow_status"],
@@ -252,6 +338,41 @@ TEST_SPEC = {
                 "retry_recommended": {"type": "boolean"},
                 "missing_requirements": {"type": "array"},
                 "trace": {"type": "array"},
+            },
+        },
+        "DataReduceRequest": {
+            "type": "object",
+            "required": ["task", "step_id", "source_event"],
+            "properties": {
+                "task": {"type": "string"},
+                "original_task": {"type": "string"},
+                "step_id": {"type": "string"},
+                "target_agent": {"type": "string"},
+                "source_event": {"type": "string"},
+                "reduction_request": {"type": "object"},
+                "local_reduction_command": {"type": "string"},
+                "existing_reduced_result": {},
+                "input_data": {},
+                "source_value": {},
+                "source_payload": {"type": "object"},
+                "available_context": {"type": "object"},
+            },
+        },
+        "DataReducedResult": {
+            "type": "object",
+            "required": ["step_id", "source_event", "strategy"],
+            "properties": {
+                "step_id": {"type": "string"},
+                "task": {"type": "string"},
+                "original_task": {"type": "string"},
+                "target_agent": {"type": "string"},
+                "source_event": {"type": "string"},
+                "detail": {"type": "string"},
+                "reduced_result": {},
+                "strategy": {"type": "string"},
+                "attempts": {"type": "number"},
+                "local_reduction_command": {"type": "string"},
+                "error": {"type": "string"},
             },
         },
         "ValidationProgress": {
@@ -312,6 +433,9 @@ TEST_SPEC = {
     "events": {
         "task.plan": {"contract": "TaskPlan"},
         "task.result": {"contract": "TaskResult"},
+        "shell.result": {"contract": "ShellResult"},
+        "data.reduce": {"contract": "DataReduceRequest"},
+        "data.reduced": {"contract": "DataReducedResult"},
         "validation.request": {"contract": "ValidationRequest"},
         "validation.result": {"contract": "ValidationResult"},
         "validation.progress": {"contract": "ValidationProgress"},
@@ -331,6 +455,11 @@ TEST_SPEC = {
             "subscribes_to": ["validation.request"],
             "emits": ["validation.result"],
         },
+        "data_reducer": {
+            "runtime": {"adapter": "test_reducer"},
+            "subscribes_to": ["data.reduce"],
+            "emits": ["data.reduced"],
+        },
         "fallback_planner": {
             "runtime": {"adapter": "test_fallback_planner"},
             "subscribes_to": ["planner.replan.request"],
@@ -338,7 +467,7 @@ TEST_SPEC = {
         },
         "recorder": {
             "runtime": {"adapter": "test_recorder"},
-            "subscribes_to": ["validation.progress", "validation.request", "workflow.result", "planner.replan.request", "clarification.required"],
+            "subscribes_to": ["validation.progress", "validation.request", "workflow.result", "planner.replan.request", "clarification.required", "data.reduce"],
             "emits": [],
         },
     },
@@ -350,6 +479,7 @@ class EngineValidationTests(unittest.TestCase):
         self.original_registry = dict(ADAPTER_REGISTRY)
         ADAPTER_REGISTRY["test_exec"] = _ExecAdapter
         ADAPTER_REGISTRY["test_validator"] = _ValidatorAdapter
+        ADAPTER_REGISTRY["test_reducer"] = _ReducerAdapter
         ADAPTER_REGISTRY["test_recorder"] = _RecorderAdapter
         ADAPTER_REGISTRY["test_fallback_planner"] = _FallbackPlannerAdapter
         ADAPTER_REGISTRY["test_no_recovery_planner"] = _NoRecoveryPlannerAdapter
@@ -462,6 +592,25 @@ class EngineValidationTests(unittest.TestCase):
         self.assertEqual(workflow["selected_option"]["id"], "option2")
         self.assertEqual(len(workflow["attempts"]), 2)
         self.assertTrue(workflow["validation"]["valid"])
+        self.assertEqual(workflow["attempts"][0]["routing"]["action"], "replan_workflow")
+        self.assertEqual(workflow["attempts"][0]["replan"]["derived_option_id"], "option2")
+        self.assertEqual(workflow["attempts"][1]["option"]["derived_from_attempt"], 1)
+        self.assertEqual(workflow["attempts"][1]["routing"]["action"], "accept_attempt")
+        self.assertEqual(workflow["graph"]["kind"], "workflow_execution")
+        self.assertEqual(workflow["graph"]["selected_option_id"], "option2")
+        graph_node_ids = {item["node_id"] for item in workflow["graph"]["nodes"]}
+        self.assertTrue(any(item.endswith(":attempt:1:step:step1") for item in graph_node_ids))
+        self.assertTrue(any(item.endswith(":attempt:1:validator") for item in graph_node_ids))
+        self.assertTrue(any(item.endswith(":attempt:2:validator") for item in graph_node_ids))
+        self.assertTrue(any(item.endswith(":attempt:1:validator:router") for item in graph_node_ids))
+        self.assertTrue(any(item.endswith(":attempt:1:validator:router:replan") for item in graph_node_ids))
+        self.assertTrue(any(item.endswith(":attempt:2:validator:router") for item in graph_node_ids))
+        graph_edges = {(item["source"], item["target"], item["relation"]) for item in workflow["graph"]["edges"]}
+        root_node_id = workflow["graph"]["root_node_id"]
+        self.assertIn(
+            (f"{root_node_id}:attempt:1:validator:router:replan", f"{root_node_id}:attempt:2", "activates"),
+            graph_edges,
+        )
 
         validation_progress = [payload for event_name, payload in _RecorderAdapter.events if event_name == "validation.progress"]
         stages = [item["stage"] for item in validation_progress]
@@ -481,6 +630,56 @@ class EngineValidationTests(unittest.TestCase):
         replan_requests = [payload for event_name, payload in _RecorderAdapter.events if event_name == "planner.replan.request"]
         self.assertEqual(len(replan_requests), 1)
         self.assertEqual(replan_requests[0]["step_id"], "__workflow__")
+
+    def test_engine_uses_next_existing_option_without_workflow_replan(self):
+        engine = Engine(TEST_SPEC)
+        engine.setup()
+        engine.emit(
+            "task.plan",
+            {
+                "task": "produce the final answer",
+                "task_shape": "lookup",
+                "steps": [],
+                "plan_options": [
+                    {
+                        "id": "option1",
+                        "label": "Primary plan",
+                        "steps": [
+                            {
+                                "id": "step1",
+                                "target_agent": "executor",
+                                "task": "primary attempt",
+                                "instruction": {"operation": "run_command", "command": "primary"},
+                            }
+                        ],
+                    },
+                    {
+                        "id": "option2",
+                        "label": "Fallback plan",
+                        "steps": [
+                            {
+                                "id": "step1",
+                                "target_agent": "executor",
+                                "task": "fallback attempt",
+                                "instruction": {"operation": "run_command", "command": "fallback"},
+                            }
+                        ],
+                    },
+                ],
+            },
+        )
+
+        workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
+        self.assertEqual(len(workflow_events), 1)
+        workflow = workflow_events[0]
+        self.assertEqual(workflow["selected_option"]["id"], "option2")
+        self.assertEqual(workflow["attempts"][0]["routing"]["action"], "try_next_option")
+        self.assertEqual(workflow["attempts"][1]["routing"]["action"], "accept_attempt")
+        replan_requests = [payload for event_name, payload in _RecorderAdapter.events if event_name == "planner.replan.request"]
+        self.assertEqual(replan_requests, [])
+        graph_edges = {(item["source"], item["target"], item["relation"]) for item in workflow["graph"]["edges"]}
+        root_node_id = workflow["graph"]["root_node_id"]
+        self.assertIn((f"{root_node_id}:attempt:1", f"{root_node_id}:attempt:2", "next_attempt"), graph_edges)
 
     def test_engine_escalates_to_clarification_after_uncertainty_threshold(self):
         engine = Engine(TEST_SPEC)
@@ -511,6 +710,11 @@ class EngineValidationTests(unittest.TestCase):
         clarification = clarification_events[0]
         self.assertEqual(clarification["task"], "uncertain goal")
         self.assertIn("narrower target", clarification.get("question", ""))
+        self.assertEqual(clarification["attempts"][0]["routing"]["action"], "clarify")
+        self.assertEqual(clarification["graph"]["status"], "needs_clarification")
+        self.assertEqual(clarification["graph"]["statistics"]["clarification_count"], 1)
+        clarification_node_ids = {item["node_id"] for item in clarification["graph"]["nodes"]}
+        self.assertTrue(any(item.endswith(":validator:router:clarification") for item in clarification_node_ids))
         replan_requests = [payload for event_name, payload in _RecorderAdapter.events if event_name == "planner.replan.request" and payload.get("task") == "uncertain goal"]
         self.assertEqual(len(replan_requests), 0)
 
@@ -566,6 +770,9 @@ class EngineValidationTests(unittest.TestCase):
         self.assertEqual(workflow["result"], "Total nodes: 3\nState idle: 2\nState mixed: 1")
         self.assertEqual(workflow["steps"][0]["id"], "step1")
         self.assertEqual(workflow["steps"][0]["steps"][0]["task"], "fixed count and state step")
+        self.assertEqual(workflow["steps"][0]["routing"]["action"], "replan_step")
+        self.assertEqual(workflow["steps"][0]["replan"]["replace_step_id"], "step1")
+        self.assertEqual(workflow["steps"][0]["steps"][0]["routing"]["action"], "accept_step")
 
         replan_requests = [
             payload
@@ -583,6 +790,45 @@ class EngineValidationTests(unittest.TestCase):
         self.assertEqual(len(step_validation_requests), 2)
         self.assertEqual(step_validation_requests[0]["step_task"], "bad count step")
         self.assertEqual(step_validation_requests[1]["step_task"], "fixed count and state step")
+        graph_node_ids = {item["node_id"] for item in workflow["graph"]["nodes"]}
+        self.assertTrue(any(item.endswith(":step:step1:router") for item in graph_node_ids))
+        self.assertTrue(any(item.endswith(":step:step1:router:replan") for item in graph_node_ids))
+
+    def test_engine_routes_step_output_through_data_reducer_before_validation(self):
+        engine = Engine(TEST_SPEC)
+        engine.setup()
+        engine.emit(
+            "task.plan",
+            {
+                "task": "count the lines in the shell output",
+                "task_shape": "lookup",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "target_agent": "executor",
+                        "task": "reduce raw shell output",
+                        "instruction": {"operation": "run_command", "command": "reduce"},
+                    }
+                ],
+            },
+        )
+
+        reduction_requests = [payload for event_name, payload in _RecorderAdapter.events if event_name == "data.reduce"]
+        self.assertEqual(len(reduction_requests), 1)
+        self.assertEqual(reduction_requests[0]["step_id"], "step1")
+        self.assertEqual(reduction_requests[0]["source_event"], "shell.result")
+        self.assertEqual(reduction_requests[0]["input_data"], "alpha\nbeta\n")
+        self.assertEqual(reduction_requests[0]["reduction_request"]["kind"], "shell.local_reducer")
+
+        workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
+        self.assertEqual(len(workflow_events), 1)
+        workflow = workflow_events[0]
+        step_payload = workflow["steps"][0]["payload"]
+        self.assertEqual(step_payload["reduced_result"], "Reduced lines: 2")
+        self.assertEqual(workflow["steps"][0]["routing"]["action"], "accept_step")
+        self.assertEqual(workflow["graph"]["statistics"]["reducer_count"], 1)
+        self.assertEqual(workflow["graph"]["statistics"]["router_count"], 2)
+        self.assertTrue(any(item["node_id"].endswith(":reducer") for item in workflow["graph"]["nodes"]))
 
 
 if __name__ == "__main__":

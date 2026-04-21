@@ -79,16 +79,30 @@ def _truncate_text(value: str, limit: int = 240) -> str:
     return value[: limit - 3].rstrip() + "..."
 
 
-def _compact_payload(value):
+def _compact_payload(value, *, _seen=None, _depth: int = 0):
     if _full_event_logs_enabled():
         return value
+    if _depth > 12:
+        return "<max-depth>"
+    if _seen is None:
+        _seen = set()
     if isinstance(value, list):
-        return [_compact_payload(item) for item in value]
+        value_id = id(value)
+        if value_id in _seen:
+            return "<cycle>"
+        nested_seen = set(_seen)
+        nested_seen.add(value_id)
+        return [_compact_payload(item, _seen=nested_seen, _depth=_depth + 1) for item in value]
     if not isinstance(value, dict):
         if isinstance(value, str):
             return _truncate_text(value)
         return value
 
+    value_id = id(value)
+    if value_id in _seen:
+        return "<cycle>"
+    nested_seen = set(_seen)
+    nested_seen.add(value_id)
     compact = {}
     for key, item in value.items():
         if key in {"stdout", "stderr"} and isinstance(item, str):
@@ -106,7 +120,7 @@ def _compact_payload(value):
                 "excerpt": _truncate_text(item.replace("\b", ""), 180) if item else "",
             }
             continue
-        compact[key] = _compact_payload(item)
+        compact[key] = _compact_payload(item, _seen=nested_seen, _depth=_depth + 1)
     return compact
 
 

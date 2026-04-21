@@ -10,6 +10,8 @@ Contents
 - `agents/synthesizer.py`: turns `research.result` or `task.result` into `answer.final`
 - `agents/operations_planner.py`: detects file/shell/notify tasks from `user.ask`
 - `agents/llm_operations_planner.py`: LLM-driven planner with deterministic fallback
+- `agents/data_reducer.py`: reduces raw executor outputs into smaller normalized step summaries
+- `reduction.py`: shared reduction request builders and reducer execution helpers used by shell, SQL, Slurm, and `data_reducer`
 - `agents/filesystem.py`: reads workspace files from `file.read`
 - `agents/shell_runner.py`: executes allowlisted shell commands from `shell.exec`
 - `agents/notifier.py`: handles `notify.send` and emits `notify.result`

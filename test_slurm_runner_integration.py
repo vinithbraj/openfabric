@@ -409,8 +409,8 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.cluster.node_inventory_summary",
-                "field": "reduced_result",
-                "contains": "Total nodes: 4",
+                "field": "reduction_request",
+                "contains": "slurm.node_inventory_summary",
             },
             {
                 "name": "node_list",
@@ -427,7 +427,7 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.cluster.node_list",
-                "field": "reduced_result",
+                "field": "stdout",
                 "contains": "node-a|idle|hpc*",
             },
             {
@@ -445,7 +445,7 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.cluster.partition_summary",
-                "field": "reduced_result",
+                "field": "stdout",
                 "contains": "hpc*|up|infinite|3|mixed|node-a,node-b,node-c",
             },
             {
@@ -463,8 +463,8 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.jobs.queue_count",
-                "field": "reduced_result",
-                "contains": "Matching jobs: 2",
+                "field": "reduction_request",
+                "contains": "slurm.line_count",
             },
             {
                 "name": "queue_list",
@@ -481,7 +481,7 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.jobs.queue_list",
-                "field": "reduced_result",
+                "field": "stdout",
                 "contains": "101|vinith|PENDING|hpc|align",
             },
             {
@@ -499,8 +499,8 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.jobs.queue_state_breakdown",
-                "field": "reduced_result",
-                "contains": "Total jobs: 3",
+                "field": "reduction_request",
+                "contains": "slurm.state_breakdown",
             },
             {
                 "name": "history_list",
@@ -517,7 +517,7 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.jobs.history_list",
-                "field": "reduced_result",
+                "field": "stdout",
                 "contains": "203|qc|manju|FAILED|gpu|00:05:00|2026-04-20T03:05:00",
             },
             {
@@ -535,8 +535,8 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.jobs.elapsed_summary",
-                "field": "reduced_result",
-                "contains": "Jobs considered: 2",
+                "field": "reduction_request",
+                "contains": "slurm.elapsed_summary",
             },
             {
                 "name": "job_details",
@@ -553,7 +553,7 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.jobs.details",
-                "field": "reduced_result",
+                "field": "stdout",
                 "contains": "JobId=102 JobName=mockjob UserId=vinith State=RUNNING Partition=hpc Nodes=1",
             },
             {
@@ -571,7 +571,7 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
                 },
                 "execution_strategy": "deterministic",
                 "primitive": "slurm.jobs.cancel",
-                "field": "reduced_result",
+                "field": "stdout",
                 "contains": "Cancelled job 104",
             },
             {
@@ -617,7 +617,8 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
         self.assertTrue(payload.get("fallback_used"))
         self.assertEqual(payload.get("returncode"), 0)
         self.assertIn("sshare -u vinith", str(payload.get("command") or ""))
-        self.assertIn("root|vinith|1|0.500000|10|0.200000|2.500000", str(payload.get("reduced_result") or ""))
+        self.assertEqual(payload.get("reduction_request", {}).get("kind"), "pass_through")
+        self.assertIn("root|vinith|1|0.500000|10|0.200000|2.500000", str(payload.get("stdout") or ""))
 
 
 if __name__ == "__main__":

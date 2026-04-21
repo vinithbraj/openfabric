@@ -103,6 +103,8 @@ contracts:
         type: string
       returncode:
         type: number
+      reduction_request:
+        type: object
 
   SqlQuery:
     type: object
@@ -141,6 +143,8 @@ contracts:
       stats:
         type: object
       result: {}
+      reduction_request:
+        type: object
 
   SlurmResult:
     type: object
@@ -159,6 +163,8 @@ contracts:
       stats:
         type: object
       result: {}
+      reduction_request:
+        type: object
 
   NotifySend:
     type: object
@@ -471,6 +477,62 @@ contracts:
       result: {}
       error:
         type: string
+      local_reduction_command:
+        type: string
+      reduction:
+        type: object
+
+  DataReduceRequest:
+    type: object
+    required: [task, step_id, source_event]
+    properties:
+      task:
+        type: string
+      original_task:
+        type: string
+      step_id:
+        type: string
+      target_agent:
+        type: string
+      source_event:
+        type: string
+      reduction_request:
+        type: object
+      local_reduction_command:
+        type: string
+      existing_reduced_result: {}
+      input_data: {}
+      source_value: {}
+      source_payload:
+        type: object
+      available_context:
+        type: object
+
+  DataReducedResult:
+    type: object
+    required: [step_id, source_event, strategy]
+    properties:
+      step_id:
+        type: string
+      task:
+        type: string
+      original_task:
+        type: string
+      target_agent:
+        type: string
+      source_event:
+        type: string
+      detail:
+        type: string
+      reduced_result: {}
+      strategy:
+        type: string
+      attempts:
+        type: number
+      local_reduction_command:
+        type: string
+      error:
+        type: string
 
   NotifyResult:
     type: object
@@ -497,6 +559,8 @@ contracts:
       error:
         type: string
       presentation:
+        type: object
+      graph:
         type: object
 
   FinalAnswer:
@@ -540,6 +604,10 @@ contracts:
               type: array
             emits:
               type: array
+      execution_policy:
+        type: object
+      graph:
+        type: object
 
 events:
   system.capabilities:
@@ -566,6 +634,10 @@ events:
     contract: NotifySend
   notify.result:
     contract: NotifyResult
+  data.reduce:
+    contract: DataReduceRequest
+  data.reduced:
+    contract: DataReducedResult
   task.plan:
     contract: TaskPlan
   task.result:
@@ -699,6 +771,22 @@ agents:
       - task.plan
     emits:
       - notify.result
+
+  data_reducer:
+    description: "Reduces raw executor outputs into smaller summaries before validation using a structured reduction request or a direct local reducer command."
+    methods:
+      - name: reduce_step_output
+        event: data.reduce
+        when: "Executes a shared reduction request or a direct local reducer command for a completed step."
+    runtime:
+      adapter: http
+      endpoint: "http://127.0.0.1:8313/handle"
+      autostart:
+        app: agent_library.agents.data_reducer:app
+    subscribes_to:
+      - data.reduce
+    emits:
+      - data.reduced
 
   synthesizer:
     description: "Builds final user-facing answers from tool results."

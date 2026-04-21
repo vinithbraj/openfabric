@@ -9,7 +9,8 @@ from typing import Any
 from fastapi import FastAPI
 import requests
 
-from agent_library.common import EventRequest, EventResponse, run_local_reducer_loop, serialize_for_stdin, shared_llm_api_settings, task_plan_context
+from agent_library.common import EventRequest, EventResponse, serialize_for_stdin, shared_llm_api_settings, task_plan_context
+from agent_library.reduction import build_shell_reduction_request, execute_reduction_request, generate_shell_reduction_command
 from agent_library.agents.llm_operations_planner import _derive_shell_command as _planner_derive_shell_command
 from runtime.console import log_debug, log_raw
 
@@ -353,76 +354,22 @@ def _llm_generate_reduction_command(
     previous_command: str = "",
     previous_error: str = "",
 ) -> str:
-    api_key, base_url, timeout, model = _llm_api_settings()
-    if not api_key:
-        return ""
-
-    repair_context = ""
-    if previous_error:
-        repair_context = (
-            "- The previous reducer failed. Generate a corrected command that avoids the prior issue.\n"
-            f"- Previous command: {previous_command}\n"
-            f"- Previous error: {previous_error}\n"
-        )
-
-    prompt = (
-        "You are an expert shell data analyst. I have a large output from a shell command but I only want to "
-        "send the relevant data back for analysis. Your job is to provide exactly ONE shell command "
-        "(using awk, grep, tail, head, or jq) that will extract or calculate the necessary information "
-        "from the FULL output locally.\n\n"
-        f"User Intent: {task}\n"
-        f"Original Command: {original_cmd}\n"
-        "Sample Data (first few lines):\n"
-        "```\n"
-        f"{sample_stdout}\n"
-        "```\n"
-        "Instructions:\n"
-        "- Return ONLY the shell command string, no markdown, no explanations.\n"
-        "- The command will receive the full output via STDIN.\n"
-        "- If the user wants a sum of a column, use awk.\n"
-        "- If you cannot generate a reliable processing command, return 'NONE'.\n"
-        f"{repair_context}"
-        "Shell Command:"
+    return generate_shell_reduction_command(
+        task,
+        original_cmd,
+        sample_stdout,
+        previous_command,
+        previous_error,
     )
-
-    try:
-        response = requests.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You are a shell command generator. Return only the command."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0,
-            },
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        cmd = response.json()["choices"][0]["message"]["content"].strip().strip("`").strip()
-        return cmd if cmd and cmd.upper() != "NONE" else ""
-    except Exception:
-        return ""
 
 
 def _llm_summarize_locally(task: str, original_cmd: str, stdout: str) -> tuple[str, str]:
-    if len(stdout) < 5000:
+    reduction_request = build_shell_reduction_request(task, original_cmd, stdout)
+    if not isinstance(reduction_request, dict):
         return "", ""
-
-    sample = stdout[:5000]
-    reduction = run_local_reducer_loop(
-        stdout,
-        lambda previous_command, previous_error: _llm_generate_reduction_command(
-            task,
-            original_cmd,
-            sample,
-            previous_command,
-            previous_error,
-        ),
-        validate_output=lambda output: bool(output.strip()),
-    )
-    return reduction.output, reduction.command
+    reduction = execute_reduction_request(reduction_request, stdout)
+    reduced_result = reduction.reduced_result if isinstance(reduction.reduced_result, str) else ""
+    return reduced_result, reduction.local_reduction_command
 
 
 def _is_blocked(command: str) -> bool:
@@ -763,25 +710,20 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
 
     completed, install_command, install_detail = _attempt_python_dependency_repair(command, stdin_text, completed)
 
-    # Attempt local reduction for large outputs (Phase 9)
-    refined_answer = ""
-    local_reduction_command = ""
     effective_returncode, partial_success_reason = _normalize_partial_success(command, completed)
-    if task and effective_returncode == 0 and len(completed.stdout) > 5000:
-        refined_answer, local_reduction_command = _llm_summarize_locally(task, command, completed.stdout)
-        if refined_answer:
-            _debug_log(f"Local reduction successful. Summary: {refined_answer[:100]}...")
+    reduction_request = None
+    if task and effective_returncode == 0:
+        reduction_request = build_shell_reduction_request(task, command, completed.stdout)
     
     payload = {
         "command": command,
         "install_command": install_command,
-        "local_reduction_command": local_reduction_command or None,
         "stdout": completed.stdout.strip(),
         "stderr": completed.stderr.strip(),
         "returncode": effective_returncode,
-        "reduced_result": refined_answer or None,
-        "refined_answer": refined_answer or None,
     }
+    if isinstance(reduction_request, dict):
+        payload["reduction_request"] = reduction_request
     if effective_returncode != completed.returncode:
         payload["raw_returncode"] = completed.returncode
     details = [item for item in (install_detail, partial_success_reason) if isinstance(item, str) and item.strip()]
