@@ -36,6 +36,7 @@ from agent_library.agents.llm_operations_planner import (
     _derive_presentation,
     _derive_shell_command,
     _fallback_steps,
+    _format_discovered_agents,
     _infer_task_shape,
     _normalize_task_shape,
     _parse_decision,
@@ -55,6 +56,12 @@ CAPABILITIES = {
             "name": "slurm_runner_cluster",
             "subscribes_to": ["task.plan"],
             "description": "Slurm cluster agent",
+            "execution_model": "deterministic_first_with_llm_fallback",
+            "deterministic_catalog_version": "v4-initial",
+            "deterministic_catalog_size": 16,
+            "deterministic_catalog_families": ["cluster", "queue", "history"],
+            "cluster_name": "default",
+            "cluster_aliases": ["slurm", "cluster"],
         },
         {
             "name": "sql_runner_mydb",
@@ -62,6 +69,10 @@ CAPABILITIES = {
             "description": "SQL database agent",
             "database_name": "mydb",
             "database_aliases": ["mydb"],
+            "execution_model": "deterministic_first_with_llm_fallback",
+            "deterministic_catalog_version": "v4-initial",
+            "deterministic_catalog_size": 11,
+            "deterministic_catalog_families": ["schema", "table", "aggregate"],
         },
         {
             "name": "sql_runner_dicom_mock",
@@ -457,6 +468,13 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(len(decision["plan_options"]), 2)
         self.assertEqual(decision["plan_options"][0]["id"], "option1")
         self.assertEqual(decision["plan_options"][1]["label"], "Fallback")
+
+    def test_format_discovered_agents_includes_deterministic_metadata(self):
+        formatted = _format_discovered_agents(CAPABILITIES)
+        self.assertIn("execution_model=deterministic_first_with_llm_fallback", formatted)
+        self.assertIn("deterministic_catalog_size=16", formatted)
+        self.assertIn("cluster_aliases=[slurm, cluster]", formatted)
+        self.assertIn("database_name=mydb", formatted)
 
     def test_infer_task_shape_count(self):
         self.assertEqual(

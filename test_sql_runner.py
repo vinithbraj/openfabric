@@ -34,8 +34,12 @@ pydantic_stub.BaseModel = _BaseModel
 sys.modules.setdefault("pydantic", pydantic_stub)
 
 from agent_library.agents.sql_runner import (
+    handle_event,
     _parse_strict_json_object,
     _execute_sql,
+    _execute_sql_deterministic_selection,
+    _heuristic_sql_selection,
+    _normalize_sql_selection,
     _postgres_safe_sql,
     _repair_sql_with_retries,
     _schema_schemas_result,
@@ -49,6 +53,7 @@ from agent_library.agents.sql_runner import (
     _sql_repair_max_attempts,
     _sql_llm_transport_settings,
 )
+from agent_library.common import EventRequest
 
 
 POSTGRES_SCHEMA = {
@@ -252,6 +257,225 @@ class PostgresSafeSqlTests(unittest.TestCase):
 
         self.assertEqual(len(attempts), 4)
         self.assertEqual(stats["sql_repair_attempts"], 3.0)
+
+    def test_normalize_sql_selection_rejects_unknown_primitive(self):
+        normalized = _normalize_sql_selection(
+            {
+                "primitive_id": "sql.unknown.primitive",
+                "selection_reason": "bad",
+                "parameters": {"table_name": "Patients"},
+                "fallback_sql": "SELECT 1",
+                "fallback_reason": "fallback",
+            }
+        )
+        self.assertEqual(normalized["primitive_id"], "fallback_only")
+        self.assertEqual(normalized["fallback_sql"], "SELECT 1")
+
+    def test_heuristic_sql_selection_does_not_misclassify_row_count_as_schema_listing(self):
+        selection = _heuristic_sql_selection("how many rows are in dicom.patients", POSTGRES_SCHEMA)
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection["primitive_id"], "sql.table.row_count")
+        self.assertEqual(selection["parameters"]["table_name"], "dicom.patients")
+
+    def test_heuristic_sql_selection_scopes_column_listing_to_table(self):
+        selection = _heuristic_sql_selection("list all columns in dicom.patients", POSTGRES_SCHEMA)
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection["primitive_id"], "sql.schema.list_columns")
+        self.assertEqual(selection["parameters"]["table_name"], "dicom.patients")
+
+    def test_heuristic_sql_selection_does_not_treat_database_alias_as_schema_name(self):
+        selection = _heuristic_sql_selection("list all tables in mydb", POSTGRES_SCHEMA)
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection["primitive_id"], "sql.schema.list_tables")
+        self.assertEqual(selection["parameters"], {})
+
+    def test_execute_sql_deterministic_selection_for_row_count(self):
+        executed = {}
+
+        def fake_execute_sql(_conn, sql, limit, _schema):
+            executed["sql"] = sql
+            executed["limit"] = limit
+            return {
+                "sql": sql,
+                "columns": ["count"],
+                "rows": [{"count": 7}],
+                "row_count": 1,
+                "returned_row_count": 1,
+                "total_matching_rows": 1,
+                "truncated": False,
+                "limit": limit,
+            }
+
+        with patch("agent_library.agents.sql_runner._execute_sql", side_effect=fake_execute_sql):
+            payload = _execute_sql_deterministic_selection(
+                conn=object(),
+                dialect="postgres",
+                schema=POSTGRES_SCHEMA,
+                task="how many rows are in Patients",
+                selection={
+                    "primitive_id": "sql.table.row_count",
+                    "parameters": {"table_name": "Patients"},
+                },
+                limit=25,
+            )
+
+        self.assertIsNotNone(payload)
+        self.assertIn('COUNT(*) AS "count"', executed["sql"])
+        self.assertEqual(executed["limit"], 1)
+        self.assertEqual(payload["result"]["rows"][0]["count"], 7)
+
+    def test_handle_event_prefers_deterministic_sql_selection_before_llm_sql(self):
+        class _Conn:
+            def close(self):
+                return None
+
+        req = EventRequest(
+            event="task.plan",
+            payload={
+                "task": "how many rows are in Patients",
+                "target_agent": "sql_runner",
+                "instruction": {"operation": "query_from_request", "question": "how many rows are in Patients"},
+            },
+        )
+
+        deterministic_payload = {
+            "detail": "SQL deterministic count executed.",
+            "sql": 'SELECT COUNT(*) AS "count" FROM "flathr"."Patients"',
+            "result": {
+                "sql": 'SELECT COUNT(*) AS "count" FROM "flathr"."Patients"',
+                "columns": ["count"],
+                "rows": [{"count": 7}],
+                "row_count": 1,
+                "returned_row_count": 1,
+                "total_matching_rows": 1,
+                "truncated": False,
+                "limit": 1,
+            },
+        }
+
+        with patch("agent_library.agents.sql_runner._dsn", return_value="postgresql://example"), patch(
+            "agent_library.agents.sql_runner._connect", return_value=("postgres", _Conn())
+        ), patch("agent_library.agents.sql_runner._introspect", return_value=POSTGRES_SCHEMA), patch(
+            "agent_library.agents.sql_runner._heuristic_sql_selection",
+            return_value={
+                "primitive_id": "sql.table.row_count",
+                "selection_reason": "heuristic",
+                "parameters": {"table_name": "Patients"},
+                "fallback_sql": "",
+                "fallback_reason": "",
+            },
+        ), patch(
+            "agent_library.agents.sql_runner._execute_sql_deterministic_selection",
+            return_value=deterministic_payload,
+        ), patch("agent_library.agents.sql_runner._llm_sql_queries") as llm_sql_queries:
+            response = handle_event(req)
+
+        self.assertEqual(response["emits"][0]["event"], "sql.result")
+        payload = response["emits"][0]["payload"]
+        self.assertEqual(payload["execution_strategy"], "deterministic")
+        self.assertEqual(payload["deterministic_primitive"], "sql.table.row_count")
+        llm_sql_queries.assert_not_called()
+
+    def test_handle_event_uses_selector_fallback_sql_before_legacy_llm_sql(self):
+        class _Conn:
+            def close(self):
+                return None
+
+        req = EventRequest(
+            event="task.plan",
+            payload={
+                "task": "show top patients by studies",
+                "target_agent": "sql_runner",
+                "instruction": {"operation": "query_from_request", "question": "show top patients by studies"},
+            },
+        )
+
+        repaired_result = {
+            "sql": 'SELECT "PatientId" FROM "flathr"."Patients" LIMIT 3',
+            "columns": ["PatientId"],
+            "rows": [{"PatientId": "a"}, {"PatientId": "b"}],
+            "row_count": 2,
+            "returned_row_count": 2,
+            "total_matching_rows": 2,
+            "truncated": False,
+            "limit": 3,
+        }
+
+        with patch("agent_library.agents.sql_runner._dsn", return_value="postgresql://example"), patch(
+            "agent_library.agents.sql_runner._connect", return_value=("postgres", _Conn())
+        ), patch("agent_library.agents.sql_runner._introspect", return_value=POSTGRES_SCHEMA), patch(
+            "agent_library.agents.sql_runner._heuristic_sql_selection", return_value=None
+        ), patch(
+            "agent_library.agents.sql_runner._llm_select_sql_strategy",
+            return_value={
+                "primitive_id": "fallback_only",
+                "selection_reason": "needs join",
+                "parameters": {},
+                "fallback_sql": 'SELECT "PatientId" FROM "flathr"."Patients" LIMIT 3',
+                "fallback_reason": "selector fallback",
+            },
+        ), patch(
+            "agent_library.agents.sql_runner._repair_sql_with_retries",
+            return_value=(repaired_result, [{"label": "selector fallback", "sql": 'SELECT "PatientId" FROM "flathr"."Patients" LIMIT 3'}]),
+        ), patch("agent_library.agents.sql_runner._llm_sql_queries") as llm_sql_queries:
+            response = handle_event(req)
+
+        payload = response["emits"][0]["payload"]
+        self.assertEqual(payload["execution_strategy"], "selector_fallback_sql")
+        self.assertEqual(payload["fallback_sql"], 'SELECT "PatientId" FROM "flathr"."Patients" LIMIT 3')
+        llm_sql_queries.assert_not_called()
+
+    def test_handle_event_prefers_selector_fallback_for_average_question(self):
+        class _Conn:
+            def close(self):
+                return None
+
+        req = EventRequest(
+            event="task.plan",
+            payload={
+                "task": "what is the average number of studies per patient",
+                "target_agent": "sql_runner",
+                "instruction": {"operation": "query_from_request", "question": "what is the average number of studies per patient"},
+            },
+        )
+
+        repaired_result = {
+            "sql": "SELECT AVG(study_count) AS average_studies_per_patient FROM example",
+            "columns": ["average_studies_per_patient"],
+            "rows": [{"average_studies_per_patient": 2.5}],
+            "row_count": 1,
+            "returned_row_count": 1,
+            "total_matching_rows": 1,
+            "truncated": False,
+            "limit": 1,
+        }
+
+        with patch("agent_library.agents.sql_runner._dsn", return_value="postgresql://example"), patch(
+            "agent_library.agents.sql_runner._connect", return_value=("postgres", _Conn())
+        ), patch("agent_library.agents.sql_runner._introspect", return_value=POSTGRES_SCHEMA), patch(
+            "agent_library.agents.sql_runner._heuristic_sql_selection", return_value=None
+        ), patch(
+            "agent_library.agents.sql_runner._llm_select_sql_strategy",
+            return_value={
+                "primitive_id": "sql.agg.count",
+                "selection_reason": "count then average",
+                "parameters": {"table_name": "Patients"},
+                "fallback_sql": "SELECT AVG(study_count) AS average_studies_per_patient FROM example",
+                "fallback_reason": "average requires fallback",
+            },
+        ), patch(
+            "agent_library.agents.sql_runner._execute_sql_deterministic_selection"
+        ) as deterministic_execute, patch(
+            "agent_library.agents.sql_runner._repair_sql_with_retries",
+            return_value=(repaired_result, [{"label": "average requires fallback", "sql": "SELECT AVG(study_count) AS average_studies_per_patient FROM example"}]),
+        ), patch("agent_library.agents.sql_runner._llm_sql_queries") as llm_sql_queries:
+            response = handle_event(req)
+
+        payload = response["emits"][0]["payload"]
+        self.assertEqual(payload["execution_strategy"], "selector_fallback_sql")
+        self.assertEqual(payload["sql"], "SELECT AVG(study_count) AS average_studies_per_patient FROM example")
+        deterministic_execute.assert_not_called()
+        llm_sql_queries.assert_not_called()
 
 
 if __name__ == "__main__":

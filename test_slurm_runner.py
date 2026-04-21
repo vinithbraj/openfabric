@@ -50,12 +50,17 @@ pydantic_stub.BaseModel = _BaseModelStub
 sys.modules.setdefault("pydantic", pydantic_stub)
 
 from agent_library.agents.slurm_runner import (
+    handle_event,
+    _build_deterministic_slurm_plan,
     _deterministic_reduce_slurm_result,
     _deterministic_slurm_command,
+    _heuristic_slurm_selection,
     _instruction_to_command,
+    _normalize_slurm_selection,
     _parse_command_input,
 )
 from agent_library.agents.slurm_runner import _gateway_base_url, _result_payload
+from agent_library.common import EventRequest
 from dep_agent_library.slurm_gateway_agent.app import _allowed_commands, _resolve_command
 
 
@@ -63,6 +68,11 @@ class SlurmRunnerTests(unittest.TestCase):
     def test_parse_command_input_from_string(self):
         command, args = _parse_command_input("squeue -u vinith")
         self.assertEqual(command, "squeue")
+        self.assertEqual(args, ["-u", "vinith"])
+
+    def test_parse_command_input_merges_explicit_args_with_string_command(self):
+        command, args = _parse_command_input("sshare", ["-u", "vinith"])
+        self.assertEqual(command, "sshare")
         self.assertEqual(args, ["-u", "vinith"])
 
     def test_instruction_cluster_status(self):
@@ -127,6 +137,139 @@ class SlurmRunnerTests(unittest.TestCase):
         self.assertIn("State idle: 2", reduced)
         self.assertIn("State mixed: 1", reduced)
         self.assertIn("python3 -c", reducer_command)
+
+    def test_heuristic_slurm_selection_for_pending_job_count(self):
+        selection = _heuristic_slurm_selection(
+            "how many pending jobs are there for user vinith",
+            {"partitions": ["hpc"], "node_states": {}, "allowed_commands": ["squeue"]},
+        )
+        self.assertEqual(selection["primitive_id"], "slurm.jobs.queue_count")
+        self.assertEqual(selection["parameters"]["user"], "vinith")
+        self.assertEqual(selection["parameters"]["job_states"], ["PENDING"])
+
+    def test_normalize_slurm_selection_rejects_unknown_primitive(self):
+        normalized = _normalize_slurm_selection(
+            {
+                "primitive_id": "slurm.unknown",
+                "selection_reason": "bad",
+                "parameters": {"partition_name": "hpc"},
+                "fallback_command": "squeue",
+                "fallback_args": ["-h"],
+                "fallback_reason": "fallback",
+            },
+            {"partitions": ["hpc"]},
+        )
+        self.assertEqual(normalized["primitive_id"], "fallback_only")
+        self.assertEqual(normalized["fallback_command"], "squeue")
+
+    def test_build_deterministic_slurm_plan_for_queue_count(self):
+        plan = _build_deterministic_slurm_plan(
+            {
+                "primitive_id": "slurm.jobs.queue_count",
+                "parameters": {"user": "vinith", "partition_name": "hpc", "job_states": ["PENDING"]},
+            },
+            "how many pending jobs are there for user vinith",
+            {"partitions": ["hpc"]},
+        )
+        self.assertEqual(plan["command"], "squeue")
+        self.assertIn("-u", plan["args"])
+        self.assertIn("vinith", plan["args"])
+        self.assertIn("-p", plan["args"])
+        self.assertIn("hpc", plan["args"])
+        self.assertIn("-t", plan["args"])
+
+    def test_handle_event_prefers_deterministic_slurm_primitive(self):
+        req = EventRequest(
+            event="task.plan",
+            payload={
+                "task": "how many pending jobs are there for user vinith",
+                "target_agent": "slurm_runner_cluster",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": "how many pending jobs are there for user vinith",
+                },
+            },
+        )
+
+        with patch("agent_library.agents.slurm_runner._slurm_gateway_ready", return_value=True), patch(
+            "agent_library.agents.slurm_runner._get_slurm_context",
+            return_value={"partitions": ["hpc"], "node_states": {}, "allowed_commands": ["squeue"]},
+        ), patch(
+            "agent_library.agents.slurm_runner._heuristic_slurm_selection",
+            return_value={
+                "primitive_id": "slurm.jobs.queue_count",
+                "selection_reason": "heuristic",
+                "parameters": {"user": "vinith", "job_states": ["PENDING"]},
+                "fallback_command": "",
+                "fallback_args": [],
+                "fallback_reason": "",
+            },
+        ), patch(
+            "agent_library.agents.slurm_runner._build_deterministic_slurm_plan",
+            return_value={"primitive_id": "slurm.jobs.queue_count", "command": "squeue", "args": ["-h", "-o", "%i|%u|%T|%P|%j"], "reason": "deterministic"},
+        ), patch(
+            "agent_library.agents.slurm_runner._gateway_execute",
+            return_value={"returncode": 0, "stdout": "1|vinith|PENDING|hpc|job-a\n2|vinith|PENDING|hpc|job-b\n", "stderr": "", "duration_ms": 11},
+        ), patch(
+            "agent_library.agents.slurm_runner._refine_deterministic_slurm_result",
+            return_value=("Matching jobs: 2", "python3 -c 'print(2)'"),
+        ), patch("agent_library.agents.slurm_runner._llm_slurm_command") as llm_fallback:
+            response = handle_event(req)
+
+        self.assertEqual(response["emits"][0]["event"], "slurm.result")
+        payload = response["emits"][0]["payload"]
+        self.assertEqual(payload["execution_strategy"], "deterministic")
+        self.assertEqual(payload["deterministic_primitive"], "slurm.jobs.queue_count")
+        self.assertEqual(payload["reduced_result"], "Matching jobs: 2")
+        llm_fallback.assert_not_called()
+
+    def test_handle_event_uses_selector_fallback_after_deterministic_failure(self):
+        req = EventRequest(
+            event="task.plan",
+            payload={
+                "task": "how many pending jobs are there",
+                "target_agent": "slurm_runner_cluster",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": "how many pending jobs are there",
+                },
+            },
+        )
+
+        gateway_results = [
+            {"returncode": 1, "stdout": "", "stderr": "deterministic failed", "duration_ms": 5},
+            {"returncode": 0, "stdout": "1|vinith|PENDING|hpc|job-a\n2|vinith|PENDING|hpc|job-b\n", "stderr": "", "duration_ms": 7},
+        ]
+
+        with patch("agent_library.agents.slurm_runner._slurm_gateway_ready", return_value=True), patch(
+            "agent_library.agents.slurm_runner._get_slurm_context",
+            return_value={"partitions": ["hpc"], "node_states": {}, "allowed_commands": ["squeue"]},
+        ), patch(
+            "agent_library.agents.slurm_runner._heuristic_slurm_selection",
+            return_value={
+                "primitive_id": "slurm.jobs.queue_count",
+                "selection_reason": "heuristic",
+                "parameters": {"job_states": ["PENDING"]},
+                "fallback_command": "squeue",
+                "fallback_args": ["-h", "-t", "PENDING"],
+                "fallback_reason": "selector fallback",
+            },
+        ), patch(
+            "agent_library.agents.slurm_runner._build_deterministic_slurm_plan",
+            return_value={"primitive_id": "slurm.jobs.queue_count", "command": "squeue", "args": ["-h", "-o", "%i|%u|%T|%P|%j"], "reason": "deterministic"},
+        ), patch(
+            "agent_library.agents.slurm_runner._gateway_execute",
+            side_effect=gateway_results,
+        ), patch(
+            "agent_library.agents.slurm_runner._llm_process_result",
+            return_value=("There are 2 pending jobs.", ""),
+        ), patch("agent_library.agents.slurm_runner._llm_slurm_command") as llm_fallback:
+            response = handle_event(req)
+
+        payload = response["emits"][0]["payload"]
+        self.assertEqual(payload["execution_strategy"], "selector_fallback_command")
+        self.assertEqual(payload["reduced_result"], "There are 2 pending jobs.")
+        llm_fallback.assert_not_called()
 
 
 class SlurmGatewayTests(unittest.TestCase):

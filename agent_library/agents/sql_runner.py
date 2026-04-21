@@ -15,16 +15,131 @@ from runtime.console import log_debug, log_raw
 
 app = FastAPI()
 
+SQL_EXECUTION_MODEL = "deterministic_first_with_llm_fallback"
+SQL_DETERMINISTIC_CATALOG_VERSION = "v4-initial"
+SQL_DETERMINISTIC_PRIMITIVES = [
+    {
+        "primitive_id": "sql.schema.list_schemas",
+        "family": "schema",
+        "summary": "List database schemas.",
+        "required_params": [],
+        "optional_params": [],
+        "intent_tags": ["schema", "schemas", "database"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.schema.list_tables",
+        "family": "schema",
+        "summary": "List tables across the database or within one schema.",
+        "required_params": [],
+        "optional_params": ["schema_name"],
+        "intent_tags": ["schema", "tables", "database"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.schema.list_columns",
+        "family": "schema",
+        "summary": "List columns globally or for one table.",
+        "required_params": [],
+        "optional_params": ["schema_name", "table_name"],
+        "intent_tags": ["schema", "columns", "table"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.schema.list_relationships",
+        "family": "schema",
+        "summary": "List foreign-key relationships globally or for one table.",
+        "required_params": [],
+        "optional_params": ["schema_name", "table_name"],
+        "intent_tags": ["schema", "relationships", "foreign_keys"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.table.exists",
+        "family": "table",
+        "summary": "Check whether a table exists.",
+        "required_params": ["table_name"],
+        "optional_params": ["schema_name"],
+        "intent_tags": ["table", "exists", "schema"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.table.row_count",
+        "family": "table",
+        "summary": "Count rows in one table.",
+        "required_params": ["table_name"],
+        "optional_params": ["schema_name", "filters"],
+        "intent_tags": ["count", "rows", "table"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.table.sample_rows",
+        "family": "table",
+        "summary": "Return sample rows from one table.",
+        "required_params": ["table_name"],
+        "optional_params": ["schema_name", "columns", "filters", "limit", "order_by", "order_direction"],
+        "intent_tags": ["sample", "rows", "table"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.rows.select",
+        "family": "rows",
+        "summary": "Return selected rows from one table with validated filters.",
+        "required_params": ["table_name"],
+        "optional_params": ["schema_name", "columns", "filters", "limit", "order_by", "order_direction"],
+        "intent_tags": ["rows", "select", "filter"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.agg.count",
+        "family": "aggregate",
+        "summary": "Count rows from one table with validated filters.",
+        "required_params": ["table_name"],
+        "optional_params": ["schema_name", "filters"],
+        "intent_tags": ["count", "aggregate", "filter"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.table.distinct_values",
+        "family": "table",
+        "summary": "List distinct values for one validated column.",
+        "required_params": ["table_name", "column_name"],
+        "optional_params": ["schema_name", "filters", "limit"],
+        "intent_tags": ["distinct", "values", "column"],
+        "read_only": True,
+    },
+    {
+        "primitive_id": "sql.group.count_by_column",
+        "family": "group",
+        "summary": "Return grouped counts for one validated column.",
+        "required_params": ["table_name", "column_name"],
+        "optional_params": ["schema_name", "filters", "limit", "order_direction"],
+        "intent_tags": ["group", "count", "column"],
+        "read_only": True,
+    },
+]
+SQL_DETERMINISTIC_PRIMITIVE_IDS = {
+    item["primitive_id"] for item in SQL_DETERMINISTIC_PRIMITIVES if isinstance(item, dict) and item.get("primitive_id")
+}
+SQL_DETERMINISTIC_CATALOG_FAMILIES = sorted(
+    {
+        str(item.get("family")).strip()
+        for item in SQL_DETERMINISTIC_PRIMITIVES
+        if isinstance(item, dict) and str(item.get("family") or "").strip()
+    }
+)
+
 AGENT_METADATA = {
     "description": (
         "Connects to a configured SQL database, introspects schemas/tables/columns/"
-        "relationships, generates read-only SQL from natural language, executes it, "
-        "and returns query results."
+        "relationships, executes deterministic read-only database primitives first, "
+        "and falls back to generated read-only SQL only when deterministic coverage is insufficient."
     ),
     "capability_domains": [
         "sql",
         "database",
         "schema_introspection",
+        "deterministic_primitives",
         "query_generation",
         "read_only_analytics",
         "data_retrieval",
@@ -43,12 +158,23 @@ AGENT_METADATA = {
         "sort",
         "explain",
     ],
+    "execution_model": SQL_EXECUTION_MODEL,
+    "deterministic_catalog_version": SQL_DETERMINISTIC_CATALOG_VERSION,
+    "deterministic_catalog_families": SQL_DETERMINISTIC_CATALOG_FAMILIES,
+    "deterministic_catalog_size": len(SQL_DETERMINISTIC_PRIMITIVES),
+    "deterministic_primitives": [item["primitive_id"] for item in SQL_DETERMINISTIC_PRIMITIVES],
+    "deterministic_catalog_reference": "VERSION_4_PRIMITIVE_CATALOG.md",
+    "fallback_policy": (
+        "Run deterministic SQL primitive first. If the primitive cannot answer cleanly, "
+        "run the selection-provided fallback SQL or legacy generated SQL."
+    ),
     "side_effect_policy": "read_only_sql_with_safety_checks",
     "safety_enforced_by_agent": True,
     "routing_notes": [
         "Use for requests about SQL databases, schemas, tables, columns, relationships, or data questions that should be answered by querying a configured database.",
         "Requires SQL_AGENT_DSN or SQL_DATABASE_URL to be configured in the agent environment.",
         "Only read-only SQL is executed. Mutating statements are rejected.",
+        "For natural-language database questions, this agent now uses deterministic primitives first and only falls back to free-form SQL generation when needed.",
     ],
     "methods": [
         {
@@ -59,11 +185,18 @@ AGENT_METADATA = {
             "examples": ["show database schema", "list all SQL tables", "describe relationships in the database"],
         },
         {
-            "name": "answer_database_question",
+            "name": "select_deterministic_sql_primitive",
             "event": "task.plan",
-            "when": "Generates and executes read-only SQL to answer a natural-language database question.",
-            "intent_tags": ["sql_query", "database_question", "analytics"],
-            "examples": ["how many users signed up last week", "show top 10 customers by revenue"],
+            "when": "Selects one deterministic SQL primitive plus a fallback SQL plan for a natural-language database question.",
+            "intent_tags": ["sql_primitive_selection", "database_question", "analytics"],
+            "examples": ["how many rows are in patients", "list all tables in mydb", "show distinct patient genders"],
+        },
+        {
+            "name": "execute_sql_fallback_when_needed",
+            "event": "task.plan",
+            "when": "Executes generated fallback SQL only when the deterministic SQL primitive cannot answer cleanly.",
+            "intent_tags": ["sql_query_fallback", "database_question", "analytics"],
+            "examples": ["which customers spent the most money last month", "show top 10 customers by revenue"],
         },
     ],
 }
@@ -98,6 +231,593 @@ def _llm_api_settings():
 
 def _sql_llm_transport_settings(default_model: str) -> tuple[str, str, float, str]:
     return shared_llm_api_settings(default_model)
+
+
+def _sql_catalog_prompt_text() -> str:
+    lines = []
+    for primitive in SQL_DETERMINISTIC_PRIMITIVES:
+        primitive_id = str(primitive.get("primitive_id") or "").strip()
+        if not primitive_id:
+            continue
+        summary = str(primitive.get("summary") or "").strip()
+        required_params = primitive.get("required_params") if isinstance(primitive.get("required_params"), list) else []
+        optional_params = primitive.get("optional_params") if isinstance(primitive.get("optional_params"), list) else []
+        lines.append(
+            f"- {primitive_id}: {summary} "
+            f"required=[{', '.join(str(item) for item in required_params) or 'none'}] "
+            f"optional=[{', '.join(str(item) for item in optional_params) or 'none'}]"
+        )
+    return "\n".join(lines)
+
+
+def _normalize_positive_int(value: Any, default: int, minimum: int = 1, maximum: int = 1000) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(parsed, maximum))
+
+
+def _resolve_table_spec(schema: dict, table_name: str, schema_name: str = "") -> dict[str, Any] | None:
+    raw_table = str(table_name or "").strip()
+    raw_schema = str(schema_name or "").strip()
+    if not raw_table:
+        return None
+    if "." in raw_table and not raw_schema:
+        prefix, suffix = raw_table.split(".", 1)
+        raw_schema = prefix.strip()
+        raw_table = suffix.strip()
+    if not raw_table:
+        return None
+    exact_matches = []
+    loose_matches = []
+    for table in schema.get("tables", []):
+        if not isinstance(table, dict):
+            continue
+        candidate_table = str(table.get("name") or "").strip()
+        candidate_schema = str(table.get("schema") or "").strip()
+        if not candidate_table:
+            continue
+        if candidate_table == raw_table and (not raw_schema or candidate_schema == raw_schema):
+            exact_matches.append(table)
+        if candidate_table.lower() == raw_table.lower() and (not raw_schema or candidate_schema.lower() == raw_schema.lower()):
+            loose_matches.append(table)
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(loose_matches) == 1:
+        return loose_matches[0]
+    return None
+
+
+def _resolve_column_name(table: dict[str, Any], column_name: str) -> str | None:
+    raw = str(column_name or "").strip()
+    if not raw:
+        return None
+    exact_matches = []
+    loose_matches = []
+    for column in table.get("columns", []):
+        if not isinstance(column, dict):
+            continue
+        candidate = str(column.get("name") or "").strip()
+        if not candidate:
+            continue
+        if candidate == raw:
+            exact_matches.append(candidate)
+        if candidate.lower() == raw.lower():
+            loose_matches.append(candidate)
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(loose_matches) == 1:
+        return loose_matches[0]
+    return None
+
+
+def _sql_literal(value: Any, dialect: str) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        if dialect == "mysql":
+            return "1" if value else "0"
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    text = str(value)
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _normalize_sql_filters(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        column = str(item.get("column") or "").strip()
+        op = str(item.get("op") or "").strip().lower()
+        if not column or not op:
+            continue
+        normalized.append(
+            {
+                "column": column,
+                "op": op,
+                "value": item.get("value"),
+                "values": item.get("values"),
+                "lower": item.get("lower"),
+                "upper": item.get("upper"),
+            }
+        )
+    return normalized
+
+
+def _build_sql_where_clauses(filters: list[dict[str, Any]], table: dict[str, Any], dialect: str) -> list[str] | None:
+    clauses: list[str] = []
+    for item in filters:
+        column_name = _resolve_column_name(table, item.get("column", ""))
+        if not column_name:
+            return None
+        quoted_column = _quote_identifier(column_name, dialect)
+        op = str(item.get("op") or "").strip().lower()
+        if op == "eq":
+            clauses.append(f"{quoted_column} = {_sql_literal(item.get('value'), dialect)}")
+        elif op == "neq":
+            clauses.append(f"{quoted_column} <> {_sql_literal(item.get('value'), dialect)}")
+        elif op == "gt":
+            clauses.append(f"{quoted_column} > {_sql_literal(item.get('value'), dialect)}")
+        elif op == "gte":
+            clauses.append(f"{quoted_column} >= {_sql_literal(item.get('value'), dialect)}")
+        elif op == "lt":
+            clauses.append(f"{quoted_column} < {_sql_literal(item.get('value'), dialect)}")
+        elif op == "lte":
+            clauses.append(f"{quoted_column} <= {_sql_literal(item.get('value'), dialect)}")
+        elif op == "like":
+            clauses.append(f"{quoted_column} LIKE {_sql_literal(item.get('value'), dialect)}")
+        elif op == "ilike":
+            if dialect == "postgres":
+                clauses.append(f"{quoted_column} ILIKE {_sql_literal(item.get('value'), dialect)}")
+            else:
+                clauses.append(
+                    f"LOWER(CAST({quoted_column} AS TEXT)) LIKE LOWER({_sql_literal(item.get('value'), dialect)})"
+                )
+        elif op == "is_null":
+            clauses.append(f"{quoted_column} IS NULL")
+        elif op == "is_not_null":
+            clauses.append(f"{quoted_column} IS NOT NULL")
+        elif op in {"in", "not_in"}:
+            values = item.get("values")
+            if not isinstance(values, list) or not values:
+                return None
+            value_sql = ", ".join(_sql_literal(entry, dialect) for entry in values)
+            comparator = "IN" if op == "in" else "NOT IN"
+            clauses.append(f"{quoted_column} {comparator} ({value_sql})")
+        elif op == "between":
+            clauses.append(
+                f"{quoted_column} BETWEEN {_sql_literal(item.get('lower'), dialect)} "
+                f"AND {_sql_literal(item.get('upper'), dialect)}"
+            )
+        else:
+            return None
+    return clauses
+
+
+def _qualified_table_name(table: dict[str, Any], dialect: str) -> str:
+    schema_name = str(table.get("schema") or "").strip()
+    table_name = str(table.get("name") or "").strip()
+    qualified = ".".join(part for part in (schema_name, table_name) if part)
+    return _quote_qualified_identifier(qualified, dialect)
+
+
+def _quoted_columns_for_selection(table: dict[str, Any], dialect: str, columns: Any) -> list[str] | None:
+    if not isinstance(columns, list) or not columns:
+        return None
+    resolved = []
+    for item in columns:
+        column_name = _resolve_column_name(table, item)
+        if not column_name:
+            return None
+        resolved.append(_quote_identifier(column_name, dialect))
+    return resolved
+
+
+def _heuristic_sql_selection(task: str, schema: dict) -> dict[str, Any] | None:
+    text = str(task or "").strip().lower()
+    if not text:
+        return None
+    identifiers = _schema_identifier_sets(schema)
+    table_match = re.search(r"\b(?:in|from|table)\s+([A-Za-z0-9_.-]+)\b", str(task or ""), flags=re.IGNORECASE)
+    table_name = table_match.group(1).strip() if table_match else ""
+    if _schemas_only_schema_request(None, task):
+        return {"primitive_id": "sql.schema.list_schemas", "selection_reason": "Heuristic schema listing match.", "parameters": {}}
+    if _tables_only_schema_request(None, task):
+        parameters = {}
+        if table_name and "." not in table_name and table_name in identifiers.get("schemas", set()):
+            parameters["schema_name"] = table_name
+        return {"primitive_id": "sql.schema.list_tables", "selection_reason": "Heuristic table listing match.", "parameters": parameters}
+    if _columns_only_schema_request(None, task):
+        parameters = {"table_name": table_name} if table_name else {}
+        return {"primitive_id": "sql.schema.list_columns", "selection_reason": "Heuristic column listing match.", "parameters": parameters}
+    if _relationships_only_schema_request(None, task):
+        parameters = {"table_name": table_name} if table_name else {}
+        return {"primitive_id": "sql.schema.list_relationships", "selection_reason": "Heuristic relationship listing match.", "parameters": parameters}
+    if table_name and any(token in text for token in ("row count", "count rows", "how many rows")):
+        return {
+            "primitive_id": "sql.table.row_count",
+            "selection_reason": "Heuristic row-count match.",
+            "parameters": {"table_name": table_name},
+        }
+    if table_name and any(token in text for token in ("sample", "example rows", "show rows", "first rows")):
+        return {
+            "primitive_id": "sql.table.sample_rows",
+            "selection_reason": "Heuristic sample-rows match.",
+            "parameters": {"table_name": table_name},
+        }
+    return None
+
+
+def _selection_should_use_fallback(task: str, selection: dict[str, Any]) -> bool:
+    fallback_sql = str(selection.get("fallback_sql") or "").strip()
+    if not fallback_sql:
+        return False
+    primitive_id = str(selection.get("primitive_id") or "").strip()
+    if primitive_id == "fallback_only":
+        return True
+    task_lc = str(task or "").lower()
+    unsupported_aggregate_tokens = (
+        "average",
+        "avg",
+        "mean",
+        "median",
+        "percentile",
+        "percentage",
+        "percent ",
+        "ratio",
+    )
+    if primitive_id in {"sql.agg.count", "sql.table.row_count"} and any(token in task_lc for token in unsupported_aggregate_tokens):
+        return True
+    return False
+
+
+def _llm_select_sql_strategy(task: str, schema: dict) -> dict[str, Any]:
+    api_key, base_url, timeout_seconds, model = _sql_llm_transport_settings("gpt-4o-mini")
+    prompt = (
+        "You are the deterministic SQL primitive selector for a database agent.\n"
+        "Choose exactly one deterministic primitive from the executable primitive catalog below.\n"
+        "Also provide a fallback SQL query that would answer the same user request if deterministic execution cannot answer cleanly.\n"
+        "Return STRICT JSON only with exactly these top-level keys:\n"
+        "{\"primitive_id\":\"...\",\"selection_reason\":\"...\",\"parameters\":{...},\"fallback_sql\":\"...\",\"fallback_reason\":\"...\"}\n"
+        "Rules:\n"
+        "- primitive_id MUST be one of the executable primitive IDs listed below, or fallback_only.\n"
+        "- Use exact schema, table, and column identifiers from the schema catalog.\n"
+        "- Prefer the simplest primitive that can fully answer the request.\n"
+        "- If the request is fundamentally outside the executable deterministic primitives, use primitive_id=fallback_only.\n"
+        "- fallback_sql must be read-only SQL or an empty string when no fallback can be proposed.\n"
+        "- parameters must only include fields that help execute the chosen primitive, such as schema_name, table_name, column_name, columns, filters, limit, order_by, order_direction.\n"
+        "Executable deterministic primitives:\n"
+        f"{_sql_catalog_prompt_text()}\n"
+        "Schema summary:\n"
+        f"{_schema_summary(schema)}\n"
+        "Exact identifier catalog:\n"
+        f"{_schema_identifier_catalog(schema)}\n"
+        f"User request: {task}"
+    )
+    response = requests.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You produce strict JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+    log_raw("SQL_SELECTOR_LLM_RAW", content)
+    parsed = _parse_strict_json_object(content)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _normalize_sql_selection(selection: Any) -> dict[str, Any]:
+    if not isinstance(selection, dict):
+        return {"primitive_id": "fallback_only", "selection_reason": "", "parameters": {}, "fallback_sql": "", "fallback_reason": ""}
+    primitive_id = str(selection.get("primitive_id") or "").strip()
+    if primitive_id not in SQL_DETERMINISTIC_PRIMITIVE_IDS:
+        primitive_id = "fallback_only"
+    parameters = selection.get("parameters")
+    fallback_sql = str(selection.get("fallback_sql") or "").strip()
+    fallback_reason = str(selection.get("fallback_reason") or "").strip()
+    return {
+        "primitive_id": primitive_id,
+        "selection_reason": str(selection.get("selection_reason") or "").strip(),
+        "parameters": parameters if isinstance(parameters, dict) else {},
+        "fallback_sql": fallback_sql,
+        "fallback_reason": fallback_reason,
+    }
+
+
+def _sql_fallback_query_specs_from_selection(selection: dict[str, Any]) -> list[dict[str, str]]:
+    fallback_sql = str(selection.get("fallback_sql") or "").strip()
+    if not fallback_sql:
+        return []
+    label = str(selection.get("fallback_reason") or "selector fallback").strip() or "selector fallback"
+    return [{"label": label, "sql": fallback_sql}]
+
+
+def _deterministic_sql_exists_result(table: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "columns": ["schema", "table", "exists"],
+        "rows": [
+            {
+                "schema": table.get("schema"),
+                "table": table.get("name"),
+                "exists": True,
+            }
+        ],
+        "row_count": 1,
+        "returned_row_count": 1,
+        "total_matching_rows": 1,
+        "truncated": False,
+        "limit": 1,
+    }
+
+
+def _execute_sql_deterministic_selection(
+    conn,
+    dialect: str,
+    schema: dict,
+    task: str,
+    selection: dict[str, Any],
+    limit: int,
+) -> dict[str, Any] | None:
+    primitive_id = str(selection.get("primitive_id") or "").strip()
+    params = selection.get("parameters") if isinstance(selection.get("parameters"), dict) else {}
+    if primitive_id == "sql.schema.list_schemas":
+        return {"detail": "Database schemas listed.", "sql": "", "result": _schema_schemas_result(schema)}
+    if primitive_id == "sql.schema.list_tables":
+        schema_name = str(params.get("schema_name") or "").strip()
+        if not schema_name:
+            return {"detail": "Database tables listed.", "sql": "", "result": _schema_tables_result(schema)}
+        rows = [
+            row for row in _schema_tables_result(schema)["rows"]
+            if str(row.get("schema") or "").strip().lower() == schema_name.lower()
+        ]
+        return {
+            "detail": f"Database tables listed for schema {schema_name}.",
+            "sql": "",
+            "result": {
+                "columns": ["schema", "table", "type"],
+                "rows": rows,
+                "row_count": len(rows),
+                "returned_row_count": len(rows),
+                "total_matching_rows": len(rows),
+                "truncated": False,
+                "limit": len(rows),
+            },
+        }
+    if primitive_id == "sql.schema.list_columns":
+        schema_name = str(params.get("schema_name") or "").strip()
+        table_name = str(params.get("table_name") or "").strip()
+        if table_name:
+            table = _resolve_table_spec(schema, table_name, schema_name)
+            if not table:
+                return None
+            rows = []
+            for column in table.get("columns", []):
+                rows.append(
+                    {
+                        "schema": table.get("schema"),
+                        "table": table.get("name"),
+                        "column": column.get("name"),
+                        "type": column.get("type"),
+                        "nullable": column.get("nullable"),
+                    }
+                )
+            return {
+                "detail": f"Database columns listed for table {table.get('name')}.",
+                "sql": "",
+                "result": {
+                    "columns": ["schema", "table", "column", "type", "nullable"],
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "returned_row_count": len(rows),
+                    "total_matching_rows": len(rows),
+                    "truncated": False,
+                    "limit": len(rows),
+                },
+            }
+        if not schema_name:
+            return {"detail": "Database columns listed.", "sql": "", "result": _schema_columns_result(schema)}
+        rows = [
+            row for row in _schema_columns_result(schema)["rows"]
+            if str(row.get("schema") or "").strip().lower() == schema_name.lower()
+        ]
+        return {
+            "detail": f"Database columns listed for schema {schema_name}.",
+            "sql": "",
+            "result": {
+                "columns": ["schema", "table", "column", "type", "nullable"],
+                "rows": rows,
+                "row_count": len(rows),
+                "returned_row_count": len(rows),
+                "total_matching_rows": len(rows),
+                "truncated": False,
+                "limit": len(rows),
+            },
+        }
+    if primitive_id == "sql.schema.list_relationships":
+        schema_name = str(params.get("schema_name") or "").strip()
+        table_name = str(params.get("table_name") or "").strip()
+        if table_name:
+            table = _resolve_table_spec(schema, table_name, schema_name)
+            if not table:
+                return None
+            rows = []
+            for foreign_key in table.get("foreign_keys", []):
+                rows.append(
+                    {
+                        "schema": table.get("schema"),
+                        "table": table.get("name"),
+                        "column": foreign_key.get("column"),
+                        "references": ".".join(
+                            part
+                            for part in (
+                                str(foreign_key.get("references_schema") or "").strip(),
+                                str(foreign_key.get("references_table") or "").strip(),
+                                str(foreign_key.get("references_column") or "").strip(),
+                            )
+                            if part
+                        ),
+                    }
+                )
+            return {
+                "detail": f"Database relationships listed for table {table.get('name')}.",
+                "sql": "",
+                "result": {
+                    "columns": ["schema", "table", "column", "references"],
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "returned_row_count": len(rows),
+                    "total_matching_rows": len(rows),
+                    "truncated": False,
+                    "limit": len(rows),
+                },
+            }
+        if not schema_name:
+            return {"detail": "Database relationships listed.", "sql": "", "result": _schema_relationships_result(schema)}
+        rows = [
+            row for row in _schema_relationships_result(schema)["rows"]
+            if str(row.get("schema") or "").strip().lower() == schema_name.lower()
+        ]
+        return {
+            "detail": f"Database relationships listed for schema {schema_name}.",
+            "sql": "",
+            "result": {
+                "columns": ["schema", "table", "column", "references"],
+                "rows": rows,
+                "row_count": len(rows),
+                "returned_row_count": len(rows),
+                "total_matching_rows": len(rows),
+                "truncated": False,
+                "limit": len(rows),
+            },
+        }
+
+    table = _resolve_table_spec(schema, params.get("table_name"), params.get("schema_name", ""))
+    if not table:
+        return None
+    table_sql = _qualified_table_name(table, dialect)
+    filters = _normalize_sql_filters(params.get("filters"))
+    where_clauses = _build_sql_where_clauses(filters, table, dialect)
+    if where_clauses is None:
+        return None
+    where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    if primitive_id == "sql.table.exists":
+        return {"detail": f"Table {table.get('name')} exists.", "sql": "", "result": _deterministic_sql_exists_result(table)}
+
+    if primitive_id in {"sql.table.row_count", "sql.agg.count"}:
+        sql = f"SELECT COUNT(*) AS {_quote_identifier('count', dialect)} FROM {table_sql}{where_sql}"
+        result = _execute_sql(conn, sql, 1, schema)
+        return {"detail": "SQL deterministic count executed.", "sql": result.get("sql", sql), "result": result}
+
+    if primitive_id == "sql.table.sample_rows" or primitive_id == "sql.rows.select":
+        columns = _quoted_columns_for_selection(table, dialect, params.get("columns"))
+        select_columns = ", ".join(columns) if columns else "*"
+        order_by = _resolve_column_name(table, params.get("order_by"))
+        order_direction = str(params.get("order_direction") or "asc").strip().lower()
+        if order_direction not in {"asc", "desc"}:
+            order_direction = "asc"
+        order_sql = f" ORDER BY {_quote_identifier(order_by, dialect)} {order_direction.upper()}" if order_by else ""
+        row_limit = _normalize_positive_int(params.get("limit"), 5 if primitive_id == "sql.table.sample_rows" else limit, maximum=limit)
+        sql = f"SELECT {select_columns} FROM {table_sql}{where_sql}{order_sql} LIMIT {row_limit}"
+        result = _execute_sql(conn, sql, row_limit, schema)
+        detail = "SQL deterministic row selection executed." if primitive_id == "sql.rows.select" else "SQL deterministic sample rows executed."
+        return {"detail": detail, "sql": result.get("sql", sql), "result": result}
+
+    if primitive_id == "sql.table.distinct_values":
+        column_name = _resolve_column_name(table, params.get("column_name"))
+        if not column_name:
+            return None
+        row_limit = _normalize_positive_int(params.get("limit"), limit, maximum=limit)
+        quoted_column = _quote_identifier(column_name, dialect)
+        sql = (
+            f"SELECT DISTINCT {quoted_column} AS {quoted_column} "
+            f"FROM {table_sql}{where_sql} ORDER BY {quoted_column} ASC LIMIT {row_limit}"
+        )
+        result = _execute_sql(conn, sql, row_limit, schema)
+        return {"detail": "SQL deterministic distinct-values query executed.", "sql": result.get("sql", sql), "result": result}
+
+    if primitive_id == "sql.group.count_by_column":
+        column_name = _resolve_column_name(table, params.get("column_name"))
+        if not column_name:
+            return None
+        row_limit = _normalize_positive_int(params.get("limit"), limit, maximum=limit)
+        order_direction = str(params.get("order_direction") or "desc").strip().lower()
+        if order_direction not in {"asc", "desc"}:
+            order_direction = "desc"
+        quoted_column = _quote_identifier(column_name, dialect)
+        sql = (
+            f"SELECT {quoted_column} AS {quoted_column}, COUNT(*) AS {_quote_identifier('count', dialect)} "
+            f"FROM {table_sql}{where_sql} GROUP BY {quoted_column} "
+            f"ORDER BY {_quote_identifier('count', dialect)} {order_direction.upper()} LIMIT {row_limit}"
+        )
+        result = _execute_sql(conn, sql, row_limit, schema)
+        return {"detail": "SQL deterministic grouped count query executed.", "sql": result.get("sql", sql), "result": result}
+
+    return None
+
+
+def _finalize_sql_success_payload(
+    task: str,
+    detail: str,
+    sql: str,
+    schema: dict,
+    stats: dict[str, float],
+    result: dict[str, Any] | None,
+    selection: dict[str, Any] | None = None,
+    *,
+    execution_strategy: str,
+) -> dict[str, Any]:
+    refined_answer = ""
+    reduced_result = ""
+    local_reduction_command = ""
+    if isinstance(result, dict) and result.get("rows"):
+        rows = result.get("rows", [])
+        columns = result.get("columns", [])
+        row_count = result.get("total_matching_rows", result.get("row_count", len(rows)))
+        if _should_reduce_sql_result(task, result):
+            reduced_result, local_reduction_command = _llm_reduce_sql_result(
+                task,
+                sql,
+                columns,
+                rows,
+                row_count if isinstance(row_count, int) else len(rows),
+            )
+            refined_answer = reduced_result
+        elif len(rows) > 5:
+            refined_answer = _llm_summarize_rows(task, sql, columns, rows)
+
+    payload: dict[str, Any] = {
+        "detail": detail,
+        "refined_answer": refined_answer or None,
+        "reduced_result": reduced_result or None,
+        "local_reduction_command": local_reduction_command or None,
+        "sql": sql,
+        "schema": schema,
+        "stats": stats,
+        "result": result,
+        "execution_strategy": execution_strategy,
+    }
+    if isinstance(selection, dict):
+        payload["deterministic_primitive"] = selection.get("primitive_id")
+        payload["deterministic_selection_reason"] = selection.get("selection_reason")
+        payload["fallback_sql"] = selection.get("fallback_sql") or None
+    payload["fallback_used"] = execution_strategy in {"selector_fallback_sql", "llm_generated_sql"}
+    return payload
 
 
 def _llm_summarize_rows(task: str, sql: str, columns: list[str], rows: list[dict[str, Any]]) -> str:
@@ -1345,7 +2065,7 @@ def handle_event(req: EventRequest):
             schema = _introspect(dialect, conn)
             stats["schema_ms"] = _elapsed_ms(started)
             operation = instruction.get("operation") if isinstance(instruction, dict) else None
-            if operation == "inspect_schema" or (_is_schema_request(classification_task) and not provided_sql):
+            if operation == "inspect_schema":
                 focus = instruction.get("focus") if isinstance(instruction, dict) else None
                 stats["total_ms"] = _elapsed_ms(total_started)
                 focused_schema = _focused_schema_result(
@@ -1392,14 +2112,72 @@ def handle_event(req: EventRequest):
                         f"SELECT * FROM {_quote_qualified_identifier(table.strip(), dialect)} "
                         f"LIMIT {int(limit) if isinstance(limit, (int, float)) else 5}"
                     )
+            query_task = (
+                instruction.get("question")
+                if isinstance(instruction, dict) and isinstance(instruction.get("question"), str)
+                else execution_task
+            )
+            selection: dict[str, Any] | None = None
+            execution_strategy = "explicit_sql"
             if isinstance(provided_sql, str) and provided_sql.strip():
                 query_specs = [{"label": "provided SQL", "sql": provided_sql.strip()}]
                 stats["sql_generation_ms"] = 0
             else:
-                started = time.perf_counter()
-                query_task = instruction.get("question") if isinstance(instruction, dict) and isinstance(instruction.get("question"), str) else execution_task
-                query_specs = _llm_sql_queries(query_task, schema)
-                stats["sql_generation_ms"] = _elapsed_ms(started)
+                execution_strategy = "llm_generated_sql"
+                selection_started = time.perf_counter()
+                raw_selection = _heuristic_sql_selection(query_task, schema)
+                if raw_selection is None:
+                    raw_selection = _llm_select_sql_strategy(query_task, schema)
+                stats["deterministic_selection_ms"] = _elapsed_ms(selection_started)
+                selection = _normalize_sql_selection(raw_selection)
+                if _selection_should_use_fallback(query_task, selection):
+                    selection = dict(selection)
+                    selection["primitive_id"] = "fallback_only"
+
+                deterministic_payload = None
+                if selection.get("primitive_id") and selection.get("primitive_id") != "fallback_only":
+                    deterministic_started = time.perf_counter()
+                    deterministic_payload = _execute_sql_deterministic_selection(
+                        conn,
+                        dialect,
+                        schema,
+                        query_task,
+                        selection,
+                        _row_limit(),
+                    )
+                    stats["deterministic_execution_ms"] = _elapsed_ms(deterministic_started)
+                if isinstance(deterministic_payload, dict):
+                    stats["sql_generation_ms"] = 0
+                    stats["query_ms"] = stats.get("deterministic_execution_ms", 0.0)
+                    stats["total_ms"] = _elapsed_ms(total_started)
+                    return {
+                        "emits": [
+                            {
+                                "event": "sql.result",
+                                "payload": _finalize_sql_success_payload(
+                                    query_task,
+                                    str(deterministic_payload.get("detail") or "SQL deterministic primitive executed."),
+                                    str(deterministic_payload.get("sql") or ""),
+                                    schema,
+                                    stats,
+                                    deterministic_payload.get("result")
+                                    if isinstance(deterministic_payload.get("result"), dict)
+                                    else None,
+                                    selection,
+                                    execution_strategy="deterministic",
+                                ),
+                            }
+                        ]
+                    }
+
+                query_specs = _sql_fallback_query_specs_from_selection(selection)
+                if query_specs:
+                    stats["sql_generation_ms"] = 0
+                    execution_strategy = "selector_fallback_sql"
+                else:
+                    started = time.perf_counter()
+                    query_specs = _llm_sql_queries(query_task, schema)
+                    stats["sql_generation_ms"] = _elapsed_ms(started)
             if not query_specs:
                 stats["total_ms"] = _elapsed_ms(total_started)
                 return {
@@ -1421,45 +2199,24 @@ def handle_event(req: EventRequest):
                     ]
                 }
             started = time.perf_counter()
-            query_task = instruction.get("question") if isinstance(instruction, dict) and isinstance(instruction.get("question"), str) else execution_task
             result, query_specs = _repair_sql_with_retries(conn, schema, query_task, query_specs, _row_limit(), stats)
             stats["query_ms"] = _elapsed_ms(started)
             stats["total_ms"] = _elapsed_ms(total_started)
             sql = result.get("sql", "")
-            # Phase 10: SQL Result Summarization
-            refined_answer = ""
-            reduced_result = ""
-            local_reduction_command = ""
-            if result and result.get("rows"):
-                rows = result.get("rows", [])
-                columns = result.get("columns", [])
-                row_count = result.get("total_matching_rows", result.get("row_count", len(rows)))
-                if _should_reduce_sql_result(execution_task, result):
-                    reduced_result, local_reduction_command = _llm_reduce_sql_result(
-                        execution_task,
-                        sql,
-                        columns,
-                        rows,
-                        row_count if isinstance(row_count, int) else len(rows),
-                    )
-                    refined_answer = reduced_result
-                elif len(rows) > 5:
-                    refined_answer = _llm_summarize_rows(execution_task, sql, columns, rows)
-
             return {
                 "emits": [
                     {
                         "event": "sql.result",
-                        "payload": {
-                            "detail": "SQL query executed.",
-                            "refined_answer": refined_answer or None,
-                            "reduced_result": reduced_result or None,
-                            "local_reduction_command": local_reduction_command or None,
-                            "sql": sql,
-                            "schema": schema,
-                            "stats": stats,
-                            "result": result,
-                        },
+                        "payload": _finalize_sql_success_payload(
+                            query_task,
+                            "SQL query executed.",
+                            sql,
+                            schema,
+                            stats,
+                            result,
+                            selection,
+                            execution_strategy=execution_strategy,
+                        ),
                     }
                 ]
             }

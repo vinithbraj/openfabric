@@ -99,6 +99,28 @@ def _format_discovered_agents(capabilities: dict) -> str:
         template_agent = item.get("template_agent")
         if isinstance(template_agent, str) and template_agent.strip():
             metadata.append(f"template_agent={template_agent.strip()}")
+        execution_model = item.get("execution_model")
+        if isinstance(execution_model, str) and execution_model.strip():
+            metadata.append(f"execution_model={execution_model.strip()}")
+        catalog_version = item.get("deterministic_catalog_version")
+        if isinstance(catalog_version, str) and catalog_version.strip():
+            metadata.append(f"deterministic_catalog_version={catalog_version.strip()}")
+        catalog_size = item.get("deterministic_catalog_size")
+        if isinstance(catalog_size, (int, float)):
+            metadata.append(f"deterministic_catalog_size={int(catalog_size)}")
+        catalog_families = item.get("deterministic_catalog_families")
+        if isinstance(catalog_families, list):
+            families = ", ".join(entry for entry in catalog_families if isinstance(entry, str) and entry.strip())
+            if families:
+                metadata.append(f"deterministic_catalog_families=[{families}]")
+        cluster_name = item.get("cluster_name")
+        if isinstance(cluster_name, str) and cluster_name.strip():
+            metadata.append(f"cluster_name={cluster_name.strip()}")
+        cluster_aliases = item.get("cluster_aliases")
+        if isinstance(cluster_aliases, list):
+            aliases = ", ".join(alias for alias in cluster_aliases if isinstance(alias, str) and alias.strip())
+            if aliases:
+                metadata.append(f"cluster_aliases=[{aliases}]")
         metadata_text = f" Metadata[{'; '.join(metadata)}]" if metadata else ""
         lines.append(
             f"- {name}: {description} Domains[{domain_text or 'none'}] "
