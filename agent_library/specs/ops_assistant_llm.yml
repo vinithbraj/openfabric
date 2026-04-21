@@ -288,6 +288,8 @@ contracts:
         type: string
       available_context:
         type: object
+      validation:
+        type: object
       partial_result: {}
       presentation:
         type: object
@@ -347,7 +349,11 @@ contracts:
     type: object
     required: [task, workflow_status]
     properties:
+      validation_scope:
+        type: string
       task:
+        type: string
+      original_task:
         type: string
       task_shape:
         type: string
@@ -365,11 +371,20 @@ contracts:
         type: string
       workflow_status:
         type: string
+      step_id:
+        type: string
+      step_task:
+        type: string
+      step_target_agent:
+        type: string
+      step_event:
+        type: string
       steps:
         type: array
         items:
           type: object
       result: {}
+      step_value: {}
       error:
         type: string
       presentation:

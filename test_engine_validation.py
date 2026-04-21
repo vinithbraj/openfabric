@@ -27,6 +27,10 @@ class _ExecAdapter:
             return [("task.result", {"detail": "Fallback execution finished.", "result": "final answer"})]
         if task == "uncertain attempt":
             return [("task.result", {"detail": "Execution finished with ambiguous result.", "result": ""})]
+        if task == "bad count step":
+            return [("task.result", {"detail": "Step finished with state-only output.", "result": 'The state of the nodes is "idle".'})]
+        if task == "fixed count and state step":
+            return [("task.result", {"detail": "Recovered node inventory.", "result": "Total nodes: 3\nState idle: 2\nState mixed: 1"})]
         return [("task.result", {"detail": "Unknown task", "status": "failed", "error": "unsupported"})]
 
 
@@ -37,6 +41,34 @@ class _ValidatorAdapter:
     def handle(self, event_name, payload):
         if event_name != "validation.request":
             return []
+        if payload.get("validation_scope") == "step":
+            if payload.get("step_task") == "bad count step":
+                return [
+                    (
+                        "validation.result",
+                        {
+                            "valid": False,
+                            "verdict": "invalid",
+                            "reason": "The step returned only state text and missed the requested count.",
+                            "retry_recommended": True,
+                            "missing_requirements": ["count"],
+                            "trace": ["Checked step output against the step task.", "Detected missing count evidence."],
+                        },
+                    )
+                ]
+            return [
+                (
+                    "validation.result",
+                    {
+                        "valid": True,
+                        "verdict": "valid",
+                        "reason": "The step output satisfies the step intent.",
+                        "retry_recommended": False,
+                        "missing_requirements": [],
+                        "trace": ["Checked step output against the step task.", "Detected complete fulfillment."],
+                    },
+                )
+            ]
         if payload.get("task") == "uncertain goal":
             return [
                 (
@@ -48,6 +80,25 @@ class _ValidatorAdapter:
                         "retry_recommended": False,
                         "missing_requirements": ["narrower target"],
                         "trace": ["Validation could not determine whether the result satisfies the request."],
+                    },
+                )
+            ]
+        task_text = str(payload.get("task") or "").lower()
+        result = payload.get("result")
+        result_text = str(result)
+        if (
+            ("how many" in task_text and "state" in task_text) or "node inventory" in task_text
+        ) and "total nodes:" in result_text.lower() and "state " in result_text.lower():
+            return [
+                (
+                    "validation.result",
+                    {
+                        "valid": True,
+                        "verdict": "valid",
+                        "reason": "Recovered attempt now satisfies the combined count/state request.",
+                        "retry_recommended": False,
+                        "missing_requirements": [],
+                        "trace": ["Checked the option output against the original task.", "Detected both count and state information."],
                     },
                 )
             ]
@@ -98,6 +149,24 @@ class _FallbackPlannerAdapter:
     def handle(self, event_name, payload):
         if event_name != "planner.replan.request":
             return []
+        if payload.get("step_id") == "step1":
+            return [
+                (
+                    "planner.replan.result",
+                    {
+                        "replace_step_id": "step1",
+                        "reason": "Use a repaired node inventory step.",
+                        "steps": [
+                            {
+                                "id": "step1_1",
+                                "target_agent": "executor",
+                                "task": "fixed count and state step",
+                                "instruction": {"operation": "run_command", "command": "fixed"},
+                            }
+                        ],
+                    },
+                )
+            ]
         return [
             (
                 "planner.replan.result",
@@ -399,7 +468,11 @@ class EngineValidationTests(unittest.TestCase):
         self.assertIn("retrying", stages)
         self.assertIn("passed", stages)
 
-        validation_requests = [payload for event_name, payload in _RecorderAdapter.events if event_name == "validation.request"]
+        validation_requests = [
+            payload
+            for event_name, payload in _RecorderAdapter.events
+            if event_name == "validation.request" and payload.get("validation_scope") != "step"
+        ]
         self.assertEqual(validation_requests[0]["task_shape"], "lookup")
         self.assertEqual(
             validation_requests[0]["steps"],
@@ -467,6 +540,49 @@ class EngineValidationTests(unittest.TestCase):
         workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
         self.assertEqual(len(workflow_events), 1)
         self.assertEqual(workflow_events[0]["status"], "failed")
+
+    def test_engine_replans_step_when_completed_output_diverges_from_step_intent(self):
+        engine = Engine(TEST_SPEC)
+        engine.setup()
+        engine.emit(
+            "task.plan",
+            {
+                "task": "show cluster node inventory",
+                "task_shape": "lookup",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "target_agent": "executor",
+                        "task": "bad count step",
+                        "instruction": {"operation": "run_command", "command": "bad"},
+                    }
+                ],
+            },
+        )
+        workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
+        self.assertEqual(len(workflow_events), 1)
+        workflow = workflow_events[0]
+        self.assertEqual(workflow["status"], "completed")
+        self.assertEqual(workflow["result"], "Total nodes: 3\nState idle: 2\nState mixed: 1")
+        self.assertEqual(workflow["steps"][0]["id"], "step1")
+        self.assertEqual(workflow["steps"][0]["steps"][0]["task"], "fixed count and state step")
+
+        replan_requests = [
+            payload
+            for event_name, payload in _RecorderAdapter.events
+            if event_name == "planner.replan.request" and payload.get("step_id") == "step1"
+        ]
+        self.assertEqual(len(replan_requests), 1)
+        self.assertEqual(replan_requests[0]["failure_class"], "validation_failed")
+
+        step_validation_requests = [
+            payload
+            for event_name, payload in _RecorderAdapter.events
+            if event_name == "validation.request" and payload.get("validation_scope") == "step"
+        ]
+        self.assertEqual(len(step_validation_requests), 2)
+        self.assertEqual(step_validation_requests[0]["step_task"], "bad count step")
+        self.assertEqual(step_validation_requests[1]["step_task"], "fixed count and state step")
 
 
 if __name__ == "__main__":

@@ -25,8 +25,10 @@ class Engine:
     DEFAULT_WORKFLOW_LIMITS = {
         "max_attempts": 3,
         "max_replans": 1,
+        "max_step_replans": 1,
         "max_uncertain_attempts": 1,
         "max_validation_llm_calls": 1,
+        "max_step_validation_llm_calls": 1,
     }
     DEFAULT_EXECUTION_POLICY = {
         "allow_python_package_installs": True,
@@ -363,7 +365,7 @@ class Engine:
     def _select_subscribers(self, event_name: str, payload: dict):
         subscribers = self.bus.get_subscribers(event_name)
         target_agent = payload.get("target_agent") if isinstance(payload, dict) else None
-        if isinstance(target_agent, str) and target_agent:
+        if event_name == "task.plan" and isinstance(target_agent, str) and target_agent:
             subscribers = [agent_name for agent_name in subscribers if agent_name == target_agent]
         return subscribers
 
@@ -803,6 +805,88 @@ class Engine:
             "steps": steps,
         }
 
+    def _structured_count_like(self, value: Any) -> bool:
+        if self._looks_like_scalar(value):
+            return True
+        if isinstance(value, str):
+            compact = value.strip().lower()
+            return bool(re.search(r"\d", compact)) and any(token in compact for token in ("count", "total", "matching"))
+        if isinstance(value, list) and len(value) == 1:
+            row = value[0]
+            if isinstance(row, dict):
+                numeric_values = [item for item in row.values() if self._looks_like_scalar(item)]
+                return len(numeric_values) == 1
+        if isinstance(value, dict):
+            for key in ("count", "total", "matching_jobs", "jobs_considered", "total_nodes"):
+                if key in value and self._looks_like_scalar(value.get(key)):
+                    return True
+            rows = value.get("rows")
+            if self._structured_count_like(rows):
+                return True
+            nested = value.get("result")
+            if nested is not None and nested is not value and self._structured_count_like(nested):
+                return True
+            reduced = value.get("reduced_result") or value.get("refined_answer")
+            if isinstance(reduced, str):
+                reduced_lower = reduced.lower()
+                return bool(re.search(r"\d", reduced_lower)) and any(token in reduced_lower for token in ("count", "total", "matching"))
+        return False
+
+    def _contains_state_evidence(self, value: Any) -> bool:
+        try:
+            text = json.dumps(value, ensure_ascii=True, default=str).lower()
+        except TypeError:
+            text = str(value).lower()
+        return any(
+            token in text
+            for token in (
+                "state",
+                "status",
+                "idle",
+                "mixed",
+                "allocated",
+                "running",
+                "pending",
+                "failed",
+                "completed",
+                "down",
+                "drain",
+            )
+        )
+
+    def _task_requires_count_and_state(self, task_text: str) -> bool:
+        text = str(task_text or "").lower()
+        return any(token in text for token in ("how many", "count ", "number of", "total ")) and any(
+            token in text for token in (" state", " states", "status", "breakdown")
+        )
+
+    def _infer_task_shape(self, task_text: str, fallback_shape: str, primary_event: str | None = None) -> str:
+        text = str(task_text or "").strip().lower()
+        inherited_shape = str(fallback_shape or "").strip().lower()
+        if any(token in text for token in ("save ", "write ", "create ")) and any(
+            token in text for token in (" file", " path", ".txt", ".csv", ".json", ".md")
+        ):
+            return "save_artifact"
+        if any(token in text for token in ("how many", "count ", "number of", "total ")) or text.startswith("count "):
+            return "count"
+        if any(token in text for token in ("whether", "check whether", "if any", "is there", "exists", "does ", "do any", "has ")) and not any(
+            token in text for token in ("list ", "show ", "display ")
+        ):
+            return "boolean_check"
+        if any(token in text for token in ("schema", "schemas", "columns", "column ", "relationship", "relationships", "foreign key")):
+            return "schema_summary"
+        if any(token in text for token in ("compare", "difference", "versus", " vs ")):
+            return "compare"
+        if any(token in text for token in ("summarize", "summary", "overview")):
+            return "summarize_dataset"
+        if any(token in text for token in ("list ", "show ", "find ", "which ", "sample rows", "display ")):
+            return "list"
+        if inherited_shape:
+            return inherited_shape
+        if primary_event == "shell.result":
+            return "command_execution"
+        return "lookup"
+
     def _default_validation_result(
         self,
         workflow_payload: dict,
@@ -815,10 +899,32 @@ class Engine:
         status = workflow.get("status")
         error = workflow.get("error")
         result = workflow.get("result")
-        task_shape = str(workflow_payload.get("task_shape") or "").strip().lower() or "lookup"
+        task_text = str(workflow_payload.get("task") or "").strip()
+        task_shape = self._infer_task_shape(task_text, str(workflow_payload.get("task_shape") or ""))
         completed = status == "completed"
         prior_results = self._prior_step_results(context)
         shape_assessment = self._assess_task_shape_result(task_shape, result, prior_results)
+        if self._task_requires_count_and_state(task_text):
+            has_count = self._structured_count_like(result)
+            has_state = self._contains_state_evidence(result)
+            shape_assessment = {
+                "verdict": "valid" if has_count and has_state else "invalid",
+                "reason": (
+                    "Combined count/state output detected."
+                    if has_count and has_state
+                    else "Count/state task did not include both count and state evidence."
+                ),
+                "missing_requirements": [
+                    requirement
+                    for requirement, present in (("count", has_count), ("state breakdown", has_state))
+                    if not present
+                ],
+                "trace": [
+                    "Detected compound count/state intent from the workflow task.",
+                    f"Count evidence detected: {has_count}.",
+                    f"State evidence detected: {has_state}.",
+                ],
+            }
         valid = completed and shape_assessment["verdict"] == "valid"
         trace = [
             f"Attempt {attempt} of {total_attempts} used option '{option.get('label') or option.get('id') or 'workflow'}'.",
@@ -840,6 +946,127 @@ class Engine:
             "missing_requirements": shape_assessment.get("missing_requirements", []),
             "trace": trace,
         }
+
+    def _infer_step_task_shape(self, step_payload: dict, primary_event: str | None, primary_payload: Any, primary_value: Any) -> str:
+        return self._infer_task_shape(
+            str(step_payload.get("task") or ""),
+            str(step_payload.get("task_shape") or ""),
+            primary_event,
+        )
+
+    def _default_step_validation_result(
+        self,
+        workflow_payload: dict,
+        step_id: str,
+        step_payload: dict,
+        primary_event: str | None,
+        primary_payload: Any,
+        primary_value: Any,
+        context: dict,
+    ) -> dict:
+        task_shape = self._infer_step_task_shape(step_payload, primary_event, primary_payload, primary_value)
+        prior_results = self._prior_step_results(context)
+        shape_assessment = self._assess_task_shape_result(task_shape, primary_value, prior_results)
+        valid = shape_assessment["verdict"] == "valid"
+        trace = [
+            f"Validated step '{step_id}' for task '{step_payload.get('task', '')}'.",
+            f"Inferred step task shape '{task_shape}'.",
+            f"Primary event was '{primary_event or 'unknown'}'.",
+            *shape_assessment["trace"],
+        ]
+        if valid:
+            trace.append("The step output satisfies the inferred step intent.")
+        else:
+            trace.append("The step output did not clearly satisfy the inferred step intent.")
+        return {
+            "valid": valid,
+            "verdict": shape_assessment["verdict"],
+            "reason": "Step output satisfied the step intent." if valid else str(shape_assessment["reason"] or "Step output did not satisfy the step intent."),
+            "retry_recommended": not valid,
+            "missing_requirements": shape_assessment.get("missing_requirements", []),
+            "trace": trace,
+        }
+
+    def _validate_step_attempt(
+        self,
+        workflow_payload: dict,
+        step_id: str,
+        step_payload: dict,
+        primary_event: str | None,
+        primary_payload: Any,
+        primary_value: Any,
+        context: dict,
+        validation_request_index: int,
+        depth: int,
+    ) -> dict:
+        limits = self._workflow_limits(workflow_payload)
+        validation_llm_budget_remaining = max(0, limits["max_step_validation_llm_calls"] - max(0, validation_request_index - 1))
+        step_task_shape = self._infer_step_task_shape(step_payload, primary_event, primary_payload, primary_value)
+        if "validation.request" not in self.spec.get("events", {}):
+            return self._default_step_validation_result(
+                workflow_payload,
+                step_id,
+                step_payload,
+                primary_event,
+                primary_payload,
+                primary_value,
+                context,
+            )
+
+        request_payload = {
+            "validation_scope": "step",
+            "task": workflow_payload.get("task", ""),
+            "original_task": workflow_payload.get("task", ""),
+            "task_shape": step_task_shape,
+            "workflow_status": "completed",
+            "validation_llm_budget_remaining": validation_llm_budget_remaining,
+            "step_id": step_id,
+            "step_task": step_payload.get("task", ""),
+            "step_target_agent": step_payload.get("target_agent", ""),
+            "step_event": primary_event or "",
+            "steps": [
+                {
+                    "id": step_id,
+                    "task": step_payload.get("task", ""),
+                    "status": "completed",
+                    "event": primary_event or "",
+                    "payload": self._compact_event_payload(primary_event or "", primary_payload),
+                }
+            ],
+            "result": self._compact_event_payload(primary_event or "", primary_payload)
+            if isinstance(primary_payload, dict)
+            else self._compact_value(primary_value, text_limit=240, row_limit=5),
+            "step_value": self._compact_value(primary_value, text_limit=240, row_limit=5),
+            "available_context": {
+                key: self._compact_value(value, text_limit=180, row_limit=3)
+                for key, value in context.items()
+                if key != "original_task" and not key.endswith(".event")
+            },
+        }
+        contract_name = self.spec["events"]["validation.request"]["contract"]
+        self.contracts.validate_payload(contract_name, request_payload)
+        log_event("validation.request", request_payload, depth + 1)
+        emitted = self._invoke_subscribers("validation.request", request_payload, depth + 1)
+        validation_result = None
+        auxiliary = []
+        for event_name, event_payload in emitted:
+            if event_name == "validation.result":
+                validation_result = event_payload
+            else:
+                auxiliary.append((event_name, event_payload))
+        for event_name, event_payload in auxiliary:
+            self.emit(event_name, event_payload, depth + 1)
+        if not isinstance(validation_result, dict):
+            return self._default_step_validation_result(
+                workflow_payload,
+                step_id,
+                step_payload,
+                primary_event,
+                primary_payload,
+                primary_value,
+                context,
+            )
+        return validation_result
 
     def _looks_like_scalar(self, value: Any) -> bool:
         if isinstance(value, (int, float, bool)):
@@ -880,7 +1107,7 @@ class Engine:
             rows = None
 
         if task_shape == "count":
-            if self._looks_like_scalar(result):
+            if self._structured_count_like(result):
                 return {"verdict": "valid", "reason": "Count-like scalar detected.", "missing_requirements": [], "trace": ["Detected scalar output compatible with a count task."]}
             if isinstance(rows, list) and len(rows) == 1:
                 return {"verdict": "uncertain", "reason": "Single-row structured output may still need local reduction into a scalar count.", "missing_requirements": ["scalar count"], "trace": ["Observed one structured row; count reduction may still be required."]}
@@ -979,7 +1206,7 @@ class Engine:
 
         request_payload = {
             "task": workflow_payload.get("task", ""),
-            "task_shape": workflow_payload.get("task_shape", ""),
+            "task_shape": self._infer_task_shape(str(workflow_payload.get("task") or ""), str(workflow_payload.get("task_shape") or "")),
             "attempt": attempt,
             "total_attempts": total_attempts,
             "option_id": option.get("id"),
@@ -1361,6 +1588,7 @@ class Engine:
         primary_value: Any,
         status: str,
         duration_ms: float,
+        validation_result: dict | None = None,
     ):
         detail = primary_payload.get("detail", "") if isinstance(primary_payload, dict) else ""
         envelope = {
@@ -1376,6 +1604,8 @@ class Engine:
             "duration_ms": duration_ms,
             "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
         }
+        if isinstance(validation_result, dict):
+            envelope["validation"] = self._compact_value(validation_result, text_limit=180, row_limit=3)
         if primary_event == "shell.result" and isinstance(primary_payload, dict):
             envelope["command"] = primary_payload.get("command")
             envelope["returncode"] = primary_payload.get("returncode")
@@ -1470,6 +1700,9 @@ class Engine:
         error: str,
         context: dict,
         depth: int,
+        *,
+        failure_class: str | None = None,
+        validation_result: dict | None = None,
     ):
         if "planner.replan.request" not in self.spec.get("events", {}):
             return None
@@ -1480,7 +1713,8 @@ class Engine:
             "original_task": workflow_payload.get("task", context.get("original_task", "")),
             "target_agent": step_payload.get("target_agent", ""),
             "reason": error,
-            "failure_class": "needs_decomposition" if self._step_requests_replan(primary_event or "", primary_payload) else "execution_failed",
+            "failure_class": failure_class
+            or ("needs_decomposition" if self._step_requests_replan(primary_event or "", primary_payload) else "execution_failed"),
             "event": primary_event or "",
             "available_context": {
                 key: value
@@ -1489,6 +1723,8 @@ class Engine:
             },
             "presentation": workflow_payload.get("presentation", {}),
         }
+        if isinstance(validation_result, dict):
+            replan_payload["validation"] = self._compact_value(validation_result, text_limit=180, row_limit=3)
         if isinstance(primary_payload, dict):
             if primary_payload.get("error"):
                 replan_payload["error"] = primary_payload.get("error")
@@ -1675,8 +1911,11 @@ class Engine:
         records = []
         final_results = []
         final_value = None
+        limits = self._workflow_limits(payload)
         pending = [step for step in steps if isinstance(step, dict)]
         completed_ids: set[str] = set()
+        step_replans: dict[str, int] = {}
+        step_validation_requests = 0
 
         while pending:
             ready_index = next(
@@ -1797,6 +2036,36 @@ class Engine:
                     if isinstance(primary_payload, dict)
                     else None
                 ) or "Step failed."
+                needs_clarification = isinstance(primary_payload, dict) and primary_payload.get("status") == "needs_clarification"
+                if not needs_clarification and step_replans.get(step_id, 0) < limits["max_step_replans"]:
+                    replan_result = self._request_replan(
+                        step_id,
+                        step_payload,
+                        payload,
+                        primary_event,
+                        primary_payload,
+                        error,
+                        context,
+                        depth,
+                    )
+                    replanned_steps = replan_result.get("steps") if isinstance(replan_result, dict) else None
+                    if isinstance(replanned_steps, list) and replanned_steps:
+                        step_replans[step_id] = step_replans.get(step_id, 0) + 1
+                        self._emit_step_progress(
+                            "retrying",
+                            step_id,
+                            step_payload,
+                            depth + 1,
+                            message=error,
+                            event=primary_event,
+                            duration_ms=duration_ms,
+                            result=result_summary,
+                            reason=error,
+                        )
+                        replanned_step = copy.deepcopy(raw_step)
+                        replanned_step["steps"] = replanned_steps
+                        pending.insert(ready_index, replanned_step)
+                        continue
                 self._emit_step_progress(
                     "failed",
                     step_id,
@@ -1854,6 +2123,98 @@ class Engine:
                     "final_results": step_results,
                 }
 
+            step_validation_requests += 1
+            step_validation = self._validate_step_attempt(
+                payload,
+                step_id,
+                step_payload,
+                primary_event,
+                primary_payload,
+                primary_value,
+                context,
+                step_validation_requests,
+                depth,
+            )
+            step_valid = bool(step_validation.get("valid")) or (
+                step_validation.get("verdict") == "uncertain" and not step_validation.get("retry_recommended")
+            )
+            if not step_valid:
+                error = str(step_validation.get("reason") or "Step output diverged from the requested intent.")
+                if step_replans.get(step_id, 0) < limits["max_step_replans"]:
+                    replan_result = self._request_replan(
+                        step_id,
+                        step_payload,
+                        payload,
+                        primary_event,
+                        primary_payload,
+                        error,
+                        context,
+                        depth,
+                        failure_class="validation_failed",
+                        validation_result=step_validation,
+                    )
+                    replanned_steps = replan_result.get("steps") if isinstance(replan_result, dict) else None
+                    if isinstance(replanned_steps, list) and replanned_steps:
+                        step_replans[step_id] = step_replans.get(step_id, 0) + 1
+                        self._emit_step_progress(
+                            "retrying",
+                            step_id,
+                            step_payload,
+                            depth + 1,
+                            message=error,
+                            event=primary_event,
+                            duration_ms=duration_ms,
+                            result=result_summary,
+                            reason=error,
+                            validation=self._compact_value(step_validation, text_limit=180, row_limit=3),
+                        )
+                        replanned_step = copy.deepcopy(raw_step)
+                        replanned_step["steps"] = replanned_steps
+                        pending.insert(ready_index, replanned_step)
+                        continue
+
+                self._emit_step_progress(
+                    "failed",
+                    step_id,
+                    step_payload,
+                    depth + 1,
+                    message=error,
+                    event=primary_event,
+                    duration_ms=duration_ms,
+                    result=result_summary,
+                    error=error,
+                    validation=self._compact_value(step_validation, text_limit=180, row_limit=3),
+                    sql=primary_payload.get("sql") if isinstance(primary_payload, dict) else None,
+                    stdout=primary_payload.get("stdout") if isinstance(primary_payload, dict) else None,
+                    stderr=primary_payload.get("stderr") if isinstance(primary_payload, dict) else None,
+                )
+                records.append(
+                    {
+                        "id": step_id,
+                        "task": step_payload.get("task", ""),
+                        "target_agent": step_payload.get("target_agent"),
+                        "status": "failed",
+                        "event": primary_event,
+                        "duration_ms": duration_ms,
+                        "payload": self._compact_event_payload(primary_event or "", primary_payload),
+                        "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
+                        "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
+                        "validation": self._compact_value(step_validation, text_limit=180, row_limit=3),
+                        "error": error,
+                        "emitted": [
+                            {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
+                            for event_name, event_payload in step_results
+                        ],
+                    }
+                )
+                return {
+                    "status": "failed",
+                    "steps": records,
+                    "result": primary_value,
+                    "error": error,
+                    "final_results": step_results,
+                }
+
             self._emit_step_progress(
                 "completed",
                 step_id,
@@ -1868,6 +2229,7 @@ class Engine:
                 local_reduction_command=primary_payload.get("local_reduction_command") if isinstance(primary_payload, dict) else None,
                 stdout=primary_payload.get("stdout") if isinstance(primary_payload, dict) else None,
                 stderr=primary_payload.get("stderr") if isinstance(primary_payload, dict) else None,
+                validation=self._compact_value(step_validation, text_limit=180, row_limit=3),
             )
             self._record_context_value(context, step_id, primary_event, primary_payload, primary_value)
             self._record_step_result(
@@ -1880,6 +2242,7 @@ class Engine:
                     primary_value,
                     "completed",
                     duration_ms,
+                    validation_result=step_validation,
                 ),
             )
             completed_ids.add(step_id)
@@ -1896,6 +2259,7 @@ class Engine:
                     "payload": self._compact_event_payload(primary_event or "", primary_payload),
                     "result": self._compact_value(primary_value, text_limit=240, row_limit=4),
                     "evidence": self._step_evidence(primary_event, primary_payload, primary_value),
+                    "validation": self._compact_value(step_validation, text_limit=180, row_limit=3),
                     "emitted": [
                         {"event": event_name, "payload": self._compact_event_payload(event_name, event_payload)}
                         for event_name, event_payload in step_results

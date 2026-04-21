@@ -145,6 +145,87 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(payload["valid"])
         self.assertEqual(payload["verdict"], "valid")
 
+    def test_workflow_validation_accepts_combined_count_and_state_output(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "task": "how many nodes are currently in my slurm cluster and what is their state ?",
+                    "task_shape": "lookup",
+                    "workflow_status": "completed",
+                    "result": "Total nodes: 3\nState idle: 2\nState mixed: 1",
+                    "steps": [{"id": "step1", "status": "completed"}],
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+        self.assertFalse(payload["retry_recommended"])
+
+    def test_workflow_validation_accepts_structured_count_output(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "task": "how many rows are in dicom.patients",
+                    "task_shape": "lookup",
+                    "workflow_status": "completed",
+                    "result": {"result": {"rows": [{"count": 100}], "columns": ["count"], "row_count": 1}},
+                    "steps": [{"id": "step1", "status": "completed"}],
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+
+    def test_step_validation_rejects_combined_count_and_state_step_without_count(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "validation_scope": "step",
+                    "task": "how many nodes are currently in my slurm cluster and what is their state ?",
+                    "original_task": "how many nodes are currently in my slurm cluster and what is their state ?",
+                    "step_id": "step1",
+                    "step_task": "how many nodes are currently in my slurm cluster and what is their state ?",
+                    "task_shape": "count",
+                    "workflow_status": "completed",
+                    "step_event": "slurm.result",
+                    "result": {"reduced_result": 'The state of the nodes is either "idle" or "mixed".'},
+                    "step_value": 'The state of the nodes is either "idle" or "mixed".',
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertFalse(payload["valid"])
+        self.assertEqual(payload["verdict"], "invalid")
+        self.assertTrue(payload["retry_recommended"])
+        self.assertIn("count", payload["missing_requirements"])
+
+    def test_step_validation_accepts_structured_single_row_count(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "validation_scope": "step",
+                    "task": "how many rows are in dicom.patients",
+                    "original_task": "how many rows are in dicom.patients",
+                    "step_id": "step1",
+                    "step_task": "how many rows are in dicom.patients",
+                    "task_shape": "count",
+                    "workflow_status": "completed",
+                    "step_event": "sql.result",
+                    "result": {"result": {"rows": [{"count": 100}], "columns": ["count"], "row_count": 1}},
+                    "step_value": {"result": {"rows": [{"count": 100}], "columns": ["count"], "row_count": 1}},
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+
 
 if __name__ == "__main__":
     unittest.main()
