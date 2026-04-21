@@ -150,6 +150,16 @@ Implemented in this change:
 - render a browser UI with run filtering, summary cards, timeline checkpoints, Mermaid export, and an interactive SVG graph view
 - expose the dashboard from the CLI with `python cli.py --serve-runs-ui`
 
+### Phase 10
+
+Implemented in this change:
+
+- add persisted run observability derivation in [runtime/run_observability.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_observability.py)
+- derive and store `observability.json` alongside each persisted run in [runtime/run_store.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_store.py)
+- enrich run summaries and inspections with timing, validation, routing, failure, and per-agent metrics in [runtime/run_inspector.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_inspector.py)
+- expose audit-style run filtering and observability inspection through the CLI and engine helpers in [cli.py](/home/vinith/Desktop/Workspace/openfabric/cli.py) and [runtime/engine.py](/home/vinith/Desktop/Workspace/openfabric/runtime/engine.py)
+- surface observability in the persisted-run browser UI and add observability-aware API endpoints in [runtime/run_visualizer.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_visualizer.py)
+
 ## Current Mapping
 
 Today’s runtime already maps naturally to the target graph:
@@ -180,5 +190,6 @@ The runtime now exposes the following execution chains directly in the graph:
 
 The main remaining architectural gaps before production are:
 
-- add stronger production observability around timings, metrics, and audit queries on top of the persisted run store
 - harden the visualization layer with authentication, multi-user deployment posture, and larger-run pagination/virtualization
+- add exportable metrics backends and long-term audit retention patterns beyond per-run JSON artifacts
+- introduce durable alerting and SLO-oriented thresholds on top of the new observability layer

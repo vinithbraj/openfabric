@@ -41,6 +41,10 @@ def _build_parser():
         help="Show the persisted inspection payload for a run id and exit.",
     )
     mode_group.add_argument(
+        "--show-run-observability",
+        help="Show the persisted observability payload for a run id and exit.",
+    )
+    mode_group.add_argument(
         "--show-run-graph",
         help="Render the persisted workflow graph for a run id and exit.",
     )
@@ -58,6 +62,34 @@ def _build_parser():
         type=int,
         default=20,
         help="Maximum number of runs to show with --list-runs.",
+    )
+    parser.add_argument(
+        "--run-task-contains",
+        help="Optional substring filter applied to the persisted task text for --list-runs.",
+    )
+    parser.add_argument(
+        "--run-agent",
+        help="Optional agent filter applied to persisted run observability for --list-runs.",
+    )
+    parser.add_argument(
+        "--run-has-errors",
+        action="store_true",
+        help="Show only runs with recorded execution or validation failures when using --list-runs.",
+    )
+    parser.add_argument(
+        "--run-min-duration-ms",
+        type=float,
+        help="Minimum wall-clock duration in milliseconds for --list-runs.",
+    )
+    parser.add_argument(
+        "--run-max-duration-ms",
+        type=float,
+        help="Maximum wall-clock duration in milliseconds for --list-runs.",
+    )
+    parser.add_argument(
+        "--run-slow-step-ms",
+        type=float,
+        help="Only show runs with at least one step at or above this duration for --list-runs.",
     )
     parser.add_argument(
         "--graph-format",
@@ -91,6 +123,15 @@ def _format_run_summary(summary):
     task = str(summary.get("task") or "").strip()
     if task:
         parts.append(f"task={task}")
+    duration_ms = summary.get("wall_clock_duration_ms")
+    if duration_ms is not None:
+        parts.append(f"duration_ms={duration_ms}")
+    error_count = summary.get("error_count")
+    if error_count is not None:
+        parts.append(f"errors={error_count}")
+    agents = summary.get("agents")
+    if isinstance(agents, list) and agents:
+        parts.append(f"agents={','.join(str(item) for item in agents[:4])}")
     active_step_id = summary.get("active_step_id")
     if active_step_id:
         parts.append(f"active_step={active_step_id}")
@@ -103,7 +144,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        if args.list_runs or args.show_run or args.show_run_graph or args.serve_runs_ui:
+        if args.list_runs or args.show_run or args.show_run_observability or args.show_run_graph or args.serve_runs_ui:
             if args.serve_runs_ui:
                 from runtime.run_visualizer import serve_run_visualizer
 
@@ -111,7 +152,16 @@ def main():
                 return
             store = RunStore()
             if args.list_runs:
-                for summary in store.list_runs(limit=args.run_limit, status=args.run_status):
+                for summary in store.list_runs(
+                    limit=args.run_limit,
+                    status=args.run_status,
+                    task_contains=args.run_task_contains,
+                    agent=args.run_agent,
+                    has_errors=True if args.run_has_errors else None,
+                    min_duration_ms=args.run_min_duration_ms,
+                    max_duration_ms=args.run_max_duration_ms,
+                    slow_step_ms=args.run_slow_step_ms,
+                ):
                     print(_format_run_summary(summary))
                 return
             if args.show_run:
@@ -119,6 +169,15 @@ def main():
                 if not isinstance(inspection, dict):
                     raise ValueError(f"Run '{args.show_run}' was not found.")
                 print(json.dumps(inspection, ensure_ascii=True, indent=2, sort_keys=True))
+                return
+            if args.show_run_observability:
+                observability = store.load_observability(args.show_run_observability)
+                if not isinstance(observability, dict):
+                    inspection = store.inspect(args.show_run_observability, include_timeline=True)
+                    if not isinstance(inspection, dict) or not isinstance(inspection.get("observability"), dict):
+                        raise ValueError(f"Run '{args.show_run_observability}' was not found.")
+                    observability = inspection["observability"]
+                print(json.dumps(observability, ensure_ascii=True, indent=2, sort_keys=True))
                 return
             inspection = store.inspect(args.show_run_graph, include_timeline=False)
             if not isinstance(inspection, dict):
@@ -141,7 +200,7 @@ def main():
             return
 
         if not args.spec_path:
-            parser.error("spec_path is required unless you are using --list-runs, --show-run, --show-run-graph, or --serve-runs-ui")
+            parser.error("spec_path is required unless you are using --list-runs, --show-run, --show-run-observability, --show-run-graph, or --serve-runs-ui")
 
         spec = load_spec(args.spec_path, selected_agents=args.selected_agents)
         validate_semantics(spec)

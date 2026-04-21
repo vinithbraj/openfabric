@@ -345,14 +345,45 @@ class Engine:
         payload["resume_run_id"] = run_id
         self._execute_task_plan(payload, depth)
 
-    def list_runs(self, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
-        return self.run_store.list_runs(limit=limit, status=status)
+    def list_runs(
+        self,
+        limit: int = 20,
+        status: str | None = None,
+        *,
+        task_contains: str | None = None,
+        agent: str | None = None,
+        has_errors: bool | None = None,
+        min_duration_ms: float | None = None,
+        max_duration_ms: float | None = None,
+        slow_step_ms: float | None = None,
+        resumable: bool | None = None,
+        replayable: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.run_store.list_runs(
+            limit=limit,
+            status=status,
+            task_contains=task_contains,
+            agent=agent,
+            has_errors=has_errors,
+            min_duration_ms=min_duration_ms,
+            max_duration_ms=max_duration_ms,
+            slow_step_ms=slow_step_ms,
+            resumable=resumable,
+            replayable=replayable,
+        )
 
     def inspect_run(self, run_id: str, *, include_timeline: bool = True) -> dict[str, Any]:
         inspection = self.run_store.inspect(run_id, include_timeline=include_timeline)
         if not isinstance(inspection, dict):
             raise ValueError(f"Cannot inspect run '{run_id}': persisted state was not found.")
         return inspection
+
+    def inspect_run_observability(self, run_id: str) -> dict[str, Any]:
+        inspection = self.inspect_run(run_id, include_timeline=True)
+        observability = inspection.get("observability")
+        if not isinstance(observability, dict):
+            raise ValueError(f"Cannot inspect observability for run '{run_id}': payload was not found.")
+        return copy.deepcopy(observability)
 
     def render_run_graph(self, run_id: str, *, format: str = "mermaid") -> str | dict[str, Any]:
         inspection = self.inspect_run(run_id, include_timeline=False)

@@ -205,7 +205,10 @@ Useful inspection commands:
 ```bash
 python cli.py --list-runs
 python cli.py --list-runs --run-status completed
+python cli.py --list-runs --run-agent executor --run-has-errors
+python cli.py --list-runs --run-task-contains fallback --run-min-duration-ms 10
 python cli.py --show-run 20260421T010203Z_abcd1234ef56
+python cli.py --show-run-observability 20260421T010203Z_abcd1234ef56
 python cli.py --show-run-graph 20260421T010203Z_abcd1234ef56
 python cli.py --show-run-graph 20260421T010203Z_abcd1234ef56 --graph-format json
 python cli.py --serve-runs-ui
@@ -217,10 +220,11 @@ Each persisted run directory now includes:
 - `state.json`: the latest durable runtime state
 - `timeline.jsonl`: checkpoint-by-checkpoint stage history
 - `summary.json`: compact inspection summary
+- `observability.json`: timing, validation, routing, failure, and agent metrics
 - `graph.json`: persisted workflow execution graph
 - `graph.mmd`: Mermaid flowchart rendering of the workflow graph
 
-The browser UI serves a run list, summary cards, timeline checkpoints, Mermaid text, and an interactive SVG graph renderer over the persisted workflow graph.
+The browser UI serves a run list, summary cards, timing/error observability, timeline checkpoints, Mermaid text, and an interactive SVG graph renderer over the persisted workflow graph.
 
 ## LLM Configuration
 

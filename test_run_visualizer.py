@@ -63,6 +63,7 @@ from runtime.run_visualizer import (
     build_run_visualization_payload,
     list_run_visualizations,
     load_run_graph_payload,
+    load_run_observability_payload,
     load_run_visualization,
     render_run_visualizer_html,
 )
@@ -160,6 +161,7 @@ class RunVisualizerTests(unittest.TestCase):
         self.assertEqual(visualization["run_id"], run_id)
         self.assertIn("graph_view", visualization)
         self.assertIn("timeline", visualization)
+        self.assertIn("observability", visualization)
 
         graph_json = load_run_graph_payload(store, run_id, format="json")
         self.assertEqual(graph_json["run_id"], run_id)
@@ -167,6 +169,9 @@ class RunVisualizerTests(unittest.TestCase):
         self.assertIn("nodes", graph_view)
         graph_mermaid = load_run_graph_payload(store, run_id, format="mermaid")
         self.assertIn("flowchart TD", graph_mermaid)
+        observability = load_run_observability_payload(store, run_id)
+        self.assertEqual(observability["run_id"], run_id)
+        self.assertIn("timings", observability)
 
     def test_render_run_visualizer_html_contains_dashboard_shell(self):
         html = render_run_visualizer_html(base_dir="/tmp/openfabric_runs")

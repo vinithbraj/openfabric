@@ -231,6 +231,9 @@ def build_run_visualization_payload(inspection: dict[str, Any]) -> dict[str, Any
         "run_id": str(inspection.get("run_id") or ""),
         "summary": copy.deepcopy(inspection.get("summary")) if isinstance(inspection.get("summary"), dict) else {},
         "state": copy.deepcopy(inspection.get("state")) if isinstance(inspection.get("state"), dict) else {},
+        "observability": copy.deepcopy(inspection.get("observability"))
+        if isinstance(inspection.get("observability"), dict)
+        else {},
         "graph": copy.deepcopy(graph),
         "graph_view": build_graph_view_model(graph),
         "graph_mermaid": str(inspection.get("graph_mermaid") or ""),
@@ -243,8 +246,23 @@ def list_run_visualizations(
     *,
     limit: int = 50,
     status: str | None = None,
+    task_contains: str | None = None,
+    agent: str | None = None,
+    has_errors: bool | None = None,
+    min_duration_ms: float | None = None,
+    max_duration_ms: float | None = None,
+    slow_step_ms: float | None = None,
 ) -> dict[str, Any]:
-    runs = run_store.list_runs(limit=limit, status=status)
+    runs = run_store.list_runs(
+        limit=limit,
+        status=status,
+        task_contains=task_contains,
+        agent=agent,
+        has_errors=has_errors,
+        min_duration_ms=min_duration_ms,
+        max_duration_ms=max_duration_ms,
+        slow_step_ms=slow_step_ms,
+    )
     return {
         "schema_version": VISUALIZER_SCHEMA_VERSION,
         "count": len(runs),
@@ -272,6 +290,11 @@ def load_run_graph_payload(run_store: RunStore, run_id: str, *, format: str = "v
     if target_format == "view":
         return visualization["graph_view"]
     raise ValueError(f"Unsupported graph format '{format}'.")
+
+
+def load_run_observability_payload(run_store: RunStore, run_id: str) -> dict[str, Any]:
+    visualization = load_run_visualization(run_store, run_id)
+    return copy.deepcopy(visualization.get("observability") or {})
 
 
 def render_run_visualizer_html(*, base_dir: str = "") -> str:
@@ -710,6 +733,11 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
           <option value="failed">failed</option>
           <option value="needs_clarification">needs_clarification</option>
         </select>
+        <input id="run-agent" type="search" placeholder="Filter by agent name" />
+        <select id="run-errors">
+          <option value="">Any error state</option>
+          <option value="true">Errors only</option>
+        </select>
       </div>
       <div id="run-list" class="run-list">
         <div class="loading">Loading persisted runs...</div>
@@ -809,6 +837,15 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       return `${{safe}} ${{suffix}}`;
     }}
 
+    function formatDuration(value) {{
+      if (value == null || value === '' || Number.isNaN(Number(value))) {{
+        return 'n/a';
+      }}
+      const ms = Number(value);
+      if (ms < 1000) return `${{ms.toFixed(2)}} ms`;
+      return `${{(ms / 1000).toFixed(2)}} s`;
+    }}
+
     function escapeHtml(value) {{
       return String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -827,9 +864,13 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
 
     async function loadRuns() {{
       const status = document.getElementById('run-status').value;
+      const agent = document.getElementById('run-agent').value.trim();
+      const hasErrors = document.getElementById('run-errors').value;
       const query = new URLSearchParams();
       query.set('limit', '150');
       if (status) query.set('status', status);
+      if (agent) query.set('agent', agent);
+      if (hasErrors) query.set('has_errors', hasErrors);
       const payload = await fetchJson(`/api/runs?${{query.toString()}}`);
       state.runs = Array.isArray(payload.runs) ? payload.runs : [];
       applyRunFilter();
@@ -898,17 +939,23 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       const payload = state.selectedVisualization;
       if (!payload) return;
       const summary = payload.summary || {{}};
+      const observability = payload.observability || {{}};
       document.getElementById('hero-title').textContent = summary.task || payload.run_id || 'Persisted run';
       document.getElementById('hero-subtitle').textContent =
         `Run ${payload.run_id} | last stage: ${summary.last_stage || 'unknown'} | selected option: ${summary.selected_option_id || 'n/a'}`;
       document.getElementById('hero-status').textContent = summary.status || 'unknown';
-      renderSummary(summary);
+      renderSummary(summary, observability);
       renderGraph(payload.graph_view || {{ nodes: [], edges: [] }});
       renderTimeline(payload.timeline || []);
       document.getElementById('mermaid-detail').textContent = payload.graph_mermaid || 'No Mermaid diagram stored.';
     }}
 
-    function renderSummary(summary) {{
+    function renderSummary(summary, observability) {{
+      const agents = Array.isArray(summary.agents) ? summary.agents : [];
+      const slowestSteps = Array.isArray(observability.slowest_steps) ? observability.slowest_steps : [];
+      const validationCounts = observability.validation_counts || {{}};
+      const stepValidationCount =
+        Number(summary.step_validation_count || 0) + Number(summary.workflow_validation_count || 0);
       const cards = [
         {{
           label: 'Status',
@@ -924,6 +971,28 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
           label: 'Graph',
           value: `${summary.graph_node_count || 0} nodes`,
           detail: `${summary.graph_edge_count || 0} edges`,
+        }},
+        {{
+          label: 'Timing',
+          value: formatDuration(summary.wall_clock_duration_ms),
+          detail: slowestSteps.length
+            ? `Slowest step: ${slowestSteps[0].step_id} at ${formatDuration(slowestSteps[0].duration_ms)}`
+            : `Step total: ${formatDuration(summary.step_total_duration_ms)}`,
+        }},
+        {{
+          label: 'Errors',
+          value: String(summary.error_count || 0),
+          detail: summary.has_errors ? 'Run recorded failures or invalid attempts.' : 'No recorded failures.',
+        }},
+        {{
+          label: 'Validation',
+          value: String(stepValidationCount || 0),
+          detail: `Workflow: ${validationCounts.workflow ? JSON.stringify(validationCounts.workflow) : '{}'} | Step: ${validationCounts.step ? JSON.stringify(validationCounts.step) : '{}'}`,
+        }},
+        {{
+          label: 'Agents',
+          value: String(summary.agent_count || agents.length || 0),
+          detail: agents.length ? agents.join(', ') : 'No agent metrics stored.',
         }},
         {{
           label: 'Recovery',
@@ -1039,6 +1108,8 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
 
     document.getElementById('run-search').addEventListener('input', applyRunFilter);
     document.getElementById('run-status').addEventListener('change', loadRuns);
+    document.getElementById('run-agent').addEventListener('change', loadRuns);
+    document.getElementById('run-errors').addEventListener('change', loadRuns);
     loadRuns().catch((error) => {{
       document.getElementById('run-list').innerHTML = `<div class="empty">Failed to load runs: ${escapeHtml(error.message)}</div>`;
     }});
@@ -1061,8 +1132,30 @@ def create_run_visualizer_app(run_store: RunStore | None = None) -> FastAPI:
         return JSONResponse({"status": "ok", "base_dir": str(store.base_dir)})
 
     @app.get("/api/runs")
-    def api_runs(limit: int = 50, status: str = "") -> JSONResponse:
-        payload = list_run_visualizations(store, limit=max(1, min(limit, 500)), status=status or None)
+    def api_runs(
+        limit: int = 50,
+        status: str = "",
+        task_contains: str = "",
+        agent: str = "",
+        has_errors: str = "",
+        min_duration_ms: float | None = None,
+        max_duration_ms: float | None = None,
+        slow_step_ms: float | None = None,
+    ) -> JSONResponse:
+        error_filter = None
+        if str(has_errors).strip().lower() in {"1", "true", "yes", "errors"}:
+            error_filter = True
+        payload = list_run_visualizations(
+            store,
+            limit=max(1, min(limit, 500)),
+            status=status or None,
+            task_contains=task_contains or None,
+            agent=agent or None,
+            has_errors=error_filter,
+            min_duration_ms=min_duration_ms,
+            max_duration_ms=max_duration_ms,
+            slow_step_ms=slow_step_ms,
+        )
         return JSONResponse(payload)
 
     @app.get("/api/runs/{run_id}")
@@ -1083,6 +1176,14 @@ def create_run_visualizer_app(run_store: RunStore | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if isinstance(payload, str):
             return PlainTextResponse(payload)
+        return JSONResponse(payload)
+
+    @app.get("/api/runs/{run_id}/observability")
+    def api_run_observability(run_id: str) -> JSONResponse:
+        try:
+            payload = load_run_observability_payload(store, run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' was not found.") from exc
         return JSONResponse(payload)
 
     return app

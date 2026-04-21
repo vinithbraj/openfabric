@@ -2,6 +2,7 @@ import copy
 from typing import Any
 
 from .graph import build_workflow_graph
+from .run_observability import build_run_observability
 
 
 RUN_INSPECTION_SCHEMA_VERSION = "phase1"
@@ -107,6 +108,7 @@ def build_run_summary(
     *,
     timeline: list[dict[str, Any]] | None = None,
     graph: dict[str, Any] | None = None,
+    observability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(session, dict):
         raise ValueError("Persisted run session must be a dict.")
@@ -118,6 +120,36 @@ def build_run_summary(
         if isinstance(option_id, str) and option_id.strip():
             selected_option_id = option_id.strip()
     graph_stats = graph.get("statistics") if isinstance(graph, dict) and isinstance(graph.get("statistics"), dict) else {}
+    observability_counts = (
+        observability.get("counts")
+        if isinstance(observability, dict) and isinstance(observability.get("counts"), dict)
+        else {}
+    )
+    observability_timings = (
+        observability.get("timings")
+        if isinstance(observability, dict) and isinstance(observability.get("timings"), dict)
+        else {}
+    )
+    observability_audit = (
+        observability.get("audit")
+        if isinstance(observability, dict) and isinstance(observability.get("audit"), dict)
+        else {}
+    )
+    routing_counts = (
+        observability.get("routing_action_counts")
+        if isinstance(observability, dict) and isinstance(observability.get("routing_action_counts"), dict)
+        else {}
+    )
+    validation_counts = (
+        observability.get("validation_counts")
+        if isinstance(observability, dict) and isinstance(observability.get("validation_counts"), dict)
+        else {}
+    )
+    slowest_steps = (
+        observability.get("slowest_steps")
+        if isinstance(observability, dict) and isinstance(observability.get("slowest_steps"), list)
+        else []
+    )
     terminal_payload = session.get("terminal_payload")
     terminal_event = session.get("terminal_event")
     resumable = str(session.get("status") or "").strip() == "running" and not (
@@ -149,6 +181,22 @@ def build_run_summary(
         "graph_available": isinstance(graph, dict),
         "graph_node_count": graph_stats.get("node_count"),
         "graph_edge_count": graph_stats.get("edge_count"),
+        "step_count": observability_counts.get("step_count"),
+        "error_count": observability_counts.get("error_count"),
+        "step_validation_count": observability_counts.get("step_validation_count"),
+        "workflow_validation_count": observability_counts.get("workflow_validation_count"),
+        "wall_clock_duration_ms": observability_timings.get("wall_clock_duration_ms"),
+        "step_total_duration_ms": observability_timings.get("step_total_duration_ms"),
+        "max_step_duration_ms": observability_timings.get("max_step_duration_ms"),
+        "agents": observability_audit.get("agents", []),
+        "agent_count": len(observability_audit.get("agents", []))
+        if isinstance(observability_audit.get("agents"), list)
+        else 0,
+        "has_errors": observability_audit.get("has_errors"),
+        "routing_action_counts": copy.deepcopy(routing_counts) if isinstance(routing_counts, dict) else {},
+        "validation_counts": copy.deepcopy(validation_counts) if isinstance(validation_counts, dict) else {},
+        "slowest_step_id": slowest_steps[0].get("step_id") if slowest_steps else None,
+        "slowest_step_duration_ms": slowest_steps[0].get("duration_ms") if slowest_steps else None,
         "replayable": replayable,
         "resumable": resumable,
     }
@@ -180,12 +228,14 @@ def build_run_inspection(
         raise ValueError("Persisted run session must be a dict.")
     attempts = [item for item in session.get("attempts", []) if isinstance(item, dict)]
     graph = build_persisted_workflow_graph(session)
-    summary = build_run_summary(session, timeline=timeline, graph=graph)
+    observability = build_run_observability(session, timeline=timeline, graph=graph)
+    summary = build_run_summary(session, timeline=timeline, graph=graph, observability=observability)
     return {
         "schema_version": RUN_INSPECTION_SCHEMA_VERSION,
         "run_id": summary["run_id"],
         "summary": summary,
         "state": _state_view(session, attempts),
+        "observability": observability,
         "graph": graph,
         "graph_mermaid": render_workflow_graph_mermaid(graph),
         "timeline": copy.deepcopy(timeline) if isinstance(timeline, list) else [],

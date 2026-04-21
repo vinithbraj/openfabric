@@ -9,6 +9,7 @@ from .run_inspector import (
     build_run_summary,
     render_workflow_graph_mermaid,
 )
+from .run_observability import build_run_observability
 
 
 RUN_STORE_SCHEMA_VERSION = "phase1"
@@ -43,6 +44,9 @@ class RunStore:
 
     def graph_mermaid_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "graph.mmd"
+
+    def observability_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / "observability.json"
 
     def exists(self, run_id: str) -> bool:
         return self.state_path(run_id).exists()
@@ -120,8 +124,26 @@ class RunStore:
             return None
         return path.read_text(encoding="utf-8")
 
-    def list_runs(self, *, limit: int | None = 20, status: str | None = None) -> list[dict[str, Any]]:
+    def load_observability(self, run_id: str) -> dict[str, Any] | None:
+        return self._load_json_dict(self.observability_path(run_id))
+
+    def list_runs(
+        self,
+        *,
+        limit: int | None = 20,
+        status: str | None = None,
+        task_contains: str | None = None,
+        agent: str | None = None,
+        has_errors: bool | None = None,
+        min_duration_ms: float | None = None,
+        max_duration_ms: float | None = None,
+        slow_step_ms: float | None = None,
+        resumable: bool | None = None,
+        replayable: bool | None = None,
+    ) -> list[dict[str, Any]]:
         target_status = str(status or "").strip()
+        task_filter = str(task_contains or "").strip().lower()
+        agent_filter = str(agent or "").strip().lower()
         summaries: list[dict[str, Any]] = []
         for run_dir in sorted(self.base_dir.iterdir(), reverse=True):
             if not run_dir.is_dir():
@@ -135,8 +157,36 @@ class RunStore:
                 graph = self.load_graph(run_dir.name)
                 if not isinstance(graph, dict):
                     graph = build_persisted_workflow_graph(session)
-                summary = build_run_summary(session, timeline=timeline, graph=graph)
+                observability = self.load_observability(run_dir.name)
+                if not isinstance(observability, dict):
+                    observability = build_run_observability(session, timeline=timeline, graph=graph)
+                summary = build_run_summary(session, timeline=timeline, graph=graph, observability=observability)
             if target_status and str(summary.get("status") or "").strip() != target_status:
+                continue
+            if task_filter and task_filter not in str(summary.get("task") or "").strip().lower():
+                continue
+            if agent_filter:
+                agent_list = summary.get("agents")
+                normalized_agents = {
+                    str(item).strip().lower()
+                    for item in (agent_list if isinstance(agent_list, list) else [])
+                    if str(item).strip()
+                }
+                if agent_filter not in normalized_agents:
+                    continue
+            if has_errors is not None and bool(summary.get("has_errors")) is not has_errors:
+                continue
+            wall_clock_duration = self._safe_float(summary.get("wall_clock_duration_ms"))
+            max_step_duration = self._safe_float(summary.get("max_step_duration_ms"))
+            if min_duration_ms is not None and wall_clock_duration < float(min_duration_ms):
+                continue
+            if max_duration_ms is not None and wall_clock_duration > float(max_duration_ms):
+                continue
+            if slow_step_ms is not None and max_step_duration < float(slow_step_ms):
+                continue
+            if resumable is not None and bool(summary.get("resumable")) is not resumable:
+                continue
+            if replayable is not None and bool(summary.get("replayable")) is not replayable:
                 continue
             summaries.append(summary)
 
@@ -157,6 +207,12 @@ class RunStore:
             return None
         timeline = self.load_timeline(run_id) if include_timeline else []
         return build_run_inspection(session, timeline=timeline)
+
+    def _safe_float(self, value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _load_json_dict(self, path: Path) -> dict[str, Any] | None:
         if not path.exists():
@@ -187,7 +243,9 @@ class RunStore:
                 return
             timeline = self.load_timeline(run_id)
             graph = build_persisted_workflow_graph(state)
-            summary = build_run_summary(state, timeline=timeline, graph=graph)
+            observability = build_run_observability(state, timeline=timeline, graph=graph)
+            summary = build_run_summary(state, timeline=timeline, graph=graph, observability=observability)
+            self._write_json(self.observability_path(run_id), observability)
             self._write_json(self.summary_path(run_id), summary)
             self._write_json(self.graph_path(run_id), graph)
             self._write_text(self.graph_mermaid_path(run_id), render_workflow_graph_mermaid(graph))

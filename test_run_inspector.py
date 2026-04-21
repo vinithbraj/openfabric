@@ -86,6 +86,7 @@ class RunInspectorTests(unittest.TestCase):
         summary = store.load_summary(run_id)
         graph = store.load_graph(run_id)
         graph_mermaid = store.load_graph_mermaid(run_id)
+        observability = store.load_observability(run_id)
 
         self.assertIsInstance(summary, dict)
         self.assertEqual(summary["run_id"], run_id)
@@ -100,11 +101,15 @@ class RunInspectorTests(unittest.TestCase):
         self.assertIsInstance(graph_mermaid, str)
         self.assertIn("flowchart TD", graph_mermaid)
         self.assertIn("Replayable workflow", graph_mermaid)
+        self.assertIsInstance(observability, dict)
+        self.assertEqual(observability["run_id"], run_id)
+        self.assertEqual(observability["counts"]["attempt_count"], 1)
 
         inspection = engine.inspect_run(run_id)
         self.assertEqual(inspection["summary"]["run_id"], run_id)
         self.assertEqual(inspection["summary"]["graph_node_count"], graph["statistics"]["node_count"])
         self.assertEqual(inspection["graph"]["run_id"], run_id)
+        self.assertEqual(inspection["observability"]["run_id"], run_id)
 
         mermaid = engine.render_run_graph(run_id, format="mermaid")
         self.assertIn("flowchart TD", mermaid)
@@ -214,9 +219,11 @@ class RunInspectorTests(unittest.TestCase):
         summary_path = store.summary_path(run_id)
         graph_path = store.graph_path(run_id)
         mermaid_path = store.graph_mermaid_path(run_id)
+        observability_path = store.observability_path(run_id)
         self.assertTrue(summary_path.exists())
         self.assertTrue(graph_path.exists())
         self.assertTrue(mermaid_path.exists())
+        self.assertTrue(observability_path.exists())
 
         with summary_path.open("r", encoding="utf-8") as handle:
             summary = json.load(handle)
