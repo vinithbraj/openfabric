@@ -111,11 +111,11 @@ def _gateway_host() -> str:
 
 
 def _gateway_port() -> int:
-    raw = os.getenv("SLURM_GATEWAY_PORT", "8310")
+    raw = os.getenv("SLURM_GATEWAY_PORT", "8312")
     try:
         return int(raw)
     except ValueError:
-        return 8310
+        return 8312
 
 
 def _gateway_scheme() -> str:

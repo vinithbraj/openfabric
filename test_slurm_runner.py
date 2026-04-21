@@ -84,6 +84,10 @@ class SlurmRunnerTests(unittest.TestCase):
         with patch.dict("os.environ", {"SLURM_GATEWAY_HOST": "10.0.0.8", "SLURM_GATEWAY_PORT": "9001"}, clear=False):
             self.assertEqual(_gateway_base_url(), "http://10.0.0.8:9001")
 
+    def test_gateway_base_url_defaults_to_dedicated_slurm_gateway_port(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(_gateway_base_url(), "http://127.0.0.1:8312")
+
     def test_is_slurm_task_new_keywords(self):
         from agent_library.agents.slurm_runner import _is_slurm_task
         self.assertTrue(_is_slurm_task("check gpu availability"))

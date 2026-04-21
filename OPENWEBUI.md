@@ -19,6 +19,9 @@ to:
 http://127.0.0.1:8000/v1
 ```
 
+Slurm-backed requests use a separate Slurm gateway service. Its default bind
+port is `8312` so it does not collide with the Open WebUI gateway on `8310`.
+
 Default model:
 
 ```text

@@ -320,6 +320,38 @@ class EngineValidationTests(unittest.TestCase):
         engine._record_step_result(context, envelope)
         self.assertEqual(engine._resolve_reference_path("step1.rows.0.name", context), "alice")
 
+    def test_recorded_context_aliases_preserve_full_rows_for_followup_references(self):
+        engine = Engine(TEST_SPEC)
+        rows = [{"schema": "flathr", "table": f"table_{index}", "type": "table"} for index in range(6)]
+        payload = {
+            "detail": "Database tables listed.",
+            "sql": "",
+            "result": {
+                "rows": rows,
+                "columns": ["schema", "table", "type"],
+                "row_count": len(rows),
+                "limit": len(rows),
+            },
+        }
+        context = {"__step_results__": [], "__step_results_by_id__": {}}
+
+        engine._record_context_value(context, "step1", "sql.result", payload, payload)
+        envelope = engine._structured_step_result(
+            "step1",
+            {"task": "list tables", "target_agent": "sql_runner_mydb"},
+            "sql.result",
+            payload,
+            payload,
+            "completed",
+            1.0,
+        )
+        engine._record_step_result(context, envelope)
+
+        self.assertEqual(len(context["__step_results_by_id__"]["step1"]["rows"]), 5)
+        self.assertEqual(len(engine._resolve_reference_path("step1.rows", context)), 6)
+        self.assertEqual(engine._resolve_reference_path("step1.rows.5.table", context), "table_5")
+        self.assertEqual(engine._resolve_reference_path("step1.result.rows.5.table", context), "table_5")
+
     def test_compact_event_payload_preserves_shell_output_for_workflow_grounding(self):
         engine = Engine(TEST_SPEC)
         compact = engine._compact_event_payload(

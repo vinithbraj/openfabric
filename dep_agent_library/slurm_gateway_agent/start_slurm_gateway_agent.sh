@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 HOST="${SLURM_GATEWAY_BIND_HOST:-0.0.0.0}"
-PORT="${SLURM_GATEWAY_BIND_PORT:-8310}"
+PORT="${SLURM_GATEWAY_BIND_PORT:-8312}"
 
 if [[ ! -x "${VENV_DIR}/bin/uvicorn" ]]; then
   echo "Missing virtualenv at ${VENV_DIR}. Run install_slurm_gateway_agent.sh first." >&2

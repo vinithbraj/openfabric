@@ -460,21 +460,8 @@ class Engine:
             return {key: self._resolve_templates(item, context) for key, item in value.items()}
         return value
 
-    def _resolve_reference_path(self, path: str, context: dict):
-        if not isinstance(path, str) or not path.strip():
-            return None
-        parts = [part for part in path.split(".") if part]
-        if not parts:
-            return None
-        step_results = context.get("__step_results_by_id__", {})
-        head = parts[0]
-        if isinstance(step_results, dict) and head in step_results:
-            current = step_results[head]
-        elif head in context:
-            current = context[head]
-        else:
-            return None
-        for part in parts[1:]:
+    def _walk_reference_parts(self, current: Any, parts: list[str]):
+        for part in parts:
             if isinstance(current, dict):
                 current = current.get(part)
             elif isinstance(current, list) and part.isdigit():
@@ -486,6 +473,29 @@ class Engine:
             else:
                 return None
         return current
+
+    def _resolve_reference_path(self, path: str, context: dict):
+        if not isinstance(path, str) or not path.strip():
+            return None
+        path = path.strip()
+        if path in context:
+            return context.get(path)
+        parts = [part for part in path.split(".") if part]
+        if not parts:
+            return None
+        for index in range(len(parts) - 1, 0, -1):
+            prefix = ".".join(parts[:index])
+            if prefix in context:
+                return self._walk_reference_parts(context.get(prefix), parts[index:])
+        step_results = context.get("__step_results_by_id__", {})
+        head = parts[0]
+        if isinstance(step_results, dict) and head in step_results:
+            current = step_results[head]
+        elif head in context:
+            current = context[head]
+        else:
+            return None
+        return self._walk_reference_parts(current, parts[1:])
 
     def _resolve_references(self, value: Any, context: dict):
         if isinstance(value, dict):
@@ -1307,9 +1317,34 @@ class Engine:
     def _record_context_value(self, context: dict, step_id: str, primary_event: str, primary_payload: Any, primary_value: Any):
         context["prev"] = primary_value
         context[step_id] = primary_value
+        context[f"{step_id}.value"] = primary_value
         context[f"{step_id}.event"] = primary_event
         context[f"{step_id}.detail"] = primary_payload.get("detail", "") if isinstance(primary_payload, dict) else ""
-        context[f"{step_id}.result"] = primary_payload.get("result", primary_value) if isinstance(primary_payload, dict) else primary_value
+        if not isinstance(primary_payload, dict):
+            context[f"{step_id}.result"] = primary_value
+            return
+
+        result = primary_payload.get("result", primary_value)
+        context[f"{step_id}.result"] = result
+        for key in (
+            "stdout",
+            "stderr",
+            "sql",
+            "command",
+            "returncode",
+            "schema",
+            "stats",
+            "reduced_result",
+            "refined_answer",
+            "local_reduction_command",
+            "error",
+            "status",
+        ):
+            if key in primary_payload:
+                context[f"{step_id}.{key}"] = primary_payload.get(key)
+        if isinstance(result, dict):
+            for key, value in result.items():
+                context.setdefault(f"{step_id}.{key}", value)
 
     def _merge_child_context(self, context: dict, child_context: dict):
         for key, value in child_context.items():

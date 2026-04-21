@@ -51,7 +51,7 @@ arguments:
         description: "Slurm scheduler agent that talks to a remote Slurm gateway."
         env:
           SLURM_GATEWAY_HOST: "${SLURM_GATEWAY_HOST:-127.0.0.1}"
-          SLURM_GATEWAY_PORT: "${SLURM_GATEWAY_PORT:-8310}"
+          SLURM_GATEWAY_PORT: "${SLURM_GATEWAY_PORT:-8312}"
           SLURM_GATEWAY_SCHEME: "${SLURM_GATEWAY_SCHEME:-http}"
         metadata:
           cluster_name: "default"
