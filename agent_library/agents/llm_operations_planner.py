@@ -447,6 +447,8 @@ def _infer_task_shape(question: str, *, target_agent: str | None = None, present
         return "save_artifact"
     if _planner_is_schema_request(text):
         return "schema_summary"
+    if _looks_like_slurm_elapsed_summary_question(text):
+        return "lookup"
     if _looks_like_mixed_count_and_detail_request(text):
         return "list" if fmt == "markdown_table" or family == "sql_runner" else "lookup"
     if len(compound_parts) > 1 and (count_part_count > 1 or (count_part_count and boolean_part_count)):
@@ -1103,6 +1105,29 @@ def _looks_like_slurm_question(question: str) -> bool:
             "scancel",
             "hpc",
         }
+    )
+
+
+def _looks_like_slurm_elapsed_summary_question(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    if not any(token in text for token in ("slurm", "sacct", "job", "jobs", "partition", "cluster", "scheduler")):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "how long",
+            "took to complete",
+            "take to complete",
+            "total elapsed",
+            "elapsed time",
+            "duration",
+            "average time",
+            "avg time",
+            "mean time",
+            "median time",
+            "longest",
+            "shortest",
+        )
     )
 
 
@@ -1809,7 +1834,10 @@ def _derive_presentation(question: str) -> dict:
         and any(token in question_lc for token in ("list", "show"))
         and "table" not in question_lc
     )
-    if docker_listing_request:
+    if _looks_like_slurm_elapsed_summary_question(question_lc):
+        presentation["format"] = "markdown"
+        presentation["task"] = "Report the computed Slurm timing summary clearly in Markdown."
+    elif docker_listing_request:
         presentation["format"] = "markdown"
         presentation["task"] = "Show the raw Docker command output clearly in a preformatted block."
     elif any(token in question_lc for token in ("table", "tabulate", "columns", "rows", "compare", "comparison", "status", "list")):
@@ -2713,6 +2741,9 @@ def _normalize_presentation(question: str, presentation: dict | None):
         and normalized.get("format") == "markdown_table"
     ):
         normalized["task"] = "Show grounded SQL results in a clean Markdown table."
+    if _looks_like_slurm_elapsed_summary_question(question):
+        normalized["format"] = "markdown"
+        normalized["task"] = "Report the computed Slurm timing summary clearly in Markdown."
     if docker_listing_request:
         normalized["format"] = "markdown"
         normalized["task"] = "Show the raw Docker command output clearly in a preformatted block."

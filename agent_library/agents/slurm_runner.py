@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -245,6 +246,62 @@ def _llm_api_settings() -> tuple[str, str, float, str]:
     return shared_llm_api_settings("gpt-4o-mini", timeout_seconds=_llm_timeout_seconds())
 
 
+def _extract_partition_name(task: str) -> str:
+    text = str(task or "").strip()
+    patterns = (
+        r"\bin\s+['\"]?([A-Za-z0-9._-]+)['\"]?\s+partition\b",
+        r"\bfor\s+['\"]?([A-Za-z0-9._-]+)['\"]?\s+partition\b",
+        r"\bpartition\s+named\s+['\"]?([A-Za-z0-9._-]+)['\"]?\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _looks_like_elapsed_summary_task(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if "sacct" not in text and not any(token in text for token in ("slurm", "job", "jobs", "partition")):
+        return False
+    duration_markers = (
+        "how long",
+        "took to complete",
+        "take to complete",
+        "total time",
+        "total elapsed",
+        "elapsed time",
+        "duration",
+        "average time",
+        "avg time",
+        "mean time",
+        "longest",
+        "shortest",
+    )
+    return any(marker in text for marker in duration_markers)
+
+
+def _deterministic_slurm_command(task: str) -> dict[str, Any] | None:
+    if not _looks_like_elapsed_summary_task(task):
+        return None
+    args = ["-X", "-P", "--format=JobID,JobName,State,Elapsed,End"]
+    partition = _extract_partition_name(task)
+    if partition:
+        args.append(f"--partition={partition}")
+    task_lc = str(task or "").lower()
+    if any(token in task_lc for token in ("complete", "completed")):
+        args.append("--state=COMPLETED")
+    elif "failed" in task_lc:
+        args.append("--state=FAILED")
+    elif "cancel" in task_lc:
+        args.append("--state=CANCELLED")
+    return {
+        "command": "sacct",
+        "args": args,
+        "reason": "Using deterministic sacct accounting query for an elapsed-time summary request.",
+    }
+
+
 def _is_usage_error(stderr: str) -> bool:
     if not isinstance(stderr, str):
         return False
@@ -365,6 +422,9 @@ def _get_slurm_context() -> dict[str, Any]:
 
 
 def _llm_slurm_command(task: str) -> dict[str, Any]:
+    deterministic = _deterministic_slurm_command(task)
+    if deterministic is not None:
+        return deterministic
     api_key, base_url, timeout_seconds, model = _llm_api_settings()
 
     context = _get_slurm_context()
@@ -574,7 +634,143 @@ def _llm_generate_local_command(
         return ""
 
 
+def _deterministic_elapsed_reducer_command(task: str) -> str:
+    task_lc = str(task or "").lower()
+    completed_only = any(token in task_lc for token in ("complete", "completed"))
+    state_filter = "COMPLETED" if completed_only else ""
+    script = f"""
+import sys
+
+STATE_FILTER = {state_filter!r}
+
+def parse_elapsed(value: str):
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.lower() in {{"unknown", "n/a", "partition_limit", "infinite", "unlimited"}}:
+        return None
+    days = 0
+    if "-" in text:
+        day_text, text = text.split("-", 1)
+        try:
+            days = int(day_text)
+        except ValueError:
+            return None
+    parts = text.split(":")
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError:
+        return None
+    if len(numbers) == 3:
+        hours, minutes, seconds = numbers
+    elif len(numbers) == 2:
+        hours, minutes, seconds = 0, numbers[0], numbers[1]
+    elif len(numbers) == 1:
+        hours, minutes, seconds = 0, 0, numbers[0]
+    else:
+        return None
+    return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
+
+def format_elapsed(total_seconds: int) -> str:
+    total_seconds = int(total_seconds)
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if days:
+        return f"{{days}}-{{hours:02d}}:{{minutes:02d}}:{{seconds:02d}}"
+    return f"{{hours:02d}}:{{minutes:02d}}:{{seconds:02d}}"
+
+text = sys.stdin.read()
+lines = [line for line in text.splitlines() if line.strip()]
+if not lines:
+    print("No Slurm job records were returned.")
+    raise SystemExit(0)
+
+header = lines[0].split("|")
+header_map = {{name.strip().lower(): index for index, name in enumerate(header)}}
+elapsed_index = header_map.get("elapsed")
+state_index = header_map.get("state")
+job_id_index = header_map.get("jobid")
+job_name_index = header_map.get("jobname")
+if elapsed_index is None:
+    print("Could not find an Elapsed column in the Slurm output.")
+    raise SystemExit(0)
+
+total_seconds = 0
+count = 0
+skipped = 0
+longest = None
+shortest = None
+for line in lines[1:]:
+    cols = line.split("|")
+    if elapsed_index >= len(cols):
+        skipped += 1
+        continue
+    state = cols[state_index].strip().upper() if state_index is not None and state_index < len(cols) else ""
+    if STATE_FILTER and state != STATE_FILTER:
+        continue
+    seconds = parse_elapsed(cols[elapsed_index])
+    if seconds is None:
+        skipped += 1
+        continue
+    total_seconds += seconds
+    count += 1
+    job_id = cols[job_id_index].strip() if job_id_index is not None and job_id_index < len(cols) else ""
+    job_name = cols[job_name_index].strip() if job_name_index is not None and job_name_index < len(cols) else ""
+    record = (seconds, job_id, job_name)
+    if longest is None or seconds > longest[0]:
+        longest = record
+    if shortest is None or seconds < shortest[0]:
+        shortest = record
+
+if count == 0:
+    if STATE_FILTER:
+        print(f"No matching Slurm jobs were found for state {{STATE_FILTER}}.")
+    else:
+        print("No matching Slurm jobs were found.")
+    raise SystemExit(0)
+
+average_seconds = total_seconds // count
+lines_out = [
+    f"Jobs considered: {{count}}",
+    f"Total elapsed time: {{format_elapsed(total_seconds)}}",
+    f"Average elapsed time: {{format_elapsed(average_seconds)}}",
+]
+if longest is not None:
+    lines_out.append(f"Longest elapsed job: {{longest[1] or longest[2] or 'unknown'}} ({{format_elapsed(longest[0])}})")
+if shortest is not None:
+    lines_out.append(f"Shortest elapsed job: {{shortest[1] or shortest[2] or 'unknown'}} ({{format_elapsed(shortest[0])}})")
+if skipped:
+    lines_out.append(f"Skipped rows without parseable elapsed values: {{skipped}}")
+print("\\n".join(lines_out))
+""".strip()
+    return f"python3 -c {shlex.quote(script)}"
+
+
+def _deterministic_reduce_slurm_result(task: str, command: str, stdout: str) -> tuple[str, str]:
+    if not _looks_like_elapsed_summary_task(task):
+        return "", ""
+    if not isinstance(stdout, str) or "Elapsed" not in stdout or "|" not in stdout:
+        return "", ""
+    full_command_lc = str(command or "").lower()
+    if "sacct" not in full_command_lc:
+        return "", ""
+    reduction = run_local_reducer_loop(
+        stdout,
+        lambda previous_command, previous_error: _deterministic_elapsed_reducer_command(task),
+        max_attempts=1,
+        validate_output=lambda output: bool(output.strip()),
+    )
+    if reduction.succeeded:
+        return reduction.output, reduction.command
+    return "", ""
+
+
 def _llm_process_result(task: str, command: str, stdout: str, stderr: str) -> tuple[str, str]:
+    deterministic_answer, deterministic_command = _deterministic_reduce_slurm_result(task, command, stdout)
+    if deterministic_answer:
+        return deterministic_answer, deterministic_command
+
     try:
         api_key, base_url, timeout_seconds, model = _llm_api_settings()
     except Exception as exc:
