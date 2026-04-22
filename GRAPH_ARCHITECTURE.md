@@ -160,6 +160,16 @@ Implemented in this change:
 - expose audit-style run filtering and observability inspection through the CLI and engine helpers in [cli.py](/home/vinith/Desktop/Workspace/openfabric/cli.py) and [runtime/engine.py](/home/vinith/Desktop/Workspace/openfabric/runtime/engine.py)
 - surface observability in the persisted-run browser UI and add observability-aware API endpoints in [runtime/run_visualizer.py](/home/vinith/Desktop/Workspace/openfabric/runtime/run_visualizer.py)
 
+### Phase 11
+
+Implemented in this change:
+
+- add strict `Agent Contract V1` foundation models in [agent_library/contracts.py](/home/vinith/Desktop/Workspace/openfabric/agent_library/contracts.py)
+- add reusable agent descriptor and response helpers in [agent_library/template.py](/home/vinith/Desktop/Workspace/openfabric/agent_library/template.py)
+- normalize legacy `AGENT_METADATA.methods` into contract-level `apis` during runtime capability discovery in [runtime/engine.py](/home/vinith/Desktop/Workspace/openfabric/runtime/engine.py)
+- project normalized `apis` plus shared request/result schemas into the capability graph in [runtime/graph.py](/home/vinith/Desktop/Workspace/openfabric/runtime/graph.py)
+- document the new builder contract in [AGENT_CONTRACT_V1.md](/home/vinith/Desktop/Workspace/openfabric/AGENT_CONTRACT_V1.md)
+
 ## Current Mapping
 
 Today’s runtime already maps naturally to the target graph:

@@ -65,6 +65,16 @@ def _debug_log(message: str):
         log_debug("LLM_OPS_DEBUG", message)
 
 
+def _agent_api_specs(agent: dict) -> list[dict]:
+    api_list = agent.get("apis")
+    if isinstance(api_list, list):
+        return [item for item in api_list if isinstance(item, dict)]
+    method_list = agent.get("methods")
+    if isinstance(method_list, list):
+        return [item for item in method_list if isinstance(item, dict)]
+    return []
+
+
 def _format_discovered_agents(capabilities: dict) -> str:
     lines = []
     for item in capabilities.get("agents", []):
@@ -77,15 +87,11 @@ def _format_discovered_agents(capabilities: dict) -> str:
         domain_text = ", ".join(entry for entry in domains if isinstance(entry, str)) if isinstance(domains, list) else ""
         verb_text = ", ".join(entry for entry in verbs if isinstance(entry, str)) if isinstance(verbs, list) else ""
         methods = []
-        method_list = item.get("methods", [])
-        if isinstance(method_list, list):
-            for method in method_list:
-                if not isinstance(method, dict):
-                    continue
-                method_name = method.get("name")
-                method_event = method.get("event")
-                if isinstance(method_name, str) and isinstance(method_event, str):
-                    methods.append(f"{method_name} emits event {method_event}")
+        for method in _agent_api_specs(item):
+            method_name = method.get("name")
+            method_event = method.get("event")
+            if isinstance(method_name, str) and isinstance(method_event, str):
+                methods.append(f"{method_name} emits event {method_event}")
         method_text = ", ".join(methods) if methods else "none"
         metadata = []
         database_name = item.get("database_name")
@@ -848,19 +854,12 @@ def _agent_search_blob(agent: Dict[str, Any]) -> str:
             parts.append(value)
         elif isinstance(value, list):
             parts.append(" ".join(entry for entry in value if isinstance(entry, str)))
-    methods = agent.get("methods", [])
-    if isinstance(methods, list):
-        for method in methods:
-            if not isinstance(method, dict):
-                continue
-            parts.extend(
-                str(method.get(key, ""))
-                for key in ("name", "event", "when")
-            )
-            for list_key in ("intent_tags", "examples", "anti_patterns"):
-                values = method.get(list_key, [])
-                if isinstance(values, list):
-                    parts.append(" ".join(entry for entry in values if isinstance(entry, str)))
+    for method in _agent_api_specs(agent):
+        parts.extend(str(method.get(key, "")) for key in ("name", "event", "when", "summary"))
+        for list_key in ("intent_tags", "examples", "anti_patterns"):
+            values = method.get(list_key, [])
+            if isinstance(values, list):
+                parts.append(" ".join(entry for entry in values if isinstance(entry, str)))
     return " ".join(part for part in parts if part)
 
 

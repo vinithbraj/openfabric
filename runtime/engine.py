@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from agent_library.contracts import normalize_agent_metadata
+
 from .console import log_boot, log_event, log_event_handler
 from .contracts import ContractRegistry
 from .event_bus import EventBus
@@ -115,7 +117,7 @@ class Engine:
         catalog = []
         for agent_name, config in self.spec["agents"].items():
             runtime_cfg = config.get("runtime", {})
-            metadata = self._load_agent_metadata(runtime_cfg)
+            metadata = self._load_agent_metadata(agent_name, runtime_cfg)
             config_metadata = config.get("metadata", {})
             if isinstance(config_metadata, dict):
                 for key, value in config_metadata.items():
@@ -131,6 +133,7 @@ class Engine:
                 "name": agent_name,
                 "description": metadata.get("description", config.get("description", "")),
                 "methods": metadata.get("methods", config.get("methods", [])),
+                "apis": metadata.get("apis", metadata.get("methods", config.get("methods", []))),
                 "routing_notes": metadata.get("routing_notes", []),
                 "adapter": runtime_cfg.get("adapter"),
                 "endpoint": runtime_cfg.get("endpoint"),
@@ -145,7 +148,7 @@ class Engine:
             catalog.append(entry)
         return catalog
 
-    def _load_agent_metadata(self, runtime_cfg: dict):
+    def _load_agent_metadata(self, agent_name: str, runtime_cfg: dict):
         autostart_cfg = runtime_cfg.get("autostart", {})
         app_ref = autostart_cfg.get("app")
         if not isinstance(app_ref, str) or ":" not in app_ref:
@@ -157,72 +160,16 @@ class Engine:
         except Exception:
             return {}
 
-        raw = getattr(module, "AGENT_METADATA", None)
-        if not isinstance(raw, dict):
+        raw = getattr(module, "AGENT_DESCRIPTOR", None)
+        if raw is None:
+            raw = getattr(module, "AGENT_METADATA", None)
+        if raw is None:
             return {}
 
-        def _sanitize_metadata_value(value: Any):
-            if isinstance(value, (str, bool, int, float)):
-                return value
-            if isinstance(value, list):
-                sanitized = [item for item in value if isinstance(item, (str, bool, int, float))]
-                return sanitized if sanitized else None
-            if isinstance(value, dict):
-                sanitized = {}
-                for key, item in value.items():
-                    if not isinstance(key, str):
-                        continue
-                    nested = _sanitize_metadata_value(item)
-                    if nested is not None:
-                        sanitized[key] = nested
-                return sanitized if sanitized else None
-            return None
-
-        metadata = {}
-        description = raw.get("description")
-        if isinstance(description, str):
-            metadata["description"] = description
-
-        routing_notes = raw.get("routing_notes")
-        if isinstance(routing_notes, list):
-            safe_notes = [item for item in routing_notes if isinstance(item, str)]
-            if safe_notes:
-                metadata["routing_notes"] = safe_notes
-
-        methods = raw.get("methods")
-        if isinstance(methods, list):
-            valid_methods = []
-            for method in methods:
-                if not isinstance(method, dict):
-                    continue
-                name = method.get("name")
-                event = method.get("event")
-                when = method.get("when")
-                if not isinstance(name, str) or not isinstance(event, str):
-                    continue
-                entry = {"name": name, "event": event}
-                if isinstance(when, str):
-                    entry["when"] = when
-                for key, value in method.items():
-                    if key in {"name", "event", "when"}:
-                        continue
-                    if isinstance(value, str):
-                        entry[key] = value
-                    elif isinstance(value, list):
-                        safe_list = [item for item in value if isinstance(item, str)]
-                        if safe_list:
-                            entry[key] = safe_list
-                valid_methods.append(entry)
-            metadata["methods"] = valid_methods
-
-        for key, value in raw.items():
-            if key in {"description", "routing_notes", "methods"}:
-                continue
-            sanitized = _sanitize_metadata_value(value)
-            if sanitized is not None:
-                metadata[key] = sanitized
-
-        return metadata
+        try:
+            return normalize_agent_metadata(agent_name, raw)
+        except Exception:
+            return {}
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

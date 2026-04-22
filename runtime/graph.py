@@ -94,15 +94,18 @@ def infer_agent_graph_role(
     return "executor"
 
 
-def _method_api(method: dict[str, Any]) -> dict[str, Any]:
+def _api_spec(method: dict[str, Any]) -> dict[str, Any]:
     api = {
         "name": str(method.get("name") or "").strip(),
         "event": str(method.get("event") or "").strip(),
     }
+    summary = method.get("summary")
     when = method.get("when")
+    if isinstance(summary, str) and summary.strip():
+        api["summary"] = summary.strip()
     if isinstance(when, str) and when.strip():
         api["when"] = when.strip()
-    for key in ("intent_tags", "examples", "risk_level", "anti_patterns"):
+    for key in ("intent_tags", "examples", "risk_level", "anti_patterns", "side_effect_level"):
         value = method.get(key)
         if isinstance(value, list):
             safe_values = [item for item in value if isinstance(item, str) and item.strip()]
@@ -110,6 +113,12 @@ def _method_api(method: dict[str, Any]) -> dict[str, Any]:
                 api[key] = safe_values
         elif isinstance(value, str) and value.strip():
             api[key] = value.strip()
+    if isinstance(method.get("deterministic"), bool):
+        api["deterministic"] = method.get("deterministic")
+    for key in ("input_schema", "output_schema"):
+        value = method.get(key)
+        if isinstance(value, dict) and value:
+            api[key] = _compact_value(value, text_limit=180, row_limit=3)
     return api
 
 
@@ -122,7 +131,7 @@ def build_agent_graph_node(
     subscribes_to = config.get("subscribes_to", [])
     emits = config.get("emits", [])
     runtime_cfg = config.get("runtime", {})
-    methods = metadata.get("methods", config.get("methods", []))
+    methods = metadata.get("apis", metadata.get("methods", config.get("methods", [])))
     role = infer_agent_graph_role(agent_name, subscribes_to, emits, metadata)
 
     graph_node = {
@@ -139,13 +148,26 @@ def build_agent_graph_node(
         "capabilities": {
             "domains": [item for item in metadata.get("capability_domains", []) if isinstance(item, str)],
             "verbs": [item for item in metadata.get("action_verbs", []) if isinstance(item, str)],
-            "apis": [_method_api(item) for item in methods if isinstance(item, dict)],
+            "apis": [_api_spec(item) for item in methods if isinstance(item, dict)],
         },
         "runtime": {
             "adapter": runtime_cfg.get("adapter"),
             "endpoint": runtime_cfg.get("endpoint"),
         },
     }
+
+    contract = {}
+    contract_version = metadata.get("contract_version")
+    if isinstance(contract_version, str) and contract_version.strip():
+        contract["version"] = contract_version.strip()
+    request_schema = metadata.get("request_schema")
+    if isinstance(request_schema, dict) and request_schema:
+        contract["request_schema"] = _compact_value(request_schema, text_limit=180, row_limit=3)
+    result_schema = metadata.get("result_schema")
+    if isinstance(result_schema, dict) and result_schema:
+        contract["result_schema"] = _compact_value(result_schema, text_limit=180, row_limit=3)
+    if contract:
+        graph_node["contract"] = contract
 
     for key in (
         "execution_model",

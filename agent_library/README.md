@@ -66,11 +66,27 @@ Agents can expose richer `AGENT_METADATA` keys to improve planner matching:
 
 These fields are published in `system.capabilities` and consumed by `llm_operations_planner`.
 
+Agent Contract V1
+
+New agents should prefer the normalized descriptor contract in
+[AGENT_CONTRACT_V1.md](/home/vinith/Desktop/Workspace/openfabric/AGENT_CONTRACT_V1.md).
+
+Use:
+
+- `agent_library/contracts.py` for the strict descriptor and shared envelope models
+- `agent_library/template.py` for descriptor builders and common response helpers
+
+Runtime currently supports both:
+
+- legacy `AGENT_METADATA.methods`
+- normalized `AGENT_DESCRIPTOR.apis`
+
 Reuse pattern
 
 1. Add a new agent module under `agent_library/agents/`.
-2. Implement `/handle` returning `{"emits": [...]}`.
-3. Reference the app in spec with:
+2. Export `AGENT_DESCRIPTOR` and optionally `AGENT_METADATA = AGENT_DESCRIPTOR`.
+3. Implement `/handle` returning `{"emits": [...]}`.
+4. Reference the app in spec with:
 
 ```yaml
 runtime:

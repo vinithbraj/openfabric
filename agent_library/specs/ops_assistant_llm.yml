@@ -642,6 +642,10 @@ contracts:
           properties:
             name:
               type: string
+            contract_version:
+              type: string
+            role:
+              type: string
             description:
               type: string
             methods:
@@ -656,6 +660,24 @@ contracts:
                     type: string
                   when:
                     type: string
+            apis:
+              type: array
+              items:
+                type: object
+                required: [name, event]
+                properties:
+                  name:
+                    type: string
+                  event:
+                    type: string
+                  summary:
+                    type: string
+                  when:
+                    type: string
+                  input_schema:
+                    type: object
+                  output_schema:
+                    type: object
             adapter:
               type: string
             endpoint:
@@ -664,6 +686,10 @@ contracts:
               type: array
             emits:
               type: array
+            request_schema:
+              type: object
+            result_schema:
+              type: object
       execution_policy:
         type: object
       graph:
