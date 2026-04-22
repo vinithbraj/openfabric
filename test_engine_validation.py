@@ -797,6 +797,44 @@ class EngineValidationTests(unittest.TestCase):
         self.assertIn("postgres_db", compact["stdout"])
         self.assertIn("postgres_db", compact["stdout_excerpt"])
 
+    def test_extract_result_value_uses_shell_detail_when_stdout_capture_is_empty(self):
+        engine = Engine(TEST_SPEC)
+        value = engine._extract_result_value(
+            "shell.result",
+            {
+                "command": "conda env remove -n vinith -y",
+                "stdout": "",
+                "stderr": "EnvironmentLocationNotFound: Not a conda environment: /home/vinith/miniconda3/envs/vinith",
+                "returncode": 0,
+                "detail": "Conda environment `vinith` was already absent.",
+                "normalized_result": "Conda environment `vinith` was already absent.",
+            },
+            {
+                "instruction": {
+                    "capture": {"mode": "stdout_stripped"},
+                }
+            },
+        )
+        self.assertEqual(value, "Conda environment `vinith` was already absent.")
+
+    def test_infer_task_shape_treats_confirm_removed_as_boolean_check(self):
+        engine = Engine(TEST_SPEC)
+        shape = engine._infer_task_shape(
+            "confirm the conda environment named vinith was removed",
+            "list",
+            "shell.result",
+        )
+        self.assertEqual(shape, "boolean_check")
+
+    def test_boolean_check_accepts_structured_exists_payload(self):
+        engine = Engine(TEST_SPEC)
+        assessment = engine._assess_task_shape_result(
+            "boolean_check",
+            {"exists": False, "name": "vinith"},
+            [],
+        )
+        self.assertEqual(assessment["verdict"], "valid")
+
     def test_engine_derives_fallback_only_after_validator_rejects_primary_attempt(self):
         engine = Engine(TEST_SPEC)
         engine.setup()

@@ -153,6 +153,23 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(payload["valid"])
         self.assertEqual(payload["verdict"], "valid")
 
+    def test_validation_accepts_structured_exists_payload_for_boolean_check(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "task": "confirm the conda environment named vinith was removed",
+                    "task_shape": "boolean_check",
+                    "workflow_status": "completed",
+                    "result": {"exists": False, "name": "vinith"},
+                    "steps": [{"id": "step1", "status": "completed"}],
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+
     def test_workflow_validation_accepts_combined_count_and_state_output(self):
         response = handle_event(
             types.SimpleNamespace(
@@ -227,6 +244,28 @@ class ValidatorTests(unittest.TestCase):
                     "step_event": "sql.result",
                     "result": {"result": {"rows": [{"count": 100}], "columns": ["count"], "row_count": 1}},
                     "step_value": {"result": {"rows": [{"count": 100}], "columns": ["count"], "row_count": 1}},
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+
+    def test_step_validation_infers_confirm_removed_as_boolean_check(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "validation_scope": "step",
+                    "task": "remove conda environment named vinith, then confirm it was removed",
+                    "original_task": "remove conda environment named vinith, then confirm it was removed",
+                    "step_id": "step2",
+                    "step_task": "confirm the conda environment named vinith was removed",
+                    "task_shape": "list",
+                    "workflow_status": "completed",
+                    "step_event": "shell.result",
+                    "result": {"exists": False, "name": "vinith"},
+                    "step_value": {"exists": False, "name": "vinith"},
                 },
             )
         )

@@ -17,6 +17,13 @@ AGENT_DESCRIPTOR = agent_descriptor(
     side_effect_policy="allow_non_destructive_side_effects",
     safety_enforced_by_agent=True,
     routing_notes=["Use for explicit notify/alert/remind intents."],
+    planning_hints={
+        "keywords": ["notify", "notification", "alert", "remind", "reminder", "message me", "ping me"],
+        "anti_keywords": ["database", "sql", "slurm", "docker", "file search"],
+        "preferred_task_shapes": ["lookup", "command_execution"],
+        "instruction_operations": ["send_notification"],
+        "routing_priority": 20,
+    },
     apis=[
         agent_api(
             name="send_notification",
@@ -28,6 +35,10 @@ AGENT_DESCRIPTOR = agent_descriptor(
             examples=["notify me when done", "send alert deployment finished"],
             deterministic=True,
             side_effect_level="non_destructive_write",
+            planning_hints={
+                "keywords": ["notify", "alert", "remind", "send message"],
+                "instruction_operations": ["send_notification"],
+            },
             input_schema={
                 "type": "object",
                 "properties": {

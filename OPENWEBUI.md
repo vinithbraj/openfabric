@@ -3,6 +3,11 @@
 This repo exposes the OpenFabric planner stack through an OpenAI-compatible
 gateway so Open WebUI can be used as the chat interface.
 
+If you want a built-in standalone browser client instead, see
+[`CODEX_UI.md`](CODEX_UI.md). The standalone UI uses the same `/v1` API
+surface as Open WebUI. A runtime config panel is also available at `/config`
+on the gateway host.
+
 ## Start
 
 Keep vLLM running on port `8000`, then start the gateway:

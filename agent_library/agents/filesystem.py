@@ -20,6 +20,13 @@ AGENT_DESCRIPTOR = agent_descriptor(
         "Use only for opening or reading a specific file path.",
         "Do not use for search/discovery tasks like find, locate, or list files.",
     ],
+    planning_hints={
+        "keywords": ["read file", "open file", "show file", "cat file", "path", "filepath"],
+        "anti_keywords": ["find files", "search repo", "list files", "grep", "count files"],
+        "preferred_task_shapes": ["lookup", "command_execution"],
+        "instruction_operations": ["read_file"],
+        "routing_priority": 18,
+    },
     apis=[
         agent_api(
             name="read_workspace_file",
@@ -32,6 +39,10 @@ AGENT_DESCRIPTOR = agent_descriptor(
             anti_patterns=["find files named vinith", "list all files containing foo"],
             deterministic=True,
             side_effect_level="read_only",
+            planning_hints={
+                "keywords": ["read", "open", "show", "cat", "filepath"],
+                "instruction_operations": ["read_file"],
+            },
             input_schema={
                 "type": "object",
                 "properties": {

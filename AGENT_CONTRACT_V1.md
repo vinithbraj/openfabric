@@ -51,6 +51,11 @@ AGENT_DESCRIPTOR = agent_descriptor(
             side_effect_level="read_only",
         )
     ],
+    planning_hints={
+        "keywords": ["example", "sample"],
+        "preferred_task_shapes": ["lookup"],
+        "instruction_operations": ["do_example_work"],
+    },
 )
 
 AGENT_METADATA = AGENT_DESCRIPTOR
@@ -61,6 +66,30 @@ Use `trigger_event` to describe what input event activates the API.
 Use `emits` to describe what output events the API may publish.
 
 `event` still works as a legacy alias for `trigger_event`, but new agents should use the explicit form.
+
+## Planning Hints
+
+New agents should expose `planning_hints` in the descriptor, and optionally per API.
+
+These hints are how the planner becomes less hardcoded over time.
+
+Recommended descriptor-level fields:
+
+- `keywords`
+- `anti_keywords`
+- `preferred_task_shapes`
+- `instruction_operations`
+- `structured_followup`
+- `native_count_preferred`
+- `routing_priority`
+
+Recommended API-level fields:
+
+- `instruction_operations`
+- `keywords`
+- `preferred_task_shapes`
+
+These hints are advisory, not executable. They tell the planner when the agent is a good fit and which instruction operations it should prefer when building `task.plan` steps.
 
 ## Shared Request Envelope
 

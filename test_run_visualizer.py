@@ -218,6 +218,7 @@ class RunVisualizerTests(unittest.TestCase):
         self.assertIn("download-run-json", html)
         self.assertIn("download-graph-json", html)
         self.assertIn("download-mermaid", html)
+        self.assertIn("flowchart TD\\n", html)
         self.assertIn("/tmp/openfabric_runs", html)
 
     def test_graph_endpoint_disables_response_model_generation(self):

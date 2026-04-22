@@ -35,8 +35,10 @@ class AgentContractTests(unittest.TestCase):
                     output_schema={"type": "object", "properties": {"ok": {"type": "boolean"}}},
                     deterministic=True,
                     side_effect_level="read_only",
+                    planning_hints={"instruction_operations": ["do_example_work"]},
                 )
             ],
+            planning_hints={"keywords": ["example"], "preferred_task_shapes": ["lookup"]},
         )
 
         self.assertEqual(descriptor["contract_version"], AGENT_CONTRACT_VERSION)
@@ -48,6 +50,8 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(descriptor["methods"][0]["trigger_event"], "task.plan")
         self.assertEqual(descriptor["request_contract"], SHARED_REQUEST_CONTRACT_NAME)
         self.assertEqual(descriptor["result_contract"], SHARED_RESULT_CONTRACT_NAME)
+        self.assertEqual(descriptor["planning_hints"]["keywords"], ["example"])
+        self.assertEqual(descriptor["apis"][0]["planning_hints"]["instruction_operations"], ["do_example_work"])
         self.assertIn("request_schema", descriptor)
         self.assertIn("result_schema", descriptor)
 

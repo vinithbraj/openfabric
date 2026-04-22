@@ -54,6 +54,7 @@ from agent_library.agents.llm_operations_planner import (
     _normalize_task_shape,
     _parse_decision,
     _compound_fallback_steps,
+    _conda_env_removal_steps,
     _normalize_followup_shell_instruction,
     _normalize_steps,
     _select_target_agent,
@@ -182,6 +183,126 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertIn("repository root", steps[2]["task"].lower())
         self.assertIn("wc -l", steps[2]["instruction"]["command"])
 
+    def test_split_compound_request_shared_verb_docker_inventory(self):
+        parts = _split_compound_request("list all docker containers and docke r images on this machines")
+        self.assertEqual(
+            parts,
+            [
+                "list all docker containers on this machine",
+                "list docker images on this machine",
+            ],
+        )
+
+    def test_compound_fallback_steps_expand_shared_verb_docker_inventory(self):
+        steps = _compound_fallback_steps(
+            "list all docker containers and docke r images on this machines",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 2)
+        self.assertEqual([step["target_agent"] for step in steps], ["shell_runner", "shell_runner"])
+        self.assertEqual(steps[0]["instruction"]["command"], "docker ps -a")
+        self.assertEqual(steps[1]["instruction"]["command"], "docker images")
+
+    def test_split_compound_request_expands_shared_verb_before_presentation_clause(self):
+        parts = _split_compound_request(
+            "Count all docker containers and docker images on this machine, then report both counts and the difference."
+        )
+        self.assertEqual(
+            parts,
+            [
+                "Count all docker containers on this machine",
+                "Count docker images on this machine",
+                "report both counts and the difference",
+            ],
+        )
+
+    def test_fallback_steps_return_same_family_shell_compound_steps(self):
+        steps = _fallback_steps(
+            "list all docker containers and docke r images on this machines",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 2)
+        self.assertEqual([step["target_agent"] for step in steps], ["shell_runner", "shell_runner"])
+        self.assertEqual(steps[0]["instruction"]["command"], "docker ps -a")
+        self.assertEqual(steps[1]["instruction"]["command"], "docker images")
+
+    def test_conda_removal_workflow_expands_remove_confirm_and_final_list(self):
+        steps = _conda_env_removal_steps(
+            "remove conda environment named vinith, use -y and confirm it was removed, give me a final list of all env"
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual([step["target_agent"] for step in steps], ["shell_runner", "shell_runner", "shell_runner"])
+        self.assertEqual(steps[0]["instruction"]["command"], "conda env remove -n vinith -y")
+        self.assertEqual(steps[0]["instruction"]["capture"]["mode"], "stdout_stripped")
+        self.assertIn('"exists"', steps[1]["instruction"]["command"])
+        self.assertEqual(steps[1]["instruction"]["capture"]["mode"], "json")
+        self.assertEqual(steps[1]["depends_on"], ["step1"])
+        self.assertEqual(steps[2]["instruction"]["command"], "conda env list")
+        self.assertEqual(steps[2]["depends_on"], ["step2"])
+
+    def test_fallback_steps_prefer_conda_removal_workflow_for_compound_remove_request(self):
+        steps = _fallback_steps(
+            "remove conda environment named vinith, use -y and confirm it was removed, give me a final list of all env",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(steps[0]["instruction"]["command"], "conda env remove -n vinith -y")
+        self.assertEqual(steps[1]["instruction"]["capture"]["mode"], "json")
+        self.assertEqual(steps[2]["instruction"]["command"], "conda env list")
+
+    def test_fallback_steps_handle_missing_leading_r_in_remove(self):
+        steps = _fallback_steps(
+            "emove conda environment named vinith, use -y and confirm it was removed, give me a final list of all env",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(steps[0]["instruction"]["command"], "conda env remove -n vinith -y")
+
+    def test_build_primary_plan_repairs_single_step_conda_removal_collapse(self):
+        question = "emove conda environment named vinith, use -y and confirm it was removed, give me a final list of all env"
+        decision = {
+            "steps": [
+                {
+                    "id": "step1",
+                    "target_agent": "shell_runner",
+                    "task": question,
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": "conda env remove -n vinith -y && conda env list",
+                    },
+                }
+            ]
+        }
+        steps = _build_primary_plan(question, decision, CAPABILITIES)
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(steps[0]["instruction"]["command"], "conda env remove -n vinith -y")
+        self.assertEqual(steps[1]["instruction"]["capture"]["mode"], "json")
+        self.assertEqual(steps[2]["instruction"]["command"], "conda env list")
+
+    def test_compound_fallback_steps_expand_git_branch_and_clean_state(self):
+        steps = _compound_fallback_steps(
+            "Show the current git branch and whether the working tree is clean.",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 2)
+        self.assertEqual([step["target_agent"] for step in steps], ["shell_runner", "shell_runner"])
+        self.assertEqual(steps[0]["instruction"]["command"], "git branch --show-current")
+        self.assertIn("git diff --quiet", steps[1]["instruction"]["command"])
+
+    def test_compound_fallback_steps_expand_shared_scope_python_difference(self):
+        steps = _compound_fallback_steps(
+            "Using the shell, count Python files in the repository root and in agent_library/agents, then report both counts and the difference.",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual([step["target_agent"] for step in steps], ["shell_runner", "shell_runner", "shell_runner"])
+        self.assertEqual(steps[0]["instruction"]["command"], 'find . -maxdepth 1 -type f -name "*.py" | wc -l')
+        self.assertEqual(
+            steps[1]["instruction"]["command"],
+            'find agent_library/agents -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
+        )
+        self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
+
     def test_build_primary_plan_prefers_multi_domain_count_fallback_over_llm_steps(self):
         question = (
             "In the mydb database count the tables in the dicom schema, and in the repository root using the shell "
@@ -277,6 +398,37 @@ class PlannerSemanticValidationTests(unittest.TestCase):
             "python3 -c 'import pathlib\nimport sys\n\npath = pathlib.Path(sys.argv[1])\nneedle = sys.argv[2]\nprint(path.read_text(encoding=\"utf-8\").count(needle))' runtime/engine.py task.plan",
         )
 
+    def test_compound_fallback_steps_add_difference_for_generic_shell_count_pairs(self):
+        steps = _compound_fallback_steps(
+            (
+                "Using the shell, in runtime/engine.py count how many times task.plan appears, and in "
+                "openwebui_gateway.py count how many times PlannerGateway appears. Report both counts and the difference."
+            ),
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(steps[0]["target_agent"], "shell_runner")
+        self.assertEqual(steps[1]["target_agent"], "shell_runner")
+        self.assertEqual(steps[2]["target_agent"], "shell_runner")
+        self.assertIn("runtime/engine.py", steps[0]["instruction"]["command"])
+        self.assertIn("openwebui_gateway.py", steps[1]["instruction"]["command"])
+        self.assertIn("dependency_results", steps[2]["instruction"]["command"])
+        self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
+
+    def test_compound_fallback_steps_expand_line_count_and_markdown_token_difference(self):
+        steps = _compound_fallback_steps(
+            (
+                "Using the shell, how many lines are in VERSION_4_PRIMITIVE_CATALOG.md, and across the Markdown files "
+                "in the repository root how many times does the word graph appear? Report both counts and the difference."
+            ),
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual([step["target_agent"] for step in steps], ["shell_runner", "shell_runner", "shell_runner"])
+        self.assertEqual(steps[0]["instruction"]["command"], "wc -l < VERSION_4_PRIMITIVE_CATALOG.md")
+        self.assertIn("graph", steps[1]["instruction"]["command"])
+        self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
+
     def test_handle_event_short_circuits_deterministic_shell_requests_before_llm(self):
         planner_module.CAPABILITIES["agents"] = copy.deepcopy(CAPABILITIES["agents"])
         planner_module.CAPABILITIES["available_events"] = {"task.plan", "plan.progress", "task.result"}
@@ -302,6 +454,47 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         step = task_plan["payload"]["steps"][0]
         self.assertEqual(step["target_agent"], "shell_runner")
         self.assertIn("PlannerGateway", step["command"])
+
+    def test_handle_event_repairs_invalid_single_step_shared_verb_shell_plan_before_emitting(self):
+        request = types.SimpleNamespace(
+            event="user.ask",
+            payload={"question": "list all docker containers and docke r images on this machines"},
+        )
+
+        original_capabilities = copy.deepcopy(planner_module.CAPABILITIES)
+        planner_module.CAPABILITIES.clear()
+        planner_module.CAPABILITIES.update({"agents": copy.deepcopy(CAPABILITIES["agents"])})
+        try:
+            with patch(
+                "agent_library.agents.llm_operations_planner._llm_decide",
+                return_value={
+                    "processable": True,
+                    "reason": "bad condensed docker plan",
+                    "task_shape": "list",
+                    "steps": [
+                        {
+                            "id": "step1",
+                            "target_agent": "shell_runner",
+                            "task": "list all docker containers on this machine",
+                            "instruction": {
+                                "operation": "run_command",
+                                "command": "docker ps -a",
+                            },
+                        }
+                    ],
+                    "presentation": {"format": "markdown"},
+                },
+            ):
+                response = handle_event(request)
+        finally:
+            planner_module.CAPABILITIES.clear()
+            planner_module.CAPABILITIES.update(original_capabilities)
+
+        task_plan = next(item["payload"] for item in response["emits"] if item["event"] == "task.plan")
+        self.assertEqual(len(task_plan["steps"]), 2)
+        self.assertEqual(task_plan["steps"][0]["target_agent"], "shell_runner")
+        self.assertEqual(task_plan["steps"][0]["instruction"]["command"], "docker ps -a")
+        self.assertEqual(task_plan["steps"][1]["instruction"]["command"], "docker images")
 
     def test_detects_slurm_node_to_job_drift(self):
         self.assertTrue(
@@ -741,12 +934,47 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertIn("cluster_aliases=[slurm, cluster]", formatted)
         self.assertIn("database_name=mydb", formatted)
 
+    def test_format_discovered_agents_includes_planning_hints(self):
+        capabilities = {
+            "agents": [
+                {
+                    "name": "travel_agent",
+                    "description": "Travel planner agent",
+                    "capability_domains": ["travel"],
+                    "action_verbs": ["book", "plan"],
+                    "subscribes_to": ["task.plan"],
+                    "apis": [
+                        {
+                            "name": "plan_trip",
+                            "trigger_event": "task.plan",
+                            "emits": ["task.result"],
+                            "planning_hints": {
+                                "instruction_operations": ["plan_trip"],
+                            },
+                        }
+                    ],
+                    "planning_hints": {
+                        "keywords": ["flight", "hotel", "itinerary"],
+                        "preferred_task_shapes": ["lookup"],
+                        "routing_priority": 15,
+                    },
+                }
+            ]
+        }
+        formatted = _format_discovered_agents(capabilities)
+        self.assertIn("planning_hints[", formatted)
+        self.assertIn("keywords=[flight, hotel, itinerary]", formatted)
+        self.assertIn("instruction_operations=[plan_trip]", formatted)
+
     def test_capability_summary_uses_trigger_and_emit_contract_fields(self):
         capabilities = {
             "agents": [
                 {
                     "name": "planner",
                     "description": "Planner",
+                    "planning_hints": {
+                        "keywords": ["route", "plan"],
+                    },
                     "apis": [
                         {
                             "name": "plan_task",
@@ -754,6 +982,7 @@ class PlannerSemanticValidationTests(unittest.TestCase):
                             "emits": ["task.plan"],
                             "request_contract": "agent_execution_request",
                             "result_contract": "agent_execution_result",
+                            "planning_hints": {"instruction_operations": ["plan_task"]},
                         }
                     ],
                 }
@@ -762,8 +991,10 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         summary = _capability_summary(capabilities)
         self.assertEqual(summary["agents"][0]["trigger_events"], ["user.ask"])
         self.assertEqual(summary["agents"][0]["emits"], ["task.plan"])
+        self.assertEqual(summary["agents"][0]["planning_hints"]["keywords"], ["plan", "route"])
         self.assertEqual(summary["agents"][0]["apis"][0]["trigger_event"], "user.ask")
         self.assertEqual(summary["agents"][0]["apis"][0]["emits"], ["task.plan"])
+        self.assertEqual(summary["agents"][0]["apis"][0]["planning_hints"]["instruction_operations"], ["plan_task"])
 
     def test_infer_task_shape_count(self):
         self.assertEqual(
@@ -782,6 +1013,47 @@ class PlannerSemanticValidationTests(unittest.TestCase):
             _select_target_agent("how many nodes are currently in my slurm cluster and what is their state ?", CAPABILITIES),
             "slurm_runner_cluster",
         )
+
+    def test_select_target_agent_prefers_descriptor_planning_hints_for_custom_agent(self):
+        capabilities = {
+            "agents": [
+                {
+                    "name": "travel_agent",
+                    "description": "Travel planning agent",
+                    "capability_domains": ["travel"],
+                    "action_verbs": ["book", "plan"],
+                    "subscribes_to": ["task.plan"],
+                    "apis": [
+                        {
+                            "name": "plan_trip",
+                            "trigger_event": "task.plan",
+                            "emits": ["task.result"],
+                        }
+                    ],
+                    "planning_hints": {
+                        "keywords": ["flight", "hotel", "airport", "itinerary", "travel"],
+                        "preferred_task_shapes": ["lookup"],
+                        "routing_priority": 25,
+                    },
+                },
+                {
+                    "name": "shell_runner",
+                    "description": "Shell agent",
+                    "subscribes_to": ["task.plan"],
+                    "apis": [
+                        {
+                            "name": "run_command",
+                            "trigger_event": "task.plan",
+                            "emits": ["shell.result"],
+                        }
+                    ],
+                    "planning_hints": {
+                        "keywords": ["docker", "git", "file", "repo"],
+                    },
+                },
+            ]
+        }
+        self.assertEqual(_select_target_agent("book a flight to NYC", capabilities), "travel_agent")
 
     def test_fallback_steps_use_single_slurm_step_for_node_inventory_summary(self):
         steps = _fallback_steps(

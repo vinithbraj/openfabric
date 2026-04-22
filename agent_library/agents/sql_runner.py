@@ -195,6 +195,34 @@ AGENT_DESCRIPTOR = agent_descriptor(
         "Only read-only SQL is executed. Mutating statements are rejected.",
         "For natural-language database questions, this agent now uses deterministic primitives first and only falls back to free-form SQL generation when needed.",
     ],
+    planning_hints={
+        "keywords": [
+            "sql",
+            "database",
+            "db",
+            "schema",
+            "schemas",
+            "table",
+            "tables",
+            "column",
+            "columns",
+            "rows",
+            "query",
+            "queries",
+            "join",
+            "relationship",
+            "relationships",
+            "foreign key",
+            "record",
+            "records",
+        ],
+        "anti_keywords": ["repo file search", "docker", "terminal logs", "slurm queue", "cluster nodes"],
+        "preferred_task_shapes": ["count", "boolean_check", "schema_summary", "list", "compare", "lookup", "save_artifact"],
+        "instruction_operations": ["inspect_schema", "query_from_request", "execute_sql", "sample_rows"],
+        "structured_followup": True,
+        "native_count_preferred": True,
+        "routing_priority": 45,
+    },
     apis=[
         agent_api(
             name="introspect_database",
@@ -206,6 +234,11 @@ AGENT_DESCRIPTOR = agent_descriptor(
             examples=["show database schema", "list all SQL tables", "describe relationships in the database"],
             deterministic=True,
             side_effect_level="read_only",
+            planning_hints={
+                "keywords": ["schema", "schemas", "tables", "columns", "relationships", "foreign keys"],
+                "preferred_task_shapes": ["schema_summary", "list", "lookup"],
+                "instruction_operations": ["inspect_schema"],
+            },
         ),
         agent_api(
             name="select_deterministic_sql_primitive",
@@ -217,6 +250,12 @@ AGENT_DESCRIPTOR = agent_descriptor(
             examples=["how many rows are in patients", "list all tables in mydb", "show distinct patient genders"],
             deterministic=True,
             side_effect_level="read_only",
+            planning_hints={
+                "keywords": ["count", "rows", "database question", "analytics", "distinct", "group by"],
+                "preferred_task_shapes": ["count", "list", "lookup", "compare"],
+                "instruction_operations": ["query_from_request", "sample_rows"],
+                "native_count_preferred": True,
+            },
         ),
         agent_api(
             name="execute_sql_fallback_when_needed",
@@ -228,6 +267,11 @@ AGENT_DESCRIPTOR = agent_descriptor(
             examples=["which customers spent the most money last month", "show top 10 customers by revenue"],
             deterministic=False,
             side_effect_level="read_only",
+            planning_hints={
+                "keywords": ["query", "join", "aggregate", "top customers", "revenue", "database question"],
+                "preferred_task_shapes": ["list", "compare", "lookup"],
+                "instruction_operations": ["execute_sql", "query_from_request"],
+            },
         ),
     ],
 )

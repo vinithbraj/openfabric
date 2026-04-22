@@ -375,6 +375,11 @@ def _evaluate_scenario(
     problems: list[str] = []
     normalized_answer = _normalize_text(answer)
     for fragment in scenario.expected_fragments(context):
+        if isinstance(fragment, (list, tuple, set)):
+            normalized_options = [_normalize_text(option) for option in fragment]
+            if not any(option and option in normalized_answer for option in normalized_options):
+                problems.append(f"Missing expected answer fragment: {list(fragment)}")
+            continue
         if _normalize_text(fragment) not in normalized_answer:
             problems.append(f"Missing expected answer fragment: {fragment}")
 

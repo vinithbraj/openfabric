@@ -25,6 +25,13 @@ AGENT_DESCRIPTOR = agent_descriptor(
         "Use an LLM preprocessing step to choose the calculator function and operands.",
         "If request does not map to calculator capabilities, emit nothing.",
     ],
+    planning_hints={
+        "keywords": ["calculate", "compute", "add", "subtract", "multiply", "divide", "sum", "difference", "product", "quotient"],
+        "anti_keywords": ["database", "slurm", "docker", "file", "repository", "git"],
+        "preferred_task_shapes": ["count", "lookup", "compare"],
+        "instruction_operations": ["compute_with_llm_selected_function"],
+        "routing_priority": 12,
+    },
     apis=[
         agent_api(
             name="compute_with_llm_selected_function",
@@ -37,6 +44,10 @@ AGENT_DESCRIPTOR = agent_descriptor(
             anti_patterns=["find files named vinith", "read README.md"],
             deterministic=False,
             side_effect_level="read_only",
+            planning_hints={
+                "keywords": ["calculate", "compute", "add", "subtract", "multiply", "divide"],
+                "instruction_operations": ["compute_with_llm_selected_function"],
+            },
             input_schema={
                 "type": "object",
                 "properties": {

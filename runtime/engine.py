@@ -617,19 +617,36 @@ class Engine:
             return payload.get("result", payload.get("detail", ""))
         if event_name == "shell.result":
             stdout = payload.get("stdout", "")
+            detail = payload.get("detail", "") if isinstance(payload.get("detail"), str) else ""
+            normalized_result = payload.get("normalized_result")
+            if not isinstance(normalized_result, str):
+                normalized_result = ""
             if result_mode == "json":
                 try:
                     return json.loads(stdout)
                 except (json.JSONDecodeError, TypeError):
                     return stdout
             if result_mode == "stdout_first_line":
+                if normalized_result.strip():
+                    return normalized_result.strip()
                 lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-                return lines[0] if lines else ""
+                if lines:
+                    return lines[0]
+                return detail.strip() if detail.strip() else ""
             if result_mode == "stdout_last_line":
+                if normalized_result.strip():
+                    return normalized_result.strip()
                 lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-                return lines[-1] if lines else ""
+                if lines:
+                    return lines[-1]
+                return detail.strip() if detail.strip() else ""
             if result_mode == "stdout_stripped":
-                return stdout.strip()
+                if normalized_result.strip():
+                    return normalized_result.strip()
+                compact_stdout = stdout.strip()
+                if compact_stdout:
+                    return compact_stdout
+                return detail.strip() if detail.strip() else compact_stdout
             if isinstance(result_mode, str) and result_mode.startswith("json_field:"):
                 field_name = result_mode.split(":", 1)[1].strip()
                 if field_name:
@@ -639,6 +656,15 @@ class Engine:
                             return parsed[field_name]
                     except (json.JSONDecodeError, TypeError):
                         return stdout
+            if normalized_result.strip():
+                return normalized_result.strip()
+            if isinstance(stdout, str) and stdout.strip():
+                return stdout
+            reduced = payload.get("reduced_result") or payload.get("refined_answer")
+            if reduced not in (None, "", [], {}):
+                return reduced
+            if detail.strip():
+                return detail.strip()
             return stdout
         if event_name == "file.content":
             return payload.get("content", "")
@@ -1686,6 +1712,10 @@ class Engine:
             return "save_artifact"
         if any(token in text for token in ("how many", "count ", "number of", "total ")) or text.startswith("count "):
             return "count"
+        if any(token in text for token in ("confirm ", "verify ", "check ")) and any(
+            token in text for token in (" removed", " absent", " missing", " exists", " present")
+        ) and not any(token in text for token in ("list ", "show ", "display ")):
+            return "boolean_check"
         if any(token in text for token in ("whether", "check whether", "if any", "is there", "exists", "does ", "do any", "has ")) and not any(
             token in text for token in ("list ", "show ", "display ")
         ):
@@ -2108,6 +2138,22 @@ class Engine:
     def _looks_like_boolean(self, value: Any) -> bool:
         if isinstance(value, bool):
             return True
+        if isinstance(value, dict):
+            for key in ("exists", "present", "removed", "missing", "ok", "success"):
+                candidate = value.get(key)
+                if isinstance(candidate, bool):
+                    return True
+                if isinstance(candidate, str) and candidate.strip().lower() in {
+                    "true",
+                    "false",
+                    "yes",
+                    "no",
+                    "exists",
+                    "missing",
+                    "removed",
+                    "present",
+                }:
+                    return True
         if isinstance(value, str):
             return value.strip().lower() in {"true", "false", "yes", "no", "exists", "missing", "0", "1"}
         return False

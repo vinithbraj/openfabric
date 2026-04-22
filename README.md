@@ -140,8 +140,11 @@ The repo also exposes the planner stack through an OpenAI-compatible gateway:
 
 - [`openwebui_gateway.py`](openwebui_gateway.py)
 - [`OPENWEBUI.md`](OPENWEBUI.md)
+- [`codex_ui_gateway.py`](codex_ui_gateway.py)
+- [`CODEX_UI.md`](CODEX_UI.md)
 
 This lets Open WebUI act as the chat frontend while OpenFabric handles planning, execution, validation, and synthesis behind the scenes.
+There is also a standalone Codex-style UI that uses the exact same `/v1` API surface.
 
 ## Key Characteristics
 
@@ -186,6 +189,24 @@ python cli.py examples/hello_http.yml
 
 ```bash
 python cli.py agent_library/specs/ops_assistant_llm.yml
+```
+
+### 5. Run the standalone Codex-style UI
+
+```bash
+bash scripts/start_codex_ui.sh
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8314
+```
+
+Runtime config panel:
+
+```text
+http://127.0.0.1:8314/config
 ```
 
 Useful variants:

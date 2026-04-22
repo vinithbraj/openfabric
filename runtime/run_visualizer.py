@@ -1657,7 +1657,7 @@ def render_run_visualizer_html(*, base_dir: str = "") -> str:
       if (!state.selectedVisualization || !state.selectedRunId) return;
       downloadText(
         `run-${{state.selectedRunId}}-graph.mmd`,
-        state.selectedVisualization.graph_mermaid || 'flowchart TD\n',
+        state.selectedVisualization.graph_mermaid || 'flowchart TD\\n',
         'text/plain;charset=utf-8'
       );
     }}

@@ -4,6 +4,7 @@ import contextlib
 import copy
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -62,6 +63,20 @@ def _lines_in_file(path: Path) -> int:
     return len(path.read_text(encoding="utf-8").splitlines())
 
 
+def _command_output_lines(command: list[str]) -> list[str]:
+    completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True)
+    if completed.returncode != 0:
+        return []
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def _command_output_text(command: list[str]) -> str:
+    completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True)
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
 def _build_ground_truth() -> dict[str, Any]:
     root_py_files = _sorted_file_names(REPO_ROOT, suffix=".py")
     root_md_files = _sorted_file_names(REPO_ROOT, suffix=".md")
@@ -77,6 +92,8 @@ def _build_ground_truth() -> dict[str, Any]:
         for entry in REPO_ROOT.iterdir()
         if entry.is_file() and "openwebui" in entry.name.lower()
     )
+    docker_containers = _command_output_lines(["docker", "ps", "-a", "--format", "{{.Names}}"])
+    docker_images = _command_output_lines(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"])
     root_markdown_paths = [REPO_ROOT / name for name in root_md_files]
     mydb_tables = _query_strings(
         MYDB_DSN,
@@ -130,11 +147,21 @@ def _build_ground_truth() -> dict[str, Any]:
         "script_entry_count": len(script_entries),
         "script_python_files": script_python_files,
         "script_python_count": len(script_python_files),
+        "runtime_entry_count": len(list((REPO_ROOT / "runtime").iterdir())),
         "spec_yaml_files": spec_yaml_files,
         "spec_yaml_count": len(spec_yaml_files),
         "assistant_spec_filename_count": len([name for name in spec_yaml_files if "assistant" in name.lower()]),
         "openwebui_root_files": openwebui_root_files,
         "openwebui_root_file_count": len(openwebui_root_files),
+        "docker_containers": docker_containers,
+        "docker_container_count": len(docker_containers),
+        "docker_images": docker_images,
+        "docker_image_count": len(docker_images),
+        "git_branch": _command_output_text(["git", "branch", "--show-current"]),
+        "last_commit_message": _command_output_text(["git", "log", "--format=%s", "-n", "1"]),
+        "working_tree_clean": _command_output_text(
+            ["bash", "-lc", "if git diff --quiet && git diff --cached --quiet; then echo true; else echo false; fi"]
+        ),
         "version4_line_count": _lines_in_file(REPO_ROOT / "VERSION_4_PRIMITIVE_CATALOG.md"),
         "engine_task_plan_count": _substring_count(REPO_ROOT / "runtime" / "engine.py", "task.plan"),
         "gateway_planner_name_count": _substring_count(REPO_ROOT / "openwebui_gateway.py", "PlannerGateway"),
@@ -604,12 +631,199 @@ def _db_shell_scenarios() -> list[Scenario]:
     ]
 
 
+def _compound_shell_scenarios() -> list[Scenario]:
+    return [
+        Scenario(
+            scenario_id="compound_shell_01_docker_inventory_shared_verb",
+            question="list all docker containers and docke r images on this machines",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [*ctx["docker_containers"][:2], *ctx["docker_images"][:2]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_02_docker_count_difference",
+            question="Count all docker containers and docker images on this machine, then report both counts and the difference.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                str(ctx["docker_container_count"]),
+                str(ctx["docker_image_count"]),
+                str(abs(ctx["docker_container_count"] - ctx["docker_image_count"])),
+            ],
+            min_step_count=3,
+        ),
+        Scenario(
+            scenario_id="compound_shell_03_git_branch_and_last_commit",
+            question="Show the current git branch and last commit message.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [ctx["git_branch"], ctx["last_commit_message"]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_04_git_branch_and_clean_state",
+            question="Show the current git branch and whether the working tree is clean.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                ctx["git_branch"],
+                ("true", "yes") if str(ctx["working_tree_clean"]).lower() == "true" else ("false", "no"),
+            ],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_05_root_python_inventory",
+            question="Using the shell in the repository root, list the first five Python files alphabetically and tell me the total count.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["root_py_count"]), *ctx["root_py_files"][:3]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_06_root_markdown_inventory",
+            question="Using the shell in the repository root, list the Markdown files alphabetically and tell me the total count.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["root_md_count"]), *ctx["root_md_files"][:3]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_07_root_test_inventory",
+            question="Using the shell in the repository root, list the test Python files alphabetically and tell me the total count.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["root_test_count"]), *ctx["root_test_files"][:3]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_08_agent_module_inventory",
+            question="Using the shell, under agent_library/agents list the first five Python modules alphabetically and tell me the total count.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["agent_python_count"]), *ctx["agent_python_files"][:3]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_09_runtime_python_inventory",
+            question="Using the shell, under runtime list the Python files alphabetically and tell me the total count.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["runtime_python_count"]), *ctx["runtime_python_files"][:3]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_10_spec_inventory",
+            question="Using the shell, in agent_library/specs list the YAML spec files alphabetically and tell me the total count.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["spec_yaml_count"]), *ctx["spec_yaml_files"]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_11_scripts_inventory",
+            question="Using the shell, in the scripts directory list the entries alphabetically and tell me the total count.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["script_entry_count"]), *ctx["script_entries"][:3]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_12_root_directory_inventory",
+            question="Using the shell in the repository root, list the first five directories alphabetically and tell me the total count.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["root_dir_count"]), *ctx["root_dirs"][:3]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_13_openwebui_count_and_list",
+            question="Using the shell in the repository root, count the files whose names contain openwebui and list them.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [str(ctx["openwebui_root_file_count"]), *ctx["openwebui_root_files"]],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_14_root_python_vs_markdown",
+            question="Using the shell in the repository root, count Python files and Markdown files, then report both counts and the difference.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                str(ctx["root_py_count"]),
+                str(ctx["root_md_count"]),
+                str(abs(ctx["root_py_count"] - ctx["root_md_count"])),
+            ],
+            min_step_count=3,
+        ),
+        Scenario(
+            scenario_id="compound_shell_15_agent_vs_spec_difference",
+            question="Using the shell, count Python modules in agent_library/agents and YAML specs in agent_library/specs, then report both counts and the difference.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                str(ctx["agent_python_count"]),
+                str(ctx["spec_yaml_count"]),
+                str(abs(ctx["agent_python_count"] - ctx["spec_yaml_count"])),
+            ],
+            min_step_count=3,
+        ),
+        Scenario(
+            scenario_id="compound_shell_16_runtime_vs_test_difference",
+            question="Using the shell, count Python files under runtime and test Python files in the repository root, then report both counts and the difference.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                str(ctx["runtime_python_count"]),
+                str(ctx["root_test_count"]),
+                str(abs(ctx["runtime_python_count"] - ctx["root_test_count"])),
+            ],
+            min_step_count=3,
+        ),
+        Scenario(
+            scenario_id="compound_shell_17_runtime_entries_and_python_counts",
+            question="Using the shell, in runtime count the direct entries and the Python files, then report both counts.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                str(ctx["runtime_entry_count"]),
+                str(ctx["runtime_python_count"]),
+            ],
+            min_step_count=2,
+        ),
+        Scenario(
+            scenario_id="compound_shell_18_root_vs_agent_python_difference",
+            question="Using the shell, count Python files in the repository root and in agent_library/agents, then report both counts and the difference.",
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                str(ctx["root_py_count"]),
+                str(ctx["agent_python_count"]),
+                str(abs(ctx["root_py_count"] - ctx["agent_python_count"])),
+            ],
+            min_step_count=3,
+        ),
+        Scenario(
+            scenario_id="compound_shell_19_dual_string_counts_difference",
+            question=(
+                "Using the shell, in runtime/engine.py count how many times task.plan appears, and in "
+                "openwebui_gateway.py count how many times PlannerGateway appears. Report both counts and the difference."
+            ),
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                str(ctx["engine_task_plan_count"]),
+                str(ctx["gateway_planner_name_count"]),
+                str(abs(ctx["engine_task_plan_count"] - ctx["gateway_planner_name_count"])),
+            ],
+            min_step_count=3,
+        ),
+        Scenario(
+            scenario_id="compound_shell_20_line_count_vs_markdown_token_count",
+            question=(
+                "Using the shell, how many lines are in VERSION_4_PRIMITIVE_CATALOG.md, and across the Markdown files "
+                "in the repository root how many times does the word graph appear? Report both counts and the difference."
+            ),
+            expected_agents=("shell_runner",),
+            expected_fragments=lambda ctx: [
+                str(ctx["version4_line_count"]),
+                str(ctx["root_markdown_graph_count"]),
+                str(abs(ctx["version4_line_count"] - ctx["root_markdown_graph_count"])),
+            ],
+            min_step_count=3,
+        ),
+    ]
+
+
 def _all_scenarios(selected_suites: set[str]) -> list[Scenario]:
     scenarios: list[Scenario] = []
     if "shell" in selected_suites:
         scenarios.extend(_shell_scenarios())
     if "db-shell" in selected_suites:
         scenarios.extend(_db_shell_scenarios())
+    if "compound-shell" in selected_suites:
+        scenarios.extend(_compound_shell_scenarios())
     return scenarios
 
 
@@ -618,7 +832,7 @@ def main() -> int:
     parser.add_argument(
         "--suite",
         action="append",
-        choices=("shell", "db-shell"),
+        choices=("shell", "db-shell", "compound-shell"),
         help="Scenario suite(s) to run. Defaults to both.",
     )
     args = parser.parse_args()

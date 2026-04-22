@@ -159,6 +159,7 @@ class AgentApiSpec(BaseModel):
     result_envelope_fields: list[str] = Field(default_factory=shared_result_field_names)
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
+    planning_hints: dict[str, Any] = Field(default_factory=dict)
 
     class Config:
         extra = "allow"
@@ -181,6 +182,7 @@ class AgentDescriptor(BaseModel):
     result_envelope_fields: list[str] = Field(default_factory=shared_result_field_names)
     request_schema: dict[str, Any] = Field(default_factory=shared_request_schema)
     result_schema: dict[str, Any] = Field(default_factory=shared_result_schema)
+    planning_hints: dict[str, Any] = Field(default_factory=dict)
 
     class Config:
         extra = "allow"
@@ -206,6 +208,7 @@ def build_agent_api(
     result_envelope_fields: list[str] | None = None,
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
+    planning_hints: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     effective_trigger_event = str(trigger_event or event or "").strip()
@@ -233,6 +236,7 @@ def build_agent_api(
         result_envelope_fields=list(result_envelope_fields or shared_result_field_names()),
         input_schema=deepcopy(input_schema) if isinstance(input_schema, dict) else {},
         output_schema=deepcopy(output_schema) if isinstance(output_schema, dict) else {},
+        planning_hints=deepcopy(planning_hints) if isinstance(planning_hints, dict) else {},
         **extra,
     )
     return _model_dump(api)
@@ -342,6 +346,7 @@ def normalize_agent_metadata(agent_name: str, raw_metadata: Any) -> dict[str, An
                     result_envelope_fields=_string_list(item.get("result_envelope_fields")) or shared_result_field_names(),
                     input_schema=deepcopy(item.get("input_schema")) if isinstance(item.get("input_schema"), dict) else None,
                     output_schema=deepcopy(item.get("output_schema")) if isinstance(item.get("output_schema"), dict) else None,
+                    planning_hints=deepcopy(item.get("planning_hints")) if isinstance(item.get("planning_hints"), dict) else None,
                 )
             )
 
@@ -381,6 +386,7 @@ def build_agent_descriptor(
     result_envelope_fields: list[str] | None = None,
     request_schema: dict[str, Any] | None = None,
     result_schema: dict[str, Any] | None = None,
+    planning_hints: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     payload = {
@@ -399,6 +405,7 @@ def build_agent_descriptor(
         "result_envelope_fields": list(result_envelope_fields or shared_result_field_names()),
         "request_schema": deepcopy(request_schema) if isinstance(request_schema, dict) else shared_request_schema(),
         "result_schema": deepcopy(result_schema) if isinstance(result_schema, dict) else shared_result_schema(),
+        "planning_hints": deepcopy(planning_hints) if isinstance(planning_hints, dict) else {},
         **extra,
     }
     return normalize_agent_metadata(name, payload)

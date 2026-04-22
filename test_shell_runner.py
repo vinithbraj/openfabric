@@ -137,6 +137,34 @@ class ShellRunnerDataFlowTests(unittest.TestCase):
         self.assertEqual(emitted["payload"]["raw_returncode"], 1)
         self.assertIn("partial results", emitted["payload"]["detail"])
 
+    def test_conda_remove_missing_environment_is_treated_as_idempotent_success(self):
+        class _Completed:
+            stdout = ""
+            stderr = "EnvironmentLocationNotFound: Not a conda environment: /home/vinith/miniconda3/envs/vinith\n"
+            returncode = 1
+
+        with patch("agent_library.agents.shell_runner.subprocess.run", return_value=_Completed()):
+            response = handle_event(
+                types.SimpleNamespace(
+                    event="task.plan",
+                    payload={
+                        "task": "remove conda environment named vinith with -y",
+                        "target_agent": "shell_runner",
+                        "instruction": {
+                            "operation": "run_command",
+                            "command": "conda env remove -n vinith -y",
+                        },
+                    },
+                )
+            )
+
+        emitted = response["emits"][0]
+        self.assertEqual(emitted["event"], "shell.result")
+        self.assertEqual(emitted["payload"]["returncode"], 0)
+        self.assertEqual(emitted["payload"]["raw_returncode"], 1)
+        self.assertIn("already absent", emitted["payload"]["detail"])
+        self.assertIn("already absent", emitted["payload"]["normalized_result"])
+
     def test_multiline_stdin_gets_trailing_newline_for_line_counts(self):
         captured = {}
 

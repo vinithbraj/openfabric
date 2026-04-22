@@ -127,6 +127,144 @@ def _agent_handles_trigger(agent: dict, event_name: str) -> bool:
     return event_name in _agent_trigger_events(agent)
 
 
+def _planning_hint_dict(item: dict) -> dict[str, Any]:
+    raw = item.get("planning_hints")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _planning_hint_list(hints: dict[str, Any], key: str) -> list[str]:
+    value = hints.get(key)
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if isinstance(item, str) and str(item).strip()]
+
+
+def _planning_hint_int(hints: dict[str, Any], key: str, default: int = 0) -> int:
+    value = hints.get(key)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _planning_hint_bool(hints: dict[str, Any], key: str) -> bool:
+    value = hints.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _agent_planning_hints(agent: dict) -> dict[str, Any]:
+    merged = {
+        "keywords": [],
+        "anti_keywords": [],
+        "preferred_task_shapes": [],
+        "instruction_operations": [],
+        "routing_priority": 0,
+        "structured_followup": False,
+        "native_count_preferred": False,
+    }
+    hint_sources: list[dict[str, Any]] = []
+    descriptor_hints = _planning_hint_dict(agent)
+    if descriptor_hints:
+        hint_sources.append(descriptor_hints)
+    for api in _agent_api_specs(agent):
+        api_hints = _planning_hint_dict(api)
+        if api_hints:
+            hint_sources.append(api_hints)
+
+    for hints in hint_sources:
+        for key in ("keywords", "anti_keywords", "preferred_task_shapes", "instruction_operations"):
+            merged[key].extend(_planning_hint_list(hints, key))
+        merged["routing_priority"] += _planning_hint_int(hints, "routing_priority")
+        merged["structured_followup"] = merged["structured_followup"] or _planning_hint_bool(hints, "structured_followup")
+        merged["native_count_preferred"] = merged["native_count_preferred"] or _planning_hint_bool(hints, "native_count_preferred")
+
+    for key in ("routing_hints", "domain_hints", "schema_hints", "entity_hints"):
+        value = agent.get(key)
+        if isinstance(value, str) and value.strip():
+            merged["keywords"].append(value.strip())
+        elif isinstance(value, list):
+            merged["keywords"].extend(str(item).strip() for item in value if isinstance(item, str) and str(item).strip())
+
+    for key in ("database_name", "argument_name", "template_agent", "cluster_name"):
+        value = agent.get(key)
+        if isinstance(value, str) and value.strip():
+            merged["keywords"].append(value.strip())
+    for key in ("database_aliases", "cluster_aliases"):
+        value = agent.get(key)
+        if isinstance(value, list):
+            merged["keywords"].extend(str(item).strip() for item in value if isinstance(item, str) and str(item).strip())
+
+    merged["keywords"] = sorted({item for item in merged["keywords"] if item})
+    merged["anti_keywords"] = sorted({item for item in merged["anti_keywords"] if item})
+    merged["preferred_task_shapes"] = sorted({item for item in merged["preferred_task_shapes"] if item})
+    merged["instruction_operations"] = sorted({item for item in merged["instruction_operations"] if item})
+    return merged
+
+
+def _format_planning_hints(hints: dict[str, Any]) -> str:
+    parts = []
+    keywords = _planning_hint_list(hints, "keywords")
+    if keywords:
+        parts.append(f"keywords=[{', '.join(keywords[:10])}]")
+    preferred_task_shapes = _planning_hint_list(hints, "preferred_task_shapes")
+    if preferred_task_shapes:
+        parts.append(f"preferred_task_shapes=[{', '.join(preferred_task_shapes)}]")
+    instruction_operations = _planning_hint_list(hints, "instruction_operations")
+    if instruction_operations:
+        parts.append(f"instruction_operations=[{', '.join(instruction_operations)}]")
+    if _planning_hint_bool(hints, "structured_followup"):
+        parts.append("structured_followup=true")
+    if _planning_hint_bool(hints, "native_count_preferred"):
+        parts.append("native_count_preferred=true")
+    routing_priority = _planning_hint_int(hints, "routing_priority")
+    if routing_priority:
+        parts.append(f"routing_priority={routing_priority}")
+    return "; ".join(parts)
+
+
+def _format_runtime_agent_planning_guide(capabilities: dict) -> str:
+    lines = []
+    for agent in capabilities.get("agents", []):
+        if not isinstance(agent, dict):
+            continue
+        name = agent.get("name")
+        if not isinstance(name, str) or name in {"ops_planner", "synthesizer"}:
+            continue
+        if not _agent_handles_trigger(agent, "task.plan"):
+            continue
+        hints = _agent_planning_hints(agent)
+        hint_text = _format_planning_hints(hints)
+        api_summaries = []
+        for api in _agent_api_specs(agent):
+            if not isinstance(api, dict) or api_trigger_event(api) != "task.plan":
+                continue
+            api_name = str(api.get("name") or "").strip()
+            summary = str(api.get("summary") or api.get("when") or "").strip()
+            api_hint_text = _format_planning_hints(_planning_hint_dict(api))
+            parts = [part for part in (api_name, summary, api_hint_text) if part]
+            if parts:
+                api_summaries.append(" | ".join(parts))
+        detail = f"- {name}: {str(agent.get('description') or '').strip() or 'No description provided.'}"
+        if hint_text:
+            detail += f" Planning[{hint_text}]"
+        if api_summaries:
+            detail += f" APIs[{'; '.join(api_summaries)}]"
+        lines.append(detail)
+    return "\n".join(lines) if lines else "- none"
+
+
 def _format_discovered_agents(capabilities: dict) -> str:
     lines = []
     for item in capabilities.get("agents", []):
@@ -177,12 +315,16 @@ def _format_discovered_agents(capabilities: dict) -> str:
                 metadata.append(f"deterministic_catalog_families=[{families}]")
         cluster_name = item.get("cluster_name")
         if isinstance(cluster_name, str) and cluster_name.strip():
-            metadata.append(f"cluster_name={cluster_name.strip()}")
+                metadata.append(f"cluster_name={cluster_name.strip()}")
         cluster_aliases = item.get("cluster_aliases")
         if isinstance(cluster_aliases, list):
             aliases = ", ".join(alias for alias in cluster_aliases if isinstance(alias, str) and alias.strip())
             if aliases:
                 metadata.append(f"cluster_aliases=[{aliases}]")
+        planning_hints = _agent_planning_hints(item)
+        planning_hint_text = _format_planning_hints(planning_hints)
+        if planning_hint_text:
+            metadata.append(f"planning_hints[{planning_hint_text}]")
         metadata_text = f" Metadata[{'; '.join(metadata)}]" if metadata else ""
         lines.append(
             f"- {name}: {description} Domains[{domain_text or 'none'}] "
@@ -222,15 +364,10 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "2b) task_shape MUST describe the user goal at a high level using one of the allowed values.\n"
         "3) Each step MUST have id and task. Leaf steps MUST have target_agent. Group steps may omit target_agent when they contain nested steps.\n"
         "4) Every leaf step MUST include an instruction object with an agent-native operation and inputs.\n"
-        "5) For shell_runner use instruction.operation=run_command with fields such as command, input, and capture.\n"
-        "5a) For shell_runner tasks that need structured parsing, aggregation, generation, or file creation from prior results, prefer a single python3 heredoc snippet over brittle shell pipelines.\n"
-        "   Example capture objects: {\"mode\":\"stdout_first_line\"}, {\"mode\":\"stdout_stripped\"}, {\"mode\":\"json\"}, {\"mode\":\"json_field\",\"field\":\"envs\"}.\n"
-        "   For conditional checks, prefer machine-readable JSON output and set allow_returncodes when a nonzero exit code is expected and should not fail the workflow.\n"
-        "6) For sql_runner use instruction.operation values like inspect_schema, query_from_request, execute_sql, or sample_rows.\n"
-        "7) For slurm_runner use instruction.operation values like query_from_request, execute_command, cluster_status, list_jobs, or job_details.\n"
-        "8) For filesystem use instruction.operation=read_file with a path.\n"
-        "9) For notifier use instruction.operation=send_notification with channel/message.\n"
-        "10) target_agent MUST be one discovered runtime agent name that can handle task.plan; never use ops_planner or synthesizer.\n"
+        "5) Use discovered descriptor planning hints and API summaries to choose target_agent and instruction.operation.\n"
+        "5a) target_agent MUST be one discovered runtime agent name that can handle task.plan; never use ops_planner or synthesizer.\n"
+        "5b) instruction.operation MUST come from the selected agent's advertised planning hints or API guidance below.\n"
+        "5c) For deterministic shell checks, prefer machine-readable output and capture hints such as stdout_first_line, stdout_stripped, json, or json_field when the selected agent advertises them.\n"
         "11) Break chained requests into multiple atomic steps. Do not combine unrelated actions into one step. Use nested steps for grouped subtasks.\n"
         "12) Rewrite each step as a direct, concrete instruction for the target agent. Do not simply copy long stretches of the user's wording.\n"
         "13) Each step should be self-contained, operational, and phrased so another LLM can execute it without guessing.\n"
@@ -239,17 +376,15 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "15a) When a later step needs to inspect or transform rows returned by an earlier step, prefer shell_runner with instruction.input referencing prior rows or the full prior step result.\n"
         "15b) For tasks like 'in this list', 'from those rows', 'check the previous result', or 'search the output', do not issue a fresh SQL query unless the user explicitly asks to query again.\n"
         "16) when is optional. Use it for conditional execution such as {\"$from\":\"step1.returncode\",\"not_equals\":0}.\n"
-        "17) For arithmetic chains with explicit numeric operands, use shell_runner with safe arithmetic commands. Do not invent extra arithmetic operations.\n"
-        "18) For any safe local machine, workspace, repository, process, service, container, network, build/test, package, arithmetic, text, or data operation that can be expressed as shell commands, prefer shell_runner.\n"
-        "18a) If execution requires a missing Python dependency and runtime policy allows it, shell_runner may install the required Python package into the current Python environment to complete the task.\n"
-        "19) For SQL/database/schema/table/column/relationship/data questions against a configured database, prefer sql_runner.\n"
-        "20) For Slurm, HPC cluster, scheduler, queue, node, partition, reservation, fairshare, or job-control questions, prefer slurm_runner.\n"
-        "20a) For Slurm and SQL requests involving counts, averages, stats, or filtering, prefer a SINGLE step using the native agent (slurm_runner or sql_runner) with operation=query_from_request. Avoid decomposing these into shell_runner pipes (grep, wc, etc.) as native agents handle large datasets more reliably.\n"
-        "21) For simple SQL/database questions, one sql_runner step is fine. For complex SQL tasks, decompose into concrete sql_runner steps such as inspect schema, sample values, determine join path, and run the final query.\n"
+        "17) Prefer agents that advertise native_count_preferred for count, stats, or filtering tasks instead of decomposing into shell pipes.\n"
+        "18) Prefer agents that advertise structured_followup when a later step needs to inspect prior rows or structured outputs.\n"
+        "18a) If execution requires a missing Python dependency and runtime policy allows it, only use that path when the selected agent explicitly advertises local command execution.\n"
+        "19) For simple database or scheduler questions, one native step is often enough; only decompose when the agent hints or prior failures justify it.\n"
+        "20) Do not invent agent names, instruction operations, or capabilities beyond the discovered guide below.\n"
         "22) When you emit multiple SQL steps, each later SQL step should clearly state what it is trying to learn or produce, and it must declare depends_on when it uses earlier findings.\n"
         "23) When using shell_runner, prefer explicit machine-readable commands for deterministic checks.\n"
         "24) For existence checks, avoid substring grep against broad human-readable output. Use exact or JSON-based checks.\n"
-        "25) When using sql_runner or slurm_runner, do not invent shell commands or fake CLI syntax for other agents.\n"
+        "25) Do not invent shell commands or fake CLI syntax for non-shell agents.\n"
         "26) Do not invent nonexistent specialized agents; use discovered agents only.\n"
         "27) Extract presentation intent separately from execution steps. Examples: table, JSON, bullets, concise, detailed, include commands, hide internals.\n"
         "28) NEVER create execution steps for presentation, summarization, formatting, synthesis, or making output readable. That happens after execution in the synthesizer layer and must not appear in steps.\n"
@@ -273,6 +408,8 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         '- "book a flight to NYC" -> {"processable":false,"reason":"no travel booking capability","steps":[]}\n'
         "Discovered runtime agents:\n"
         f"{_format_discovered_agents(capabilities)}\n"
+        "Runtime planning guide:\n"
+        f"{_format_runtime_agent_planning_guide(capabilities)}\n"
         "Runtime execution policy:\n"
         f"{_format_execution_policy(capabilities)}\n"
         f'User request: "{question}"'
@@ -294,12 +431,13 @@ def _build_replan_prompt(payload: dict, capabilities: dict) -> str:
         "4) Use only discovered runtime agent names that can handle task.plan; never use ops_planner or synthesizer.\n"
         "5) Replace only the failed step, not the full workflow.\n"
         "6) Prefer diagnostic or introspection subtasks before repeating the same failed action.\n"
-        "7) For SQL/database/schema/table/column/relationship/data questions, prefer sql_runner.\n"
-        "8) For shell/machine/workspace/container/process/repo operations, prefer shell_runner and explicit commands when possible.\n"
-        "8a) If runtime policy allows Python package installation, you may replan through shell_runner steps that install a missing Python package when that is necessary to complete the task.\n"
+        "7) Use discovered descriptor planning hints and API summaries below to choose replacement agents and instruction operations.\n"
+        "8) If runtime policy allows Python package installation, only use that path when the selected agent explicitly advertises local command execution.\n"
         "9) Tolerate minor typos and informal phrasing.\n"
         "Discovered runtime agents:\n"
         f"{_format_discovered_agents(capabilities)}\n"
+        "Runtime planning guide:\n"
+        f"{_format_runtime_agent_planning_guide(capabilities)}\n"
         "Runtime execution policy:\n"
         f"{_format_execution_policy(capabilities)}\n"
         "Replan request JSON:\n"
@@ -911,6 +1049,9 @@ def _agent_search_blob(agent: Dict[str, Any]) -> str:
             parts.append(value)
         elif isinstance(value, list):
             parts.append(" ".join(entry for entry in value if isinstance(entry, str)))
+    planning_hints = _agent_planning_hints(agent)
+    for key in ("keywords", "preferred_task_shapes", "instruction_operations"):
+        parts.append(" ".join(_planning_hint_list(planning_hints, key)))
     for method in _agent_api_specs(agent):
         parts.extend(str(method.get(key, "")) for key in ("name", "event", "trigger_event", "when", "summary"))
         parts.extend(_agent_emitted_events({"apis": [method]}))
@@ -927,6 +1068,81 @@ def _agent_family(name: str) -> str:
     if name.startswith("slurm_runner"):
         return "slurm_runner"
     return name
+
+
+def _hint_token_set(values: list[str]) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        tokens.update(_tokenize(value))
+    return tokens
+
+
+def _agent_keyword_tokens(agent: dict) -> set[str]:
+    return _hint_token_set(_planning_hint_list(_agent_planning_hints(agent), "keywords"))
+
+
+def _agent_anti_keyword_tokens(agent: dict) -> set[str]:
+    return _hint_token_set(_planning_hint_list(_agent_planning_hints(agent), "anti_keywords"))
+
+
+def _agent_preferred_task_shapes(agent: dict) -> set[str]:
+    return {item for item in _planning_hint_list(_agent_planning_hints(agent), "preferred_task_shapes")}
+
+
+def _agent_routing_priority(agent: dict) -> int:
+    hints = _agent_planning_hints(agent)
+    return _planning_hint_int(hints, "routing_priority") + _agent_int(agent.get("routing_priority"), 0)
+
+
+def _agent_supports_structured_followup(agent: dict) -> bool:
+    return _planning_hint_bool(_agent_planning_hints(agent), "structured_followup")
+
+
+def _agent_native_count_preferred(agent: dict) -> bool:
+    return _planning_hint_bool(_agent_planning_hints(agent), "native_count_preferred")
+
+
+def _family_hint_tokens(capabilities: dict, family: str) -> set[str]:
+    tokens: set[str] = set()
+    for agent in capabilities.get("agents", []):
+        if not isinstance(agent, dict):
+            continue
+        name = agent.get("name")
+        if not isinstance(name, str) or _agent_family(name) != family or not _agent_handles_trigger(agent, "task.plan"):
+            continue
+        tokens.update(_agent_keyword_tokens(agent))
+    return tokens
+
+
+def _looks_like_specific_file_read_request(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    if any(token in text for token in ("find ", "search ", "list ", "locate ", "grep ")):
+        return False
+    has_read_verb = any(token in text for token in ("read ", "open ", "show ", "cat "))
+    has_path = bool(re.search(r"\b[./a-zA-Z0-9_-]+\.[a-zA-Z0-9]+\b", text))
+    return has_read_verb and has_path
+
+
+def _agent_routing_score(question: str, agent: dict, *, task_shape: str) -> int:
+    question_tokens = _tokenize(question)
+    question_lc = str(question or "").strip().lower()
+    blob_tokens = _tokenize(_agent_search_blob(agent))
+    keyword_tokens = _agent_keyword_tokens(agent)
+    anti_keyword_tokens = _agent_anti_keyword_tokens(agent)
+    score = len(question_tokens & blob_tokens)
+    score += len(question_tokens & keyword_tokens) * 6
+    score -= len(question_tokens & anti_keyword_tokens) * 10
+    if task_shape in _agent_preferred_task_shapes(agent):
+        score += 12
+    if task_shape == "count" and _agent_native_count_preferred(agent):
+        score += 10
+    if _agent_supports_structured_followup(agent) and any(
+        marker in question_lc
+        for marker in ("previous result", "previous step", "previous rows", "in this list", "those rows", "listed patient")
+    ):
+        score += 6
+    score += _agent_routing_priority(agent)
+    return score
 
 
 def _first_agent_in_family(capabilities: dict, family: str) -> str | None:
@@ -983,7 +1199,7 @@ def _agent_int(value: Any, default: int = 0) -> int:
 
 
 def _sql_agent_hint_tokens(agent: dict) -> set[str]:
-    tokens: set[str] = set()
+    tokens = set(_agent_keyword_tokens(agent))
     for key in ("routing_hints", "domain_hints", "schema_hints", "entity_hints"):
         value = agent.get(key)
         if isinstance(value, str):
@@ -1295,8 +1511,6 @@ def _looks_like_local_hardware_question(question: str) -> bool:
 
 
 def _select_target_agent(question: str, capabilities: dict) -> str | None:
-    question_lc = question.lower()
-    question_tokens = _tokenize(question)
     candidates = []
 
     for agent in capabilities.get("agents", []):
@@ -1312,46 +1526,36 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
     if not candidates:
         return None
 
+    if _looks_like_specific_file_read_request(question):
+        filesystem_agent = _first_agent_in_family(capabilities, "filesystem")
+        if filesystem_agent:
+            return filesystem_agent
+
     if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
         native_slurm = _first_agent_in_family(capabilities, "slurm_runner")
         if native_slurm:
             return native_slurm
 
-    priority_boosts = {
-        "shell_runner": 0,
-        "sql_runner": 0,
-        "slurm_runner": 0,
-        "notifier": 0,
-    }
-    looks_like_sql = _looks_like_sql_question(question, capabilities)
-    looks_like_sql_export = _looks_like_sql_export_request(question, capabilities)
+    if _looks_like_sql_question(question, capabilities):
+        sql_target = _select_sql_target_agent(question, capabilities)
+        if sql_target:
+            return sql_target
 
-    if any(token in question_tokens for token in {"docker", "container", "containers", "image", "images", "installed", "available", "git", "grep", "rg", "find", "list", "logs", "restart", "stop", "start", "ps", "ports", "tail", "head", "line", "lines"}):
-        priority_boosts["shell_runner"] += 10
-    if _looks_like_workspace_file_question(question) and not looks_like_sql:
-        priority_boosts["shell_runner"] += 15
-    if _looks_like_repo_file_scan(question):
-        priority_boosts["shell_runner"] += 20
-    if _looks_like_local_hardware_question(question):
-        priority_boosts["shell_runner"] += 24
-    if looks_like_sql:
-        priority_boosts["sql_runner"] += 12
-    if looks_like_sql_export:
-        priority_boosts["sql_runner"] += 18
-    if _looks_like_slurm_question(question):
-        priority_boosts["slurm_runner"] += 12
-    if re.search(r"\b(add|subtract|multiply|divide|calculate|compute|sum)\b", question_lc) or len(re.findall(r"\b\d+(?:\.\d+)?\b", question_lc)) >= 2:
-        priority_boosts["shell_runner"] += 10
-    if _looks_like_notification_request(question):
-        priority_boosts["notifier"] += 10
+    task_shape = _infer_task_shape(question)
 
     best_name = None
     best_score = float("-inf")
     for agent in candidates:
         name = agent["name"]
-        blob_tokens = _tokenize(_agent_search_blob(agent))
-        score = len(question_tokens & blob_tokens)
-        score += priority_boosts.get(_agent_family(name), 0)
+        score = _agent_routing_score(question, agent, task_shape=task_shape)
+        if _looks_like_workspace_file_question(question) and _agent_family(name) == "shell_runner":
+            score += 8
+        if _looks_like_repo_file_scan(question) and _agent_family(name) == "shell_runner":
+            score += 12
+        if _looks_like_local_hardware_question(question) and _agent_family(name) == "shell_runner":
+            score += 12
+        if _looks_like_notification_request(question) and _agent_family(name) == "notifier":
+            score += 12
         if score > best_score:
             best_score = score
             best_name = name
@@ -1375,6 +1579,7 @@ def _select_sql_target_agent(question: str, capabilities: dict) -> str | None:
 
     question_tokens = _tokenize(question)
     question_lc = str(question or "").strip().lower()
+    task_shape = _infer_task_shape(question)
     best_name = None
     best_score = float("-inf")
     for agent in sql_agents:
@@ -1392,13 +1597,11 @@ def _select_sql_target_agent(question: str, capabilities: dict) -> str | None:
         hint_tokens = _sql_agent_hint_tokens(agent)
         score = len(question_tokens & alias_tokens) * 25
         score += len(question_tokens & hint_tokens) * 12
-        score += len(question_tokens & _tokenize(_agent_search_blob(agent)))
+        score += _agent_routing_score(question, agent, task_shape=task_shape)
         score += _sql_agent_priority(agent)
         database_name = str(agent.get("database_name") or "").strip().lower()
         if database_name and database_name in question_lc:
             score += 100
-        if database_name == "dicom_mock" and question_tokens & {"mrn", "dicom", "rtplan", "rtstruct", "rtdose", "series", "instances"}:
-            score += 20
         if score > best_score:
             best_score = score
             best_name = name
@@ -1408,6 +1611,16 @@ def _select_sql_target_agent(question: str, capabilities: dict) -> str | None:
 def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
     task_lc = task.lower().strip()
     save_path = _extract_save_output_path(task)
+    env_name = _extract_conda_env_name(task)
+
+    if env_name and "conda" in task_lc and re.search(r"\b(remove|delete|uninstall)\b", task_lc):
+        return f"conda env remove -n {shlex.quote(env_name)} -y"
+    if env_name and "conda" in task_lc and "env" in task_lc and any(
+        marker in task_lc for marker in ("confirm", "verify", "was removed", "is removed", "exists")
+    ):
+        return _build_conda_env_status_command(env_name)
+    if "conda" in task_lc and "env" in task_lc and "list" in task_lc:
+        return "conda env list"
 
     if "current git branch" in task_lc and "working tree" in task_lc and "clean" in task_lc:
         return 'printf "Branch: %s\\nWorking tree clean: %s\\n" "$(git branch --show-current)" "$(git diff --quiet && echo true || echo false)"'
@@ -1500,10 +1713,13 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
     if "top-level directories" in task_lc or "top level directories" in task_lc:
         return 'find . -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" | sort'
 
+    if "current git branch" in task_lc:
+        return "git branch --show-current"
+
     if "current branch" in task_lc:
         return "git branch --show-current"
 
-    if "working tree clean" in task_lc:
+    if "working tree clean" in task_lc or "working tree is clean" in task_lc:
         return 'if git diff --quiet && git diff --cached --quiet; then echo true; else echo false; fi'
 
     if "last commit message" in task_lc:
@@ -1542,6 +1758,17 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
     if string_count_match:
         path = string_count_match.group(1)
         needle = string_count_match.group(2).strip().strip("\"'").rstrip("?.")
+        if needle:
+            return _build_file_text_count_command(path, needle)
+
+    inline_string_count_match = re.search(
+        r"in\s+([A-Za-z0-9_./-]+)\s+count\s+how\s+many\s+times(?:\s+the\s+string)?\s+(.+?)\s+appears?",
+        task,
+        flags=re.IGNORECASE,
+    )
+    if inline_string_count_match:
+        path = inline_string_count_match.group(1)
+        needle = inline_string_count_match.group(2).strip().strip("\"'").rstrip("?.")
         if needle:
             return _build_file_text_count_command(path, needle)
 
@@ -2637,6 +2864,115 @@ def _build_conda_env_exists_command(env_name: str) -> str:
     )
 
 
+def _build_conda_env_status_command(env_name: str) -> str:
+    return (
+        "conda env list --json | "
+        "python3 -c "
+        f"'import json,sys,os; name={json.dumps(env_name)}; "
+        "envs=json.load(sys.stdin).get(\"envs\", []); "
+        "exists=any(os.path.basename(path.rstrip(\"/\")) == name for path in envs); "
+        "print(json.dumps({\"exists\": exists, \"name\": name}));'"
+    )
+
+
+def _looks_like_conda_env_removal_workflow(question: str) -> bool:
+    text = _normalize_common_shell_compound_typos(str(question or "").strip()).lower()
+    if not text or "conda" not in text or "env" not in text:
+        return False
+    if not re.search(r"\b(remove|delete|uninstall)\b", text):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "confirm",
+            "verify",
+            "was removed",
+            "is removed",
+            "final list",
+            "list of all env",
+            "list all env",
+            "list all environments",
+            "env list",
+        )
+    )
+
+
+def _conda_env_removal_steps(question: str) -> list[dict]:
+    if not _looks_like_conda_env_removal_workflow(question):
+        return []
+    env_name = _extract_conda_env_name(question)
+    if not env_name:
+        return []
+
+    text = _normalize_common_shell_compound_typos(str(question or "").strip()).lower()
+    wants_confirm = any(
+        marker in text
+        for marker in (
+            "confirm",
+            "verify",
+            "was removed",
+            "is removed",
+            "check it was removed",
+            "confirm it was removed",
+        )
+    )
+    wants_list = any(
+        marker in text
+        for marker in (
+            "final list",
+            "list of all env",
+            "list all env",
+            "list all environments",
+            "env list",
+        )
+    )
+
+    steps: list[dict] = [
+        {
+            "id": "step1",
+            "target_agent": "shell_runner",
+            "task": f"remove conda environment named {env_name} with -y",
+            "instruction": {
+                "operation": "run_command",
+                "command": f"conda env remove -n {shlex.quote(env_name)} -y",
+                "capture": {"mode": "stdout_stripped"},
+            },
+        }
+    ]
+
+    if wants_confirm:
+        steps.append(
+            {
+                "id": f"step{len(steps) + 1}",
+                "target_agent": "shell_runner",
+                "task": f"confirm the conda environment named {env_name} was removed",
+                "instruction": {
+                    "operation": "run_command",
+                    "command": _build_conda_env_status_command(env_name),
+                    "capture": {"mode": "json"},
+                },
+                "depends_on": [steps[-1]["id"]],
+            }
+        )
+
+    if wants_list:
+        steps.append(
+            {
+                "id": f"step{len(steps) + 1}",
+                "target_agent": "shell_runner",
+                "task": "give the final list of all conda environments",
+                "instruction": {
+                    "operation": "run_command",
+                    "command": "conda env list",
+                    "capture": {"mode": "stdout_stripped"},
+                },
+                "depends_on": [steps[-1]["id"]],
+            }
+        )
+
+    return steps if len(steps) >= 2 else []
+
+
 def _is_capability_question(question: str) -> bool:
     question_lc = question.lower()
     if not re.search(r"\b(you|your|system|agent|agents|tool|tools|capabilit|can you|can this|supported|available|introspect|introspection)\b", question_lc):
@@ -2681,6 +3017,7 @@ def _capability_summary(capabilities: dict) -> dict:
             "description": agent.get("description", ""),
             "domains": agent.get("capability_domains", []),
             "actions": agent.get("action_verbs", []),
+            "planning_hints": _agent_planning_hints(agent),
             "trigger_events": sorted(_agent_trigger_events(agent)),
             "emits": sorted(_agent_emitted_events(agent)),
             "request_contract": agent.get("request_contract", ""),
@@ -2692,6 +3029,7 @@ def _capability_summary(capabilities: dict) -> dict:
                     "emits": api_emit_events(method),
                     "request_contract": method.get("request_contract", ""),
                     "result_contract": method.get("result_contract", ""),
+                    "planning_hints": _planning_hint_dict(method),
                 }
                 for method in _agent_api_specs(agent)
                 if isinstance(method, dict)
@@ -2733,6 +3071,9 @@ def _format_capability_answer(capabilities: dict) -> str:
 
 
 def _fallback_steps(question: str, capabilities: dict):
+    conda_removal_steps = _conda_env_removal_steps(question)
+    if conda_removal_steps:
+        return conda_removal_steps
     compound_steps = _compound_fallback_steps(question, capabilities)
     compound_families = {
         _agent_family(str(step.get("target_agent") or ""))
@@ -2748,6 +3089,8 @@ def _fallback_steps(question: str, capabilities: dict):
     shell_pair_steps = _shell_pair_count_fallback_steps(question)
     if shell_pair_steps:
         return shell_pair_steps
+    if compound_steps and compound_families == {"shell_runner"}:
+        return compound_steps
     if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
         target_agent = _first_agent_in_family(capabilities, "slurm_runner")
         if target_agent:
@@ -2893,12 +3236,12 @@ def _current_request_from_context(question: str) -> str:
 
 
 def _split_compound_request(question: str) -> list[str]:
-    text = re.sub(r"\s+", " ", question).strip()
+    text = _normalize_common_shell_compound_typos(re.sub(r"\s+", " ", question).strip())
     if not text:
         return []
     separator_re = re.compile(
-        r"\s*(?:;|\.\s+|,?\s+and\s+|,?\s+then\s+|,\s+also\s+)"
-        r"(?=(?:what\b|how\b|count\b|list\b|show\b|find\b|which\b|is\b|are\b|does\b|do\b|did\b|can\b|has\b|have\b|current\b|last\b|latest\b|get\b|provide\b|check\b|create\b|copy\b|save\b|write\b|tail\b|open\b|read\b|tell\b|report\b|give\b|in\b|under\b|within\b|using\b))",
+        r"\s*(?:;|\.\s+|\?\s+|,?\s+and\s+|,?\s+then\s+|,\s+also\s+)"
+        r"(?=(?:what\b|how\b|count\b|list\b|show\b|find\b|which\b|is\b|are\b|does\b|do\b|did\b|can\b|has\b|have\b|current\b|last\b|latest\b|get\b|provide\b|check\b|create\b|copy\b|save\b|write\b|tail\b|open\b|read\b|tell\b|report\b|give\b|in\b|under\b|within\b|across\b|using\b))",
         flags=re.IGNORECASE,
     )
     parts = [
@@ -2906,6 +3249,18 @@ def _split_compound_request(question: str) -> list[str]:
         for part in separator_re.split(text)
         if part and _sanitize_task_text(part)
     ]
+    expanded_parts: list[str] = []
+    for part in parts:
+        shared_verb_parts = _split_shared_verb_compound_request(part)
+        if len(shared_verb_parts) >= 2:
+            expanded_parts.extend(shared_verb_parts)
+        else:
+            expanded_parts.append(part)
+    parts = _inherit_shared_compound_context(expanded_parts)
+    if len(parts) < 2:
+        shared_verb_parts = _split_shared_verb_compound_request(text)
+        if len(shared_verb_parts) >= 2:
+            return shared_verb_parts
     return parts or [text]
 
 
@@ -2917,6 +3272,103 @@ def _sanitize_task_text(text: str) -> str:
     compact = re.sub(r"\s+(?:and|then|also)\s*$", "", compact, flags=re.IGNORECASE)
     compact = re.sub(r"\s+", " ", compact).strip(" ,;:.")
     return compact
+
+
+def _normalize_common_shell_compound_typos(text: str) -> str:
+    normalized = str(text or "")
+    normalized = re.sub(r"\bdocke\s+r\b", "docker", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bthis\s+machines\b", "this machine", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bemove\b", "remove", normalized, flags=re.IGNORECASE)
+    return normalized
+
+
+def _split_shared_verb_compound_request(question: str) -> list[str]:
+    text = _normalize_common_shell_compound_typos(re.sub(r"\s+", " ", str(question or "").strip()))
+    if not text:
+        return []
+
+    match = re.match(
+        r"^(?P<prefix>(?:(?:in|under|within|on)\s+[^,]+,\s+)*)?(?P<verb>list|show|count)\s+(?P<body>.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return []
+
+    body = str(match.group("body") or "").strip()
+    if not body:
+        return []
+
+    if re.search(
+        r"\s+and\s+(?:what|how|count|list|show|find|which|is|are|does|do|did|can|has|have|"
+        r"current|last|latest|get|provide|check|create|copy|save|write|tail|open|read|tell|"
+        r"report|give|in|under|within|across|using)\b",
+        body,
+        flags=re.IGNORECASE,
+    ):
+        return []
+
+    parts = re.split(r"\s+and\s+", body, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) != 2:
+        return []
+
+    prefix = str(match.group("prefix") or "")
+    verb = str(match.group("verb") or "").strip()
+    first_item = _sanitize_task_text(parts[0])
+    second_item = _sanitize_task_text(parts[1])
+    if not first_item or not second_item:
+        return []
+
+    common_suffix = ""
+    suffix_match = re.search(r"\s+((?:in|under|within|on)\s+.+)$", second_item, flags=re.IGNORECASE)
+    if suffix_match and not re.search(r"\s+(?:in|under|within|on)\s+.+$", first_item, flags=re.IGNORECASE):
+        common_suffix = " " + suffix_match.group(1).strip()
+        second_item = second_item[: suffix_match.start()].strip()
+    if not second_item:
+        return []
+
+    return [
+        _sanitize_task_text(f"{prefix}{verb} {first_item}{common_suffix}"),
+        _sanitize_task_text(f"{prefix}{verb} {second_item}{common_suffix}"),
+    ]
+
+
+def _inherit_shared_scope_request(previous: str, current: str) -> str:
+    previous_text = _sanitize_task_text(previous)
+    current_text = _sanitize_task_text(current)
+    if not previous_text or not current_text:
+        return current_text
+    current_lc = current_text.lower()
+    if not re.match(r"^(?:in|under|within|on|across)\b", current_lc, flags=re.IGNORECASE):
+        return current_text
+    if re.match(r"^(?:count|list|show)\b", current_lc, flags=re.IGNORECASE) or any(
+        marker in current_lc for marker in COUNT_REQUEST_MARKERS
+    ):
+        return current_text
+    base_match = re.match(
+        r"^(?P<prefix>.*?\b(?:count|list|show)\s+)(?P<body>.+?)\s+(?:in|under|within|on|across)\s+.+$",
+        previous_text,
+        flags=re.IGNORECASE,
+    )
+    if not base_match:
+        return current_text
+    prefix = str(base_match.group("prefix") or "")
+    body = str(base_match.group("body") or "").strip()
+    if not body:
+        return current_text
+    return _sanitize_task_text(f"{prefix}{body} {current_text}")
+
+
+def _inherit_shared_compound_context(parts: list[str]) -> list[str]:
+    inherited: list[str] = []
+    for part in parts:
+        compact = _sanitize_task_text(part)
+        if not compact:
+            continue
+        if inherited:
+            compact = _inherit_shared_scope_request(inherited[-1], compact)
+        inherited.append(compact)
+    return inherited
 
 
 def _normalized_sql_query_question(task: str, question: str) -> str:
@@ -2938,6 +3390,8 @@ def _normalized_sql_query_question(task: str, question: str) -> str:
 def _normalize_compound_shell_part(part: str, question: str) -> str:
     compact = _sanitize_task_text(part)
     if not compact:
+        return compact
+    if _derive_shell_command(compact, 1):
         return compact
     compact_lc = compact.lower()
     question_lc = str(question or "").lower()
@@ -2974,6 +3428,14 @@ def _contextualize_shell_followup_task(task: str, question: str) -> str:
         return compact
     compact_lc = compact.lower()
     question_lc = str(question or "").lower()
+    if compact_lc in {"list them", "show them", "display them"}:
+        antecedent = re.search(
+            r"\b(?:count|list|show|find)\s+(.+?)\s+(?:and|then)\s+(?:list|show|display)\s+them\b",
+            question_lc,
+            flags=re.IGNORECASE,
+        )
+        if antecedent:
+            return _sanitize_task_text(f"list {antecedent.group(1)}")
     wants_count = any(marker in compact_lc for marker in ("count", "total count", "number of", "how many"))
     if (
         wants_count
@@ -3256,6 +3718,33 @@ def _compound_fallback_steps(question: str, capabilities: dict):
         if followup_task and previous_step_id:
             step["depends_on"] = [previous_step_id]
         steps.append(step)
+    wants_difference = any(token in str(question or "").lower() for token in ("difference", "compare", "versus", " vs "))
+    if (
+        wants_difference
+        and len(steps) == 2
+        and not any("difference" in str(step.get("task") or "").lower() for step in steps)
+        and all(
+            _infer_task_shape(
+                str(step.get("task") or ""),
+                target_agent=str(step.get("target_agent") or ""),
+            )
+            == "count"
+            for step in steps
+        )
+    ):
+        steps.append(
+            {
+                "id": "step3",
+                "target_agent": "shell_runner",
+                "task": "compute the absolute difference between the previous counts",
+                "instruction": {
+                    "operation": "run_command",
+                    "command": _build_dependency_results_difference_command(),
+                    "capture": {"mode": "stdout_stripped"},
+                },
+                "depends_on": [str(steps[0]["id"]), str(steps[1]["id"])],
+            }
+        )
     return steps
 
 
@@ -3910,6 +4399,13 @@ def _validate_plan_steps(question: str, steps: list[dict], capabilities: dict) -
         return {
             "valid": False,
             "reason": "Planner collapsed the shell count workflow and lost required comparison/count steps.",
+        }
+
+    expected_conda_removal_steps = _conda_env_removal_steps(question)
+    if expected_conda_removal_steps and len(leaf_steps) < len(_leaf_plan_steps(expected_conda_removal_steps)):
+        return {
+            "valid": False,
+            "reason": "Planner collapsed the conda removal workflow and lost the required verify/list follow-up steps.",
         }
 
     compound_fallback = _compound_fallback_steps(question, capabilities)

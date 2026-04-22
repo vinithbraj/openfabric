@@ -18,8 +18,10 @@ from agent_library.agents.synthesizer import _build_prompt as _build_synthesis_p
 from agent_library.agents.synthesizer import _fallback_answer as _fallback_synthesis_answer
 from runtime.engine import Engine
 from runtime.loader import load_spec
+from runtime.runtime_config import describe_runtime_settings, get_runtime_setting, reset_runtime_settings, update_runtime_settings
+from runtime.runtime_config_ui import render_runtime_config_html
 from runtime.semantic_validator import validate_semantics
-from web_compat import FastAPI, HTTPException, Request, StreamingResponse
+from web_compat import FastAPI, HTMLResponse, HTTPException, Request, StreamingResponse
 
 
 DEFAULT_MODEL_ID = "openfabric-planner"
@@ -50,6 +52,10 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage]
     stream: bool = False
+
+
+class RuntimeConfigUpdateRequest(BaseModel):
+    values: dict[str, Any] = {}
 
 
 class PlannerGateway:
@@ -91,6 +97,9 @@ class PlannerGateway:
                             if agent_name != SYNTHESIZER_AGENT_NAME
                         ]
             try:
+                if should_cancel is not None and should_cancel():
+                    raise ClientCancelled("Client disconnected.")
+                self.engine._emit_system_capabilities()
                 if should_cancel is not None and should_cancel():
                     raise ClientCancelled("Client disconnected.")
                 self.engine.emit("user.ask", {"question": question})
@@ -430,7 +439,7 @@ def _streaming_headers() -> dict[str, str]:
 
 
 def _stream_progress_enabled() -> bool:
-    return _env_flag("OPENFABRIC_GATEWAY_STREAM_PROGRESS", default=True)
+    return get_runtime_setting("chat_progress_enabled")
 
 
 def _text_stream_parts(text: str, chunk_size: int = 96) -> Iterator[str]:
@@ -687,34 +696,8 @@ def _blockquote_lines(text: str) -> list[str]:
     return [f"> {line}" if line else ">" for line in clean.splitlines()]
 
 
-def _trace_tone(label: str) -> str:
-    label_lc = label.strip().lower()
-    if any(token in label_lc for token in ("failed", "error")):
-        return "failure"
-    if any(token in label_lc for token in ("validation", "retry", "clarification", "trying")):
-        return "validation"
-    if any(token in label_lc for token in ("running", "completed step", "shell result", "sql result", "workflow complete", "completed")):
-        return "execution"
-    if any(token in label_lc for token in ("plan", "planning", "replanning")):
-        return "planning"
-    if "thinking" in label_lc:
-        return "thinking"
-    return "neutral"
-
-
-def _trace_badge(tone: str) -> str:
-    return {
-        "thinking": "🟣",
-        "planning": "🟦",
-        "execution": "🟩",
-        "validation": "🟨",
-        "failure": "🟥",
-        "neutral": "⬜",
-    }.get(tone, "⬜")
-
-
 def _trace_title(label: str, summary: str | None = None) -> str:
-    title = f"### {_trace_badge(_trace_tone(label))} {label}"
+    title = f"### {label}"
     if isinstance(summary, str) and summary.strip():
         return f"{title}\n\n" + "\n".join(_blockquote_lines(summary.strip()))
     return title
@@ -1449,6 +1432,29 @@ def _static_stream_response(answer: str, model: str):
 @app.get("/health")
 def health():
     return {"status": "ok", "model": model_id}
+
+
+@app.get("/config", response_class=HTMLResponse)
+def runtime_config_page():
+    return HTMLResponse(render_runtime_config_html())
+
+
+@app.get("/api/runtime-config")
+def runtime_config():
+    return describe_runtime_settings()
+
+
+@app.post("/api/runtime-config")
+def update_runtime_config(request: RuntimeConfigUpdateRequest):
+    try:
+        return update_runtime_settings(request.values or {})
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"Unknown runtime setting: {exc}") from exc
+
+
+@app.post("/api/runtime-config/reset")
+def reset_runtime_config():
+    return reset_runtime_settings()
 
 
 @app.get("/v1/models")

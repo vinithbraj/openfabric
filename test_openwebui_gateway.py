@@ -82,11 +82,37 @@ jsonschema_stub = types.ModuleType("jsonschema")
 jsonschema_stub.validate = lambda instance, schema: None
 sys.modules["jsonschema"] = jsonschema_stub
 
-from openwebui_gateway import _format_progress, _should_use_gateway_direct_fallback, _stream_synthesis_parts
+from openwebui_gateway import PlannerGateway, _format_progress, _should_use_gateway_direct_fallback, _stream_synthesis_parts
 
 
 class OpenWebUIGatewayTests(unittest.TestCase):
-    def test_progress_sections_use_colored_markdown_badges(self):
+    def test_planner_gateway_refreshes_capabilities_before_user_request(self):
+        class _Bus:
+            subscribers = {}
+
+        class _Engine:
+            def __init__(self):
+                self.bus = _Bus()
+                self.calls = []
+                self.emit = self._emit
+
+            def _emit(self, event_name, payload, depth=0):
+                self.calls.append((event_name, payload, depth))
+
+            def _emit_system_capabilities(self):
+                self.calls.append(("system.capabilities.refresh", {}, 0))
+
+        gateway = PlannerGateway.__new__(PlannerGateway)
+        gateway.engine = _Engine()
+        gateway.lock = type("_Lock", (), {"__enter__": lambda self: None, "__exit__": lambda self, exc_type, exc, tb: False})()
+
+        gateway.ask("hello")
+
+        self.assertEqual(gateway.engine.calls[0][0], "system.capabilities.refresh")
+        self.assertEqual(gateway.engine.calls[1][0], "user.ask")
+        self.assertEqual(gateway.engine.calls[1][1], {"question": "hello"})
+
+    def test_progress_sections_use_plain_markdown_headings(self):
         thinking = _format_progress("user.ask", {"question": "list docker containers"}, 0)
         planning = _format_progress("plan.progress", {"message": "I found 1 action to run.", "steps": []}, 0)
         executing = _format_progress(
@@ -94,9 +120,12 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             {"stage": "started", "step_id": "step1", "target_agent": "shell_runner", "task": "list containers"},
             0,
         )
-        self.assertIn("### 🟣 Thinking", thinking)
-        self.assertIn("### 🟦 Plan", planning)
-        self.assertIn("### 🟩 Running step", executing)
+        self.assertIn("### Thinking", thinking)
+        self.assertIn("### Plan", planning)
+        self.assertIn("### Running step", executing)
+        self.assertNotIn("🟣", thinking)
+        self.assertNotIn("🟦", planning)
+        self.assertNotIn("🟩", executing)
 
     def test_validation_progress_avoids_im_now_console_style_language(self):
         block = _format_progress(
@@ -104,7 +133,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             {"stage": "option_started", "option_id": "option1", "option_label": "Primary plan"},
             0,
         )
-        self.assertIn("### 🟨 Trying workflow option", block)
+        self.assertIn("### Trying workflow option", block)
         self.assertNotIn("I’m now", block)
         self.assertNotIn("I'm now", block)
 

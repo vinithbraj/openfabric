@@ -18,6 +18,12 @@ arguments:
           database_aliases:
             - "mydb"
           routing_priority: 10
+          planning_hints:
+            keywords:
+              - "mydb"
+              - "default app database"
+              - "general relational data"
+              - "core sample database"
           routing_hints:
             - "default app database"
             - "general relational data"
@@ -38,6 +44,13 @@ arguments:
             - "dicom_mock"
             - "dicom mock"
           routing_priority: 50
+          planning_hints:
+            keywords:
+              - "dicom_mock"
+              - "dicom mock"
+              - "dicom imaging patients studies series instances mrn modality"
+              - "radiology oncology rtplan rtstruct rtdose dicom tags"
+              - "primary healthcare dataset"
           routing_hints:
             - "dicom imaging patients studies series instances mrn modality"
             - "radiology oncology rtplan rtstruct rtdose dicom tags"
@@ -59,6 +72,16 @@ arguments:
             - "slurm"
             - "cluster"
             - "hpc"
+          planning_hints:
+            keywords:
+              - "slurm"
+              - "cluster"
+              - "hpc"
+              - "scheduler"
+              - "queue"
+              - "partition"
+              - "node"
+              - "nodes"
 
 contracts:
   UserQuestion:

@@ -97,6 +97,47 @@ AGENT_DESCRIPTOR = agent_descriptor(
         "Can derive shell commands from natural-language task plans using an LLM preprocessing step.",
         "If a task cannot be mapped to a safe local shell command, emit nothing for task.plan.",
     ],
+    planning_hints={
+        "keywords": [
+            "shell",
+            "bash",
+            "terminal",
+            "command",
+            "docker",
+            "container",
+            "containers",
+            "image",
+            "images",
+            "git",
+            "repo",
+            "repository",
+            "workspace",
+            "file",
+            "files",
+            "directory",
+            "directories",
+            "path",
+            "paths",
+            "process",
+            "port",
+            "ports",
+            "network",
+            "service",
+            "services",
+            "log",
+            "logs",
+            "env",
+            "conda",
+            "gpu",
+            "nvidia-smi",
+            "python package",
+        ],
+        "anti_keywords": ["database schema relationship", "sql join", "slurm scheduler queue partition"],
+        "preferred_task_shapes": ["count", "boolean_check", "list", "compare", "save_artifact", "command_execution"],
+        "instruction_operations": ["run_command"],
+        "structured_followup": True,
+        "routing_priority": 35,
+    },
     apis=[
         agent_api(
             name="execute_explicit_command",
@@ -113,6 +154,10 @@ AGENT_DESCRIPTOR = agent_descriptor(
             anti_patterns=["read a specific file's contents"],
             deterministic=True,
             side_effect_level="variable",
+            planning_hints={
+                "keywords": ["explicit command", "shell.exec", "terminal command"],
+                "instruction_operations": ["run_command"],
+            },
         ),
         agent_api(
             name="execute_llm_derived_command",
@@ -139,6 +184,20 @@ AGENT_DESCRIPTOR = agent_descriptor(
             anti_patterns=["delete system files", "modify system package managers without explicit need"],
             deterministic=False,
             side_effect_level="variable",
+            planning_hints={
+                "keywords": [
+                    "docker",
+                    "git",
+                    "workspace",
+                    "file inventory",
+                    "repo inspection",
+                    "machine inspection",
+                    "text processing",
+                    "arithmetical shell command",
+                ],
+                "preferred_task_shapes": ["count", "boolean_check", "list", "compare", "save_artifact", "command_execution"],
+                "instruction_operations": ["run_command"],
+            },
         ),
     ],
 )
@@ -352,6 +411,38 @@ def _normalize_partial_success(command: str, completed: subprocess.CompletedProc
     if all(any(pattern in line.lower() for pattern in NONFATAL_SCAN_ERROR_PATTERNS) for line in stderr_lines):
         return 0, "find returned partial results and only reported non-fatal permission warnings."
     return completed.returncode, None
+
+
+def _extract_conda_env_remove_name(command: str) -> str | None:
+    if not isinstance(command, str):
+        return None
+    patterns = (
+        r"\bconda\s+env\s+remove\b.*?\s(?:-n|--name)\s+([A-Za-z0-9._-]+)\b",
+        r"\bconda\s+remove\b.*?\s(?:-n|--name)\s+([A-Za-z0-9._-]+)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, command, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _normalize_idempotent_conda_env_remove(command: str, completed: subprocess.CompletedProcess[str]) -> tuple[int, str | None]:
+    if completed.returncode in (0, None):
+        return int(completed.returncode or 0), None
+    if not isinstance(command, str) or not re.search(r"\bconda\s+env\s+remove\b", command, flags=re.IGNORECASE):
+        return completed.returncode, None
+    combined = "\n".join(
+        part.strip()
+        for part in (completed.stdout, completed.stderr)
+        if isinstance(part, str) and part.strip()
+    ).lower()
+    if "environmentlocationnotfound" not in combined and "not a conda environment" not in combined:
+        return completed.returncode, None
+    env_name = _extract_conda_env_remove_name(command)
+    if env_name:
+        return 0, f"Conda environment `{env_name}` was already absent."
+    return 0, "Conda environment was already absent."
 
 
 def _llm_api_settings():
@@ -686,7 +777,10 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
 
     completed, install_command, install_detail = _attempt_python_dependency_repair(command, stdin_text, completed)
 
-    effective_returncode, partial_success_reason = _normalize_partial_success(command, completed)
+    effective_returncode, normalized_reason = _normalize_idempotent_conda_env_remove(command, completed)
+    partial_success_reason = None
+    if normalized_reason is None:
+        effective_returncode, partial_success_reason = _normalize_partial_success(command, completed)
     reduction_request = None
     if task and effective_returncode == 0:
         reduction_request = build_shell_reduction_request(task, command, completed.stdout)
@@ -698,11 +792,13 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
         "stderr": completed.stderr.strip(),
         "returncode": effective_returncode,
     }
+    if isinstance(normalized_reason, str) and normalized_reason.strip():
+        payload["normalized_result"] = normalized_reason.strip()
     if isinstance(reduction_request, dict):
         payload["reduction_request"] = reduction_request
     if effective_returncode != completed.returncode:
         payload["raw_returncode"] = completed.returncode
-    details = [item for item in (install_detail, partial_success_reason) if isinstance(item, str) and item.strip()]
+    details = [item for item in (install_detail, normalized_reason, partial_success_reason) if isinstance(item, str) and item.strip()]
     if details:
         payload["detail"] = " ".join(details)
 

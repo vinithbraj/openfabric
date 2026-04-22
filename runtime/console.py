@@ -2,6 +2,8 @@ import json
 import os
 import sys
 
+from .runtime_config import get_runtime_setting
+
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -65,12 +67,19 @@ def _format_payload(payload) -> str:
 
 
 def _full_event_logs_enabled() -> bool:
-    return os.getenv("OPENFABRIC_FULL_EVENT_LOGS", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return get_runtime_setting("console_full_event_logs_enabled")
+
+
+def _event_logs_enabled() -> bool:
+    return get_runtime_setting("console_event_logs_enabled")
+
+
+def _debug_logs_enabled() -> bool:
+    return get_runtime_setting("console_debug_logs_enabled")
+
+
+def _raw_logs_enabled() -> bool:
+    return get_runtime_setting("console_raw_logs_enabled")
 
 
 def _truncate_text(value: str, limit: int = 240) -> str:
@@ -140,6 +149,8 @@ def log_boot(message: str):
 
 
 def log_event(event_name: str, payload: dict, depth: int = 0):
+    if not _event_logs_enabled():
+        return
     indent = "  " * depth
     event_text = _paint(event_name, "blue", bold=True)
     if event_name == "answer.final" and isinstance(payload, dict) and isinstance(payload.get("answer"), str):
@@ -158,15 +169,21 @@ def log_event(event_name: str, payload: dict, depth: int = 0):
 
 
 def log_event_handler(agent_name: str, depth: int = 0):
+    if not _event_logs_enabled():
+        return
     indent = "  " * depth
     print(f"{indent}  {_paint('↳ handled by:', 'gray')} {style_agent_name(agent_name)}")
 
 
 def log_debug(channel: str, message: str):
+    if not _debug_logs_enabled():
+        return
     print(f"{_tag(channel, 'yellow')} {_paint(message, 'gray')}")
 
 
 def log_raw(channel: str, message: str):
+    if not _raw_logs_enabled():
+        return
     print(f"{_tag(channel, 'magenta')} {_paint(message, 'gray')}")
 
 

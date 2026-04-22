@@ -250,6 +250,23 @@ def _heuristic_validate(payload: dict):
 def _looks_like_boolean_result(task_text: str, result: Any) -> bool:
     if isinstance(result, bool):
         return True
+    if isinstance(result, dict):
+        for key in ("exists", "present", "removed", "missing", "ok", "success"):
+            candidate = result.get(key)
+            if isinstance(candidate, bool):
+                return True
+            if isinstance(candidate, str) and candidate.strip().lower() in {
+                "true",
+                "false",
+                "yes",
+                "no",
+                "exists",
+                "missing",
+                "removed",
+                "present",
+            }:
+                return True
+        return False
     if not isinstance(result, str):
         return False
     compact = result.strip().lower()
@@ -266,6 +283,10 @@ def _infer_step_task_shape(step_task: str, fallback_shape: str) -> str:
         return "save_artifact"
     if any(token in text for token in ("how many", "count ", "number of", "total ")) or text.startswith("count "):
         return "count"
+    if any(token in text for token in ("confirm ", "verify ", "check ")) and any(
+        token in text for token in (" removed", " absent", " missing", " exists", " present")
+    ) and not any(token in text for token in ("list ", "show ", "display ")):
+        return "boolean_check"
     if any(token in text for token in ("whether", "check whether", "if any", "exists", "is there", "does ", "do any", "has ")) and not any(
         token in text for token in ("list ", "show ", "display ")
     ):
