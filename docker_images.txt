@@ -1,5 +1,0 @@
-postgres:16
-vllm/vllm-openai:latest
-dpage/pgadmin4:latest
-ghcr.io/open-webui/open-webui:main
-nvidia/cuda:12.4.1-base-ubuntu22.04

@@ -1,7 +1,0 @@
-PyYAML
-jsonschema
-requests
-fastapi
-pydantic
-uvicorn
-psycopg2-binary
