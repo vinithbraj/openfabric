@@ -20,6 +20,8 @@ class PlanExecutor:
             try:
                 output = self.tools.invoke(step.action, step.args)
                 finished = datetime.now(timezone.utc).isoformat()
+                if step.action == "python.exec" and not bool(output.get("success", False)):
+                    raise ToolExecutionError(str(output.get("error") or "python.exec failed."))
                 if step.action == "fs.exists" and not bool(output.get("exists")):
                     raise ToolExecutionError(f"Path does not exist: {step.args.get('path', '')}")
                 history.append(
@@ -80,19 +82,7 @@ def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
     elif action == "fs.exists":
         content = "true" if result.get("exists") else "false"
     elif action == "python.exec":
-        py_result = result.get("result")
-        stdout = str(result.get("stdout") or "").strip()
-        if isinstance(py_result, dict):
-            if "value" in py_result:
-                content = str(py_result["value"])
-            elif "count" in py_result:
-                content = str(py_result["count"])
-            else:
-                content = stdout or str(py_result)
-        elif py_result is None:
-            content = stdout
-        else:
-            content = str(py_result)
+        content = str(result.get("output") or "").strip()
     elif action == "shell.exec":
         content = str(result.get("stdout", "")).strip()
     else:

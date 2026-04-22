@@ -23,7 +23,8 @@ Planning rules:
 - Use fs.write for exact file content.
 - Use fs.read to verify exact contents when a task asks for exact text.
 - Use fs.exists to assert that an important path exists before or after an operation.
-- Use python.exec for counting, filtering, selecting specific lines, or simple conditional logic.
+- Use python.exec when loops are required, multiple files must be processed, conditional logic is needed, or multiple tool calls are required.
+- Do not use python.exec for single-step tasks that a direct fs.* or shell.exec step can handle.
 - In python.exec, assign the final JSON-serializable answer to a variable named result.
 - Keep python.exec code in a single-line JSON string. Use semicolons instead of raw newlines.
 - Do not use shell.exec when a filesystem tool already covers the task.
@@ -82,5 +83,21 @@ Task: read line 2 from notes.txt
         "code": "lines = fs.read('notes.txt').splitlines(); result = {'value': lines[1]}"
       }
     }
+  ]
+}
+
+Task: copy all txt files from A to B
+{
+  "steps": [
+    {"id": 1, "action": "fs.exists", "args": {"path": "A"}},
+    {"id": 2, "action": "fs.mkdir", "args": {"path": "B"}},
+    {
+      "id": 3,
+      "action": "python.exec",
+      "args": {
+        "code": "files = fs.list('A'); copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in files if name.endswith('.txt')]; result = {'operation': 'bulk_copy', 'src_dir': 'A', 'dst_dir': 'B', 'copied_files': copied}"
+      }
+    },
+    {"id": 4, "action": "fs.list", "args": {"path": "B"}}
   ]
 }

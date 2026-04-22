@@ -32,7 +32,8 @@ Rules:
 - Use fs.mkdir for creating directories.
 - Use fs.write for exact content writes.
 - Use fs.read or fs.exists for verification steps when needed.
-- Use python.exec when counting, selecting lines, looping, filtering, or doing simple conditional logic.
+- Use python.exec when loops are required, multiple files must be processed, conditional logic is needed, or multiple tool calls are required.
+- Do not use python.exec for single-step tasks that a direct fs.* or shell.exec step can handle.
 - python.exec code may call fs.exists, fs.copy, fs.read, fs.write, fs.mkdir, fs.list, and shell.exec.
 - For python.exec, the code must assign a JSON-serializable value to a variable named result.
 - For python.exec, keep the code in a single-line JSON string and use semicolons instead of raw newlines.
@@ -92,6 +93,24 @@ Plan:
         "code": "lines = fs.read('notes.txt').splitlines(); result = {'value': lines[1]}"
       }
     }
+  ]
+}
+
+Task:
+copy all txt files from A to B
+Plan:
+{
+  "steps": [
+    {"id": 1, "action": "fs.exists", "args": {"path": "A"}},
+    {"id": 2, "action": "fs.mkdir", "args": {"path": "B"}},
+    {
+      "id": 3,
+      "action": "python.exec",
+      "args": {
+        "code": "files = fs.list('A'); copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in files if name.endswith('.txt')]; result = {'operation': 'bulk_copy', 'src_dir': 'A', 'dst_dir': 'B', 'copied_files': copied}"
+      }
+    },
+    {"id": 4, "action": "fs.list", "args": {"path": "B"}}
   ]
 }
 """

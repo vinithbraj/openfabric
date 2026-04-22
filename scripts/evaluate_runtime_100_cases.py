@@ -74,6 +74,18 @@ def setup_overwrite_fixture(case_dir: Path, existing_text: str) -> dict[str, Any
     return {"target": str(target)}
 
 
+def setup_bulk_copy_fixture(case_dir: Path, txt_count: int, md_count: int = 1) -> dict[str, Any]:
+    _clean_dir(case_dir)
+    source = case_dir / "source"
+    dest = case_dir / "dest"
+    source.mkdir(parents=True, exist_ok=True)
+    for index in range(txt_count):
+        (source / f"item_{index:02d}.txt").write_text(f"payload {index}\n")
+    for index in range(md_count):
+        (source / f"note_{index:02d}.md").write_text(f"ignore {index}\n")
+    return {"txt_count": txt_count, "md_count": md_count}
+
+
 def validate_write(case_dir: Path, context: dict[str, Any], state: dict[str, Any]) -> tuple[bool, str]:
     target = case_dir / "note.txt"
     expected = context["expected_text"]
@@ -127,6 +139,25 @@ def validate_overwrite(case_dir: Path, context: dict[str, Any], state: dict[str,
     if actual == expected:
         return True, "file overwritten correctly"
     return False, f"expected overwrite {expected!r}, found {actual!r}"
+
+
+def validate_bulk_copy(case_dir: Path, context: dict[str, Any], state: dict[str, Any]) -> tuple[bool, str]:
+    source = case_dir / "source"
+    dest = case_dir / "dest"
+    if not dest.exists():
+        return False, "destination directory missing"
+
+    src_txt = sorted(path.name for path in source.glob("*.txt"))
+    dst_txt = sorted(path.name for path in dest.glob("*.txt"))
+    if src_txt != dst_txt:
+        return False, f"txt file mismatch: src={src_txt!r} dst={dst_txt!r}"
+    dst_md = sorted(path.name for path in dest.glob("*.md"))
+    if dst_md:
+        return False, f"unexpected markdown files copied: {dst_md!r}"
+    for name in src_txt:
+        if (source / name).read_text() != (dest / name).read_text():
+            return False, f"content mismatch for {name!r}"
+    return True, "bulk txt copy matched expected output"
 
 
 def build_cases() -> list[Case]:
@@ -202,6 +233,18 @@ def build_cases() -> list[Case]:
         )
         cases.append(Case(f"case_{index:03d}", "overwrite_file", prompt, setup, validate_overwrite))
 
+    for index in range(101, 111):
+        txt_count = (index % 4) + 2
+
+        def setup(case_dir: Path, *, txt_value: int = txt_count) -> dict[str, Any]:
+            return setup_bulk_copy_fixture(case_dir, txt_value)
+
+        prompt = (
+            f"copy all txt files from artifacts/eval_100_cases/case_{index:03d}/source "
+            f"into artifacts/eval_100_cases/case_{index:03d}/dest"
+        )
+        cases.append(Case(f"case_{index:03d}", "python_exec_composition", prompt, setup, validate_bulk_copy))
+
     return cases
 
 
@@ -236,6 +279,7 @@ def tool_usage_score(category: str, tool_names: list[str]) -> float:
         "read_phrase": {"python.exec"},
         "count_files": {"python.exec"},
         "overwrite_file": {"fs.write"},
+        "python_exec_composition": {"python.exec"},
     }
     expected = required.get(category, set())
     if not expected:
@@ -301,6 +345,7 @@ def main() -> None:
                 "duration_ms": duration_ms,
                 "correctness": 1.0 if passed else 0.0,
                 "tool_usage": tool_usage_score(case.category, tool_names),
+                "used_python_exec": "python.exec" in tool_names,
                 "latency": round(duration_ms / 1000, 4),
                 "llm_calls": int(metrics.get("llm_calls", 0)),
                 "steps_executed": int(metrics.get("steps_executed", 0)),
@@ -314,7 +359,7 @@ def main() -> None:
                 "metrics": metrics,
             }
         )
-        print(f"[{index:03d}/100] {case.case_id} {case.category}: {'PASS' if passed else 'FAIL'} ({duration_ms} ms) - {detail}")
+        print(f"[{index:03d}/{len(cases):03d}] {case.case_id} {case.category}: {'PASS' if passed else 'FAIL'} ({duration_ms} ms) - {detail}")
 
     by_category: dict[str, dict[str, Any]] = {}
     for item in results:

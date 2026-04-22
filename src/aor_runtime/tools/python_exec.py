@@ -4,6 +4,7 @@ import ast
 import io
 import json
 import multiprocessing as mp
+import re
 from contextlib import redirect_stdout
 from typing import Any
 
@@ -70,6 +71,8 @@ FORBIDDEN_NAMES = {
     "delattr",
 }
 
+NETWORK_COMMAND_RE = re.compile(r"\b(curl|wget|ssh|scp|sftp|ftp|ping|nc|ncat|telnet)\b", re.IGNORECASE)
+
 
 class _PythonFsFacade:
     def __init__(self, settings: Settings) -> None:
@@ -99,7 +102,10 @@ class _PythonShellFacade:
         self.settings = settings
 
     def exec(self, command: str, cwd: str = "", timeout: int = 60) -> dict[str, Any]:
-        return run_shell(self.settings, command, cwd=cwd, timeout=timeout)
+        if NETWORK_COMMAND_RE.search(command):
+            raise ToolExecutionError("Network-oriented shell commands are not allowed inside python.exec.")
+        bounded_timeout = max(1, min(int(timeout), 5))
+        return run_shell(self.settings, command, cwd=cwd, timeout=bounded_timeout)
 
 
 def _validate_code(code: str) -> ast.AST:
@@ -141,8 +147,9 @@ class PythonExecTool(BaseTool):
         timeout: int = Field(default=5, ge=1, le=5)
 
     class ToolResult(ToolResultModel):
-        stdout: str
-        result: Any = None
+        success: bool
+        output: str | None = None
+        error: str | None = None
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -176,19 +183,36 @@ class PythonExecTool(BaseTool):
         if process.is_alive():
             process.terminate()
             process.join()
-            raise ToolExecutionError("python.exec timed out.")
+            return self.ToolResult(success=False, output=None, error="python.exec timed out.")
 
         if queue.empty():
-            raise ToolExecutionError("python.exec did not return a result.")
+            return self.ToolResult(success=False, output=None, error="python.exec did not return a result.")
 
         payload = queue.get()
         if not payload.get("ok"):
-            raise ToolExecutionError(str(payload.get("error") or "python.exec failed."))
+            return self.ToolResult(
+                success=False,
+                output=str(payload.get("stdout") or "") or None,
+                error=str(payload.get("error") or "python.exec failed."),
+            )
 
         result = payload.get("result")
         try:
             json.dumps(result, default=str)
-        except TypeError as exc:
-            raise ToolExecutionError(f"python.exec result must be JSON serializable: {exc}") from exc
+        except TypeError as exc:  # noqa: PERF203
+            return self.ToolResult(success=False, output=str(payload.get("stdout") or "") or None, error=f"python.exec result must be JSON serializable: {exc}")
 
-        return self.ToolResult(stdout=str(payload.get("stdout") or ""), result=result)
+        stdout = str(payload.get("stdout") or "").strip()
+        output: str | None
+        if result is None:
+            output = stdout or None
+        elif isinstance(result, str):
+            output = result
+        elif isinstance(result, (int, float, bool)):
+            output = str(result)
+        else:
+            output = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        if stdout and output and stdout != output:
+            output = f"{stdout}\n{output}"
+
+        return self.ToolResult(success=True, output=output, error=None)
