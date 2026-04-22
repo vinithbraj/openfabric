@@ -6,7 +6,7 @@ from typing import Any
 
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
-from aor_runtime.tools.base import BaseTool, ToolExecutionError
+from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
 
 
 def resolve_path(settings: Settings, raw_path: str) -> Path:
@@ -71,21 +71,42 @@ def fs_list(settings: Settings, path: str) -> dict[str, Any]:
 
 
 class FileExistsTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+
+    class ToolResult(ToolResultModel):
+        path: str
+        exists: bool
+        is_file: bool
+        is_dir: bool
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="fs.exists",
             description="Check whether a file or directory exists.",
             arguments_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return fs_exists(self.settings, str(arguments["path"]))
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_exists(self.settings, arguments.path))
 
 
 class FileCopyTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        src: str
+        dst: str
+
+    class ToolResult(ToolResultModel):
+        src: str
+        dst: str
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="fs.copy",
             description="Copy a file from src to dst.",
@@ -96,26 +117,45 @@ class FileCopyTool(BaseTool):
             },
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return fs_copy(self.settings, str(arguments["src"]), str(arguments["dst"]))
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_copy(self.settings, arguments.src, arguments.dst))
 
 
 class FileReadTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+
+    class ToolResult(ToolResultModel):
+        path: str
+        content: str
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="fs.read",
             description="Read a text file from the local workspace.",
             arguments_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return fs_read(self.settings, str(arguments["path"]))
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_read(self.settings, arguments.path))
 
 
 class FileWriteTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+        content: str
+
+    class ToolResult(ToolResultModel):
+        path: str
+        bytes_written: int
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="fs.write",
             description="Write exact text content to a file.",
@@ -126,31 +166,48 @@ class FileWriteTool(BaseTool):
             },
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return fs_write(self.settings, str(arguments["path"]), str(arguments["content"]))
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_write(self.settings, arguments.path, arguments.content))
 
 
 class MakeDirectoryTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+
+    class ToolResult(ToolResultModel):
+        path: str
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="fs.mkdir",
             description="Create a directory and any missing parents.",
             arguments_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return fs_mkdir(self.settings, str(arguments["path"]))
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_mkdir(self.settings, arguments.path))
 
 
 class ListDirectoryTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+
+    class ToolResult(ToolResultModel):
+        path: str
+        entries: list[str]
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="fs.list",
             description="List directory entries.",
             arguments_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return fs_list(self.settings, str(arguments["path"]))
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_list(self.settings, arguments.path))

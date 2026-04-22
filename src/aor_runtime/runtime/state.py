@@ -18,8 +18,10 @@ class RuntimeState(TypedDict, total=False):
     current_node: str
     next_node: str
     validation: dict[str, Any] | None
+    validation_checks: list[dict[str, Any]]
     final_output: dict[str, Any]
     failure_context: dict[str, Any] | None
+    metrics: dict[str, Any]
     error: str | None
     started_at: str
     updated_at: str
@@ -40,8 +42,10 @@ def initial_runtime_state(*, run_id: str, spec_name: str, input_payload: dict[st
         "current_node": "",
         "next_node": "",
         "validation": None,
+        "validation_checks": [],
         "final_output": {"content": "", "artifacts": [], "metadata": {}},
         "failure_context": None,
+        "metrics": {"llm_calls": 0, "latency_ms": 0.0, "steps_executed": 0, "retries": 0},
         "error": None,
         "started_at": timestamp,
         "updated_at": timestamp,

@@ -10,14 +10,14 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class PlanStep(BaseModel):
+class ExecutionStep(BaseModel):
     id: int
     action: str
     args: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionPlan(BaseModel):
-    steps: list[PlanStep] = Field(default_factory=list)
+    steps: list[ExecutionStep] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_steps(self) -> "ExecutionPlan":
@@ -41,13 +41,8 @@ class ToolSpec(BaseModel):
     arguments_schema: dict[str, Any]
 
 
-class StepResult(BaseModel):
-    action: str
-    output: dict[str, Any] = Field(default_factory=dict)
-
-
 class StepLog(BaseModel):
-    step: PlanStep
+    step: ExecutionStep
     result: dict[str, Any] = Field(default_factory=dict)
     success: bool
     error: str | None = None
@@ -55,16 +50,9 @@ class StepLog(BaseModel):
     finished_at: str = Field(default_factory=utc_now_iso)
 
 
-class ValidationCheck(BaseModel):
-    name: str
+class ValidationResult(BaseModel):
     success: bool
-    detail: str = ""
-
-
-class ValidationReport(BaseModel):
-    success: bool
-    checks: list[ValidationCheck] = Field(default_factory=list)
-    detail: str = ""
+    reason: str | None = None
 
 
 class PlannerConfig(BaseModel):
@@ -81,6 +69,13 @@ class FinalOutput(BaseModel):
     content: str = ""
     artifacts: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunMetrics(BaseModel):
+    llm_calls: int = 0
+    latency_ms: float = 0.0
+    steps_executed: int = 0
+    retries: int = 0
 
 
 class RunEvent(BaseModel):
@@ -104,3 +99,6 @@ class RunSummary(BaseModel):
 class RuntimeStatus(BaseModel):
     status: Literal["planning", "executing", "validating", "retrying", "completed", "failed"]
     detail: str = ""
+
+
+PlanStep = ExecutionStep

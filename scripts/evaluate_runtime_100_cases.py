@@ -228,6 +228,53 @@ def extract_tool_names(state: dict[str, Any]) -> list[str]:
     return names
 
 
+def tool_usage_score(category: str, tool_names: list[str]) -> float:
+    required: dict[str, set[str]] = {
+        "write_file": {"fs.write"},
+        "copy_file": {"fs.copy"},
+        "nested_create": {"fs.mkdir", "fs.write"},
+        "read_phrase": {"python.exec"},
+        "count_files": {"python.exec"},
+        "overwrite_file": {"fs.write"},
+    }
+    expected = required.get(category, set())
+    if not expected:
+        return 1.0
+    used = set(tool_names)
+    if expected.issubset(used):
+        return 1.0
+    if used & expected:
+        return 0.5
+    return 0.0
+
+
+def classify_failure(state: dict[str, Any], passed: bool, tool_names: list[str]) -> str | None:
+    if passed:
+        return None
+    status = str(state.get("status", ""))
+    history = state.get("history", [])
+    error = str(state.get("error") or "")
+    validation = state.get("validation") or {}
+    failure_context = state.get("failure_context") or {}
+
+    if isinstance(failure_context, dict) and failure_context.get("reason") == "tool_execution_failed":
+        return "tool_failure"
+    if isinstance(failure_context, dict) and failure_context.get("reason") == "validation_failed":
+        return "validation_failure"
+
+    if status == "failed" and not history:
+        return "planner_failure"
+    if any(isinstance(item, dict) and item.get("success") is False for item in history):
+        return "tool_failure"
+    if validation and not bool(validation.get("success", True)):
+        return "validation_failure"
+    if not tool_names:
+        return "missing_step"
+    if "disallowed tool" in error.lower():
+        return "wrong_tool"
+    return "incorrect_output"
+
+
 def main() -> None:
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -242,6 +289,8 @@ def main() -> None:
         state = engine.run_spec(str(SPEC_PATH), {"task": case.prompt})
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         passed, detail = case.validate(case_dir, context, state)
+        tool_names = extract_tool_names(state)
+        metrics = state.get("metrics", {}) if isinstance(state.get("metrics"), dict) else {}
         results.append(
             {
                 "case_id": case.case_id,
@@ -250,12 +299,19 @@ def main() -> None:
                 "passed": passed,
                 "detail": detail,
                 "duration_ms": duration_ms,
+                "correctness": 1.0 if passed else 0.0,
+                "tool_usage": tool_usage_score(case.category, tool_names),
+                "latency": round(duration_ms / 1000, 4),
+                "llm_calls": int(metrics.get("llm_calls", 0)),
+                "steps_executed": int(metrics.get("steps_executed", 0)),
+                "failure_classification": classify_failure(state, passed, tool_names),
                 "run_id": state.get("run_id"),
                 "status": state.get("status"),
                 "route": extract_route(state),
                 "history": state.get("history"),
                 "answer": _last_answer(state),
-                "tool_names": extract_tool_names(state),
+                "tool_names": tool_names,
+                "metrics": metrics,
             }
         )
         print(f"[{index:03d}/100] {case.case_id} {case.category}: {'PASS' if passed else 'FAIL'} ({duration_ms} ms) - {detail}")
@@ -275,6 +331,9 @@ def main() -> None:
         "passed": sum(1 for item in results if item["passed"]),
         "failed": sum(1 for item in results if not item["passed"]),
         "pass_rate": round(sum(1 for item in results if item["passed"]) / len(results), 4),
+        "avg_latency_ms": round(sum(item["duration_ms"] for item in results) / len(results), 2),
+        "avg_llm_calls": round(sum(item["llm_calls"] for item in results) / len(results), 4),
+        "avg_tool_usage": round(sum(item["tool_usage"] for item in results) / len(results), 4),
         "by_category": by_category,
         "results": results,
     }

@@ -44,6 +44,7 @@ class PlanExecutor:
                     )
                 )
                 failure = {
+                    "reason": "tool_execution_failed",
                     "step": step.model_dump(),
                     "error": str(exc),
                     "history": [item.model_dump() for item in history],

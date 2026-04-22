@@ -7,7 +7,7 @@ from typing import Any
 
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
-from aor_runtime.tools.base import BaseTool, ToolExecutionError
+from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
 
 
 HIGH_RISK_PATTERNS = [
@@ -57,8 +57,22 @@ def run_shell(settings: Settings, command: str, cwd: str = "", timeout: int = 60
 
 
 class ShellExecTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        command: str
+        cwd: str = ""
+        timeout: int = 60
+
+    class ToolResult(ToolResultModel):
+        command: str
+        cwd: str
+        stdout: str
+        stderr: str
+        returncode: int
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="shell.exec",
             description="Execute a shell command on the local machine.",
@@ -73,10 +87,7 @@ class ShellExecTool(BaseTool):
             },
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return run_shell(
-            self.settings,
-            str(arguments["command"]),
-            str(arguments.get("cwd", "")),
-            int(arguments.get("timeout", 60)),
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(
+            run_shell(self.settings, arguments.command, arguments.cwd, arguments.timeout)
         )

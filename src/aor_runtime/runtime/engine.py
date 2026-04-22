@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from aor_runtime.config import Settings, get_settings
-from aor_runtime.core.contracts import ExecutionPlan, FinalOutput, ValidationReport
+from aor_runtime.core.contracts import ExecutionPlan, FinalOutput, RunMetrics
 from aor_runtime.core.utils import ensure_jsonable
 from aor_runtime.dsl.loader import load_runtime_spec
 from aor_runtime.dsl.models import CompiledRuntimeSpec
@@ -34,6 +35,7 @@ class ExecutionEngine:
         self.validator = RuntimeValidator(self.settings)
 
     def run_spec(self, spec_path: str, input_payload: dict[str, Any]) -> dict[str, Any]:
+        started = perf_counter()
         spec = load_runtime_spec(spec_path)
         compiled = self.compiler.compile(spec)
         run_id = self._new_run_id()
@@ -47,13 +49,17 @@ class ExecutionEngine:
         graph = self._build_graph(compiled)
         initial_state = initial_runtime_state(run_id=run_id, spec_name=compiled.name, input_payload=input_payload)
         final_state = graph.invoke(initial_state, config={"configurable": {"thread_id": run_id}})
+        metrics = dict(final_state.get("metrics", {}))
+        metrics["latency_ms"] = round((perf_counter() - started) * 1000, 2)
+        metrics["retries"] = int(final_state.get("retries", 0))
+        final_state["metrics"] = RunMetrics.model_validate(metrics).model_dump()
         final_status = str(final_state.get("status", "failed"))
         self.store.finalize_run(run_id=run_id, status=final_status, final_state=final_state)
         self.store.append_event(
             run_id=run_id,
             node_name="runtime",
             event_type="run.completed",
-            payload={"status": final_status, "retries": final_state.get("retries", 0)},
+            payload={"status": final_status, "metrics": final_state.get("metrics", {})},
         )
         return ensure_jsonable(final_state)
 
@@ -96,11 +102,13 @@ class ExecutionEngine:
     def _planner_node(self, compiled: CompiledRuntimeSpec):
         def run(state: RuntimeState) -> dict[str, Any]:
             run_id = state["run_id"]
+            metrics = dict(state.get("metrics", {}))
+            metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + 1
             self.store.append_event(
                 run_id=run_id,
                 node_name="planner",
                 event_type="planner.started",
-                payload={"retry": state.get("retries", 0)},
+                payload={"retry": state.get("retries", 0), "llm_calls": metrics["llm_calls"]},
             )
             try:
                 plan = self.planner.build_plan(
@@ -117,6 +125,7 @@ class ExecutionEngine:
                     "next_node": "executor",
                     "status": "executing",
                     "plan": payload,
+                    "metrics": metrics,
                     "error": None,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
@@ -131,6 +140,7 @@ class ExecutionEngine:
                     "current_node": "planner",
                     "next_node": "finalize",
                     "status": "failed",
+                    "metrics": metrics,
                     "error": str(exc),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "final_output": {"content": "", "artifacts": [], "metadata": {}},
@@ -144,14 +154,16 @@ class ExecutionEngine:
         def run(state: RuntimeState) -> dict[str, Any]:
             run_id = state["run_id"]
             plan = ExecutionPlan.model_validate(state.get("plan", {}))
+            metrics = dict(state.get("metrics", {}))
             self.store.append_event(
                 run_id=run_id,
                 node_name="executor",
                 event_type="executor.started",
-                payload={"step_count": len(plan.steps)},
+                payload={"step_count": len(plan.steps), "llm_calls": metrics.get("llm_calls", 0)},
             )
             history_models, failure = self.executor.execute(plan)
             history_payload = [item.model_dump() for item in history_models]
+            metrics["steps_executed"] = int(metrics.get("steps_executed", 0)) + len(history_payload)
             for item in history_payload:
                 self.store.append_event(
                     run_id=run_id,
@@ -169,6 +181,7 @@ class ExecutionEngine:
                     "status": "retrying" if should_retry else "failed",
                     "history": history_payload,
                     "failure_context": failure,
+                    "metrics": metrics,
                     "error": failure["error"],
                     "retries": retries + 1 if should_retry else retries,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -181,6 +194,7 @@ class ExecutionEngine:
                     "status": "validating",
                     "history": history_payload,
                     "failure_context": None,
+                    "metrics": metrics,
                     "error": None,
                     "final_output": final_output,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -194,9 +208,10 @@ class ExecutionEngine:
         def run(state: RuntimeState) -> dict[str, Any]:
             run_id = state["run_id"]
             history = state.get("history", [])
-            validation = self.validator.validate([self._step_log_from_dict(item) for item in history])
+            metrics = dict(state.get("metrics", {}))
+            validation, checks = self.validator.validate([self._step_log_from_dict(item) for item in history])
             payload = validation.model_dump()
-            self.store.append_event(run_id=run_id, node_name="validator", event_type="validator.completed", payload=payload)
+            self.store.append_event(run_id=run_id, node_name="validator", event_type="validator.completed", payload={"result": payload, "checks": checks})
             if validation.success:
                 final_output = state.get("final_output", {})
                 if not final_output:
@@ -206,6 +221,8 @@ class ExecutionEngine:
                     "next_node": "finalize",
                     "status": "completed",
                     "validation": payload,
+                    "validation_checks": checks,
+                    "metrics": metrics,
                     "error": None,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "final_output": final_output,
@@ -216,6 +233,7 @@ class ExecutionEngine:
                 failure_context = {
                     "reason": "validation_failed",
                     "validation": payload,
+                    "validation_checks": checks,
                     "plan": state.get("plan", {}),
                     "history": history,
                 }
@@ -224,8 +242,10 @@ class ExecutionEngine:
                     "next_node": "planner" if should_retry else "finalize",
                     "status": "retrying" if should_retry else "failed",
                     "validation": payload,
+                    "validation_checks": checks,
                     "failure_context": failure_context,
-                    "error": validation.detail,
+                    "metrics": metrics,
+                    "error": validation.reason,
                     "retries": retries + 1 if should_retry else retries,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
@@ -238,6 +258,7 @@ class ExecutionEngine:
         def run(state: RuntimeState) -> dict[str, Any]:
             run_id = state["run_id"]
             final_output = state.get("final_output", {"content": "", "artifacts": [], "metadata": {}})
+            metrics = RunMetrics.model_validate(state.get("metrics", {})).model_dump()
             status = state.get("status", "failed")
             if status not in {"completed", "failed"}:
                 status = "failed"
@@ -252,13 +273,14 @@ class ExecutionEngine:
                 "next_node": END,
                 "status": status,
                 "final_output": final_output,
+                "metrics": metrics,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             self.store.append_event(
                 run_id=run_id,
                 node_name="finalize",
                 event_type="finalize.completed",
-                payload={"status": status, "final_output": final_output},
+                payload={"status": status, "final_output": final_output, "metrics": metrics},
             )
             self.store.save_snapshot(run_id=run_id, node_name="finalize", state={**state, **update})
             return update

@@ -7,9 +7,11 @@ import multiprocessing as mp
 from contextlib import redirect_stdout
 from typing import Any
 
+from pydantic import Field
+
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
-from aor_runtime.tools.base import BaseTool, ToolExecutionError
+from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
 from aor_runtime.tools.filesystem import fs_copy, fs_exists, fs_list, fs_mkdir, fs_read, fs_write
 from aor_runtime.tools.shell import run_shell
 
@@ -134,8 +136,18 @@ def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any
 
 
 class PythonExecTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        code: str
+        timeout: int = Field(default=5, ge=1, le=5)
+
+    class ToolResult(ToolResultModel):
+        stdout: str
+        result: Any = None
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="python.exec",
             description="Execute minimal sandboxed Python that can call fs and shell helpers.",
@@ -149,9 +161,9 @@ class PythonExecTool(BaseTool):
             },
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        code = str(arguments["code"])
-        timeout = int(arguments.get("timeout", 30))
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        code = arguments.code
+        timeout = arguments.timeout
         _validate_code(code)
 
         queue: mp.Queue = mp.Queue()
@@ -179,4 +191,4 @@ class PythonExecTool(BaseTool):
         except TypeError as exc:
             raise ToolExecutionError(f"python.exec result must be JSON serializable: {exc}") from exc
 
-        return {"stdout": str(payload.get("stdout") or ""), "result": result}
+        return self.ToolResult(stdout=str(payload.get("stdout") or ""), result=result)
