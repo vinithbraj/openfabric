@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from aor_runtime.config import Settings, get_settings
-from aor_runtime.core.contracts import ToolResult
-from aor_runtime.tools.base import BaseTool, ToolSpec
+from aor_runtime.core.contracts import ToolSpec
+from aor_runtime.tools.base import BaseTool, ToolExecutionError
 
 
 HIGH_RISK_PATTERNS = [
@@ -18,6 +18,42 @@ HIGH_RISK_PATTERNS = [
     r"\breboot\b",
     r":\(\)\s*\{",
 ]
+
+
+def run_shell(settings: Settings, command: str, cwd: str = "", timeout: int = 60) -> dict[str, Any]:
+    trimmed = command.strip()
+    if not trimmed:
+        raise ToolExecutionError("Empty command.")
+
+    if not settings.allow_destructive_shell:
+        for pattern in HIGH_RISK_PATTERNS:
+            if re.search(pattern, trimmed):
+                raise ToolExecutionError("Blocked high-risk shell command by policy.")
+
+    if not cwd:
+        resolved_cwd = settings.workspace_root
+    else:
+        candidate = Path(cwd).expanduser()
+        resolved_cwd = candidate.resolve() if candidate.is_absolute() else (settings.workspace_root / candidate).resolve()
+
+    completed = subprocess.run(
+        ["bash", "-lc", trimmed],
+        cwd=resolved_cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    result = {
+        "command": trimmed,
+        "cwd": str(resolved_cwd),
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "returncode": completed.returncode,
+    }
+    if completed.returncode != 0:
+        raise ToolExecutionError(completed.stderr.strip() or f"Command exited with {completed.returncode}")
+    return result
 
 
 class ShellExecTool(BaseTool):
@@ -37,43 +73,10 @@ class ShellExecTool(BaseTool):
             },
         )
 
-    def invoke(self, arguments: dict[str, Any]) -> ToolResult:
-        command = str(arguments.get("command", "")).strip()
-        cwd = str(arguments.get("cwd", "")).strip()
-        timeout = int(arguments.get("timeout", 60))
-        if not command:
-            return ToolResult(tool=self.spec.name, ok=False, error="Empty command.")
-
-        if not self.settings.allow_destructive_shell:
-            for pattern in HIGH_RISK_PATTERNS:
-                if re.search(pattern, command):
-                    return ToolResult(tool=self.spec.name, ok=False, error="Blocked high-risk shell command by policy.")
-
-        if not cwd:
-            resolved_cwd = self.settings.workspace_root
-        else:
-            candidate = Path(cwd).expanduser()
-            resolved_cwd = candidate.resolve() if candidate.is_absolute() else (self.settings.workspace_root / candidate).resolve()
-        try:
-            completed = subprocess.run(
-                ["bash", "-lc", command],
-                cwd=resolved_cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-            return ToolResult(
-                tool=self.spec.name,
-                ok=completed.returncode == 0,
-                output={
-                    "command": command,
-                    "cwd": str(resolved_cwd),
-                    "stdout": completed.stdout,
-                    "stderr": completed.stderr,
-                    "returncode": completed.returncode,
-                },
-                error=None if completed.returncode == 0 else completed.stderr.strip() or f"Command exited with {completed.returncode}",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(tool=self.spec.name, ok=False, error=str(exc))
+    def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return run_shell(
+            self.settings,
+            str(arguments["command"]),
+            str(arguments.get("cwd", "")),
+            int(arguments.get("timeout", 60)),
+        )

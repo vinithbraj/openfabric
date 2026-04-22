@@ -1,44 +1,47 @@
 from __future__ import annotations
 
-import operator
 from datetime import datetime, timezone
 from typing import Any
 
-from typing_extensions import Annotated, TypedDict
+from typing_extensions import TypedDict
 
 
 class RuntimeState(TypedDict, total=False):
     run_id: str
     spec_name: str
-    task: str
+    goal: str
     input: dict[str, Any]
+    plan: dict[str, Any]
+    history: list[dict[str, Any]]
+    status: str
+    retries: int
     current_node: str
     next_node: str
-    status: str
-    history: Annotated[list[dict[str, Any]], operator.add]
-    intermediate_outputs: dict[str, Any]
-    metadata: dict[str, Any]
-    last_result: dict[str, Any]
-    error: dict[str, Any] | None
+    validation: dict[str, Any] | None
+    final_output: dict[str, Any]
+    failure_context: dict[str, Any] | None
+    error: str | None
     started_at: str
     updated_at: str
 
 
 def initial_runtime_state(*, run_id: str, spec_name: str, input_payload: dict[str, Any]) -> RuntimeState:
-    task = str(input_payload.get("task") or input_payload.get("prompt") or input_payload.get("input") or "")
+    goal = str(input_payload.get("task") or input_payload.get("prompt") or input_payload.get("input") or "")
     timestamp = datetime.now(timezone.utc).isoformat()
     return {
         "run_id": run_id,
         "spec_name": spec_name,
-        "task": task,
+        "goal": goal,
         "input": input_payload,
+        "plan": {},
+        "history": [],
+        "status": "planning",
+        "retries": 0,
         "current_node": "",
         "next_node": "",
-        "status": "running",
-        "history": [],
-        "intermediate_outputs": {},
-        "metadata": {},
-        "last_result": {},
+        "validation": None,
+        "final_output": {"content": "", "artifacts": [], "metadata": {}},
+        "failure_context": None,
         "error": None,
         "started_at": timestamp,
         "updated_at": timestamp,

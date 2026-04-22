@@ -11,10 +11,6 @@ def load_runtime_spec(path: str | Path) -> RuntimeSpec:
     source = Path(path)
     payload = yaml.safe_load(source.read_text()) or {}
     spec = RuntimeSpec.model_validate(payload)
-    for agent in spec.agents.values():
-        if agent.prompt:
-            agent.prompt = str((source.parent / agent.prompt).resolve())
-    for node in spec.graph.nodes.values():
-        if node.prompt:
-            node.prompt = str((source.parent / node.prompt).resolve())
+    if spec.planner.prompt:
+        spec.planner.prompt = str((source.parent / spec.planner.prompt).resolve())
     return spec

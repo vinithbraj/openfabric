@@ -8,6 +8,7 @@ from typing import Any
 
 
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL)
+CODE_KEY_RE = re.compile(r'"code"\s*:\s*"')
 
 
 def ensure_jsonable(value: Any) -> Any:
@@ -42,15 +43,61 @@ def extract_json_object(text: str) -> Any:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
+        repaired = _escape_multiline_code_strings(cleaned)
+        if repaired != cleaned:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return json.loads(cleaned[start : end + 1])
+            snippet = cleaned[start : end + 1]
+            try:
+                return json.loads(snippet)
+            except json.JSONDecodeError:
+                repaired_snippet = _escape_multiline_code_strings(snippet)
+                return json.loads(repaired_snippet)
         start = cleaned.find("[")
         end = cleaned.rfind("]")
         if start != -1 and end != -1 and end > start:
             return json.loads(cleaned[start : end + 1])
         raise
+
+
+def _escape_multiline_code_strings(text: str) -> str:
+    if '"code"' not in text:
+        return text
+
+    chars: list[str] = []
+    index = 0
+    while index < len(text):
+        match = CODE_KEY_RE.search(text, index)
+        if match is None:
+            chars.append(text[index:])
+            break
+        chars.append(text[index : match.end()])
+        index = match.end()
+        escaped = False
+        while index < len(text):
+            ch = text[index]
+            if ch == "\\" and not escaped:
+                chars.append(ch)
+                escaped = True
+            elif ch == '"' and not escaped:
+                chars.append(ch)
+                index += 1
+                break
+            elif ch == "\n":
+                chars.append("\\n")
+                escaped = False
+            elif ch == "\r":
+                escaped = False
+            else:
+                chars.append(ch)
+                escaped = False
+            index += 1
+    return "".join(chars)
 
 
 ALLOWED_AST_NODES = {

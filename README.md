@@ -1,6 +1,6 @@
 # Agent Orchestration Runtime
 
-Agent Orchestration Runtime is a local-first platform for defining, compiling, and running multi-agent execution graphs.
+Agent Orchestration Runtime is a local-first platform for defining, compiling, and running deterministic agent workflows.
 
 Core properties:
 
@@ -9,17 +9,17 @@ Core properties:
 - FastAPI control plane
 - Local vLLM-compatible LLM integration
 - SQLite-backed run state and event logging
-- Tool-aware agents with normalized I/O contracts
+- Deterministic planner-executor-validator runtime
 
 ## Architectural Shape
 
-The implementation follows a hybrid control-plane / execution-plane split:
+The implementation follows a control-plane / execution-plane split:
 
 - Control plane: YAML DSL, graph compiler, API, CLI, run persistence
-- Execution plane: LangGraph runtime, router, agents, tools
-- Infra layer: local OpenAI-compatible LLM endpoint, SQLite run store, shell/filesystem tools
+- Execution plane: LangGraph runtime, planner, deterministic executor, deterministic validator
+- Infra layer: local OpenAI-compatible LLM endpoint, SQLite run store, filesystem/shell/python tools
 
-The LLM is used for routing and agent decisions. The runtime remains deterministic for graph execution, persistence, node retries, and conditional transitions.
+The LLM is used only to create the execution plan and optional retry plans. Execution, validation, logging, and final output are deterministic.
 
 ## Quick Start
 
@@ -54,19 +54,27 @@ The LLM is used for routing and agent decisions. The runtime remains determinist
    aor run examples/general_purpose_assistant.yaml --input '{"task":"Inspect the repository root"}'
    ```
 
+5. Start an interactive session:
+
+   ```bash
+   aor chat examples/general_purpose_assistant.yaml
+   ```
+
 ## Project Layout
 
 - `src/aor_runtime/` core package
-- `examples/` example YAML graphs
-- `prompts/` prompt templates used by agents
+- `examples/` example runtime specs
+- `prompts/` prompt templates used by the planner
 - `scripts/` convenience scripts
 
 ## Main Components
 
 - `src/aor_runtime/dsl/` normalized DSL models and loader
 - `src/aor_runtime/runtime/compiler.py` DSL -> compiled graph spec
-- `src/aor_runtime/runtime/engine.py` LangGraph orchestration engine
+- `src/aor_runtime/runtime/engine.py` LangGraph planner -> executor -> validator runtime
+- `src/aor_runtime/runtime/planner.py` single-call LLM planner
+- `src/aor_runtime/runtime/executor.py` deterministic tool executor
+- `src/aor_runtime/runtime/validator.py` deterministic validation layer
 - `src/aor_runtime/runtime/store.py` SQLite-backed runs, events, and snapshots
-- `src/aor_runtime/agents/base.py` iterative agent execution model
 - `src/aor_runtime/tools/` built-in local tools
 - `src/aor_runtime/api/app.py` FastAPI control plane

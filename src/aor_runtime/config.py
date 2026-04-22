@@ -18,8 +18,7 @@ class Settings(BaseModel):
     allow_destructive_shell: bool = Field(
         default_factory=lambda: os.getenv("AOR_ALLOW_DESTRUCTIVE_SHELL", "0").strip().lower() in {"1", "true", "yes", "on"}
     )
-    max_agent_iterations: int = Field(default_factory=lambda: int(os.getenv("AOR_MAX_AGENT_ITERATIONS", "4")))
-    max_node_retries: int = Field(default_factory=lambda: int(os.getenv("AOR_MAX_NODE_RETRIES", "2")))
+    max_plan_retries: int = Field(default_factory=lambda: int(os.getenv("AOR_MAX_PLAN_RETRIES", "2")))
 
 
 def get_settings() -> Settings:

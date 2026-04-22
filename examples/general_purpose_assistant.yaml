@@ -1,66 +1,21 @@
 version: 1
 name: general_purpose_assistant
-description: General-purpose local assistant with routing, execution, and review stages.
+description: Deterministic local assistant with explicit planning, tool execution, and validation.
 
-agents:
-  code_agent:
-    model: qwen-coder
-    tools:
-      - fs.list_dir
-      - fs.read_text
-      - fs.write_text
-      - shell.exec
-    prompt: ../prompts/code_agent.txt
-    max_iterations: 4
-    temperature: 0.1
+planner:
+  model: qwen-coder
+  prompt: ../prompts/planner_system.txt
+  temperature: 0.0
 
-  reviewer:
-    model: qwen-coder
-    tools:
-      - fs.read_text
-      - fs.list_dir
-    prompt: ../prompts/reviewer.txt
-    max_iterations: 2
-    temperature: 0.0
+runtime:
+  max_retries: 2
 
-  tool_agent:
-    model: qwen-coder
-    tools:
-      - fs.list_dir
-      - fs.read_text
-      - shell.exec
-      - python.run
-    prompt: ../prompts/tool_agent.txt
-    max_iterations: 3
-    temperature: 0.1
-
-graph:
-  start: route
-  nodes:
-    route:
-      type: router
-      prompt: ../prompts/router_system.txt
-      next:
-        - code
-        - inspect
-
-    code:
-      type: agent
-      agent: code_agent
-      next: review
-
-    inspect:
-      type: agent
-      agent: tool_agent
-      next: end
-
-    review:
-      type: agent
-      agent: reviewer
-      condition:
-        if: "last_result.get('score', 1.0) < 0.8"
-        then: code
-        else: end
-
-    end:
-      type: end
+tools:
+  - fs.exists
+  - fs.copy
+  - fs.read
+  - fs.write
+  - fs.mkdir
+  - fs.list
+  - shell.exec
+  - python.exec

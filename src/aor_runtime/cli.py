@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import typer
 import uvicorn
@@ -12,6 +13,25 @@ from aor_runtime.runtime.engine import ExecutionEngine
 app = typer.Typer(help="Agent Orchestration Runtime CLI")
 runs_app = typer.Typer(help="Inspect persisted runs")
 app.add_typer(runs_app, name="runs")
+
+
+def _final_answer_from_state(state: dict[str, Any]) -> str:
+    final_output = state.get("final_output")
+    if isinstance(final_output, dict):
+        content = final_output.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    error = state.get("error")
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+
+    validation = state.get("validation")
+    if isinstance(validation, dict):
+        detail = validation.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+    return dumps_json(state, indent=2)
 
 
 @app.command()
@@ -32,6 +52,52 @@ def run(spec_path: Path, input: str = typer.Option("{}", help="JSON input payloa
 @app.command()
 def serve(host: str = "127.0.0.1", port: int = 8011, reload: bool = False) -> None:
     uvicorn.run("aor_runtime.api.app:create_app", host=host, port=port, reload=reload, factory=True)
+
+
+@app.command()
+def chat(
+    spec_path: Path,
+    system_note: str = typer.Option("", help="Optional operator note injected into each turn."),
+    max_history: int = typer.Option(8, help="Number of prior turns to include in session context."),
+) -> None:
+    engine = ExecutionEngine()
+    session_history: list[dict[str, str]] = []
+
+    typer.echo(f"Interactive session started for {spec_path}. Type /exit to quit.")
+    typer.echo("Commands: /exit, /quit, /history, /last")
+
+    while True:
+        prompt = typer.prompt("\nYou").strip()
+        if not prompt:
+            continue
+        if prompt in {"/exit", "/quit"}:
+            typer.echo("Session ended.")
+            break
+        if prompt == "/history":
+            typer.echo(dumps_json(session_history, indent=2))
+            continue
+        if prompt == "/last":
+            if not session_history:
+                typer.echo("No turns yet.")
+            else:
+                typer.echo(dumps_json(session_history[-2:], indent=2))
+            continue
+
+        payload: dict[str, Any] = {"task": prompt}
+        if system_note.strip():
+            payload["system_note"] = system_note.strip()
+        if session_history:
+            payload["session_history"] = session_history[-max_history:]
+
+        state = engine.run_spec(str(spec_path), payload)
+        answer = _final_answer_from_state(state)
+        run_id = state.get("run_id", "")
+
+        typer.echo(f"\nAssistant [{run_id}]")
+        typer.echo(answer)
+
+        session_history.append({"role": "user", "content": prompt})
+        session_history.append({"role": "assistant", "content": answer})
 
 
 @runs_app.command("list")

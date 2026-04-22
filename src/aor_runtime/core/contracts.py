@@ -3,51 +3,84 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class ToolCall(BaseModel):
-    tool: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
+class PlanStep(BaseModel):
+    id: int
+    action: str
+    args: dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolResult(BaseModel):
-    tool: str
-    ok: bool = True
-    output: Any = None
+class ExecutionPlan(BaseModel):
+    steps: list[PlanStep] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_steps(self) -> "ExecutionPlan":
+        if not self.steps:
+            raise ValueError("Execution plan requires at least one step.")
+        expected_id = 1
+        seen_ids: set[int] = set()
+        for step in self.steps:
+            if step.id in seen_ids:
+                raise ValueError(f"Duplicate step id {step.id}.")
+            seen_ids.add(step.id)
+            if step.id != expected_id:
+                raise ValueError("Step ids must be sequential starting at 1.")
+            expected_id += 1
+        return self
+
+
+class ToolSpec(BaseModel):
+    name: str
+    description: str
+    arguments_schema: dict[str, Any]
+
+
+class StepResult(BaseModel):
+    action: str
+    output: dict[str, Any] = Field(default_factory=dict)
+
+
+class StepLog(BaseModel):
+    step: PlanStep
+    result: dict[str, Any] = Field(default_factory=dict)
+    success: bool
     error: str | None = None
+    started_at: str = Field(default_factory=utc_now_iso)
+    finished_at: str = Field(default_factory=utc_now_iso)
+
+
+class ValidationCheck(BaseModel):
+    name: str
+    success: bool
+    detail: str = ""
+
+
+class ValidationReport(BaseModel):
+    success: bool
+    checks: list[ValidationCheck] = Field(default_factory=list)
+    detail: str = ""
+
+
+class PlannerConfig(BaseModel):
+    model: str | None = None
+    prompt: str | None = None
+    temperature: float = 0.0
+
+
+class RuntimePolicy(BaseModel):
+    max_retries: int = 2
+
+
+class FinalOutput(BaseModel):
+    content: str = ""
+    artifacts: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class AgentAction(BaseModel):
-    status: Literal["continue", "complete", "blocked", "failed"] = "complete"
-    summary: str = ""
-    tool_calls: list[ToolCall] = Field(default_factory=list)
-    output: dict[str, Any] = Field(default_factory=dict)
-    score: float | None = None
-    reasoning: str = ""
-
-
-class AgentRunResult(BaseModel):
-    agent_name: str
-    status: Literal["completed", "failed", "blocked"] = "completed"
-    summary: str = ""
-    output: dict[str, Any] = Field(default_factory=dict)
-    tool_results: list[ToolResult] = Field(default_factory=list)
-    iterations: int = 0
-    score: float | None = None
-    error: str | None = None
-    raw_actions: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class RouterDecision(BaseModel):
-    selected: str
-    rationale: str = ""
-    confidence: float | None = None
 
 
 class RunEvent(BaseModel):
@@ -66,3 +99,8 @@ class RunSummary(BaseModel):
     final_state: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
+
+
+class RuntimeStatus(BaseModel):
+    status: Literal["planning", "executing", "validating", "retrying", "completed", "failed"]
+    detail: str = ""
