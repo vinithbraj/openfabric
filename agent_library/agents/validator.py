@@ -27,7 +27,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="validate_workflow_attempt",
-            event="validation.request",
+            trigger_event="validation.request",
+            emits=["validation.result"],
             summary="Validates step-level or workflow-level execution results.",
             when="Checks whether an execution attempt answered the user's request and whether another workflow option should be tried.",
             deterministic=False,

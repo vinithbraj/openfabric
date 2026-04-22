@@ -20,7 +20,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="send_notification",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["notify.result"],
             summary="Sends notification payloads derived from task plans.",
             when="Sends notification payloads derived from task plans.",
             intent_tags=["notify", "alert", "reminder"],

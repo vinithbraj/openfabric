@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from agent_library.contracts import normalize_agent_metadata
+from agent_library.contracts import metadata_api_emit_events, metadata_api_trigger_events, normalize_agent_metadata
 
 from .console import log_boot, log_event, log_event_handler
 from .contracts import ContractRegistry
@@ -130,6 +130,18 @@ class Engine:
                     else:
                         metadata[key] = value
             entry = {
+                "subscribes_to": sorted(
+                    {
+                        *[item for item in config.get("subscribes_to", []) if isinstance(item, str)],
+                        *metadata_api_trigger_events(metadata),
+                    }
+                ),
+                "emits": sorted(
+                    {
+                        *[item for item in config.get("emits", []) if isinstance(item, str)],
+                        *metadata_api_emit_events(metadata),
+                    }
+                ),
                 "name": agent_name,
                 "description": metadata.get("description", config.get("description", "")),
                 "methods": metadata.get("methods", config.get("methods", [])),
@@ -137,8 +149,6 @@ class Engine:
                 "routing_notes": metadata.get("routing_notes", []),
                 "adapter": runtime_cfg.get("adapter"),
                 "endpoint": runtime_cfg.get("endpoint"),
-                "subscribes_to": config.get("subscribes_to", []),
-                "emits": config.get("emits", []),
             }
             for key, value in metadata.items():
                 if key in {"description", "methods", "routing_notes"}:

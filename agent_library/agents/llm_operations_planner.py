@@ -8,6 +8,7 @@ import requests
 from fastapi import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
+from agent_library.contracts import api_emit_events, api_trigger_event
 from agent_library.template import (
     agent_api,
     agent_descriptor,
@@ -37,7 +38,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="assess_processable_request",
-            event="task.plan",
+            trigger_event="user.ask",
+            emits=["plan.progress", "task.plan"],
             summary="Assesses whether a request can be handled by discovered system capabilities.",
             when="When request can be handled by at least one discovered agent capability, including multi-step chains.",
             intent_tags=["processable", "capability_match"],
@@ -46,7 +48,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="reject_unprocessable_request",
-            event="task.result",
+            trigger_event="user.ask",
+            emits=["task.result"],
             summary="Explains why a request cannot be handled by discovered capabilities.",
             when="When request cannot be handled by discovered capabilities.",
             intent_tags=["unprocessable"],
@@ -55,7 +58,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="decompose_failed_step",
-            event="planner.replan.result",
+            trigger_event="planner.replan.request",
+            emits=["planner.replan.result"],
             summary="Builds a smaller replacement subplan for a failed step.",
             when="When a running step requests further decomposition or clarification.",
             intent_tags=["replan", "decomposition"],
@@ -95,6 +99,34 @@ def _agent_api_specs(agent: dict) -> list[dict]:
     return []
 
 
+def _agent_trigger_events(agent: dict) -> set[str]:
+    triggers = {
+        item
+        for item in agent.get("subscribes_to", [])
+        if isinstance(item, str) and item.strip()
+    }
+    for api in _agent_api_specs(agent):
+        trigger_event = api_trigger_event(api)
+        if trigger_event:
+            triggers.add(trigger_event)
+    return triggers
+
+
+def _agent_emitted_events(agent: dict) -> set[str]:
+    emitted = {
+        item
+        for item in agent.get("emits", [])
+        if isinstance(item, str) and item.strip()
+    }
+    for api in _agent_api_specs(agent):
+        emitted.update(api_emit_events(api))
+    return emitted
+
+
+def _agent_handles_trigger(agent: dict, event_name: str) -> bool:
+    return event_name in _agent_trigger_events(agent)
+
+
 def _format_discovered_agents(capabilities: dict) -> str:
     lines = []
     for item in capabilities.get("agents", []):
@@ -109,9 +141,13 @@ def _format_discovered_agents(capabilities: dict) -> str:
         methods = []
         for method in _agent_api_specs(item):
             method_name = method.get("name")
-            method_event = method.get("event")
-            if isinstance(method_name, str) and isinstance(method_event, str):
-                methods.append(f"{method_name} emits event {method_event}")
+            method_event = api_trigger_event(method)
+            emitted_events = api_emit_events(method)
+            if isinstance(method_name, str) and method_event:
+                method_summary = f"{method_name} triggered by {method_event}"
+                if emitted_events:
+                    method_summary += f" -> {', '.join(emitted_events)}"
+                methods.append(method_summary)
         method_text = ", ".join(methods) if methods else "none"
         metadata = []
         database_name = item.get("database_name")
@@ -679,10 +715,10 @@ def _llm_replan(payload: dict, capabilities: dict):
 def _derive_available_events(agents: List[Dict[str, Any]]) -> List[str]:
     available = set()
     for agent in agents:
-        for event in agent.get("subscribes_to", []):
+        for event in _agent_trigger_events(agent):
             if event in SUPPORTED_EVENT_SCHEMAS and event != "user.ask":
                 available.add(event)
-        for event in agent.get("emits", []):
+        for event in _agent_emitted_events(agent):
             if event in SUPPORTED_EVENT_SCHEMAS:
                 available.add(event)
     return sorted(available or DEFAULT_ALLOWED_EVENTS)
@@ -692,8 +728,7 @@ def _agent_names_with_task_plan(capabilities: dict) -> set[str]:
     names = set()
     for agent in capabilities.get("agents", []):
         name = agent.get("name")
-        subscribes_to = agent.get("subscribes_to", [])
-        if isinstance(name, str) and isinstance(subscribes_to, list) and "task.plan" in subscribes_to:
+        if isinstance(name, str) and _agent_handles_trigger(agent, "task.plan"):
             names.add(name)
     return names
 
@@ -875,7 +910,8 @@ def _agent_search_blob(agent: Dict[str, Any]) -> str:
         elif isinstance(value, list):
             parts.append(" ".join(entry for entry in value if isinstance(entry, str)))
     for method in _agent_api_specs(agent):
-        parts.extend(str(method.get(key, "")) for key in ("name", "event", "when", "summary"))
+        parts.extend(str(method.get(key, "")) for key in ("name", "event", "trigger_event", "when", "summary"))
+        parts.extend(_agent_emitted_events({"apis": [method]}))
         for list_key in ("intent_tags", "examples", "anti_patterns"):
             values = method.get(list_key, [])
             if isinstance(values, list):
@@ -899,7 +935,7 @@ def _first_agent_in_family(capabilities: dict, family: str) -> str | None:
         if (
             isinstance(name, str)
             and _agent_family(name) == family
-            and "task.plan" in agent.get("subscribes_to", [])
+            and _agent_handles_trigger(agent, "task.plan")
         ):
             return name
     return None
@@ -910,7 +946,7 @@ def _has_agent_family(capabilities: dict, family: str) -> bool:
         isinstance(agent, dict)
         and isinstance(agent.get("name"), str)
         and _agent_family(agent["name"]) == family
-        and "task.plan" in agent.get("subscribes_to", [])
+        and _agent_handles_trigger(agent, "task.plan")
         for agent in capabilities.get("agents", [])
     )
 
@@ -1267,8 +1303,7 @@ def _select_target_agent(question: str, capabilities: dict) -> str | None:
             continue
         if name in {"ops_planner", "synthesizer"}:
             continue
-        subscribes_to = agent.get("subscribes_to", [])
-        if not isinstance(subscribes_to, list) or "task.plan" not in subscribes_to:
+        if not _agent_handles_trigger(agent, "task.plan"):
             continue
         candidates.append(agent)
 
@@ -1329,7 +1364,7 @@ def _select_sql_target_agent(question: str, capabilities: dict) -> str | None:
         if isinstance(agent, dict)
         and isinstance(agent.get("name"), str)
         and _agent_family(agent["name"]) == "sql_runner"
-        and "task.plan" in agent.get("subscribes_to", [])
+        and _agent_handles_trigger(agent, "task.plan")
     ]
     if not sql_agents:
         return None
@@ -2240,8 +2275,21 @@ def _capability_summary(capabilities: dict) -> dict:
             "description": agent.get("description", ""),
             "domains": agent.get("capability_domains", []),
             "actions": agent.get("action_verbs", []),
-            "subscribes_to": agent.get("subscribes_to", []),
-            "emits": agent.get("emits", []),
+            "trigger_events": sorted(_agent_trigger_events(agent)),
+            "emits": sorted(_agent_emitted_events(agent)),
+            "request_contract": agent.get("request_contract", ""),
+            "result_contract": agent.get("result_contract", ""),
+            "apis": [
+                {
+                    "name": method.get("name", ""),
+                    "trigger_event": api_trigger_event(method),
+                    "emits": api_emit_events(method),
+                    "request_contract": method.get("request_contract", ""),
+                    "result_contract": method.get("result_contract", ""),
+                }
+                for method in _agent_api_specs(agent)
+                if isinstance(method, dict)
+            ],
         }
         agents.append(entry)
     return {"agents": agents}
@@ -2259,13 +2307,21 @@ def _format_capability_answer(capabilities: dict) -> str:
         description = agent.get("description") or "No description provided."
         domains = agent.get("domains", [])
         actions = agent.get("actions", [])
+        trigger_events = agent.get("trigger_events", [])
+        emitted_events = agent.get("emits", [])
         domain_text = ", ".join(item for item in domains if isinstance(item, str)) if isinstance(domains, list) else ""
         action_text = ", ".join(item for item in actions if isinstance(item, str)) if isinstance(actions, list) else ""
+        trigger_text = ", ".join(item for item in trigger_events if isinstance(item, str)) if isinstance(trigger_events, list) else ""
+        emit_text = ", ".join(item for item in emitted_events if isinstance(item, str)) if isinstance(emitted_events, list) else ""
         detail = description
         if domain_text:
             detail += f" Domains: {domain_text}."
         if action_text:
             detail += f" Actions: {action_text}."
+        if trigger_text:
+            detail += f" Triggered by: {trigger_text}."
+        if emit_text:
+            detail += f" Emits: {emit_text}."
         lines.append(f"- {name}: {detail}")
     return "\n".join(lines)
 

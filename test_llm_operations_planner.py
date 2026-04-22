@@ -33,6 +33,7 @@ pydantic_stub.BaseModel = _BaseModel
 sys.modules.setdefault("pydantic", pydantic_stub)
 
 from agent_library.agents.llm_operations_planner import (
+    _capability_summary,
     _derive_presentation,
     _derive_shell_command,
     _fallback_steps,
@@ -475,6 +476,30 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertIn("deterministic_catalog_size=16", formatted)
         self.assertIn("cluster_aliases=[slurm, cluster]", formatted)
         self.assertIn("database_name=mydb", formatted)
+
+    def test_capability_summary_uses_trigger_and_emit_contract_fields(self):
+        capabilities = {
+            "agents": [
+                {
+                    "name": "planner",
+                    "description": "Planner",
+                    "apis": [
+                        {
+                            "name": "plan_task",
+                            "trigger_event": "user.ask",
+                            "emits": ["task.plan"],
+                            "request_contract": "agent_execution_request",
+                            "result_contract": "agent_execution_result",
+                        }
+                    ],
+                }
+            ]
+        }
+        summary = _capability_summary(capabilities)
+        self.assertEqual(summary["agents"][0]["trigger_events"], ["user.ask"])
+        self.assertEqual(summary["agents"][0]["emits"], ["task.plan"])
+        self.assertEqual(summary["agents"][0]["apis"][0]["trigger_event"], "user.ask")
+        self.assertEqual(summary["agents"][0]["apis"][0]["emits"], ["task.plan"])
 
     def test_infer_task_shape_count(self):
         self.assertEqual(

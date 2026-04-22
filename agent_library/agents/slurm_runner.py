@@ -237,7 +237,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="select_deterministic_slurm_primitive",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["slurm.result", "task.result"],
             summary="Selects one deterministic Slurm primitive plus a fallback command plan for a natural-language scheduler request.",
             when="Selects one deterministic Slurm primitive plus a fallback command plan for a natural-language scheduler request.",
             intent_tags=["slurm_primitive_selection", "cluster_status", "job_queue", "accounting"],
@@ -252,7 +253,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="execute_deterministic_slurm_primitive",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["slurm.result", "task.result"],
             summary="Executes deterministic Slurm primitives via the gateway before any fallback command generation.",
             when="Executes deterministic Slurm primitives via the gateway before any fallback command generation.",
             intent_tags=["slurm_deterministic_execution", "cluster_status", "job_queue", "accounting"],
@@ -266,7 +268,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="execute_explicit_slurm_command",
-            event="slurm.query",
+            trigger_event="slurm.query",
+            emits=["slurm.result", "task.result"],
             summary="Executes an explicit Slurm command via the configured gateway.",
             when="Executes an explicit Slurm command via the configured gateway.",
             intent_tags=["slurm_command", "scheduler_control"],

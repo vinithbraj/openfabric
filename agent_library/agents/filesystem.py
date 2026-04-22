@@ -23,7 +23,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="read_workspace_file",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["file.content", "task.result"],
             summary="Reads a relative file path from task plans and emits file content.",
             when="Reads a relative file path from task plans and emits file content.",
             intent_tags=["read_file", "open_file"],

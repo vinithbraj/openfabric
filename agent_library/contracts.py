@@ -15,6 +15,29 @@ except ImportError:  # pragma: no cover - lightweight test stubs
 
 
 AGENT_CONTRACT_VERSION = "agent_contract_v1"
+SHARED_REQUEST_CONTRACT_NAME = "agent_execution_request"
+SHARED_RESULT_CONTRACT_NAME = "agent_execution_result"
+REQUEST_ENVELOPE_FIELDS = [
+    "node",
+    "task",
+    "original_task",
+    "instruction",
+    "context",
+    "policy",
+    "artifacts",
+]
+RESULT_ENVELOPE_FIELDS = [
+    "node",
+    "status",
+    "api",
+    "detail",
+    "raw_output",
+    "structured_output",
+    "artifacts",
+    "reduction_request",
+    "error",
+    "metrics",
+]
 
 
 def _model_dump(model: BaseModel) -> dict[str, Any]:
@@ -41,6 +64,31 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if isinstance(item, str) and str(item).strip()]
+
+
+def _event_list(value: Any) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return _string_list(value)
+
+
+def _unique_list(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def shared_request_field_names() -> list[str]:
+    return list(REQUEST_ENVELOPE_FIELDS)
+
+
+def shared_result_field_names() -> list[str]:
+    return list(RESULT_ENVELOPE_FIELDS)
 
 
 class AgentInstructionContract(BaseModel):
@@ -90,7 +138,9 @@ def shared_result_schema() -> dict[str, Any]:
 
 class AgentApiSpec(BaseModel):
     name: str
-    event: str
+    event: str = ""
+    trigger_event: str = ""
+    emits: list[str] = Field(default_factory=list)
     summary: str = ""
     when: str = ""
     intent_tags: list[str] = Field(default_factory=list)
@@ -99,6 +149,10 @@ class AgentApiSpec(BaseModel):
     risk_level: str | None = None
     deterministic: bool | None = None
     side_effect_level: str | None = None
+    request_contract: str = SHARED_REQUEST_CONTRACT_NAME
+    result_contract: str = SHARED_RESULT_CONTRACT_NAME
+    request_envelope_fields: list[str] = Field(default_factory=shared_request_field_names)
+    result_envelope_fields: list[str] = Field(default_factory=shared_result_field_names)
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
 
@@ -117,6 +171,10 @@ class AgentDescriptor(BaseModel):
     safety_enforced_by_agent: bool = False
     routing_notes: list[str] = Field(default_factory=list)
     apis: list[AgentApiSpec] = Field(default_factory=list)
+    request_contract: str = SHARED_REQUEST_CONTRACT_NAME
+    result_contract: str = SHARED_RESULT_CONTRACT_NAME
+    request_envelope_fields: list[str] = Field(default_factory=shared_request_field_names)
+    result_envelope_fields: list[str] = Field(default_factory=shared_result_field_names)
     request_schema: dict[str, Any] = Field(default_factory=shared_request_schema)
     result_schema: dict[str, Any] = Field(default_factory=shared_result_schema)
 
@@ -127,7 +185,9 @@ class AgentDescriptor(BaseModel):
 def build_agent_api(
     *,
     name: str,
-    event: str,
+    event: str | None = None,
+    trigger_event: str | None = None,
+    emits: list[str] | str | None = None,
     summary: str = "",
     when: str = "",
     intent_tags: list[str] | None = None,
@@ -136,13 +196,25 @@ def build_agent_api(
     risk_level: str | None = None,
     deterministic: bool | None = None,
     side_effect_level: str | None = None,
+    request_contract: str = SHARED_REQUEST_CONTRACT_NAME,
+    result_contract: str = SHARED_RESULT_CONTRACT_NAME,
+    request_envelope_fields: list[str] | None = None,
+    result_envelope_fields: list[str] | None = None,
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
+    effective_trigger_event = str(trigger_event or event or "").strip()
+    emitted_events = _event_list(emits)
+    for legacy_key in ("emitted_event", "output_event"):
+        legacy_value = extra.pop(legacy_key, None)
+        if not emitted_events:
+            emitted_events = _event_list(legacy_value)
     api = AgentApiSpec(
         name=name,
-        event=event,
+        event=effective_trigger_event,
+        trigger_event=effective_trigger_event,
+        emits=_unique_list(emitted_events),
         summary=summary or when,
         when=when or summary,
         intent_tags=intent_tags or [],
@@ -151,6 +223,10 @@ def build_agent_api(
         risk_level=risk_level,
         deterministic=deterministic,
         side_effect_level=side_effect_level,
+        request_contract=request_contract or SHARED_REQUEST_CONTRACT_NAME,
+        result_contract=result_contract or SHARED_RESULT_CONTRACT_NAME,
+        request_envelope_fields=list(request_envelope_fields or shared_request_field_names()),
+        result_envelope_fields=list(result_envelope_fields or shared_result_field_names()),
         input_schema=deepcopy(input_schema) if isinstance(input_schema, dict) else {},
         output_schema=deepcopy(output_schema) if isinstance(output_schema, dict) else {},
         **extra,
@@ -159,10 +235,15 @@ def build_agent_api(
 
 
 def _legacy_method_alias(api: dict[str, Any]) -> dict[str, Any]:
+    trigger_event = api_trigger_event(api)
     payload = {
         "name": str(api.get("name") or "").strip(),
-        "event": str(api.get("event") or "").strip(),
+        "event": trigger_event,
+        "trigger_event": trigger_event,
     }
+    emitted_events = api_emit_events(api)
+    if emitted_events:
+        payload["emits"] = emitted_events
     when = str(api.get("when") or api.get("summary") or "").strip()
     if when:
         payload["when"] = when
@@ -175,6 +256,50 @@ def _legacy_method_alias(api: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, str) and value.strip():
             payload[key] = value.strip()
     return payload
+
+
+def api_trigger_event(api: Any) -> str:
+    if not isinstance(api, dict):
+        return ""
+    value = api.get("trigger_event")
+    if not isinstance(value, str) or not value.strip():
+        value = api.get("event")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def api_emit_events(api: Any) -> list[str]:
+    if not isinstance(api, dict):
+        return []
+    emitted = _event_list(api.get("emits"))
+    if emitted:
+        return _unique_list(emitted)
+    for key in ("emitted_event", "output_event"):
+        emitted = _event_list(api.get(key))
+        if emitted:
+            return _unique_list(emitted)
+    return []
+
+
+def metadata_api_trigger_events(raw_metadata: Any) -> list[str]:
+    raw = _metadata_dict(raw_metadata)
+    api_source = raw.get("apis")
+    if not isinstance(api_source, list):
+        api_source = raw.get("methods")
+    events = [api_trigger_event(item) for item in api_source or [] if isinstance(item, dict)]
+    return _unique_list([item for item in events if item])
+
+
+def metadata_api_emit_events(raw_metadata: Any) -> list[str]:
+    raw = _metadata_dict(raw_metadata)
+    api_source = raw.get("apis")
+    if not isinstance(api_source, list):
+        api_source = raw.get("methods")
+    emitted: list[str] = []
+    for item in api_source or []:
+        if not isinstance(item, dict):
+            continue
+        emitted.extend(api_emit_events(item))
+    return _unique_list(emitted)
 
 
 def normalize_agent_metadata(agent_name: str, raw_metadata: Any) -> dict[str, Any]:
@@ -191,13 +316,14 @@ def normalize_agent_metadata(agent_name: str, raw_metadata: Any) -> dict[str, An
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
-            event = str(item.get("event") or "").strip()
-            if not name or not event:
+            trigger_event = api_trigger_event(item)
+            if not name or not trigger_event:
                 continue
             normalized_apis.append(
                 build_agent_api(
                     name=name,
-                    event=event,
+                    trigger_event=trigger_event,
+                    emits=api_emit_events(item),
                     summary=str(item.get("summary") or item.get("when") or "").strip(),
                     when=str(item.get("when") or item.get("summary") or "").strip(),
                     intent_tags=_string_list(item.get("intent_tags")),
@@ -206,6 +332,10 @@ def normalize_agent_metadata(agent_name: str, raw_metadata: Any) -> dict[str, An
                     risk_level=str(item.get("risk_level") or "").strip() or None,
                     deterministic=item.get("deterministic") if isinstance(item.get("deterministic"), bool) else None,
                     side_effect_level=str(item.get("side_effect_level") or "").strip() or None,
+                    request_contract=str(item.get("request_contract") or "").strip() or SHARED_REQUEST_CONTRACT_NAME,
+                    result_contract=str(item.get("result_contract") or "").strip() or SHARED_RESULT_CONTRACT_NAME,
+                    request_envelope_fields=_string_list(item.get("request_envelope_fields")) or shared_request_field_names(),
+                    result_envelope_fields=_string_list(item.get("result_envelope_fields")) or shared_result_field_names(),
                     input_schema=deepcopy(item.get("input_schema")) if isinstance(item.get("input_schema"), dict) else None,
                     output_schema=deepcopy(item.get("output_schema")) if isinstance(item.get("output_schema"), dict) else None,
                 )
@@ -216,6 +346,10 @@ def normalize_agent_metadata(agent_name: str, raw_metadata: Any) -> dict[str, An
     payload.setdefault("contract_version", AGENT_CONTRACT_VERSION)
     payload["apis"] = normalized_apis
     payload["methods"] = [_legacy_method_alias(item) for item in normalized_apis]
+    payload.setdefault("request_contract", SHARED_REQUEST_CONTRACT_NAME)
+    payload.setdefault("result_contract", SHARED_RESULT_CONTRACT_NAME)
+    payload.setdefault("request_envelope_fields", shared_request_field_names())
+    payload.setdefault("result_envelope_fields", shared_result_field_names())
     payload.setdefault("request_schema", shared_request_schema())
     payload.setdefault("result_schema", shared_result_schema())
 
@@ -237,6 +371,10 @@ def build_agent_descriptor(
     safety_enforced_by_agent: bool = False,
     routing_notes: list[str] | None = None,
     apis: list[dict[str, Any]] | None = None,
+    request_contract: str = SHARED_REQUEST_CONTRACT_NAME,
+    result_contract: str = SHARED_RESULT_CONTRACT_NAME,
+    request_envelope_fields: list[str] | None = None,
+    result_envelope_fields: list[str] | None = None,
     request_schema: dict[str, Any] | None = None,
     result_schema: dict[str, Any] | None = None,
     **extra: Any,
@@ -251,6 +389,10 @@ def build_agent_descriptor(
         "safety_enforced_by_agent": safety_enforced_by_agent,
         "routing_notes": routing_notes or [],
         "apis": apis or [],
+        "request_contract": request_contract or SHARED_REQUEST_CONTRACT_NAME,
+        "result_contract": result_contract or SHARED_RESULT_CONTRACT_NAME,
+        "request_envelope_fields": list(request_envelope_fields or shared_request_field_names()),
+        "result_envelope_fields": list(result_envelope_fields or shared_result_field_names()),
         "request_schema": deepcopy(request_schema) if isinstance(request_schema, dict) else shared_request_schema(),
         "result_schema": deepcopy(result_schema) if isinstance(result_schema, dict) else shared_result_schema(),
         **extra,

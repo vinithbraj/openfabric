@@ -22,7 +22,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="plan_file_read",
-            event="file.read",
+            trigger_event="user.ask",
+            emits=["file.read"],
             summary="Routes file read/open requests to the filesystem path.",
             when="Use for reading/opening files from user request.",
             deterministic=True,
@@ -30,7 +31,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="plan_cli_exec",
-            event="shell.exec",
+            trigger_event="user.ask",
+            emits=["shell.exec"],
             summary="Routes explicit shell execution requests.",
             when="Use for shell command execution requests.",
             deterministic=True,
@@ -38,7 +40,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="plan_notification",
-            event="notify.send",
+            trigger_event="user.ask",
+            emits=["notify.send"],
             summary="Routes notify or alert requests to the notifier.",
             when="Use for notify/alert requests.",
             deterministic=True,
@@ -46,7 +49,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="planner_fallback",
-            event="task.result",
+            trigger_event="user.ask",
+            emits=["task.result"],
             summary="Explains how to phrase an actionable operations request.",
             when="Use only when no actionable tool event applies.",
             deterministic=True,

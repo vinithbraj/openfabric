@@ -100,7 +100,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="execute_explicit_command",
-            event="shell.exec",
+            trigger_event="shell.exec",
+            emits=["shell.result", "task.result"],
             summary="Runs explicitly provided shell command strings.",
             when="Runs explicitly provided shell command strings.",
             intent_tags=["cli_exec"],
@@ -115,7 +116,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="execute_llm_derived_command",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["shell.result", "task.result"],
             summary="Derives a shell command from natural language and executes it when safely processable.",
             when="Derives a shell command from natural language and executes it when safely processable.",
             intent_tags=["cli_exec", "machine_operations", "workspace_operations", "data_transformation"],

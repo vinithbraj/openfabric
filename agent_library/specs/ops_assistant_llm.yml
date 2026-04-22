@@ -68,6 +68,51 @@ contracts:
       question:
         type: string
 
+  agent_execution_request:
+    type: object
+    properties:
+      node:
+        type: object
+      task:
+        type: string
+      original_task:
+        type: string
+      instruction:
+        type: object
+      context:
+        type: object
+      policy:
+        type: object
+      artifacts:
+        type: array
+        items:
+          type: object
+
+  agent_execution_result:
+    type: object
+    properties:
+      node:
+        type: object
+      status:
+        type: string
+      api:
+        type: string
+      detail:
+        type: string
+      raw_output:
+        type: object
+      structured_output:
+        type: object
+      artifacts:
+        type: array
+        items:
+          type: object
+      reduction_request:
+        type: object
+      error: {}
+      metrics:
+        type: object
+
   FileReadRequest:
     type: object
     required: [path]
@@ -658,22 +703,58 @@ contracts:
                     type: string
                   event:
                     type: string
+                  trigger_event:
+                    type: string
+                  emits:
+                    type: array
+                    items:
+                      type: string
                   when:
                     type: string
+                  request_contract:
+                    type: string
+                  result_contract:
+                    type: string
+                  request_envelope_fields:
+                    type: array
+                    items:
+                      type: string
+                  result_envelope_fields:
+                    type: array
+                    items:
+                      type: string
             apis:
               type: array
               items:
                 type: object
-                required: [name, event]
+                required: [name, trigger_event]
                 properties:
                   name:
                     type: string
                   event:
                     type: string
+                  trigger_event:
+                    type: string
+                  emits:
+                    type: array
+                    items:
+                      type: string
                   summary:
                     type: string
                   when:
                     type: string
+                  request_contract:
+                    type: string
+                  result_contract:
+                    type: string
+                  request_envelope_fields:
+                    type: array
+                    items:
+                      type: string
+                  result_envelope_fields:
+                    type: array
+                    items:
+                      type: string
                   input_schema:
                     type: object
                   output_schema:
@@ -690,6 +771,18 @@ contracts:
               type: object
             result_schema:
               type: object
+            request_contract:
+              type: string
+            result_contract:
+              type: string
+            request_envelope_fields:
+              type: array
+              items:
+                type: string
+            result_envelope_fields:
+              type: array
+              items:
+                type: string
       execution_policy:
         type: object
       graph:

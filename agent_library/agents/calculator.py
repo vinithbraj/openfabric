@@ -28,7 +28,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="compute_with_llm_selected_function",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["task.result"],
             summary="Uses LLM to select add/subtract/multiply/divide and operands from task text.",
             when="Uses LLM to select add/subtract/multiply/divide and operands from task text.",
             intent_tags=["math", "arithmetic"],

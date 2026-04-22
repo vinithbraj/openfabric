@@ -32,7 +32,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="do_example_work",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["task.result"],
             summary="Handles example task execution.",
             input_schema={
                 "type": "object",
@@ -54,6 +55,12 @@ AGENT_DESCRIPTOR = agent_descriptor(
 
 AGENT_METADATA = AGENT_DESCRIPTOR
 ```
+
+Use `trigger_event` to describe what input event activates the API.
+
+Use `emits` to describe what output events the API may publish.
+
+`event` still works as a legacy alias for `trigger_event`, but new agents should use the explicit form.
 
 ## Shared Request Envelope
 

@@ -27,7 +27,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="reduce_step_output",
-            event="data.reduce",
+            trigger_event="data.reduce",
+            emits=["data.reduced"],
             summary="Reduces raw step output into a normalized result for downstream validation and synthesis.",
             when="Runs a local reducer command against raw step output and emits a normalized reduced result.",
             deterministic=True,

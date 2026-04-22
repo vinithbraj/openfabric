@@ -2,6 +2,8 @@ import hashlib
 import json
 from typing import Any
 
+from agent_library.contracts import api_emit_events, api_trigger_event
+
 
 GRAPH_SCHEMA_VERSION = "phase3"
 
@@ -68,8 +70,17 @@ def infer_agent_graph_role(
     metadata: dict | None = None,
 ) -> str:
     metadata = metadata or {}
+    api_specs = metadata.get("apis", metadata.get("methods", []))
     subscribe_set = {item for item in (subscribes_to or []) if isinstance(item, str)}
     emit_set = {item for item in (emits or []) if isinstance(item, str)}
+    if isinstance(api_specs, list):
+        for api in api_specs:
+            if not isinstance(api, dict):
+                continue
+            trigger_event = api_trigger_event(api)
+            if trigger_event:
+                subscribe_set.add(trigger_event)
+            emit_set.update(api_emit_events(api))
     lowered = agent_name.lower()
 
     if "validation.request" in subscribe_set or "validator" in lowered:
@@ -95,10 +106,15 @@ def infer_agent_graph_role(
 
 
 def _api_spec(method: dict[str, Any]) -> dict[str, Any]:
+    trigger_event = api_trigger_event(method)
+    emitted_events = api_emit_events(method)
     api = {
         "name": str(method.get("name") or "").strip(),
-        "event": str(method.get("event") or "").strip(),
+        "event": trigger_event,
+        "trigger_event": trigger_event,
     }
+    if emitted_events:
+        api["emits"] = emitted_events
     summary = method.get("summary")
     when = method.get("when")
     if isinstance(summary, str) and summary.strip():
@@ -115,6 +131,16 @@ def _api_spec(method: dict[str, Any]) -> dict[str, Any]:
             api[key] = value.strip()
     if isinstance(method.get("deterministic"), bool):
         api["deterministic"] = method.get("deterministic")
+    for key in ("request_contract", "result_contract"):
+        value = method.get(key)
+        if isinstance(value, str) and value.strip():
+            api[key] = value.strip()
+    for key in ("request_envelope_fields", "result_envelope_fields"):
+        value = method.get(key)
+        if isinstance(value, list):
+            safe_values = [item for item in value if isinstance(item, str) and item.strip()]
+            if safe_values:
+                api[key] = safe_values
     for key in ("input_schema", "output_schema"):
         value = method.get(key)
         if isinstance(value, dict) and value:
@@ -132,6 +158,16 @@ def build_agent_graph_node(
     emits = config.get("emits", [])
     runtime_cfg = config.get("runtime", {})
     methods = metadata.get("apis", metadata.get("methods", config.get("methods", [])))
+    if isinstance(methods, list):
+        for item in methods:
+            if not isinstance(item, dict):
+                continue
+            trigger_event = api_trigger_event(item)
+            if trigger_event and trigger_event not in subscribes_to:
+                subscribes_to = [*subscribes_to, trigger_event]
+            for emitted_event in api_emit_events(item):
+                if emitted_event not in emits:
+                    emits = [*emits, emitted_event]
     role = infer_agent_graph_role(agent_name, subscribes_to, emits, metadata)
 
     graph_node = {
@@ -160,6 +196,14 @@ def build_agent_graph_node(
     contract_version = metadata.get("contract_version")
     if isinstance(contract_version, str) and contract_version.strip():
         contract["version"] = contract_version.strip()
+    for key in ("request_contract", "result_contract"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            contract[key] = value.strip()
+    for key in ("request_envelope_fields", "result_envelope_fields"):
+        value = metadata.get(key)
+        if isinstance(value, list) and value:
+            contract[key] = [item for item in value if isinstance(item, str) and item.strip()]
     request_schema = metadata.get("request_schema")
     if isinstance(request_schema, dict) and request_schema:
         contract["request_schema"] = _compact_value(request_schema, text_limit=180, row_limit=3)

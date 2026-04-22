@@ -20,7 +20,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="plan_research",
-            event="research.query",
+            trigger_event="user.ask",
+            emits=["research.query"],
             summary="Routes the user question to the research path.",
             when="When the request should also trigger research.",
             deterministic=True,
@@ -28,7 +29,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="plan_task",
-            event="task.plan",
+            trigger_event="user.ask",
+            emits=["task.plan"],
             summary="Routes the user question to the task execution path.",
             when="When the request should also trigger task execution.",
             deterministic=True,

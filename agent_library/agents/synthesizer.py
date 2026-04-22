@@ -27,7 +27,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="synthesize_file_result",
-            event="file.content",
+            trigger_event="file.content",
+            emits=["answer.final"],
             summary="Converts file content into a final user-facing answer.",
             when="Converts file content into final answer.",
             deterministic=False,
@@ -35,7 +36,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="synthesize_shell_result",
-            event="shell.result",
+            trigger_event="shell.result",
+            emits=["answer.final"],
             summary="Converts shell execution results into a final user-facing answer.",
             when="Converts shell execution result into final answer.",
             deterministic=False,
@@ -43,7 +45,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="synthesize_notify_result",
-            event="notify.result",
+            trigger_event="notify.result",
+            emits=["answer.final"],
             summary="Converts notification results into a final user-facing answer.",
             when="Converts notify result into final answer.",
             deterministic=False,
@@ -51,7 +54,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="synthesize_sql_result",
-            event="sql.result",
+            trigger_event="sql.result",
+            emits=["answer.final"],
             summary="Converts SQL schema and query results into a final user-facing answer.",
             when="Converts SQL schema/query results into final answer.",
             deterministic=False,
@@ -59,7 +63,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="synthesize_slurm_result",
-            event="slurm.result",
+            trigger_event="slurm.result",
+            emits=["answer.final"],
             summary="Converts Slurm command results into a final user-facing answer.",
             when="Converts Slurm command results into final answer.",
             deterministic=False,
@@ -67,7 +72,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="synthesize_task_result",
-            event="task.result",
+            trigger_event="task.result",
+            emits=["answer.final"],
             summary="Converts generic task results into a final user-facing answer.",
             when="Converts generic task result into final answer.",
             deterministic=False,
@@ -75,7 +81,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="synthesize_workflow_result",
-            event="workflow.result",
+            trigger_event="workflow.result",
+            emits=["answer.final"],
             summary="Converts aggregated multi-step workflow results into a final answer.",
             when="Converts aggregated multi-step workflow results into final answer.",
             deterministic=False,
@@ -83,7 +90,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="synthesize_clarification_required",
-            event="clarification.required",
+            trigger_event="clarification.required",
+            emits=["answer.final"],
             summary="Converts clarification requests into a user-facing follow-up question.",
             when="Converts clarification requests into a user-facing follow-up question.",
             deterministic=False,

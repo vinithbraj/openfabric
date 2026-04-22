@@ -1,5 +1,88 @@
 from urllib.parse import urlparse
 
+from agent_library.contracts import api_emit_events, api_trigger_event
+
+
+def _validate_contract_name(
+    contracts: dict,
+    agent_name: str,
+    scope: str,
+    key: str,
+    value,
+):
+    if value in (None, ""):
+        return
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Agent '{agent_name}' {scope} has non-string '{key}'"
+        )
+    if value not in contracts:
+        raise ValueError(
+            f"Agent '{agent_name}' {scope} references unknown contract '{value}' via '{key}'"
+        )
+
+
+def _validate_field_list(agent_name: str, scope: str, key: str, value):
+    if value is None:
+        return
+    if not isinstance(value, list):
+        raise ValueError(
+            f"Agent '{agent_name}' {scope} must define '{key}' as a list"
+        )
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"Agent '{agent_name}' {scope} has invalid '{key}' entry"
+            )
+
+
+def _validate_method_like(
+    *,
+    contracts: dict,
+    events: dict,
+    agent_name: str,
+    scope_name: str,
+    method: dict,
+):
+    if not method.get("name") or not isinstance(method.get("name"), str):
+        raise ValueError(
+            f"Agent '{agent_name}' {scope_name} is missing string 'name'"
+        )
+    legacy_event = method.get("event")
+    if legacy_event is not None and (
+        not isinstance(legacy_event, str) or not legacy_event.strip()
+    ):
+        raise ValueError(
+            f"Agent '{agent_name}' {scope_name} has invalid string 'event'"
+        )
+    trigger_event = api_trigger_event(method)
+    if not trigger_event:
+        raise ValueError(
+            f"Agent '{agent_name}' {scope_name} is missing string 'trigger_event' or legacy 'event'"
+        )
+    if legacy_event and legacy_event.strip() != trigger_event:
+        raise ValueError(
+            f"Agent '{agent_name}' {scope_name} defines mismatched 'event' and 'trigger_event'"
+        )
+    if trigger_event not in events:
+        raise ValueError(
+            f"Agent '{agent_name}' {scope_name} references undefined trigger event '{trigger_event}'"
+        )
+    emitted_events = api_emit_events(method)
+    for event_name in emitted_events:
+        if event_name not in events:
+            raise ValueError(
+                f"Agent '{agent_name}' {scope_name} emits undefined event '{event_name}'"
+            )
+    if "when" in method and not isinstance(method["when"], str):
+        raise ValueError(
+            f"Agent '{agent_name}' {scope_name} has non-string 'when'"
+        )
+    _validate_contract_name(contracts, agent_name, scope_name, "request_contract", method.get("request_contract"))
+    _validate_contract_name(contracts, agent_name, scope_name, "result_contract", method.get("result_contract"))
+    _validate_field_list(agent_name, scope_name, "request_envelope_fields", method.get("request_envelope_fields"))
+    _validate_field_list(agent_name, scope_name, "result_envelope_fields", method.get("result_envelope_fields"))
+
 
 def validate_semantics(spec: dict):
 
@@ -19,6 +102,7 @@ def validate_semantics(spec: dict):
     for agent_name, agent in agents.items():
         runtime_cfg = agent.get("runtime", {})
         methods = agent.get("methods", [])
+        apis = agent.get("apis", [])
 
         if methods is None:
             methods = []
@@ -31,22 +115,31 @@ def validate_semantics(spec: dict):
                 raise ValueError(
                     f"Agent '{agent_name}' method at index {idx} must be an object"
                 )
-            if not method.get("name") or not isinstance(method.get("name"), str):
+            _validate_method_like(
+                contracts=contracts,
+                events=events,
+                agent_name=agent_name,
+                scope_name=f"method at index {idx}",
+                method=method,
+            )
+        if apis is None:
+            apis = []
+        if not isinstance(apis, list):
+            raise ValueError(
+                f"Agent '{agent_name}' must define 'apis' as a list"
+            )
+        for idx, api in enumerate(apis):
+            if not isinstance(api, dict):
                 raise ValueError(
-                    f"Agent '{agent_name}' method at index {idx} is missing string 'name'"
+                    f"Agent '{agent_name}' api at index {idx} must be an object"
                 )
-            if not method.get("event") or not isinstance(method.get("event"), str):
-                raise ValueError(
-                    f"Agent '{agent_name}' method at index {idx} is missing string 'event'"
-                )
-            if method["event"] not in events:
-                raise ValueError(
-                    f"Agent '{agent_name}' method '{method['name']}' references undefined event '{method['event']}'"
-                )
-            if "when" in method and not isinstance(method["when"], str):
-                raise ValueError(
-                    f"Agent '{agent_name}' method '{method['name']}' has non-string 'when'"
-                )
+            _validate_method_like(
+                contracts=contracts,
+                events=events,
+                agent_name=agent_name,
+                scope_name=f"api at index {idx}",
+                method=api,
+            )
 
         for event in agent.get("subscribes_to", []):
             if event not in events:
@@ -59,6 +152,10 @@ def validate_semantics(spec: dict):
                 raise ValueError(
                     f"Agent '{agent_name}' emits undefined event '{event}'"
                 )
+        _validate_contract_name(contracts, agent_name, "descriptor", "request_contract", agent.get("request_contract"))
+        _validate_contract_name(contracts, agent_name, "descriptor", "result_contract", agent.get("result_contract"))
+        _validate_field_list(agent_name, "descriptor", "request_envelope_fields", agent.get("request_envelope_fields"))
+        _validate_field_list(agent_name, "descriptor", "result_envelope_fields", agent.get("result_envelope_fields"))
 
         if runtime_cfg.get("adapter") == "http":
             endpoint = runtime_cfg.get("endpoint")

@@ -4,6 +4,8 @@ from importlib import import_module
 
 from agent_library.contracts import (
     AGENT_CONTRACT_VERSION,
+    SHARED_REQUEST_CONTRACT_NAME,
+    SHARED_RESULT_CONTRACT_NAME,
     build_agent_api,
     build_agent_descriptor,
     normalize_agent_metadata,
@@ -26,7 +28,8 @@ class AgentContractTests(unittest.TestCase):
             apis=[
                 build_agent_api(
                     name="do_example_work",
-                    event="task.plan",
+                    trigger_event="task.plan",
+                    emits=["task.result"],
                     summary="Run example work.",
                     input_schema={"type": "object", "properties": {"value": {"type": "string"}}},
                     output_schema={"type": "object", "properties": {"ok": {"type": "boolean"}}},
@@ -38,7 +41,13 @@ class AgentContractTests(unittest.TestCase):
 
         self.assertEqual(descriptor["contract_version"], AGENT_CONTRACT_VERSION)
         self.assertEqual(descriptor["apis"][0]["name"], "do_example_work")
+        self.assertEqual(descriptor["apis"][0]["trigger_event"], "task.plan")
+        self.assertEqual(descriptor["apis"][0]["emits"], ["task.result"])
         self.assertEqual(descriptor["methods"][0]["name"], "do_example_work")
+        self.assertEqual(descriptor["methods"][0]["event"], "task.plan")
+        self.assertEqual(descriptor["methods"][0]["trigger_event"], "task.plan")
+        self.assertEqual(descriptor["request_contract"], SHARED_REQUEST_CONTRACT_NAME)
+        self.assertEqual(descriptor["result_contract"], SHARED_RESULT_CONTRACT_NAME)
         self.assertIn("request_schema", descriptor)
         self.assertIn("result_schema", descriptor)
 
@@ -92,8 +101,11 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(node["contract"]["version"], AGENT_CONTRACT_VERSION)
         self.assertIn("request_schema", node["contract"])
         self.assertIn("result_schema", node["contract"])
+        self.assertEqual(node["contract"]["request_contract"], SHARED_REQUEST_CONTRACT_NAME)
+        self.assertEqual(node["contract"]["result_contract"], SHARED_RESULT_CONTRACT_NAME)
         self.assertIn("input_schema", node["capabilities"]["apis"][0])
         self.assertIn("output_schema", node["capabilities"]["apis"][0])
+        self.assertEqual(node["capabilities"]["apis"][0]["trigger_event"], "task.plan")
 
     def test_all_agent_modules_expose_normalizable_contract_metadata(self):
         agent_dir = os.path.join(os.path.dirname(__file__), "agent_library", "agents")
@@ -115,6 +127,29 @@ class AgentContractTests(unittest.TestCase):
             self.assertTrue(normalized["methods"], module_name)
             self.assertIn("request_schema", normalized, module_name)
             self.assertIn("result_schema", normalized, module_name)
+            for api in normalized["apis"]:
+                self.assertTrue(api["trigger_event"], module_name)
+                self.assertIn("request_contract", api, module_name)
+                self.assertIn("result_contract", api, module_name)
+                self.assertIn("request_envelope_fields", api, module_name)
+                self.assertIn("result_envelope_fields", api, module_name)
+
+    def test_router_agents_use_explicit_trigger_and_emit_contracts(self):
+        planner = import_module("agent_library.agents.planner")
+        normalized_planner = normalize_agent_metadata("planner", planner.AGENT_DESCRIPTOR)
+        planner_apis = {item["name"]: item for item in normalized_planner["apis"]}
+        self.assertEqual(planner_apis["plan_research"]["trigger_event"], "user.ask")
+        self.assertEqual(planner_apis["plan_research"]["emits"], ["research.query"])
+        self.assertEqual(planner_apis["plan_task"]["trigger_event"], "user.ask")
+        self.assertEqual(planner_apis["plan_task"]["emits"], ["task.plan"])
+
+        llm_planner = import_module("agent_library.agents.llm_operations_planner")
+        normalized_llm = normalize_agent_metadata("ops_planner", llm_planner.AGENT_DESCRIPTOR)
+        llm_apis = {item["name"]: item for item in normalized_llm["apis"]}
+        self.assertEqual(llm_apis["assess_processable_request"]["trigger_event"], "user.ask")
+        self.assertEqual(llm_apis["assess_processable_request"]["emits"], ["plan.progress", "task.plan"])
+        self.assertEqual(llm_apis["decompose_failed_step"]["trigger_event"], "planner.replan.request")
+        self.assertEqual(llm_apis["decompose_failed_step"]["emits"], ["planner.replan.result"])
 
     def test_template_helpers_emit_runtime_compatible_responses(self):
         self.assertEqual(noop(), {"emits": []})

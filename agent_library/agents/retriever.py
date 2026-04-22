@@ -16,7 +16,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="lookup_research",
-            event="research.query",
+            trigger_event="research.query",
+            emits=["research.result"],
             summary="Fetches research content for a research query.",
             when="Fetches research content for a research query.",
             deterministic=False,

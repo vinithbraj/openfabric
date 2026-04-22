@@ -189,7 +189,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     apis=[
         agent_api(
             name="introspect_database",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["sql.result", "task.result"],
             summary="Lists schemas, tables, columns, and relationships for the configured SQL database.",
             when="Lists schemas, tables, columns, and relationships for the configured SQL database.",
             intent_tags=["sql_schema", "database_introspection"],
@@ -199,7 +200,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="select_deterministic_sql_primitive",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["sql.result", "task.result"],
             summary="Selects one deterministic SQL primitive plus a fallback SQL plan for a natural-language database question.",
             when="Selects one deterministic SQL primitive plus a fallback SQL plan for a natural-language database question.",
             intent_tags=["sql_primitive_selection", "database_question", "analytics"],
@@ -209,7 +211,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
         ),
         agent_api(
             name="execute_sql_fallback_when_needed",
-            event="task.plan",
+            trigger_event="task.plan",
+            emits=["sql.result", "task.result"],
             summary="Executes generated fallback SQL only when the deterministic SQL primitive cannot answer cleanly.",
             when="Executes generated fallback SQL only when the deterministic SQL primitive cannot answer cleanly.",
             intent_tags=["sql_query_fallback", "database_question", "analytics"],
