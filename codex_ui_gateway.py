@@ -47,10 +47,7 @@ def render_codex_ui_html() -> str:
     html, body {
       margin: 0;
       min-height: 100%;
-      background:
-        radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 26%),
-        radial-gradient(circle at top right, rgba(99, 102, 241, 0.08), transparent 28%),
-        linear-gradient(180deg, #0b0d10 0%, #0d1117 100%);
+      background: #0b0d10;
       color: var(--text);
       font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
     }
@@ -110,8 +107,8 @@ def render_codex_ui_html() -> str:
     .brand-subtitle {
       margin-top: 12px;
       color: var(--muted);
-      font-size: 13px;
-      line-height: 1.5;
+      font-size: 12px;
+      line-height: 1.4;
     }
 
     .sidebar-actions {
@@ -150,7 +147,7 @@ def render_codex_ui_html() -> str:
     }
 
     .sidebar-meta {
-      display: grid;
+      display: none;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
     }
@@ -271,7 +268,7 @@ def render_codex_ui_html() -> str:
     .topbar p {
       margin: 5px 0 0;
       color: var(--muted);
-      font-size: 13px;
+      font-size: 12px;
     }
 
     .topbar-controls {
@@ -324,19 +321,17 @@ def render_codex_ui_html() -> str:
 
     .welcome-shell {
       display: grid;
-      gap: 22px;
-      padding: 28px;
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.02)),
-        var(--bg-elevated);
+      gap: 16px;
+      padding: 22px;
+      background: var(--bg-elevated);
       border: 1px solid var(--line);
-      border-radius: 28px;
-      box-shadow: var(--shadow);
+      border-radius: 18px;
+      box-shadow: none;
     }
 
     .welcome-shell h2 {
       margin: 0;
-      font-size: 42px;
+      font-size: 30px;
       line-height: 1;
       font-weight: 700;
       font-family: "IBM Plex Sans Condensed", "Avenir Next Condensed", sans-serif;
@@ -394,12 +389,12 @@ def render_codex_ui_html() -> str:
 
     .message-card {
       border: 1px solid var(--line);
-      border-radius: var(--radius-xl);
+      border-radius: 16px;
       background: var(--bg-panel);
-      padding: 20px 22px;
+      padding: 16px 18px;
       overflow: hidden;
-      line-height: 1.7;
-      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.18);
+      line-height: 1.6;
+      box-shadow: none;
     }
 
     .message-row.user {
@@ -408,16 +403,12 @@ def render_codex_ui_html() -> str:
 
     .message-row.user .message-card {
       max-width: min(84%, 720px);
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03)),
-        #171d25;
+      background: #171d25;
       color: var(--user);
     }
 
     .message-row.assistant .message-card {
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015)),
-        var(--bg-panel-strong);
+      background: var(--bg-panel-strong);
       color: var(--assistant);
     }
 
@@ -475,31 +466,17 @@ def render_codex_ui_html() -> str:
     .codeblock {
       margin: 1em 0;
       border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 18px;
+      border-radius: 12px;
       background: #0f141a;
-      overflow: hidden;
-    }
-
-    .codeblock-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 10px 14px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      color: var(--muted);
-      font-size: 11px;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
+      overflow: auto;
     }
 
     .codeblock pre {
       margin: 0;
-      padding: 16px 18px 18px;
-      overflow: auto;
+      padding: 14px 16px;
       color: #eef2f7;
       font-size: 13px;
-      line-height: 1.65;
+      line-height: 1.55;
       font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
     }
 
@@ -522,9 +499,9 @@ def render_codex_ui_html() -> str:
       max-width: calc(var(--content-width) + 32px);
       margin: 0 auto;
       border: 1px solid var(--line);
-      border-radius: 26px;
+      border-radius: 18px;
       background: var(--bg-input);
-      box-shadow: var(--shadow);
+      box-shadow: none;
       overflow: hidden;
     }
 
@@ -548,7 +525,7 @@ def render_codex_ui_html() -> str:
       gap: 12px;
       padding: 14px 16px 16px;
       border-top: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.02);
+      background: transparent;
     }
 
     .composer-hint {
@@ -927,8 +904,7 @@ def render_codex_ui_html() -> str:
           <div>
             <h2>Codex-style chat for OpenFabric</h2>
             <p>
-              This standalone UI speaks the same OpenAI-compatible chat completion API as Open WebUI.
-              You can keep using the same backend contract while replacing the presentation layer.
+              Same backend contract. Less UI.
             </p>
           </div>
           <div class="prompt-grid">
@@ -985,17 +961,9 @@ def render_codex_ui_html() -> str:
       if (cursor < text.length) {
         segments.push({ type: 'text', value: text.slice(cursor) });
       }
-      return segments.map((segment) => {
-        if (segment.type === 'code') {
-          return `
-            <div class="codeblock">
-              <div class="codeblock-header">
-                <span>${escapeHtml(segment.lang || 'text')}</span>
-                <span>code</span>
-              </div>
-              <pre><code>${escapeHtml(segment.value)}</code></pre>
-            </div>
-          `;
+        return segments.map((segment) => {
+          if (segment.type === 'code') {
+          return `<div class="codeblock"><pre><code>${escapeHtml(segment.value)}</code></pre></div>`;
         }
         return renderTextBlock(segment.value);
       }).join('');

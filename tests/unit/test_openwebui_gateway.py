@@ -184,7 +184,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             0,
         )
         self.assertIn("**Selected option:** option1", block)
-        self.assertIn("- **step1** via **sql_runner_dicom_mock**:", block)
+        self.assertIn("- `step1` · sql_runner_dicom_mock · list all schemas in dicom_mock", block)
         self.assertNotIn("`selected`", block)
 
     def test_workflow_with_shell_output_uses_direct_fallback(self):
