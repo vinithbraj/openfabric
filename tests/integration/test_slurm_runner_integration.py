@@ -12,7 +12,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 MOCK_SLURM_SCRIPT = textwrap.dedent(

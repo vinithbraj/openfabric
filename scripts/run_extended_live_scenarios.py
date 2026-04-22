@@ -80,7 +80,7 @@ def _command_output_text(command: list[str]) -> str:
 def _build_ground_truth() -> dict[str, Any]:
     root_py_files = _sorted_file_names(REPO_ROOT, suffix=".py")
     root_md_files = _sorted_file_names(REPO_ROOT, suffix=".md")
-    root_test_files = _sorted_file_names(REPO_ROOT, suffix=".py", prefix="test_")
+    root_test_files = _sorted_file_names(REPO_ROOT / "tests" / "unit", suffix=".py", prefix="test_")
     root_dirs = _sorted_dir_names(REPO_ROOT)
     agent_python_files = _sorted_file_names(REPO_ROOT / "agent_library" / "agents", suffix=".py")
     runtime_python_files = _sorted_file_names(REPO_ROOT / "runtime", suffix=".py")
@@ -162,7 +162,7 @@ def _build_ground_truth() -> dict[str, Any]:
         "working_tree_clean": _command_output_text(
             ["bash", "-lc", "if git diff --quiet && git diff --cached --quiet; then echo true; else echo false; fi"]
         ),
-        "version4_line_count": _lines_in_file(REPO_ROOT / "VERSION_4_PRIMITIVE_CATALOG.md"),
+        "version4_line_count": _lines_in_file(REPO_ROOT / "docs" / "VERSION_4_PRIMITIVE_CATALOG.md"),
         "engine_task_plan_count": _substring_count(REPO_ROOT / "runtime" / "engine.py", "task.plan"),
         "gateway_planner_name_count": _substring_count(REPO_ROOT / "openwebui_gateway.py", "PlannerGateway"),
         "root_markdown_graph_count": _word_like_count(root_markdown_paths, "graph"),
@@ -201,7 +201,7 @@ def _shell_scenarios() -> list[Scenario]:
         ),
         Scenario(
             scenario_id="shell_03_root_test_inventory",
-            question="Using the shell in the repository root, list the test Python files alphabetically and tell me the total count.",
+            question="Using the shell under tests/unit, list the test Python files alphabetically and tell me the total count.",
             expected_agents=("shell_runner",),
             expected_fragments=lambda ctx: [str(ctx["root_test_count"]), *ctx["root_test_files"][:3]],
             min_step_count=1,
@@ -272,7 +272,7 @@ def _shell_scenarios() -> list[Scenario]:
         ),
         Scenario(
             scenario_id="shell_12_runtime_vs_test_difference",
-            question="Using the shell, count Python files under runtime and test Python files in the repository root, then report both counts and the difference.",
+            question="Using the shell, count Python files under runtime and test Python files under tests/unit, then report both counts and the difference.",
             expected_agents=("shell_runner",),
             expected_fragments=lambda ctx: [
                 str(ctx["runtime_python_count"]),
@@ -283,7 +283,7 @@ def _shell_scenarios() -> list[Scenario]:
         ),
         Scenario(
             scenario_id="shell_13_version4_line_count",
-            question="Using the shell, how many lines are in VERSION_4_PRIMITIVE_CATALOG.md?",
+            question="Using the shell, how many lines are in docs/VERSION_4_PRIMITIVE_CATALOG.md?",
             expected_agents=("shell_runner",),
             expected_fragments=lambda ctx: [str(ctx["version4_line_count"])],
             min_step_count=1,
@@ -450,7 +450,7 @@ def _db_shell_scenarios() -> list[Scenario]:
         Scenario(
             scenario_id="db_shell_08_mydb_instances_vs_tests",
             question=(
-                "In the mydb database count instances, and in the repository root using the shell count test Python files. "
+                "In the mydb database count instances, and under tests/unit using the shell count test Python files. "
                 "Report both counts and the difference."
             ),
             expected_agents=("sql_runner_mydb", "shell_runner"),
@@ -561,7 +561,7 @@ def _db_shell_scenarios() -> list[Scenario]:
         Scenario(
             scenario_id="db_shell_16_dicom_table_list_and_test_count",
             question=(
-                "In the dicom_mock database list the first four tables in the dicom schema alphabetically, and in the repository root using the shell "
+                "In the dicom_mock database list the first four tables in the dicom schema alphabetically, and under tests/unit using the shell "
                 "count test Python files. Report the table count, the test count, and include the first few table names."
             ),
             expected_agents=("sql_runner_dicom_mock", "shell_runner"),
@@ -684,7 +684,7 @@ def _compound_shell_scenarios() -> list[Scenario]:
         ),
         Scenario(
             scenario_id="compound_shell_07_root_test_inventory",
-            question="Using the shell in the repository root, list the test Python files alphabetically and tell me the total count.",
+            question="Using the shell under tests/unit, list the test Python files alphabetically and tell me the total count.",
             expected_agents=("shell_runner",),
             expected_fragments=lambda ctx: [str(ctx["root_test_count"]), *ctx["root_test_files"][:3]],
             min_step_count=2,
@@ -755,7 +755,7 @@ def _compound_shell_scenarios() -> list[Scenario]:
         ),
         Scenario(
             scenario_id="compound_shell_16_runtime_vs_test_difference",
-            question="Using the shell, count Python files under runtime and test Python files in the repository root, then report both counts and the difference.",
+            question="Using the shell, count Python files under runtime and test Python files under tests/unit, then report both counts and the difference.",
             expected_agents=("shell_runner",),
             expected_fragments=lambda ctx: [
                 str(ctx["runtime_python_count"]),
@@ -802,7 +802,7 @@ def _compound_shell_scenarios() -> list[Scenario]:
         Scenario(
             scenario_id="compound_shell_20_line_count_vs_markdown_token_count",
             question=(
-                "Using the shell, how many lines are in VERSION_4_PRIMITIVE_CATALOG.md, and across the Markdown files "
+                "Using the shell, how many lines are in docs/VERSION_4_PRIMITIVE_CATALOG.md, and across the Markdown files "
                 "in the repository root how many times does the word graph appear? Report both counts and the difference."
             ),
             expected_agents=("shell_runner",),

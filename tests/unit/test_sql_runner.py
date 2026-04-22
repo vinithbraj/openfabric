@@ -8,6 +8,12 @@ fastapi_stub = types.ModuleType("fastapi")
 
 
 class _FastAPIStub:
+    def get(self, *_args, **_kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
     def post(self, *_args, **_kwargs):
         def decorator(func):
             return func
@@ -43,6 +49,7 @@ sys.modules.setdefault("pydantic", pydantic_stub)
 
 from agent_library.agents.sql_runner import (
     handle_event,
+    _dsn_health_status,
     _parse_strict_json_object,
     _execute_sql,
     _execute_sql_deterministic_selection,
@@ -104,6 +111,20 @@ DICOM_COUNT_SCHEMA = {
 
 
 class PostgresSafeSqlTests(unittest.TestCase):
+    def test_dsn_health_status_reports_unconfigured_agent(self):
+        with patch.dict("os.environ", {}, clear=True):
+            ok, payload = _dsn_health_status()
+        self.assertFalse(ok)
+        self.assertFalse(payload["configured"])
+        self.assertIn("not configured", payload["detail"].lower())
+
+    def test_dsn_health_status_reports_invalid_scheme(self):
+        with patch.dict("os.environ", {"SQL_AGENT_DSN": "${SQL_DICOM_MOCK_DATABASE_URL:-postgresql://broken}"}, clear=True):
+            ok, payload = _dsn_health_status()
+        self.assertFalse(ok)
+        self.assertEqual(payload["dsn_scheme"], "unknown")
+        self.assertIn("unsupported sql_agent_dsn scheme", payload["detail"].lower())
+
     def test_sql_llm_transport_uses_dummy_key_for_local_base_url(self):
         with patch.dict(
             "os.environ",

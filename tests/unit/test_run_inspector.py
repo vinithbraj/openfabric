@@ -15,7 +15,7 @@ sys.modules.setdefault("jsonschema", jsonschema_stub)
 from runtime.engine import Engine
 from runtime.registry import ADAPTER_REGISTRY
 from runtime.run_store import RunStore
-from test_engine_validation import (
+from tests.unit.test_engine_validation import (
     TEST_SPEC,
     _CrashOnceExecAdapter,
     _ExecAdapter,

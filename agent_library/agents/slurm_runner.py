@@ -220,7 +220,7 @@ AGENT_DESCRIPTOR = agent_descriptor(
     deterministic_catalog_families=SLURM_DETERMINISTIC_CATALOG_FAMILIES,
     deterministic_catalog_size=len(SLURM_DETERMINISTIC_PRIMITIVES),
     deterministic_primitives=[item["primitive_id"] for item in SLURM_DETERMINISTIC_PRIMITIVES],
-    deterministic_catalog_reference="VERSION_4_PRIMITIVE_CATALOG.md",
+    deterministic_catalog_reference="docs/VERSION_4_PRIMITIVE_CATALOG.md",
     fallback_policy=(
         "Use the LLM-selected Slurm strategy. When it selects a local primitive, execute it locally. "
         "Otherwise run the selector-provided fallback command or generated Slurm command."

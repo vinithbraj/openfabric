@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 requests_stub = types.ModuleType("requests")
 sys.modules.setdefault("requests", requests_stub)
@@ -50,6 +51,17 @@ class _ExecAdapter:
                             "source_command": "printf 'alpha\\nbeta\\n'",
                             "sample": "alpha\nbeta\n",
                         },
+                    },
+                )
+            ]
+        if task == "sql config failure step":
+            return [
+                (
+                    "task.result",
+                    {
+                        "detail": "SQL task failed: RuntimeError: Unsupported SQL_AGENT_DSN scheme: unknown",
+                        "status": "failed",
+                        "error": "RuntimeError: Unsupported SQL_AGENT_DSN scheme: unknown",
                     },
                 )
             ]
@@ -1108,6 +1120,74 @@ class EngineValidationTests(unittest.TestCase):
         self.assertEqual(workflow["graph"]["statistics"]["reducer_count"], 1)
         self.assertEqual(workflow["graph"]["statistics"]["router_count"], 2)
         self.assertTrue(any(item["node_id"].endswith(":reducer") for item in workflow["graph"]["nodes"]))
+
+    def test_engine_fails_fast_on_non_retriable_sql_agent_configuration_error(self):
+        spec = copy.deepcopy(TEST_SPEC)
+        spec["agents"]["sql_runner_dicom_mock"] = {
+            "runtime": {"adapter": "test_exec"},
+            "subscribes_to": ["task.plan"],
+            "emits": ["task.result"],
+            "metadata": {
+                "template_agent": "sql_runner",
+                "argument_name": "dicom_mock",
+                "database_name": "dicom_mock",
+            },
+        }
+        engine = Engine(spec)
+        engine.setup()
+        engine.emit(
+            "task.plan",
+            {
+                "task": "count patients in dicom_mock",
+                "task_shape": "count",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "target_agent": "sql_runner_dicom_mock",
+                        "task": "sql config failure step",
+                        "instruction": {"operation": "query_from_request", "question": "count patients in dicom_mock"},
+                    }
+                ],
+            },
+        )
+
+        workflow_events = [payload for event_name, payload in _RecorderAdapter.events if event_name == "workflow.result"]
+        self.assertEqual(len(workflow_events), 1)
+        workflow = workflow_events[0]
+        self.assertEqual(workflow["status"], "failed")
+        self.assertEqual(workflow["steps"][0]["routing"]["action"], "fail_run")
+        self.assertEqual(workflow["steps"][0]["routing"]["failure_class"], "agent_configuration_failed")
+
+        replan_requests = [
+            payload
+            for event_name, payload in _RecorderAdapter.events
+            if event_name == "planner.replan.request" and payload.get("step_id") == "step1"
+        ]
+        self.assertEqual(replan_requests, [])
+
+    def test_autostart_rejects_unhealthy_existing_sql_agent(self):
+        spec = {
+            "contracts": {},
+            "events": {},
+            "agents": {
+                "sql_runner_dicom_mock": {
+                    "runtime": {
+                        "adapter": "http",
+                        "endpoint": "http://127.0.0.1:8308/handle",
+                        "autostart": {"app": "agent_library.agents.sql_runner:app"},
+                    },
+                    "metadata": {"template_agent": "sql_runner"},
+                }
+            },
+        }
+        engine = Engine(spec)
+        with patch.object(engine, "_is_port_open", return_value=True), patch.object(
+            engine,
+            "_probe_existing_http_agent",
+            return_value={"healthy": False, "detail": "Unsupported SQL_AGENT_DSN scheme: unknown"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unhealthy configuration"):
+                engine._autostart_http_services()
 
     def test_engine_replays_terminal_run_from_persisted_state(self):
         engine = Engine(TEST_SPEC)

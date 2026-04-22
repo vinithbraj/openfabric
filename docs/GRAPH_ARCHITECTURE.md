@@ -168,7 +168,7 @@ Implemented in this change:
 - add reusable agent descriptor and response helpers in [agent_library/template.py](/home/vinith/Desktop/Workspace/openfabric/agent_library/template.py)
 - normalize legacy `AGENT_METADATA.methods` into contract-level `apis` during runtime capability discovery in [runtime/engine.py](/home/vinith/Desktop/Workspace/openfabric/runtime/engine.py)
 - project normalized `apis` plus shared request/result schemas into the capability graph in [runtime/graph.py](/home/vinith/Desktop/Workspace/openfabric/runtime/graph.py)
-- document the new builder contract in [AGENT_CONTRACT_V1.md](/home/vinith/Desktop/Workspace/openfabric/AGENT_CONTRACT_V1.md)
+- document the new builder contract in [AGENT_CONTRACT_V1.md](AGENT_CONTRACT_V1.md)
 
 ## Current Mapping
 

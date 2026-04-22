@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 import requests
-from web_compat import FastAPI
+from web_compat import FastAPI, JSONResponse
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, task_plan_context, with_node_envelope
 from agent_library.reduction import (
@@ -182,7 +182,7 @@ AGENT_DESCRIPTOR = agent_descriptor(
     deterministic_catalog_families=SQL_DETERMINISTIC_CATALOG_FAMILIES,
     deterministic_catalog_size=len(SQL_DETERMINISTIC_PRIMITIVES),
     deterministic_primitives=[item["primitive_id"] for item in SQL_DETERMINISTIC_PRIMITIVES],
-    deterministic_catalog_reference="VERSION_4_PRIMITIVE_CATALOG.md",
+    deterministic_catalog_reference="docs/VERSION_4_PRIMITIVE_CATALOG.md",
     fallback_policy=(
         "Use the LLM-selected SQL strategy. When it selects a local primitive, execute it locally. "
         "Otherwise execute the LLM-selected fallback SQL or generated SQL."
@@ -925,6 +925,34 @@ def _llm_reduce_sql_result(
 
 def _dsn() -> str | None:
     return os.getenv("SQL_AGENT_DSN") or os.getenv("SQL_DATABASE_URL")
+
+
+def _dsn_health_status() -> tuple[bool, dict[str, Any]]:
+    dsn = _dsn()
+    if not dsn:
+        return False, {
+            "status": "error",
+            "configured": False,
+            "detail": "SQL agent is not configured. Set SQL_AGENT_DSN or SQL_DATABASE_URL.",
+            "dsn_scheme": "",
+            "agent_name": os.getenv("SQL_AGENT_NAME", "").strip(),
+        }
+    dialect = _dialect_from_dsn(dsn)
+    if dialect not in {"sqlite", "postgres", "mysql"}:
+        return False, {
+            "status": "error",
+            "configured": False,
+            "detail": f"Unsupported SQL_AGENT_DSN scheme: {dialect}",
+            "dsn_scheme": dialect,
+            "agent_name": os.getenv("SQL_AGENT_NAME", "").strip(),
+        }
+    return True, {
+        "status": "ok",
+        "configured": True,
+        "detail": "",
+        "dsn_scheme": dialect,
+        "agent_name": os.getenv("SQL_AGENT_NAME", "").strip(),
+    }
 
 
 def _row_limit() -> int:
@@ -1997,6 +2025,12 @@ def _needs_decomposition(detail: str):
             }
         ]
     }
+
+
+@app.get("/healthz")
+def healthz():
+    ok, payload = _dsn_health_status()
+    return JSONResponse(payload, status_code=200 if ok else 503)
 
 
 @app.post("/handle", response_model=EventResponse)

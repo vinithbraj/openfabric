@@ -82,7 +82,7 @@ from runtime.run_visualizer import (
     load_run_visualization,
     render_run_visualizer_html,
 )
-from test_engine_validation import (
+from tests.unit.test_engine_validation import (
     TEST_SPEC,
     _FallbackPlannerAdapter,
     _NoRecoveryPlannerAdapter,

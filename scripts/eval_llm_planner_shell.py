@@ -77,7 +77,7 @@ def _cases() -> List[Case]:
         "show disk usage in current directory",
         "count files in this folder",
         "show first 20 lines of Readme.md",
-        "show last 50 lines of SESSION_CHECKPOINT.md",
+        "show last 50 lines of docs/SESSION_CHECKPOINT.md",
         "print line count for all python files",
         "show directory tree two levels deep",
         "sort file names alphabetically",

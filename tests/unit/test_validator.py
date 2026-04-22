@@ -341,13 +341,13 @@ class ValidatorTests(unittest.TestCase):
             types.SimpleNamespace(
                 event="validation.request",
                 payload={
-                    "task": "count Markdown files in the repository root",
+                    "task": "count Markdown files in the repository",
                     "task_shape": "count",
                     "workflow_status": "completed",
-                    "result": ["README.md", "GRAPH_ARCHITECTURE.md"],
+                    "result": ["README.md", "docs/GRAPH_ARCHITECTURE.md"],
                     "steps": [
                         {"id": "step1", "status": "completed", "value": "7"},
-                        {"id": "step2", "status": "completed", "value": ["README.md", "GRAPH_ARCHITECTURE.md"]},
+                        {"id": "step2", "status": "completed", "value": ["README.md", "docs/GRAPH_ARCHITECTURE.md"]},
                     ],
                 },
             )

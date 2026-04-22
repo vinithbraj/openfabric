@@ -233,13 +233,13 @@ class SynthesizerWorkflowPriorityTests(unittest.TestCase):
         req = types.SimpleNamespace(
             event="workflow.result",
             payload={
-                "task": "In the repository root, list the first five Python files alphabetically and tell me the total count.",
+                "task": "In the repository, list the first five Python files alphabetically and tell me the total count.",
                 "task_shape": "lookup",
                 "status": "completed",
                 "steps": [
                     {
                         "id": "step1",
-                        "task": "list the first five Python files alphabetically in the repository root",
+                        "task": "list the first five Python files alphabetically in the repository",
                         "target_agent": "shell_runner",
                         "status": "completed",
                         "event": "shell.result",
@@ -247,16 +247,16 @@ class SynthesizerWorkflowPriorityTests(unittest.TestCase):
                             "stdout": (
                                 "cli.py\n"
                                 "openwebui_gateway.py\n"
-                                "test_common_reducer.py\n"
-                                "test_data_reducer.py\n"
-                                "test_engine_validation.py\n"
+                                "tests/unit/test_common_reducer.py\n"
+                                "tests/unit/test_data_reducer.py\n"
+                                "tests/unit/test_engine_validation.py\n"
                             ),
                             "returncode": 0,
                         },
                     },
                     {
                         "id": "step2",
-                        "task": "count Python files in the repository root",
+                        "task": "count Python files in the repository",
                         "target_agent": "shell_runner",
                         "status": "completed",
                         "event": "shell.result",
@@ -272,7 +272,7 @@ class SynthesizerWorkflowPriorityTests(unittest.TestCase):
         answer = _fallback_answer(req)
         self.assertIn("21", answer)
         self.assertIn("cli.py", answer)
-        self.assertIn("test_engine_validation.py", answer)
+        self.assertIn("tests/unit/test_engine_validation.py", answer)
 
     def test_slurm_lookup_workflow_reports_count_and_job_ids(self):
         req = types.SimpleNamespace(

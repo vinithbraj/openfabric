@@ -69,7 +69,7 @@ These fields are published in `system.capabilities` and consumed by `llm_operati
 Agent Contract V1
 
 New agents should prefer the normalized descriptor contract in
-[AGENT_CONTRACT_V1.md](/home/vinith/Desktop/Workspace/openfabric/AGENT_CONTRACT_V1.md).
+[AGENT_CONTRACT_V1.md](../docs/AGENT_CONTRACT_V1.md).
 
 Use:
 

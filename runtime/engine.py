@@ -382,6 +382,15 @@ class Engine:
                 )
 
             if self._is_port_open(host, port):
+                probe = self._probe_existing_http_agent(agent_name, config, endpoint)
+                if isinstance(probe, dict) and probe.get("healthy") is False:
+                    detail = str(probe.get("detail") or "health probe failed").strip()
+                    raise RuntimeError(
+                        f"HTTP agent '{agent_name}' is already reachable at {endpoint} "
+                        f"but reported an unhealthy configuration: {detail}. "
+                        f"Stop the stale process on port {port} so OpenFabric can autostart "
+                        "a correctly configured agent."
+                    )
                 log_boot(f"HTTP agent '{agent_name}' already reachable at {endpoint}")
                 continue
 
@@ -459,6 +468,76 @@ class Engine:
                 return True
         except OSError:
             return False
+
+    def _healthcheck_url(self, endpoint: str) -> str:
+        parsed = urlparse(endpoint)
+        return f"{parsed.scheme}://{parsed.netloc}/healthz"
+
+    def _probe_existing_http_agent(self, agent_name: str, config: dict, endpoint: str):
+        health = self._probe_http_healthcheck(endpoint)
+        if isinstance(health, dict):
+            return health
+        metadata = config.get("metadata", {}) if isinstance(config.get("metadata"), dict) else {}
+        template_agent = str(metadata.get("template_agent") or "").strip()
+        if agent_name.startswith("sql_runner") or template_agent == "sql_runner":
+            return self._probe_existing_sql_agent(endpoint)
+        return None
+
+    def _probe_http_healthcheck(self, endpoint: str):
+        try:
+            response = requests.get(self._healthcheck_url(endpoint), timeout=1.5)
+        except requests.RequestException:
+            return None
+        if response.status_code == 404:
+            return None
+        detail = ""
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+            detail = response.text.strip()
+        if isinstance(payload, dict):
+            detail = str(payload.get("detail") or payload.get("message") or detail).strip()
+            if response.status_code < 400 and payload.get("status") == "ok":
+                return {"healthy": True, "detail": detail}
+            if response.status_code >= 400:
+                return {"healthy": False, "detail": detail or f"health check returned HTTP {response.status_code}"}
+        if response.status_code < 400:
+            return {"healthy": True, "detail": detail}
+        return {"healthy": False, "detail": detail or f"health check returned HTTP {response.status_code}"}
+
+    def _probe_existing_sql_agent(self, endpoint: str):
+        probe_payload = {
+            "event": "sql.query",
+            "payload": {
+                "query": "startup health check",
+                "sql": "SELECT 1 AS openfabric_sql_healthcheck",
+            },
+        }
+        try:
+            response = requests.post(endpoint, json=probe_payload, timeout=3.0)
+        except requests.RequestException as exc:
+            return {"healthy": False, "detail": f"SQL agent probe failed: {exc}"}
+        if response.status_code >= 500:
+            return {"healthy": False, "detail": f"SQL agent probe returned HTTP {response.status_code}"}
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        emits = payload.get("emits")
+        if not isinstance(emits, list) or not emits:
+            return None
+        first = emits[0]
+        if not isinstance(first, dict):
+            return None
+        event_name = str(first.get("event") or "").strip()
+        event_payload = first.get("payload") if isinstance(first.get("payload"), dict) else {}
+        error_text = str(event_payload.get("error") or event_payload.get("detail") or "").strip()
+        if self._is_permanent_agent_configuration_error("sql_runner", error_text):
+            return {"healthy": False, "detail": error_text}
+        if event_name in {"sql.result", "task.result"}:
+            return {"healthy": True, "detail": ""}
+        return None
 
     def _wait_for_port(
         self,
@@ -1372,12 +1451,16 @@ class Engine:
         remaining_options = max(0, total_attempts - attempt)
         can_try_next = remaining_options > 0
         can_replan = remaining_options == 0 and replan_count < limits["max_replans"] and attempt < limits["max_attempts"]
+        non_retriable = self._workflow_has_non_retriable_failure(workflow)
         action = "fail_run"
         reason = str(validation.get("reason") or workflow.get("error") or "Workflow output did not clearly satisfy the request.").strip()
 
         if workflow.get("status") == "needs_clarification" and isinstance(clarification, dict):
             action = "clarify"
             reason = str(clarification.get("detail") or clarification.get("question") or reason).strip()
+        elif non_retriable:
+            action = "fail_run"
+            reason = str(workflow.get("error") or reason).strip()
         elif validation.get("valid"):
             action = "accept_attempt"
         elif verdict == "uncertain":
@@ -1419,6 +1502,27 @@ class Engine:
             "validation": self._compact_value(validation, text_limit=180, row_limit=3),
         }
 
+    def _workflow_has_non_retriable_failure(self, workflow: dict):
+        if not isinstance(workflow, dict):
+            return False
+        error = str(workflow.get("error") or "").strip()
+        if self._is_permanent_agent_configuration_error("sql_runner", error):
+            return True
+        steps = workflow.get("steps")
+        if not isinstance(steps, list):
+            return False
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            routing = step.get("routing")
+            if isinstance(routing, dict) and routing.get("failure_class") == "agent_configuration_failed":
+                return True
+            target_agent = str(step.get("target_agent") or "").strip()
+            step_error = str(step.get("error") or "").strip()
+            if self._is_permanent_agent_configuration_error(target_agent, step_error):
+                return True
+        return False
+
     def _route_step_attempt(
         self,
         step_id: str,
@@ -1448,9 +1552,10 @@ class Engine:
         elif needs_clarification:
             verdict = "needs_clarification"
 
-        can_replan = step_replan_count < limits["max_step_replans"]
-        action = "fail_run"
         resolved_failure_class = failure_class or ("needs_clarification" if needs_clarification else "execution_failed")
+        non_retriable = resolved_failure_class in {"agent_configuration_failed"}
+        can_replan = (not non_retriable) and step_replan_count < limits["max_step_replans"]
+        action = "fail_run"
         if stage == "validation":
             resolved_failure_class = failure_class or ("validation_failed" if not (valid or accepted_with_uncertainty) else "")
             if valid or accepted_with_uncertainty:
@@ -2658,6 +2763,36 @@ class Engine:
         status = payload.get("status")
         return event_name == "task.result" and status in {"needs_decomposition", "needs_clarification"}
 
+    def _is_permanent_agent_configuration_error(self, target_agent: str, error: str):
+        lowered = str(error or "").strip().lower()
+        if not lowered:
+            return False
+        if target_agent.startswith("sql_runner"):
+            return (
+                "sql agent is not configured" in lowered
+                or "unsupported sql_agent_dsn scheme" in lowered
+            )
+        return False
+
+    def _classify_execution_failure(
+        self,
+        step_payload: dict,
+        primary_event: str | None,
+        primary_payload: dict | None,
+        error: str,
+        *,
+        needs_clarification: bool = False,
+    ) -> str:
+        if needs_clarification:
+            return "needs_clarification"
+        target_agent = str(step_payload.get("target_agent") or "").strip()
+        detail = str(error or "").strip()
+        if isinstance(primary_payload, dict) and not detail:
+            detail = str(primary_payload.get("error") or primary_payload.get("detail") or "").strip()
+        if self._is_permanent_agent_configuration_error(target_agent, detail):
+            return "agent_configuration_failed"
+        return "execution_failed"
+
     def _record_context_value(self, context: dict, step_id: str, primary_event: str, primary_payload: Any, primary_value: Any):
         context["prev"] = primary_value
         context[step_id] = primary_value
@@ -3320,7 +3455,13 @@ class Engine:
                     step_replans,
                     step_validation_requests,
                     needs_clarification=needs_clarification,
-                    failure_class="needs_clarification" if needs_clarification else "execution_failed",
+                    failure_class=self._classify_execution_failure(
+                        step_payload,
+                        primary_event,
+                        primary_payload if isinstance(primary_payload, dict) else None,
+                        error,
+                        needs_clarification=needs_clarification,
+                    ),
                 )
                 replan_envelope = None
                 if step_routing.get("action") == "replan_step":

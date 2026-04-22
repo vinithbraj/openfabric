@@ -139,9 +139,9 @@ Useful specs in this repo:
 The repo also exposes the planner stack through an OpenAI-compatible gateway:
 
 - [`openwebui_gateway.py`](openwebui_gateway.py)
-- [`OPENWEBUI.md`](OPENWEBUI.md)
+- [`docs/OPENWEBUI.md`](docs/OPENWEBUI.md)
 - [`codex_ui_gateway.py`](codex_ui_gateway.py)
-- [`CODEX_UI.md`](CODEX_UI.md)
+- [`docs/CODEX_UI.md`](docs/CODEX_UI.md)
 
 This lets Open WebUI act as the chat frontend while OpenFabric handles planning, execution, validation, and synthesis behind the scenes.
 There is also a standalone Codex-style UI that uses the exact same `/v1` API surface.
@@ -290,7 +290,7 @@ API Key: dummy
 Model: openfabric-planner
 ```
 
-See [`OPENWEBUI.md`](OPENWEBUI.md) for setup details, context handling, SQL configuration, and gateway behavior.
+See [`docs/OPENWEBUI.md`](docs/OPENWEBUI.md) for setup details, context handling, SQL configuration, and gateway behavior.
 
 ## SQL Support
 
@@ -344,9 +344,9 @@ It is especially useful when one model or tool should not own the entire workflo
 ## Repository Guide
 
 - [`README.md`](README.md): top-level overview
-- [`OPENWEBUI.md`](OPENWEBUI.md): Open WebUI gateway usage
+- [`docs/OPENWEBUI.md`](docs/OPENWEBUI.md): Open WebUI gateway usage
 - [`agent_library/README.md`](agent_library/README.md): reusable agent library overview
-- [`SESSION_CHECKPOINT.md`](SESSION_CHECKPOINT.md): recent architecture notes and checkpoints
+- [`docs/SESSION_CHECKPOINT.md`](docs/SESSION_CHECKPOINT.md): recent architecture notes and checkpoints
 
 ## Philosophy
 

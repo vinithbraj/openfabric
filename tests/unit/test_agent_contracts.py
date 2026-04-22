@@ -1,6 +1,7 @@
 import os
 import unittest
 from importlib import import_module
+from pathlib import Path
 
 from agent_library.contracts import (
     AGENT_CONTRACT_VERSION,
@@ -112,7 +113,8 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(node["capabilities"]["apis"][0]["trigger_event"], "task.plan")
 
     def test_all_agent_modules_expose_normalizable_contract_metadata(self):
-        agent_dir = os.path.join(os.path.dirname(__file__), "agent_library", "agents")
+        repo_root = Path(__file__).resolve().parents[2]
+        agent_dir = repo_root / "agent_library" / "agents"
         module_names = []
         for filename in sorted(os.listdir(agent_dir)):
             if not filename.endswith(".py") or filename == "__init__.py":
