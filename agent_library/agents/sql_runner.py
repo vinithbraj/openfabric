@@ -23,7 +23,7 @@ from runtime.console import log_debug, log_raw
 
 app = FastAPI()
 
-SQL_EXECUTION_MODEL = "deterministic_first_with_llm_fallback"
+SQL_EXECUTION_MODEL = "llm_selected_local_execution"
 SQL_DETERMINISTIC_CATALOG_VERSION = "v4-initial"
 SQL_DETERMINISTIC_PRIMITIVES = [
     {
@@ -151,8 +151,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     role="executor",
     description=(
         "Connects to a configured SQL database, introspects schemas/tables/columns/"
-        "relationships, executes deterministic read-only database primitives first, "
-        "and falls back to generated read-only SQL only when deterministic coverage is insufficient."
+        "relationships, asks an LLM to select the best local execution strategy, "
+        "executes local read-only database primitives when selected, and otherwise runs generated read-only SQL."
     ),
     capability_domains=[
         "sql",
@@ -184,8 +184,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     deterministic_primitives=[item["primitive_id"] for item in SQL_DETERMINISTIC_PRIMITIVES],
     deterministic_catalog_reference="VERSION_4_PRIMITIVE_CATALOG.md",
     fallback_policy=(
-        "Run deterministic SQL primitive first. If the primitive cannot answer cleanly, "
-        "run the selection-provided fallback SQL or legacy generated SQL."
+        "Use the LLM-selected SQL strategy. When it selects a local primitive, execute it locally. "
+        "Otherwise execute the LLM-selected fallback SQL or generated SQL."
     ),
     side_effect_policy="read_only_sql_with_safety_checks",
     safety_enforced_by_agent=True,
@@ -494,212 +494,6 @@ def _quoted_columns_for_selection(table: dict[str, Any], dialect: str, columns: 
             return None
         resolved.append(_quote_identifier(column_name, dialect))
     return resolved
-
-
-def _simple_table_aliases(table_name: str) -> set[str]:
-    raw = str(table_name or "").strip().lower()
-    if not raw:
-        return set()
-    aliases = {raw}
-    if raw.endswith("ies") and len(raw) > 3:
-        aliases.add(raw[:-3] + "y")
-    elif raw.endswith("s") and len(raw) > 2:
-        aliases.add(raw[:-1])
-    else:
-        aliases.add(raw + "s")
-    return {alias for alias in aliases if alias}
-
-
-def _heuristic_entity_row_count_selection(task: str, schema: dict) -> dict[str, Any] | None:
-    text = str(task or "").strip().lower()
-    if not text:
-        return None
-    if not any(token in text for token in ("count ", "how many", "number of", "total count", "total number")):
-        return None
-    disqualifiers = (
-        " distinct ",
-        " each ",
-        " per ",
-        " group by ",
-        " grouped by ",
-        " grouped ",
-        " having ",
-        " more than ",
-        " less than ",
-        " at least ",
-        " at most ",
-        " top ",
-        " average ",
-        " avg ",
-        " median ",
-        " percent ",
-        " ratio ",
-        " by ",
-    )
-    padded = f" {text} "
-    if any(token in padded for token in disqualifiers):
-        return None
-
-    matches: list[dict[str, Any]] = []
-    for table in schema.get("tables", []):
-        if not isinstance(table, dict):
-            continue
-        table_name = str(table.get("name") or "").strip()
-        if not table_name:
-            continue
-        aliases = _simple_table_aliases(table_name)
-        if any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases):
-            matches.append(table)
-
-    if len(matches) != 1:
-        return None
-
-    matched = matches[0]
-    return {
-        "primitive_id": "sql.table.row_count",
-        "selection_reason": "Heuristic entity-count match against a concrete table name.",
-        "parameters": {
-            "schema_name": str(matched.get("schema") or "").strip(),
-            "table_name": str(matched.get("name") or "").strip(),
-        },
-    }
-
-
-def _heuristic_distinct_entity_row_count_selection(task: str, schema: dict) -> dict[str, Any] | None:
-    text = str(task or "").strip().lower()
-    if not text or "distinct" not in text:
-        return None
-    if not any(token in text for token in ("count ", "how many", "number of", "total count", "total number")):
-        return None
-    padded = f" {text} "
-    disqualifiers = (
-        " each ",
-        " per ",
-        " group by ",
-        " grouped by ",
-        " grouped ",
-        " having ",
-        " more than ",
-        " less than ",
-        " at least ",
-        " at most ",
-        " top ",
-        " average ",
-        " avg ",
-        " median ",
-        " percent ",
-        " ratio ",
-        " by ",
-    )
-    if any(token in padded for token in disqualifiers):
-        return None
-
-    matches: list[dict[str, Any]] = []
-    for table in schema.get("tables", []):
-        if not isinstance(table, dict):
-            continue
-        table_name = str(table.get("name") or "").strip()
-        if not table_name:
-            continue
-        aliases = _simple_table_aliases(table_name)
-        if any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases):
-            matches.append(table)
-
-    if len(matches) != 1:
-        return None
-
-    matched = matches[0]
-    return {
-        "primitive_id": "sql.table.row_count",
-        "selection_reason": "Heuristic distinct-entity count matched a concrete entity table.",
-        "parameters": {
-            "schema_name": str(matched.get("schema") or "").strip(),
-            "table_name": str(matched.get("name") or "").strip(),
-        },
-    }
-
-
-def _schema_name_hint(task: str, schema: dict) -> str:
-    text = str(task or "").strip().lower()
-    if not text:
-        return ""
-    identifiers = _schema_identifier_sets(schema)
-    schema_names = sorted(
-        (str(name).strip() for name in identifiers.get("schemas", set()) if str(name).strip()),
-        key=len,
-        reverse=True,
-    )
-    for schema_name in schema_names:
-        if re.search(rf"\b{re.escape(schema_name.lower())}\b", text):
-            return schema_name
-    return ""
-
-
-def _heuristic_schema_table_count_selection(task: str, schema: dict) -> dict[str, Any] | None:
-    text = str(task or "").strip().lower()
-    if not text:
-        return None
-    if not _schema_count_like_request(None, task):
-        return None
-    if not any(token in text for token in ("table", "tables")):
-        return None
-    if any(token in text for token in ("row", "rows", "column", "columns", "relationship", "relationships", "foreign key", "foreign keys")):
-        return None
-    if _schema_listing_request(None, task):
-        return None
-    parameters = {}
-    schema_name = _schema_name_hint(task, schema)
-    if schema_name:
-        parameters["schema_name"] = schema_name
-    return {
-        "primitive_id": "sql.schema.count_tables",
-        "selection_reason": "Heuristic table-count request matched schema metadata counting.",
-        "parameters": parameters,
-    }
-
-
-def _heuristic_sql_selection(task: str, schema: dict) -> dict[str, Any] | None:
-    text = str(task or "").strip().lower()
-    if not text:
-        return None
-    identifiers = _schema_identifier_sets(schema)
-    table_match = re.search(r"\b(?:in|from|table)\s+([A-Za-z0-9_.-]+)\b", str(task or ""), flags=re.IGNORECASE)
-    table_name = table_match.group(1).strip() if table_match else ""
-    if _schemas_only_schema_request(None, task):
-        return {"primitive_id": "sql.schema.list_schemas", "selection_reason": "Heuristic schema listing match.", "parameters": {}}
-    schema_table_count = _heuristic_schema_table_count_selection(task, schema)
-    if schema_table_count is not None:
-        return schema_table_count
-    if _tables_only_schema_request(None, task):
-        parameters = {}
-        if table_name and "." not in table_name and table_name in identifiers.get("schemas", set()):
-            parameters["schema_name"] = table_name
-        return {"primitive_id": "sql.schema.list_tables", "selection_reason": "Heuristic table listing match.", "parameters": parameters}
-    if _columns_only_schema_request(None, task):
-        parameters = {"table_name": table_name} if table_name else {}
-        return {"primitive_id": "sql.schema.list_columns", "selection_reason": "Heuristic column listing match.", "parameters": parameters}
-    if _relationships_only_schema_request(None, task):
-        parameters = {"table_name": table_name} if table_name else {}
-        return {"primitive_id": "sql.schema.list_relationships", "selection_reason": "Heuristic relationship listing match.", "parameters": parameters}
-    if table_name and any(token in text for token in ("row count", "count rows", "how many rows")):
-        return {
-            "primitive_id": "sql.table.row_count",
-            "selection_reason": "Heuristic row-count match.",
-            "parameters": {"table_name": table_name},
-        }
-    if table_name and any(token in text for token in ("sample", "example rows", "show rows", "first rows")):
-        return {
-            "primitive_id": "sql.table.sample_rows",
-            "selection_reason": "Heuristic sample-rows match.",
-            "parameters": {"table_name": table_name},
-        }
-    distinct_entity_row_count = _heuristic_distinct_entity_row_count_selection(task, schema)
-    if distinct_entity_row_count is not None:
-        return distinct_entity_row_count
-    entity_row_count = _heuristic_entity_row_count_selection(task, schema)
-    if entity_row_count is not None:
-        return entity_row_count
-    return None
 
 
 def _selection_should_use_fallback(task: str, selection: dict[str, Any]) -> bool:
@@ -2296,9 +2090,7 @@ def handle_event(req: EventRequest):
             else:
                 execution_strategy = "llm_generated_sql"
                 selection_started = time.perf_counter()
-                raw_selection = _heuristic_sql_selection(query_task, schema)
-                if raw_selection is None:
-                    raw_selection = _llm_select_sql_strategy(query_task, schema)
+                raw_selection = _llm_select_sql_strategy(query_task, schema)
                 stats["deterministic_selection_ms"] = _elapsed_ms(selection_started)
                 selection = _normalize_sql_selection(raw_selection)
                 if _selection_should_use_fallback(query_task, selection):

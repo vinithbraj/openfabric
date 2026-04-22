@@ -202,7 +202,6 @@ RUNNER_SUBPROCESS_SCRIPT = textwrap.dedent(
     runner._llm_process_result = _mock_llm_process_result
 
     if mode == "force_fairshare_fallback":
-        runner._heuristic_slurm_selection = lambda task, context: None
         runner._llm_select_slurm_strategy = lambda task, context: {
             "primitive_id": "fallback_only",
             "selection_reason": "mocked fallback selector",
@@ -364,6 +363,9 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
         )
         env["SLURM_GATEWAY_HOST"] = "127.0.0.1"
         env["SLURM_GATEWAY_PORT"] = str(self._gateway_port)
+        env["OPENFABRIC_RAW_LOGS"] = "0"
+        env["OPENFABRIC_DEBUG_LOGS"] = "0"
+        env["OPENFABRIC_CONSOLE_EVENT_LOGS"] = "0"
         completed = subprocess.run(
             [sys.executable, "-c", RUNNER_SUBPROCESS_SCRIPT, mode],
             cwd=str(REPO_ROOT),
@@ -383,6 +385,16 @@ class SlurmRunnerMockGatewayIntegrationTests(unittest.TestCase):
         try:
             return json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
+            last_json_line = ""
+            for line in reversed(completed.stdout.splitlines()):
+                if line.strip().startswith("{"):
+                    last_json_line = line.strip()
+                    break
+            if last_json_line:
+                try:
+                    return json.loads(last_json_line)
+                except json.JSONDecodeError:
+                    pass
             self.fail(f"Runner subprocess returned invalid JSON: {exc}\nOutput:\n{completed.stdout}")
 
     def test_mock_gateway_health_reports_mock_binaries(self):

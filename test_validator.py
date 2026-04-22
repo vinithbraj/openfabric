@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 fastapi_stub = types.ModuleType("fastapi")
@@ -44,6 +45,68 @@ from agent_library.agents.validator import handle_event
 
 
 class ValidatorTests(unittest.TestCase):
+    def test_validation_prefers_llm_semantic_judge_when_budget_available(self):
+        with patch(
+            "agent_library.agents.validator._llm_validate",
+            return_value={
+                "valid": True,
+                "verdict": "valid",
+                "reason": "LLM validated the workflow semantically.",
+                "retry_recommended": False,
+                "missing_requirements": [],
+                "trace": ["semantic check passed"],
+            },
+        ) as llm_validate, patch("agent_library.agents.validator._fallback_validate") as fallback_validate:
+            response = handle_event(
+                types.SimpleNamespace(
+                    event="validation.request",
+                    payload={
+                        "task": "list the files",
+                        "task_shape": "list",
+                        "workflow_status": "completed",
+                        "result": ["a.txt", "b.txt"],
+                        "steps": [{"id": "step1", "status": "completed"}],
+                    },
+                )
+            )
+
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+        llm_validate.assert_called_once()
+        fallback_validate.assert_not_called()
+
+    def test_validation_falls_back_to_local_checks_when_llm_returns_none(self):
+        with patch("agent_library.agents.validator._llm_validate", return_value=None) as llm_validate, patch(
+            "agent_library.agents.validator._fallback_validate",
+            return_value={
+                "valid": False,
+                "verdict": "invalid",
+                "reason": "Fallback heuristic rejected the workflow.",
+                "retry_recommended": True,
+                "missing_requirements": ["collection output"],
+                "trace": ["fallback path"],
+            },
+        ) as fallback_validate:
+            response = handle_event(
+                types.SimpleNamespace(
+                    event="validation.request",
+                    payload={
+                        "task": "list the files",
+                        "task_shape": "list",
+                        "workflow_status": "completed",
+                        "result": {},
+                        "steps": [{"id": "step1", "status": "completed"}],
+                    },
+                )
+            )
+
+        payload = response["emits"][0]["payload"]
+        self.assertFalse(payload["valid"])
+        self.assertEqual(payload["verdict"], "invalid")
+        llm_validate.assert_called_once()
+        fallback_validate.assert_called_once()
+
     def test_validation_heuristic_accepts_completed_attempt_with_output(self):
         response = handle_event(
             types.SimpleNamespace(

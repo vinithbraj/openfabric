@@ -46,7 +46,6 @@ from agent_library.agents.sql_runner import (
     _parse_strict_json_object,
     _execute_sql,
     _execute_sql_deterministic_selection,
-    _heuristic_sql_selection,
     _normalize_sql_selection,
     _postgres_safe_sql,
     _repair_sql_with_retries,
@@ -304,48 +303,6 @@ class PostgresSafeSqlTests(unittest.TestCase):
         self.assertEqual(normalized["primitive_id"], "fallback_only")
         self.assertEqual(normalized["fallback_sql"], "SELECT 1")
 
-    def test_heuristic_sql_selection_does_not_misclassify_row_count_as_schema_listing(self):
-        selection = _heuristic_sql_selection("how many rows are in dicom.patients", POSTGRES_SCHEMA)
-        self.assertIsNotNone(selection)
-        self.assertEqual(selection["primitive_id"], "sql.table.row_count")
-        self.assertEqual(selection["parameters"]["table_name"], "dicom.patients")
-
-    def test_heuristic_sql_selection_maps_entity_count_to_table_row_count(self):
-        selection = _heuristic_sql_selection("count patients in the dicom_mock database", DICOM_COUNT_SCHEMA)
-        self.assertIsNotNone(selection)
-        self.assertEqual(selection["primitive_id"], "sql.table.row_count")
-        self.assertEqual(selection["parameters"]["schema_name"], "dicom")
-        self.assertEqual(selection["parameters"]["table_name"], "patients")
-
-    def test_heuristic_sql_selection_maps_distinct_entity_count_to_table_row_count(self):
-        selection = _heuristic_sql_selection("Count the number of distinct patients in the dicom_mock database", DICOM_COUNT_SCHEMA)
-        self.assertIsNotNone(selection)
-        self.assertEqual(selection["primitive_id"], "sql.table.row_count")
-        self.assertEqual(selection["parameters"]["schema_name"], "dicom")
-        self.assertEqual(selection["parameters"]["table_name"], "patients")
-
-    def test_heuristic_sql_selection_does_not_overreach_grouped_patient_count_questions(self):
-        selection = _heuristic_sql_selection("how many patients have more than 2 studies", DICOM_COUNT_SCHEMA)
-        self.assertIsNone(selection)
-
-    def test_heuristic_sql_selection_scopes_column_listing_to_table(self):
-        selection = _heuristic_sql_selection("list all columns in dicom.patients", POSTGRES_SCHEMA)
-        self.assertIsNotNone(selection)
-        self.assertEqual(selection["primitive_id"], "sql.schema.list_columns")
-        self.assertEqual(selection["parameters"]["table_name"], "dicom.patients")
-
-    def test_heuristic_sql_selection_does_not_treat_database_alias_as_schema_name(self):
-        selection = _heuristic_sql_selection("list all tables in mydb", POSTGRES_SCHEMA)
-        self.assertIsNotNone(selection)
-        self.assertEqual(selection["primitive_id"], "sql.schema.list_tables")
-        self.assertEqual(selection["parameters"], {})
-
-    def test_heuristic_sql_selection_detects_schema_table_count(self):
-        selection = _heuristic_sql_selection("count the tables in the dicom schema of mydb", DICOM_COUNT_SCHEMA)
-        self.assertIsNotNone(selection)
-        self.assertEqual(selection["primitive_id"], "sql.schema.count_tables")
-        self.assertEqual(selection["parameters"]["schema_name"], "dicom")
-
     def test_execute_sql_deterministic_selection_for_row_count(self):
         executed = {}
 
@@ -431,10 +388,10 @@ class PostgresSafeSqlTests(unittest.TestCase):
         with patch("agent_library.agents.sql_runner._dsn", return_value="postgresql://example"), patch(
             "agent_library.agents.sql_runner._connect", return_value=("postgres", _Conn())
         ), patch("agent_library.agents.sql_runner._introspect", return_value=POSTGRES_SCHEMA), patch(
-            "agent_library.agents.sql_runner._heuristic_sql_selection",
+            "agent_library.agents.sql_runner._llm_select_sql_strategy",
             return_value={
                 "primitive_id": "sql.table.row_count",
-                "selection_reason": "heuristic",
+                "selection_reason": "llm selector",
                 "parameters": {"table_name": "Patients"},
                 "fallback_sql": "",
                 "fallback_reason": "",
@@ -479,8 +436,6 @@ class PostgresSafeSqlTests(unittest.TestCase):
         with patch("agent_library.agents.sql_runner._dsn", return_value="postgresql://example"), patch(
             "agent_library.agents.sql_runner._connect", return_value=("postgres", _Conn())
         ), patch("agent_library.agents.sql_runner._introspect", return_value=POSTGRES_SCHEMA), patch(
-            "agent_library.agents.sql_runner._heuristic_sql_selection", return_value=None
-        ), patch(
             "agent_library.agents.sql_runner._llm_select_sql_strategy",
             return_value={
                 "primitive_id": "fallback_only",
@@ -528,8 +483,6 @@ class PostgresSafeSqlTests(unittest.TestCase):
         with patch("agent_library.agents.sql_runner._dsn", return_value="postgresql://example"), patch(
             "agent_library.agents.sql_runner._connect", return_value=("postgres", _Conn())
         ), patch("agent_library.agents.sql_runner._introspect", return_value=POSTGRES_SCHEMA), patch(
-            "agent_library.agents.sql_runner._heuristic_sql_selection", return_value=None
-        ), patch(
             "agent_library.agents.sql_runner._llm_select_sql_strategy",
             return_value={
                 "primitive_id": "sql.agg.count",

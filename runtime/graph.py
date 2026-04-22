@@ -2,7 +2,14 @@ import hashlib
 import json
 from typing import Any
 
-from agent_library.contracts import api_emit_events, api_trigger_event
+from agent_library.contracts import (
+    SHARED_REQUEST_CONTRACT_NAME,
+    SHARED_RESULT_CONTRACT_NAME,
+    api_emit_events,
+    api_trigger_event,
+    shared_request_schema,
+    shared_result_schema,
+)
 
 
 GRAPH_SCHEMA_VERSION = "phase3"
@@ -196,10 +203,16 @@ def build_agent_graph_node(
     contract_version = metadata.get("contract_version")
     if isinstance(contract_version, str) and contract_version.strip():
         contract["version"] = contract_version.strip()
-    for key in ("request_contract", "result_contract"):
-        value = metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            contract[key] = value.strip()
+    request_contract = metadata.get("request_contract")
+    result_contract = metadata.get("result_contract")
+    if isinstance(request_contract, str) and request_contract.strip():
+        contract["request_contract"] = request_contract.strip()
+    elif contract:
+        contract["request_contract"] = SHARED_REQUEST_CONTRACT_NAME
+    if isinstance(result_contract, str) and result_contract.strip():
+        contract["result_contract"] = result_contract.strip()
+    elif contract:
+        contract["result_contract"] = SHARED_RESULT_CONTRACT_NAME
     for key in ("request_envelope_fields", "result_envelope_fields"):
         value = metadata.get(key)
         if isinstance(value, list) and value:
@@ -207,9 +220,13 @@ def build_agent_graph_node(
     request_schema = metadata.get("request_schema")
     if isinstance(request_schema, dict) and request_schema:
         contract["request_schema"] = _compact_value(request_schema, text_limit=180, row_limit=3)
+    elif contract:
+        contract["request_schema"] = _compact_value(shared_request_schema(), text_limit=180, row_limit=3)
     result_schema = metadata.get("result_schema")
     if isinstance(result_schema, dict) and result_schema:
         contract["result_schema"] = _compact_value(result_schema, text_limit=180, row_limit=3)
+    elif contract:
+        contract["result_schema"] = _compact_value(shared_result_schema(), text_limit=180, row_limit=3)
     if contract:
         graph_node["contract"] = contract
 

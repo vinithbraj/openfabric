@@ -54,7 +54,6 @@ from agent_library.agents.slurm_runner import (
     _build_deterministic_slurm_plan,
     _deterministic_reduce_slurm_result,
     _deterministic_slurm_command,
-    _heuristic_slurm_selection,
     _instruction_to_command,
     _normalize_slurm_selection,
     _parse_command_input,
@@ -138,15 +137,6 @@ class SlurmRunnerTests(unittest.TestCase):
         self.assertIn("State mixed: 1", reduced)
         self.assertIn("python3 -c", reducer_command)
 
-    def test_heuristic_slurm_selection_for_pending_job_count(self):
-        selection = _heuristic_slurm_selection(
-            "how many pending jobs are there for user vinith",
-            {"partitions": ["hpc"], "node_states": {}, "allowed_commands": ["squeue"]},
-        )
-        self.assertEqual(selection["primitive_id"], "slurm.jobs.queue_count")
-        self.assertEqual(selection["parameters"]["user"], "vinith")
-        self.assertEqual(selection["parameters"]["job_states"], ["PENDING"])
-
     def test_normalize_slurm_selection_rejects_unknown_primitive(self):
         normalized = _normalize_slurm_selection(
             {
@@ -195,10 +185,10 @@ class SlurmRunnerTests(unittest.TestCase):
             "agent_library.agents.slurm_runner._get_slurm_context",
             return_value={"partitions": ["hpc"], "node_states": {}, "allowed_commands": ["squeue"]},
         ), patch(
-            "agent_library.agents.slurm_runner._heuristic_slurm_selection",
+            "agent_library.agents.slurm_runner._llm_select_slurm_strategy",
             return_value={
                 "primitive_id": "slurm.jobs.queue_count",
-                "selection_reason": "heuristic",
+                "selection_reason": "llm selector",
                 "parameters": {"user": "vinith", "job_states": ["PENDING"]},
                 "fallback_command": "",
                 "fallback_args": [],
@@ -238,10 +228,10 @@ class SlurmRunnerTests(unittest.TestCase):
             "agent_library.agents.slurm_runner._get_slurm_context",
             return_value={"partitions": ["hpc", "gpu"], "node_states": {}, "allowed_commands": ["squeue"]},
         ), patch(
-            "agent_library.agents.slurm_runner._heuristic_slurm_selection",
+            "agent_library.agents.slurm_runner._llm_select_slurm_strategy",
             return_value={
                 "primitive_id": "slurm.jobs.queue_list",
-                "selection_reason": "heuristic",
+                "selection_reason": "llm selector",
                 "parameters": {"user": "vinith", "job_states": ["PENDING"]},
                 "fallback_command": "",
                 "fallback_args": [],
@@ -283,10 +273,10 @@ class SlurmRunnerTests(unittest.TestCase):
             "agent_library.agents.slurm_runner._get_slurm_context",
             return_value={"partitions": ["hpc"], "node_states": {}, "allowed_commands": ["squeue"]},
         ), patch(
-            "agent_library.agents.slurm_runner._heuristic_slurm_selection",
+            "agent_library.agents.slurm_runner._llm_select_slurm_strategy",
             return_value={
                 "primitive_id": "slurm.jobs.queue_count",
-                "selection_reason": "heuristic",
+                "selection_reason": "llm selector",
                 "parameters": {"job_states": ["PENDING"]},
                 "fallback_command": "squeue",
                 "fallback_args": ["-h", "-t", "PENDING"],

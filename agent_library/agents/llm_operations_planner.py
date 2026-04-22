@@ -89,6 +89,14 @@ def _debug_log(message: str):
         log_debug("LLM_OPS_DEBUG", message)
 
 
+def _planner_llm_max_attempts() -> int:
+    raw = os.getenv("PLANNER_LLM_MAX_ATTEMPTS", "3").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 3
+    return max(1, value)
+
 def _agent_api_specs(agent: dict) -> list[dict]:
     api_list = agent.get("apis")
     if isinstance(api_list, list):
@@ -369,6 +377,8 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "5b) instruction.operation MUST come from the selected agent's advertised planning hints or API guidance below.\n"
         "5c) For deterministic shell checks, prefer machine-readable output and capture hints such as stdout_first_line, stdout_stripped, json, or json_field when the selected agent advertises them.\n"
         "11) Break chained requests into multiple atomic steps. Do not combine unrelated actions into one step. Use nested steps for grouped subtasks.\n"
+        "11a) If the user asks for multiple executable sub-goals joined by words like and, then, or check whether, preserve those sub-goals as separate leaf steps unless a clause is purely presentation-only.\n"
+        "11b) Do not satisfy a request like 'list/show X and check whether Y' with one broad step. The inspection or boolean follow-up must be its own explicit step.\n"
         "12) Rewrite each step as a direct, concrete instruction for the target agent. Do not simply copy long stretches of the user's wording.\n"
         "13) Each step should be self-contained, operational, and phrased so another LLM can execute it without guessing.\n"
         "14) If a later step depends on an earlier step result, set depends_on and use a when condition or instruction inputs that reference prior results.\n"
@@ -379,7 +389,7 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         "17) Prefer agents that advertise native_count_preferred for count, stats, or filtering tasks instead of decomposing into shell pipes.\n"
         "18) Prefer agents that advertise structured_followup when a later step needs to inspect prior rows or structured outputs.\n"
         "18a) If execution requires a missing Python dependency and runtime policy allows it, only use that path when the selected agent explicitly advertises local command execution.\n"
-        "19) For simple database or scheduler questions, one native step is often enough; only decompose when the agent hints or prior failures justify it.\n"
+        "19) For a single-goal database or scheduler question, one native step is often enough; do not collapse a multi-clause request into one step just because one command might answer several clauses implicitly.\n"
         "20) Do not invent agent names, instruction operations, or capabilities beyond the discovered guide below.\n"
         "22) When you emit multiple SQL steps, each later SQL step should clearly state what it is trying to learn or produce, and it must declare depends_on when it uses earlier findings.\n"
         "23) When using shell_runner, prefer explicit machine-readable commands for deterministic checks.\n"
@@ -399,6 +409,7 @@ def _build_prompt(question: str, capabilities: dict) -> str:
         '- "find all files with extension sh in the current directory" -> {"processable":true,"reason":"shell file search","steps":[{"id":"step1","target_agent":"shell_runner","task":"find all files with extension sh in the current directory","instruction":{"operation":"run_command","command":"find . -type f -name \\"*.sh\\"","capture":{"mode":"stdout_stripped"}}}],"presentation":{"task":"List matching files clearly.","format":"bullets","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "list all running docker containers" -> {"processable":true,"reason":"docker container listing","steps":[{"id":"step1","target_agent":"shell_runner","task":"list all running docker containers","instruction":{"operation":"run_command","command":"docker ps","capture":{"mode":"stdout_stripped"}}}],"presentation":{"task":"Show running containers in a concise Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "find the newest log file and then show the last 20 lines" -> {"processable":true,"reason":"file discovery workflow","steps":[{"id":"step1","target_agent":"shell_runner","task":"find the newest log file","instruction":{"operation":"run_command","command":"find . -type f -name \\"*.log\\" -printf \\"%T@ %p\\\\n\\" | sort -nr | head -n 1 | cut -d\\" \\" -f2-","capture":{"mode":"stdout_first_line"}}},{"id":"step2","target_agent":"shell_runner","task":"show the last 20 lines of the newest log file","instruction":{"operation":"run_command","command":{"$from":"step1.value"}},"depends_on":["step1"]}]}\n'
+        '- "list all conda environments and check whether there is an environment named vinith" -> {"processable":true,"reason":"list then inspect environment presence","steps":[{"id":"step1","target_agent":"shell_runner","task":"list all conda environments","instruction":{"operation":"run_command","command":"conda env list","capture":{"mode":"stdout_stripped"}}},{"id":"step2","target_agent":"shell_runner","task":"check whether the conda environment named vinith exists","instruction":{"operation":"run_command","command":"conda env list --json | python3 -c \\"import json,sys,os; name=\\\\\\"vinith\\\\\\"; envs=json.load(sys.stdin).get(\\\\\\"envs\\\\\\", []); exists=any(os.path.basename(path.rstrip(\\\\\\"/\\\\\\")) == name for path in envs); print(json.dumps({\\\\\\"exists\\\\\\": exists, \\\\\\"name\\\\\\": name}))\\"","capture":{"mode":"json"}},"depends_on":["step1"]}],"presentation":{"task":"List the conda environments and clearly report whether vinith exists.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "list patients with more than 20 studies and then check whether any listed patient is named Test case-insensitively" -> {"processable":true,"reason":"query then inspect prior rows","steps":[{"id":"step1","target_agent":"sql_runner","task":"list patients with more than 20 studies","instruction":{"operation":"query_from_request","question":"list patients with more than 20 studies and include patient names in a neat table"}},{"id":"step2","target_agent":"shell_runner","task":"check whether any patient in the previous SQL result is named Test using a case-insensitive exact match","instruction":{"operation":"run_command","command":"python3 -c \\"import json,sys; rows=json.load(sys.stdin); print(any(str(row.get(\\\\\\\"PatientName\\\\\\\", \\\\\\\"\\\\\\\")).strip().lower() == \\\\\\\"test\\\\\\\" for row in rows))\\"","input":{"$from":"step1.rows"},"capture":{"mode":"stdout_stripped"}},"depends_on":["step1"]}],"presentation":{"task":"Show the patient table and clearly report whether any listed patient name matches Test case-insensitively.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "show database schema and relationships" -> {"processable":true,"reason":"SQL schema introspection","steps":[{"id":"step1","target_agent":"sql_runner","task":"inspect the database schema and relationships","instruction":{"operation":"inspect_schema","focus":"tables, columns, and relationships"}}],"presentation":{"task":"Summarize schemas, tables, columns, and relationships clearly.","format":"markdown","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
         '- "which customers spent the most money last month" -> {"processable":true,"reason":"SQL database question","steps":[{"id":"step1","target_agent":"sql_runner","task":"query which customers spent the most money last month","instruction":{"operation":"query_from_request","question":"which customers spent the most money last month"}}],"presentation":{"task":"Show the query results as a readable Markdown table.","format":"markdown_table","audience":"openwebui","include_context":true,"include_internal_steps":false}}\n'
@@ -442,6 +453,88 @@ def _build_replan_prompt(payload: dict, capabilities: dict) -> str:
         f"{_format_execution_policy(capabilities)}\n"
         "Replan request JSON:\n"
         f"{json.dumps(payload, indent=2)}"
+    )
+
+
+def _build_plan_retry_prompt(
+    question: str,
+    capabilities: dict,
+    rejection_reason: str,
+    previous_decision: dict | None,
+    attempt: int,
+) -> str:
+    previous_json = json.dumps(previous_decision or {}, indent=2, ensure_ascii=True)
+    return (
+        _build_prompt(question, capabilities)
+        + "\n\nPlanner self-repair loop:\n"
+        + f"- Attempt {attempt} of {_planner_llm_max_attempts()}.\n"
+        + f"- The previous candidate plan was rejected for this reason: {rejection_reason}\n"
+        + "- Produce a corrected plan that directly fixes the rejection reason.\n"
+        + "- Do not repeat the same invalid step structure, target-agent drift, or collapsed workflow shape.\n"
+        + "- If the rejection mentions collapsed clause coverage, split the user request into distinct executable leaf steps.\n"
+        + "- If the request is processable, steps must be executable and dependency-aware.\n"
+        + "Rejected candidate JSON:\n"
+        + previous_json
+    )
+
+
+def _build_replan_retry_prompt(
+    payload: dict,
+    capabilities: dict,
+    rejection_reason: str,
+    previous_decision: dict | None,
+    attempt: int,
+) -> str:
+    previous_json = json.dumps(previous_decision or {}, indent=2, ensure_ascii=True)
+    return (
+        _build_replan_prompt(payload, capabilities)
+        + "\n\nPlanner self-repair loop:\n"
+        + f"- Attempt {attempt} of {_planner_llm_max_attempts()}.\n"
+        + f"- The previous replacement plan was rejected for this reason: {rejection_reason}\n"
+        + "- Produce a corrected replacement subplan that fixes the rejection reason.\n"
+        + "- Do not repeat the same invalid replacement structure, agent-family drift, or collapsed subplan.\n"
+        + "Rejected candidate JSON:\n"
+        + previous_json
+    )
+
+
+def _build_plan_validation_prompt(
+    question: str,
+    steps: list[dict],
+    capabilities: dict,
+    *,
+    replan_payload: dict | None = None,
+) -> str:
+    context_lines = []
+    if isinstance(replan_payload, dict) and replan_payload:
+        context_lines.append("Replan context JSON:")
+        context_lines.append(json.dumps(replan_payload, indent=2, ensure_ascii=True))
+
+    return (
+        "You are the semantic plan validator for an operations assistant.\n"
+        "Task: judge whether the candidate plan actually satisfies the user's intent, preserves the necessary decomposition, "
+        "and keeps only execution-relevant user actions.\n"
+        "Output JSON only with exact keys: "
+        '{"valid":true|false,"reason":"short reason","goal_coverage":"complete|partial|incorrect","decomposition":"good|collapsed|over_decomposed","user_action_alignment":"strong|weak|meta","issues":["issue"],"rewarded_paths":["good path"],"disallowed_paths":["bad path"]}\n'
+        "Validation rules:\n"
+        "1) valid=true only if the plan preserves the user's executable goals and would reasonably produce the information or artifact the user asked for.\n"
+        "2) Reward plans that decompose the request into concrete user-action-oriented steps that causally advance the task.\n"
+        "3) Reject plans that collapse multiple executable user goals into one broad step when the user asked for distinct actions, checks, comparisons, or follow-ups.\n"
+        "4) Reject meta steps, presentation-only steps, synthesis-only steps, or steps that do not materially advance execution.\n"
+        "5) Reject steps that drift semantically away from the user's request or from the failed-step scope in a replan context.\n"
+        "6) Prefer plans where later steps explicitly inspect or transform earlier results instead of silently assuming those checks are covered.\n"
+        "7) Do not reject only because execution might fail at runtime; judge planning quality and goal coverage.\n"
+        "8) If the request has multiple user-visible actions joined by words like and, then, compare, check whether, confirm, verify, or save, expect those actions to be represented explicitly unless one clause is clearly presentation-only.\n"
+        "9) For exact existence or membership checks, disallow broad human-readable grep or substring heuristics when the plan could use an exact or machine-readable inspection step instead.\n"
+        "User request:\n"
+        f"{question}\n"
+        "Candidate plan JSON:\n"
+        f"{json.dumps(steps, indent=2, ensure_ascii=True)}\n"
+        + ("\n".join(context_lines) + "\n" if context_lines else "")
+        + "Discovered runtime agents:\n"
+        + f"{_format_discovered_agents(capabilities)}\n"
+        + "Runtime planning guide:\n"
+        + f"{_format_runtime_agent_planning_guide(capabilities)}\n"
     )
 
 
@@ -515,6 +608,49 @@ def _parse_planner_json(content: str):
         except json.JSONDecodeError:
             continue
     return json_blob, None
+
+
+def _llm_prompt_json(prompt: str, *, debug_label: str):
+    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    messages = [
+        {"role": "system", "content": "You produce strict JSON only."},
+        {"role": "user", "content": prompt},
+    ]
+
+    _debug_log(f"Constructed {debug_label} prompt:")
+    _debug_log(prompt)
+    _debug_log(f"Messages sent to {debug_label} LLM:")
+    _debug_log(json.dumps(messages, indent=2))
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0,
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+    if not response.ok:
+        _debug_log(f"{debug_label} LLM HTTP error status: {response.status_code}")
+        _debug_log(f"{debug_label} LLM HTTP error body:")
+        _debug_log(response.text[:4000])
+        response.raise_for_status()
+    data = response.json()
+    content = data["choices"][0]["message"]["content"]
+    _debug_log(f"Raw {debug_label} LLM response content:")
+    _debug_log(content)
+    json_blob, parsed = _parse_planner_json(content)
+    if not json_blob:
+        _debug_log(f"No JSON object found in {debug_label} LLM response content.")
+        return None
+    _debug_log(f"Extracted JSON object from {debug_label} LLM response:")
+    _debug_log(json_blob)
+    if parsed is None:
+        _debug_log(f"Could not parse {debug_label} JSON after repair attempts.")
+        return None
+    return parsed
 
 
 def _parse_decision(raw: Any):
@@ -600,6 +736,45 @@ def _parse_replan_decision(raw: Any):
         "replace_step_id": replace_step_id.strip(),
         "reason": reason.strip(),
         "steps": normalized_steps,
+    }
+
+
+def _parse_plan_validation(raw: Any):
+    if not isinstance(raw, dict):
+        return None
+    valid = raw.get("valid")
+    reason = raw.get("reason", "")
+    goal_coverage = raw.get("goal_coverage", "")
+    decomposition = raw.get("decomposition", "")
+    user_action_alignment = raw.get("user_action_alignment", "")
+    issues = raw.get("issues", [])
+    rewarded_paths = raw.get("rewarded_paths", [])
+    disallowed_paths = raw.get("disallowed_paths", [])
+    if not isinstance(valid, bool):
+        return None
+    if not isinstance(reason, str):
+        reason = ""
+    if not isinstance(goal_coverage, str):
+        goal_coverage = ""
+    if not isinstance(decomposition, str):
+        decomposition = ""
+    if not isinstance(user_action_alignment, str):
+        user_action_alignment = ""
+    if not isinstance(issues, list):
+        issues = []
+    if not isinstance(rewarded_paths, list):
+        rewarded_paths = []
+    if not isinstance(disallowed_paths, list):
+        disallowed_paths = []
+    return {
+        "valid": valid,
+        "reason": reason.strip(),
+        "goal_coverage": goal_coverage.strip().lower(),
+        "decomposition": decomposition.strip().lower(),
+        "user_action_alignment": user_action_alignment.strip().lower(),
+        "issues": [str(item).strip() for item in issues if str(item).strip()],
+        "rewarded_paths": [str(item).strip() for item in rewarded_paths if str(item).strip()],
+        "disallowed_paths": [str(item).strip() for item in disallowed_paths if str(item).strip()],
     }
 
 
@@ -772,45 +947,8 @@ def _parse_steps(steps: list):
 
 
 def _llm_decide(question: str, capabilities):
-    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
-
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    user_prompt = _build_prompt(question, capabilities)
-    messages = [
-        {"role": "system", "content": "You produce strict JSON only."},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    _debug_log("Constructed planner prompt:")
-    _debug_log(user_prompt)
-    _debug_log("Messages sent to LLM:")
-    _debug_log(json.dumps(messages, indent=2))
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0,
-    }
-
-    response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
-    if not response.ok:
-        _debug_log(f"Planner LLM HTTP error status: {response.status_code}")
-        _debug_log("Planner LLM HTTP error body:")
-        _debug_log(response.text[:4000])
-        response.raise_for_status()
-    data = response.json()
-    content = data["choices"][0]["message"]["content"]
-    _debug_log("Raw LLM response content:")
-    _debug_log(content)
-    json_blob, parsed = _parse_planner_json(content)
-    if not json_blob:
-        _debug_log("No JSON object found in LLM response content.")
-        return None
-    _debug_log("Extracted JSON object from LLM response:")
-    _debug_log(json_blob)
+    parsed = _llm_prompt_json(_build_prompt(question, capabilities), debug_label="planner")
     if parsed is None:
-        _debug_log("Could not parse planner JSON after repair attempts.")
         return None
     decision = _parse_decision(parsed)
     if decision is None:
@@ -822,32 +960,57 @@ def _llm_decide(question: str, capabilities):
 
 
 def _llm_replan(payload: dict, capabilities: dict):
-    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
-
-    response = requests.post(
-        f"{base_url.rstrip('/')}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You produce strict JSON only."},
-                {"role": "user", "content": _build_replan_prompt(payload, capabilities)},
-            ],
-            "temperature": 0,
-        },
-        timeout=timeout_seconds,
-    )
-    response.raise_for_status()
-    content = response.json()["choices"][0]["message"]["content"]
-    _debug_log("Raw replan LLM response content:")
-    _debug_log(content)
-    json_blob, parsed = _parse_planner_json(content)
-    if not json_blob or parsed is None:
+    parsed = _llm_prompt_json(_build_replan_prompt(payload, capabilities), debug_label="planner replan")
+    if parsed is None:
         return None
     decision = _parse_replan_decision(parsed)
     if decision is None:
         return None
     _debug_log("Planner replan decision:")
+    _debug_log(json.dumps(decision, indent=2))
+    return decision
+
+
+def _llm_retry_decide(
+    question: str,
+    capabilities: dict,
+    rejection_reason: str,
+    previous_decision: dict | None,
+    attempt: int,
+):
+    parsed = _llm_prompt_json(
+        _build_plan_retry_prompt(question, capabilities, rejection_reason, previous_decision, attempt),
+        debug_label="planner retry",
+    )
+    if parsed is None:
+        return None
+    decision = _parse_decision(parsed)
+    if decision is None:
+        _debug_log("Parsed planner retry JSON missing valid processable/reason fields.")
+        return None
+    _debug_log("Planner retry decision:")
+    _debug_log(json.dumps(decision, indent=2))
+    return decision
+
+
+def _llm_retry_replan(
+    payload: dict,
+    capabilities: dict,
+    rejection_reason: str,
+    previous_decision: dict | None,
+    attempt: int,
+):
+    parsed = _llm_prompt_json(
+        _build_replan_retry_prompt(payload, capabilities, rejection_reason, previous_decision, attempt),
+        debug_label="planner replan retry",
+    )
+    if parsed is None:
+        return None
+    decision = _parse_replan_decision(parsed)
+    if decision is None:
+        _debug_log("Parsed planner replan retry JSON missing valid fields.")
+        return None
+    _debug_log("Planner replan retry decision:")
     _debug_log(json.dumps(decision, indent=2))
     return decision
 
@@ -2567,7 +2730,14 @@ def _derive_shell_instruction(task: str, index: int) -> dict | None:
     return instruction
 
 
-def _normalize_shell_instruction(task: str, instruction: dict | None, command: str | None, index: int):
+def _normalize_shell_instruction(
+    task: str,
+    instruction: dict | None,
+    command: str | None,
+    index: int,
+    *,
+    allow_override: bool = True,
+):
     task_lc = task.lower()
     derived_instruction = _derive_shell_instruction(task, index)
     shell_instruction = instruction if isinstance(instruction, dict) and instruction.get("operation") == "run_command" else None
@@ -2576,6 +2746,7 @@ def _normalize_shell_instruction(task: str, instruction: dict | None, command: s
         shell_instruction is not None
         and isinstance(shell_instruction.get("command"), str)
         and derived_instruction
+        and allow_override
         and _should_override_shell_command(task_lc)
     ):
         shell_instruction = {
@@ -2590,7 +2761,7 @@ def _normalize_shell_instruction(task: str, instruction: dict | None, command: s
     if shell_instruction is None:
         if isinstance(command, str) and command.strip():
             stripped = command.strip()
-            if derived_instruction and _should_override_shell_command(task_lc):
+            if derived_instruction and allow_override and _should_override_shell_command(task_lc):
                 stripped = str(derived_instruction["command"])
             if _looks_like_metadata_command(stripped):
                 return None
@@ -2753,7 +2924,33 @@ def _is_presentation_only_task(task: str) -> bool:
     return any(re.search(pattern, task_lc) for pattern in PRESENTATION_ONLY_PATTERNS)
 
 
-def _normalize_agent_instruction(target_agent: str, task: str, instruction: dict | None, command: str | None, index: int):
+def _is_compound_presentation_clause(task: str) -> bool:
+    task_lc = str(task or "").lower().strip()
+    if not task_lc:
+        return False
+    return bool(
+        re.match(r"^(?:report|tell|give|provide|show)\b", task_lc)
+        and any(token in task_lc for token in ("answer", "count", "counts", "difference", "summary", "include"))
+    )
+
+
+def _executable_compound_parts(question: str) -> list[str]:
+    return [
+        part
+        for part in _split_compound_request(question)
+        if part and not _is_presentation_only_task(part) and not _is_compound_presentation_clause(part)
+    ]
+
+
+def _normalize_agent_instruction(
+    target_agent: str,
+    task: str,
+    instruction: dict | None,
+    command: str | None,
+    index: int,
+    *,
+    allow_recovery: bool = True,
+):
     family = _agent_family(target_agent)
     if family == "sql_runner":
         if _is_presentation_only_task(task):
@@ -2782,7 +2979,7 @@ def _normalize_agent_instruction(target_agent: str, task: str, instruction: dict
         return {"operation": "query_from_request", "question": task}
 
     if target_agent == "shell_runner":
-        return _normalize_shell_instruction(task, instruction, command, index)
+        return _normalize_shell_instruction(task, instruction, command, index, allow_override=allow_recovery)
 
     if target_agent == "filesystem":
         if _is_presentation_only_task(task):
@@ -3656,7 +3853,7 @@ def _compound_fallback_steps(question: str, capabilities: dict):
     if multi_domain_steps:
         return multi_domain_steps
 
-    parts = _split_compound_request(question)
+    parts = _executable_compound_parts(question)
     if len(parts) < 2:
         return []
 
@@ -3667,12 +3864,6 @@ def _compound_fallback_steps(question: str, capabilities: dict):
         previous_step_id = str(previous_step.get("id") or "") if isinstance(previous_step, dict) else ""
         followup_task = None
         part_lc = part.lower()
-        presentation_clause = bool(
-            re.match(r"^(?:report|tell|give|provide|show)\b", part_lc)
-            and any(token in part_lc for token in ("answer", "count", "counts", "difference", "summary", "include"))
-        )
-        if _is_presentation_only_task(part) or presentation_clause:
-            continue
         if previous_target == "shell_runner":
             if ("last" in part_lc or "tail" in part_lc) and ("line" in part_lc or "lines" in part_lc):
                 tail_match = re.search(r"\b(?:last|tail)\s+(\d+)\b", part_lc)
@@ -4050,7 +4241,7 @@ def _expand_sql_export_steps(question: str, steps: list[dict], capabilities: dic
     return aligned
 
 
-def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: dict):
+def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: dict, *, allow_recovery: bool = True):
     if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
         slurm_steps = _fallback_steps(question, capabilities)
         if slurm_steps:
@@ -4171,6 +4362,7 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             instruction if isinstance(instruction, dict) else None,
             command if isinstance(command, str) else None,
             index,
+            allow_recovery=allow_recovery,
         )
         if not isinstance(normalized_instruction, dict) or not normalized_instruction:
             continue
@@ -4207,7 +4399,14 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
                     ensure_ascii=True,
                 )
             )
-            recovered_instruction = _normalize_agent_instruction(target_agent, question, None, None, index)
+            recovered_instruction = _normalize_agent_instruction(
+                target_agent,
+                question,
+                None,
+                None,
+                index,
+                allow_recovery=allow_recovery,
+            )
             if not isinstance(recovered_instruction, dict) or not recovered_instruction:
                 continue
             normalized_step["task"] = question
@@ -4220,10 +4419,12 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             normalized_step["when"] = when
         normalized.append(normalized_step)
         available_step_ids.add(normalized_step["id"])
-    if not _looks_like_save_list_sql_request(question, capabilities):
+    if allow_recovery and not _looks_like_save_list_sql_request(question, capabilities):
         normalized = _recover_compound_steps(question, normalized, capabilities)
-    normalized = _expand_mixed_sql_steps(question, normalized, capabilities)
-    return _expand_sql_export_steps(question, normalized, capabilities)
+    if allow_recovery:
+        normalized = _expand_mixed_sql_steps(question, normalized, capabilities)
+        normalized = _expand_sql_export_steps(question, normalized, capabilities)
+    return normalized
 
 
 def _workflow_replan_allowed_families(payload: dict, capabilities: dict) -> set[str]:
@@ -4264,15 +4465,14 @@ def _replan_steps_respect_workflow_context(payload: dict, steps: list[dict], cap
     return candidate_families.issubset(allowed_families)
 
 
-def _normalize_presentation(question: str, presentation: dict | None):
-    normalized = _derive_presentation(question)
-    question_lc = question.lower()
-    docker_listing_request = (
-        "docker" in question_lc
-        and any(token in question_lc for token in ("container", "containers"))
-        and any(token in question_lc for token in ("list", "show"))
-        and "table" not in question_lc
-    )
+def _coerce_llm_presentation(presentation: dict | None) -> dict:
+    normalized = {
+        "task": "Answer the user request directly using clean Markdown.",
+        "format": "markdown",
+        "audience": "openwebui",
+        "include_context": True,
+        "include_internal_steps": False,
+    }
     if not isinstance(presentation, dict):
         return normalized
 
@@ -4281,36 +4481,24 @@ def _normalize_presentation(question: str, presentation: dict | None):
     if isinstance(task, str) and task.strip():
         normalized["task"] = task.strip()
     fmt = presentation.get("format")
-    if isinstance(fmt, str) and fmt.strip():
-        fmt = fmt.strip().lower()
-        normalized["format"] = fmt if fmt in allowed_formats else "markdown"
+    if isinstance(fmt, str) and fmt.strip().lower() in allowed_formats:
+        normalized["format"] = fmt.strip().lower()
     audience = presentation.get("audience")
     if isinstance(audience, str) and audience.strip():
         normalized["audience"] = audience.strip()
     for key in ("include_context", "include_internal_steps"):
         value = presentation.get(key)
         if isinstance(value, bool):
-            normalized[key] = normalized[key] or value if key == "include_internal_steps" else value
-    if (
-        _looks_like_sql_question(question, CAPABILITIES)
-        and not _planner_is_schema_request(question)
-        and normalized.get("format") == "markdown_table"
-    ):
-        normalized["task"] = "Show grounded SQL results in a clean Markdown table."
-    if _looks_like_slurm_elapsed_summary_question(question):
-        normalized["format"] = "markdown"
-        normalized["task"] = "Report the computed Slurm timing summary clearly in Markdown."
-    if _looks_like_slurm_node_inventory_summary_question(question):
-        normalized["format"] = "markdown"
-        normalized["task"] = "Report the total Slurm node count and state summary clearly in Markdown."
-    if docker_listing_request:
-        normalized["format"] = "markdown"
-        normalized["task"] = "Show the raw Docker command output clearly in a preformatted block."
+            normalized[key] = value
     return normalized
 
 
-def _steps_signature(steps: list[dict]) -> str:
-    return json.dumps(steps, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+def _coerce_llm_task_shape(raw: Any) -> str:
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in TASK_SHAPES:
+            return normalized
+    return "lookup"
 
 
 def _leaf_plan_steps(steps: list[dict]) -> list[dict]:
@@ -4326,7 +4514,206 @@ def _leaf_plan_steps(steps: list[dict]) -> list[dict]:
     return leaves
 
 
-def _validate_plan_steps(question: str, steps: list[dict], capabilities: dict) -> dict[str, Any]:
+def _llm_plan_with_retries(question: str, capabilities: dict) -> dict[str, Any] | None:
+    max_attempts = _planner_llm_max_attempts()
+    previous_decision: dict[str, Any] | None = None
+    last_reason = "Planner LLM response could not be parsed into a valid decision."
+
+    for attempt in range(1, max_attempts + 1):
+        decision = (
+            _llm_decide(question, capabilities)
+            if attempt == 1
+            else _llm_retry_decide(question, capabilities, last_reason, previous_decision, attempt)
+        )
+        if decision is None:
+            previous_decision = None
+            continue
+        if not decision.get("processable"):
+            return {
+                "decision": decision,
+                "steps": [],
+                "attempt": attempt,
+                "validation_reason": decision.get("reason") or "",
+            }
+
+        normalized, validation = _assess_llm_candidate_plan(question, decision.get("steps", []), capabilities)
+        if validation.get("valid"):
+            accepted = dict(decision)
+            accepted["steps"] = normalized
+            return {
+                "decision": accepted,
+                "steps": normalized,
+                "attempt": attempt,
+                "validation_reason": validation.get("reason") or "",
+            }
+
+        last_reason = str(validation.get("reason") or "Planner steps failed structural validation.")
+        previous_decision = dict(decision)
+        if normalized:
+            previous_decision["steps"] = normalized
+        _debug_log(
+            "Planner rejected iterative LLM candidate plan: "
+            + json.dumps(
+                {
+                    "task": question,
+                    "attempt": attempt,
+                    "reason": last_reason,
+                    "steps": previous_decision.get("steps", []),
+                },
+                ensure_ascii=True,
+            )
+        )
+
+    return {
+        "decision": previous_decision,
+        "steps": [],
+        "attempt": max_attempts,
+        "validation_reason": last_reason,
+    }
+
+
+def _llm_replan_with_retries(payload: dict, capabilities: dict) -> dict[str, Any] | None:
+    max_attempts = _planner_llm_max_attempts()
+    previous_decision: dict[str, Any] | None = None
+    last_reason = "Planner replan response could not be parsed into a valid decision."
+    task = str(payload.get("task") or "")
+
+    for attempt in range(1, max_attempts + 1):
+        decision = (
+            _llm_replan(payload, capabilities)
+            if attempt == 1
+            else _llm_retry_replan(payload, capabilities, last_reason, previous_decision, attempt)
+        )
+        if decision is None:
+            previous_decision = None
+            continue
+
+        normalized, validation = _assess_llm_candidate_plan(
+            task,
+            decision.get("steps", []),
+            capabilities,
+            replan_payload=payload,
+        )
+        if validation.get("valid"):
+            accepted = dict(decision)
+            accepted["steps"] = normalized
+            return {
+                "decision": accepted,
+                "steps": normalized,
+                "attempt": attempt,
+                "validation_reason": validation.get("reason") or "",
+            }
+
+        last_reason = str(validation.get("reason") or "Planner replan failed structural validation.")
+        previous_decision = dict(decision)
+        if normalized:
+            previous_decision["steps"] = normalized
+        _debug_log(
+            "Planner rejected iterative LLM replan candidate: "
+            + json.dumps(
+                {
+                    "task": task,
+                    "attempt": attempt,
+                    "reason": last_reason,
+                    "steps": previous_decision.get("steps", []),
+                },
+                ensure_ascii=True,
+            )
+        )
+
+    return {
+        "decision": previous_decision,
+        "steps": [],
+        "attempt": max_attempts,
+        "validation_reason": last_reason,
+    }
+
+
+def _llm_validate_plan_semantics(
+    question: str,
+    steps: list[dict],
+    capabilities: dict,
+    *,
+    replan_payload: dict | None = None,
+) -> dict[str, Any]:
+    parsed = _llm_prompt_json(
+        _build_plan_validation_prompt(
+            question,
+            steps,
+            capabilities,
+            replan_payload=replan_payload,
+        ),
+        debug_label="planner validator",
+    )
+    validation = _parse_plan_validation(parsed)
+    if validation is None:
+        return {
+            "valid": False,
+            "reason": "Semantic plan validator could not produce a valid judgment.",
+            "goal_coverage": "incorrect",
+            "decomposition": "collapsed",
+            "user_action_alignment": "weak",
+            "issues": ["validator_parse_failure"],
+            "rewarded_paths": [],
+            "disallowed_paths": [],
+        }
+    return validation
+
+
+def _normalize_llm_candidate_steps(steps: list[dict], capabilities: dict) -> list[dict]:
+    valid_names = _agent_names_with_task_plan(capabilities)
+    normalized: list[dict] = []
+
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            continue
+        nested_steps = step.get("steps")
+        if isinstance(nested_steps, list) and nested_steps:
+            normalized_nested = _normalize_llm_candidate_steps(nested_steps, capabilities)
+            if not normalized_nested:
+                continue
+            group_id = str(step.get("id") or f"step{index}").strip()
+            task = _sanitize_task_text(str(step.get("task") or "").strip())
+            normalized.append(
+                {
+                    "id": group_id or f"step{index}",
+                    "task": task or f"group {index}",
+                    "steps": normalized_nested,
+                }
+            )
+            continue
+
+        step_id = str(step.get("id") or f"step{index}").strip()
+        target_agent = str(step.get("target_agent") or "").strip()
+        task = _sanitize_task_text(str(step.get("task") or "").strip())
+        instruction = step.get("instruction") if isinstance(step.get("instruction"), dict) else None
+        if not step_id or not target_agent or not task or not instruction:
+            continue
+        if target_agent in {"ops_planner", "synthesizer"} or target_agent not in valid_names:
+            continue
+        normalized_instruction = dict(instruction)
+        if target_agent == "shell_runner":
+            normalized_instruction = _normalize_followup_shell_instruction(normalized_instruction)
+        normalized_step: dict[str, Any] = {
+            "id": step_id,
+            "target_agent": target_agent,
+            "task": task,
+            "instruction": normalized_instruction,
+        }
+        depends_on = step.get("depends_on")
+        if isinstance(depends_on, list):
+            cleaned = [str(item).strip() for item in depends_on if str(item).strip()]
+            if cleaned:
+                normalized_step["depends_on"] = cleaned
+        when = step.get("when")
+        if isinstance(when, dict) and when:
+            normalized_step["when"] = when
+        normalized.append(normalized_step)
+    return normalized
+
+
+def _validate_plan_structure(question: str, steps: list[dict], capabilities: dict) -> dict[str, Any]:
+    del question
     if not isinstance(steps, list) or not steps:
         return {"valid": False, "reason": "Planner produced no executable steps."}
 
@@ -4337,6 +4724,7 @@ def _validate_plan_steps(question: str, steps: list[dict], capabilities: dict) -
     valid_names = _agent_names_with_task_plan(capabilities)
     seen_ids: set[str] = set()
     available_ids: set[str] = set()
+
     for step in leaf_steps:
         step_id = str(step.get("id") or "").strip()
         if not step_id:
@@ -4353,22 +4741,46 @@ def _validate_plan_steps(question: str, steps: list[dict], capabilities: dict) -
             return {"valid": False, "reason": f"Planner step '{step_id}' targeted a non-executor agent."}
         if target_agent not in valid_names:
             return {"valid": False, "reason": f"Planner step '{step_id}' targeted unknown agent '{target_agent}'."}
+
+        task_text = str(step.get("task") or "").strip()
+        if not task_text:
+            return {"valid": False, "reason": f"Planner step '{step_id}' is missing a task."}
+        if _is_presentation_only_task(task_text) or _is_compound_presentation_clause(task_text):
+            return {"valid": False, "reason": f"Planner step '{step_id}' is presentation-only instead of executable."}
+
         instruction = step.get("instruction") if isinstance(step.get("instruction"), dict) else {}
         operation = str(instruction.get("operation") or "").strip().lower()
-        task_text = str(step.get("task") or "").strip()
-        if (
-            _agent_family(target_agent) == "sql_runner"
-            and operation == "inspect_schema"
-            and _planner_is_count_like_request(task_text)
-            and not _planner_is_schema_request(task_text)
-        ):
-            return {
-                "valid": False,
-                "reason": (
-                    f"Planner step '{step_id}' used schema introspection for a count-oriented SQL task "
-                    "that should execute as a database query."
-                ),
-            }
+        if not operation:
+            return {"valid": False, "reason": f"Planner step '{step_id}' is missing an instruction.operation."}
+
+        family = _agent_family(target_agent)
+        if family == "sql_runner":
+            if operation not in {"inspect_schema", "query_from_request", "execute_sql", "sample_rows"}:
+                return {"valid": False, "reason": f"Planner step '{step_id}' used unsupported SQL operation '{operation}'."}
+            if operation == "query_from_request" and not isinstance(instruction.get("question"), str):
+                return {"valid": False, "reason": f"Planner step '{step_id}' is missing SQL question text."}
+            if operation == "inspect_schema" and not isinstance(instruction.get("focus"), str):
+                return {"valid": False, "reason": f"Planner step '{step_id}' is missing SQL schema focus text."}
+            if operation == "execute_sql" and not isinstance(instruction.get("sql"), str):
+                return {"valid": False, "reason": f"Planner step '{step_id}' is missing SQL text."}
+        elif family == "slurm_runner":
+            if operation not in {"query_from_request", "execute_command", "cluster_status", "list_jobs", "job_details"}:
+                return {"valid": False, "reason": f"Planner step '{step_id}' used unsupported Slurm operation '{operation}'."}
+            if operation in {"query_from_request", "job_details"} and not isinstance(instruction.get("question"), str):
+                return {"valid": False, "reason": f"Planner step '{step_id}' is missing Slurm question text."}
+            if operation == "execute_command" and "command" not in instruction:
+                return {"valid": False, "reason": f"Planner step '{step_id}' is missing Slurm command text."}
+        elif target_agent == "shell_runner":
+            if operation != "run_command":
+                return {"valid": False, "reason": f"Planner step '{step_id}' used unsupported shell operation '{operation}'."}
+            if "command" not in instruction:
+                return {"valid": False, "reason": f"Planner step '{step_id}' is missing shell command text."}
+        elif target_agent == "filesystem":
+            if operation != "read_file" or not isinstance(instruction.get("path"), str):
+                return {"valid": False, "reason": f"Planner step '{step_id}' is missing a concrete file read instruction."}
+        elif target_agent == "notifier":
+            if operation != "send_notification":
+                return {"valid": False, "reason": f"Planner step '{step_id}' used unsupported notifier operation '{operation}'."}
 
     for step in leaf_steps:
         step_id = str(step.get("id") or "").strip()
@@ -4382,160 +4794,36 @@ def _validate_plan_steps(question: str, steps: list[dict], capabilities: dict) -
             if dependency_id == step_id:
                 return {"valid": False, "reason": f"Planner step '{step_id}' depends on itself."}
             if dependency_id not in available_ids:
-                return {
-                    "valid": False,
-                    "reason": f"Planner step '{step_id}' depends on unknown step '{dependency_id}'.",
-                }
-
-    expected_inventory_steps = _shell_inventory_fallback_steps(question)
-    if expected_inventory_steps and len(leaf_steps) < len(_leaf_plan_steps(expected_inventory_steps)):
-        return {
-            "valid": False,
-            "reason": "Planner collapsed the shell inventory request and lost the list/count workflow structure.",
-        }
-
-    expected_shell_pair_steps = _shell_pair_count_fallback_steps(question)
-    if expected_shell_pair_steps and len(leaf_steps) < len(_leaf_plan_steps(expected_shell_pair_steps)):
-        return {
-            "valid": False,
-            "reason": "Planner collapsed the shell count workflow and lost required comparison/count steps.",
-        }
-
-    expected_conda_removal_steps = _conda_env_removal_steps(question)
-    if expected_conda_removal_steps and len(leaf_steps) < len(_leaf_plan_steps(expected_conda_removal_steps)):
-        return {
-            "valid": False,
-            "reason": "Planner collapsed the conda removal workflow and lost the required verify/list follow-up steps.",
-        }
-
-    compound_fallback = _compound_fallback_steps(question, capabilities)
-    compound_parts = _split_compound_request(question)
-    if len(compound_parts) >= 2 and len(compound_fallback) >= 2 and len(leaf_steps) < 2:
-        return {
-            "valid": False,
-            "reason": "Planner collapsed a compound request into too few executable steps.",
-        }
-
-    if _looks_like_multi_domain_count_workflow(question, capabilities):
-        expected_families: set[str] = set()
-        if _looks_like_sql_question(question, capabilities):
-            expected_families.add("sql_runner")
-        if _looks_like_slurm_question(question):
-            expected_families.add("slurm_runner")
-        text = re.sub(r"\s+", " ", str(question or "").strip().lower())
-        if (
-            ("python" in text and "file" in text)
-            or _looks_like_workspace_file_question(question)
-            or _looks_like_repo_file_scan(question)
-        ):
-            expected_families.add("shell_runner")
-
-        present_families = {
-            _agent_family(str(step.get("target_agent") or ""))
-            for step in leaf_steps
-        }
-        present_families.discard("")
-        required_family_count = min(len(expected_families), 2)
-        if len(present_families & expected_families) < required_family_count:
-            return {
-                "valid": False,
-                "reason": "Planner did not preserve all required execution domains for the multi-domain count workflow.",
-            }
-        if any(token in text for token in ("difference", "compare", "versus", " vs ")):
-            if not any("difference" in str(step.get("task") or "").lower() for step in leaf_steps):
-                return {
-                    "valid": False,
-                    "reason": "Planner lost the explicit difference step for a comparison workflow.",
-                }
+                return {"valid": False, "reason": f"Planner step '{step_id}' depends on unknown step '{dependency_id}'."}
 
     return {"valid": True, "reason": "Plan passed structural validation."}
 
 
-def _repair_plan_steps(question: str, capabilities: dict, replan_payload: dict | None = None) -> list[dict]:
-    candidates: list[list[dict]] = []
-    if isinstance(replan_payload, dict):
-        candidates.append(_fallback_replan_steps(replan_payload, capabilities))
-    candidates.append(_fallback_steps(question, capabilities))
-    candidates.append(_sql_fallback_steps_for_task(question, question, capabilities))
+def _assess_llm_candidate_plan(
+    question: str,
+    steps: list[dict],
+    capabilities: dict,
+    *,
+    replan_payload: dict | None = None,
+) -> tuple[list[dict], dict[str, Any]]:
+    if not isinstance(steps, list) or not steps:
+        return [], {"valid": False, "reason": "Planner produced no executable steps."}
 
-    seen_signatures: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, list) or not candidate:
-            continue
-        normalized = _normalize_steps(question, candidate, capabilities)
-        if not normalized:
-            continue
-        signature = _steps_signature(normalized)
-        if signature in seen_signatures:
-            continue
-        seen_signatures.add(signature)
-        validation = _validate_plan_steps(question, normalized, capabilities)
-        if validation.get("valid"):
-            _debug_log(
-                "Planner repaired invalid plan via deterministic fallback: "
-                + json.dumps({"task": question, "steps": normalized}, ensure_ascii=True)
-            )
-            return normalized
-    return []
+    normalized = _normalize_llm_candidate_steps(steps, capabilities)
+    if not normalized:
+        return [], {"valid": False, "reason": "Planner produced no structurally usable steps."}
 
+    structure_validation = _validate_plan_structure(question, normalized, capabilities)
+    if not structure_validation.get("valid"):
+        return normalized, structure_validation
 
-def _validated_plan_steps(question: str, steps: list[dict], capabilities: dict, replan_payload: dict | None = None) -> list[dict]:
-    normalized = _normalize_steps(question, steps, capabilities) if isinstance(steps, list) and steps else []
-    if normalized:
-        validation = _validate_plan_steps(question, normalized, capabilities)
-        if validation.get("valid"):
-            return normalized
-        _debug_log(
-            "Planner rejected candidate plan during validation: "
-            + json.dumps(
-                {
-                    "task": question,
-                    "reason": validation.get("reason"),
-                    "steps": normalized,
-                },
-                ensure_ascii=True,
-            )
-        )
-
-    repaired = _repair_plan_steps(question, capabilities, replan_payload=replan_payload)
-    if repaired:
-        return repaired
-    return []
-
-
-def _build_primary_plan(question: str, decision: dict, capabilities: dict):
-    inventory_steps = _shell_inventory_fallback_steps(question)
-    if inventory_steps:
-        return inventory_steps
-    shell_pair_steps = _shell_pair_count_fallback_steps(question)
-    if shell_pair_steps:
-        return shell_pair_steps
-    compound_steps = _compound_fallback_steps(question, capabilities)
-    if compound_steps:
-        return compound_steps
-    if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
-        slurm_steps = _fallback_steps(question, capabilities)
-        if slurm_steps:
-            return slurm_steps
-    if _looks_like_sql_export_request(question, capabilities):
-        sql_export_steps = _sql_fallback_steps(question, capabilities)
-        if sql_export_steps:
-            return sql_export_steps
-    if _should_override_shell_command(question.lower()):
-        deterministic_shell_steps = _fallback_steps(question, capabilities)
-        if deterministic_shell_steps:
-            return deterministic_shell_steps
-    raw_primary = decision.get("steps", [])
-    primary_steps = _validated_plan_steps(question, raw_primary, capabilities) if raw_primary else []
-    if primary_steps:
-        return primary_steps
-    fallback_steps = _fallback_steps(question, capabilities)
-    if fallback_steps:
-        return _validated_plan_steps(question, fallback_steps, capabilities)
-    sql_fallback = _sql_fallback_steps_for_task(question, question, capabilities)
-    if sql_fallback:
-        return _validated_plan_steps(question, sql_fallback, capabilities)
-    return []
+    semantic_validation = _llm_validate_plan_semantics(
+        question,
+        normalized,
+        capabilities,
+        replan_payload=replan_payload,
+    )
+    return normalized, semantic_validation
 
 
 def _flatten_plan_steps(steps: list, prefix: str = "") -> list[dict]:
@@ -4586,92 +4874,6 @@ def _plan_progress_payload(question: str, steps: list, presentation: dict):
     return payload
 
 
-def _sql_plan_emits(question: str, allowed_events: set[str], task_question: str | None = None):
-    task_question = task_question or _current_request_from_context(question)
-    sql_steps = _sql_fallback_steps_for_task(question, task_question, CAPABILITIES)
-    if not sql_steps or "task.plan" not in allowed_events:
-        return None
-    presentation = _normalize_presentation(
-        task_question,
-        {
-            "task": "Show the query result as a readable Markdown table and include the SQL used.",
-            "format": "markdown_table",
-            "audience": "openwebui",
-            "include_context": True,
-            "include_internal_steps": False,
-        },
-    )
-    payload = {
-        "task": task_question,
-        "task_shape": _infer_task_shape(task_question, target_agent=sql_steps[0]["target_agent"], presentation=presentation),
-        "steps": sql_steps,
-        "presentation": presentation,
-        "target_agent": sql_steps[0]["target_agent"],
-    }
-    emits = []
-    if "plan.progress" in allowed_events:
-        emits.append(
-            {
-                "event": "plan.progress",
-                "payload": _plan_progress_payload(task_question, sql_steps, presentation),
-            }
-        )
-    emits.append({"event": "task.plan", "payload": payload})
-    return emits
-
-
-def _fallback_plan_emits(question: str, allowed_events: set[str], task_question: str | None = None):
-    task_question = task_question or _current_request_from_context(question)
-    if "task.plan" not in allowed_events:
-        return None
-    steps = _fallback_steps(task_question, CAPABILITIES)
-    if not steps:
-        return None
-    presentation = _normalize_presentation(task_question, None)
-    payload = {
-        "task": task_question,
-        "task_shape": _infer_task_shape(
-            task_question,
-            target_agent=steps[0]["target_agent"] if len(steps) == 1 else None,
-            presentation=presentation,
-        ),
-        "steps": steps,
-        "presentation": presentation,
-    }
-    if len(steps) == 1:
-        payload["target_agent"] = steps[0]["target_agent"]
-    emits = []
-    if "plan.progress" in allowed_events:
-        emits.append(
-            {
-                "event": "plan.progress",
-                "payload": _plan_progress_payload(task_question, steps, presentation),
-            }
-        )
-    emits.append({"event": "task.plan", "payload": payload})
-    return emits
-
-
-def _fallback_replan_steps(payload: dict, capabilities: dict):
-    task = str(payload.get("task") or "").strip()
-    if not task:
-        return []
-    steps = _fallback_steps(task, capabilities)
-    if not steps:
-        return []
-    failed_task = str(payload.get("task") or "").strip().lower()
-    if len(steps) == 1:
-        only = steps[0]
-        if (
-            str(only.get("task") or "").strip().lower() == failed_task
-            and not only.get("steps")
-            and not only.get("depends_on")
-            and not only.get("command")
-        ):
-            return []
-    return steps
-
-
 @app.post("/handle", response_model=EventResponse)
 @with_node_envelope("ops_planner", "router")
 def handle_event(req: EventRequest):
@@ -4692,33 +4894,21 @@ def handle_event(req: EventRequest):
         if not replace_step_id:
             return noop()
         steps = []
+        planning = None
         try:
-            decision = _llm_replan(req.payload, CAPABILITIES)
+            planning = _llm_replan_with_retries(req.payload, CAPABILITIES)
+            decision = planning.get("decision") if isinstance(planning, dict) else None
             if decision is not None and decision["replace_step_id"] == replace_step_id:
-                steps = _validated_plan_steps(
-                    str(req.payload.get("task") or ""),
-                    decision.get("steps", []),
-                    CAPABILITIES,
-                    replan_payload=req.payload,
-                )
-                if steps and not _replan_steps_respect_workflow_context(req.payload, steps, CAPABILITIES):
-                    _debug_log(
-                        "Discarding workflow replan candidate that drifted to the wrong agent family: "
-                        + json.dumps({"task": req.payload.get("task"), "steps": steps}, ensure_ascii=True)
-                    )
-                    steps = []
+                steps = planning.get("steps", []) if isinstance(planning, dict) else []
         except Exception as exc:
             _debug_log(f"Planner replan failed. Error: {type(exc).__name__}: {exc}")
         if not steps:
-            steps = _validated_plan_steps(
-                str(req.payload.get("task") or ""),
-                [],
-                CAPABILITIES,
-                replan_payload=req.payload,
-            )
-        if not steps:
             return failure_result(
-                str(req.payload.get("reason") or "Planner could not further decompose the failed step."),
+                (
+                    planning.get("validation_reason")
+                    if isinstance(planning, dict) and planning.get("validation_reason")
+                    else str(req.payload.get("reason") or "Planner could not further decompose the failed step.")
+                ),
                 error=req.payload.get("error") or req.payload.get("reason"),
             )
         emits = []
@@ -4758,52 +4948,50 @@ def handle_event(req: EventRequest):
     if _is_capability_question(current_question) and "task.result" in allowed_events:
         return task_result(_format_capability_answer(CAPABILITIES), result=_capability_summary(CAPABILITIES))
 
-    deterministic_shell_request = bool(
-        _shell_inventory_fallback_steps(current_question)
-        or _shell_pair_count_fallback_steps(current_question)
-        or _should_override_shell_command(current_question.lower())
-    )
-    if deterministic_shell_request:
-        deterministic_plan = _fallback_plan_emits(question, allowed_events, task_question=current_question)
-        if deterministic_plan is not None:
-            return emit_sequence(deterministic_plan)
-
     try:
-        decision = _llm_decide(question, CAPABILITIES)
+        planning = _llm_plan_with_retries(question, CAPABILITIES)
+        decision = planning.get("decision") if isinstance(planning, dict) else None
         if decision is not None:
-            if decision["processable"] and "task.plan" in allowed_events:
-                steps = _build_primary_plan(current_question, decision, CAPABILITIES)
-                payload = {"task": current_question}
-                if steps:
-                    payload["steps"] = steps
-                    presentation = _normalize_presentation(current_question, decision.get("presentation"))
-                    payload["presentation"] = presentation
-                    primary_target = steps[0]["target_agent"] if len(steps) == 1 else None
-                    payload["task_shape"] = _normalize_task_shape(
-                        current_question,
-                        decision.get("task_shape"),
-                        target_agent=primary_target,
-                        presentation=presentation,
+            if decision["processable"]:
+                steps = planning.get("steps", []) if isinstance(planning, dict) else []
+                if not steps:
+                    _debug_log(
+                        "Planner exhausted iterative LLM attempts without a valid executable plan: "
+                        + json.dumps(
+                            {
+                                "task": current_question,
+                                "attempt": planning.get("attempt") if isinstance(planning, dict) else None,
+                                "reason": planning.get("validation_reason") if isinstance(planning, dict) else None,
+                            },
+                            ensure_ascii=True,
+                        )
                     )
+                if steps and "task.plan" in allowed_events:
+                    payload = {"task": current_question}
+                    payload["steps"] = steps
+                    presentation = _coerce_llm_presentation(decision.get("presentation"))
+                    payload["presentation"] = presentation
+                    payload["task_shape"] = _coerce_llm_task_shape(decision.get("task_shape"))
                     if len(steps) == 1:
                         payload["target_agent"] = steps[0]["target_agent"]
                     _debug_log("Planner steps:")
                     _debug_log(json.dumps(steps, indent=2))
-                else:
-                    _debug_log("Planner found no valid target steps after normalization.")
-                emits = []
-                if steps and "plan.progress" in allowed_events:
-                    emits.append(
-                        {
-                            "event": "plan.progress",
-                            "payload": _plan_progress_payload(current_question, steps, payload.get("presentation", {})),
-                        }
+                    emits = []
+                    if "plan.progress" in allowed_events:
+                        emits.append(
+                            {
+                                "event": "plan.progress",
+                                "payload": _plan_progress_payload(current_question, steps, payload.get("presentation", {})),
+                            }
+                        )
+                    emits.append({"event": "task.plan", "payload": payload})
+                    return emit_sequence(emits)
+                if "task.result" in allowed_events:
+                    return task_result(
+                        planning.get("validation_reason") if isinstance(planning, dict) and planning.get("validation_reason")
+                        else "Planner could not produce a valid executable step sequence."
                     )
-                emits.append({"event": "task.plan", "payload": payload})
-                return emit_sequence(emits)
-            emits = _sql_plan_emits(question, allowed_events, current_question)
-            if emits is not None:
-                return emit_sequence(emits)
+                return noop()
             if "task.result" in allowed_events:
                 reason = decision["reason"] or "No matching capability found."
                 return task_result(reason)
@@ -4811,14 +4999,6 @@ def handle_event(req: EventRequest):
         _debug_log("LLM planner decision was invalid.")
     except Exception as exc:
         _debug_log(f"LLM planning failed. Error: {type(exc).__name__}: {exc}")
-
-    emits = _sql_plan_emits(question, allowed_events, current_question)
-    if emits is not None:
-        return emit_sequence(emits)
-
-    emits = _fallback_plan_emits(question, allowed_events, current_question)
-    if emits is not None:
-        return emit_sequence(emits)
 
     if "task.result" in allowed_events:
         return task_result(

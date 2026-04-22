@@ -22,7 +22,7 @@ AGENT_DESCRIPTOR = agent_descriptor(
     safety_enforced_by_agent=True,
     routing_notes=[
         "Use after step execution or workflow completion to decide whether the result should be accepted, retried, or replanned.",
-        "Uses deterministic heuristics first and an LLM only when the verdict remains uncertain and budget allows.",
+        "Uses an LLM semantic judge as the primary validator and falls back to local structural checks only when needed.",
     ],
     apis=[
         agent_api(
@@ -125,6 +125,12 @@ def _llm_validate(payload: dict):
     except json.JSONDecodeError:
         return None
     return _parse_validation_decision(parsed)
+
+
+def _fallback_validate(payload: dict):
+    if str(payload.get("validation_scope") or "").strip().lower() == "step":
+        return _heuristic_validate_step(payload)
+    return _heuristic_validate(payload)
 
 
 def _heuristic_validate(payload: dict):
@@ -698,14 +704,12 @@ def _reduced_validation_payload(payload: dict):
 def handle_event(req: EventRequest):
     if req.event != "validation.request":
         return noop()
-    if str(req.payload.get("validation_scope") or "").strip().lower() == "step":
-        heuristic = _heuristic_validate_step(req.payload)
-    else:
-        heuristic = _heuristic_validate(req.payload)
-    result = heuristic
+
+    result = None
     llm_budget_remaining = req.payload.get("validation_llm_budget_remaining")
     can_use_llm = not isinstance(llm_budget_remaining, (int, float)) or llm_budget_remaining > 0
-    if heuristic.get("verdict") == "uncertain" and can_use_llm:
+
+    if can_use_llm:
         try:
             llm_result = _llm_validate(_reduced_validation_payload(req.payload))
         except Exception as exc:
@@ -713,4 +717,7 @@ def handle_event(req: EventRequest):
             llm_result = None
         if llm_result is not None:
             result = llm_result
+
+    if result is None:
+        result = _fallback_validate(req.payload)
     return emit("validation.result", result)

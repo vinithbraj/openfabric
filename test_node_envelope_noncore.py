@@ -177,6 +177,18 @@ class NonCoreNodeEnvelopeTests(unittest.TestCase):
                         }
                     ],
                 },
+            ), patch(
+                "agent_library.agents.llm_operations_planner._llm_validate_plan_semantics",
+                return_value={
+                    "valid": True,
+                    "reason": "Semantic validator accepted the replacement plan.",
+                    "goal_coverage": "complete",
+                    "decomposition": "good",
+                    "user_action_alignment": "strong",
+                    "issues": [],
+                    "rewarded_paths": ["retry the failed command"],
+                    "disallowed_paths": [],
+                },
             ):
                 response = llm_planner_handle_event(
                     EventRequest(

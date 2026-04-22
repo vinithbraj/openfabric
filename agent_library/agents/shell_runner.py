@@ -19,7 +19,6 @@ from agent_library.template import (
     noop,
     task_result,
 )
-from agent_library.agents.llm_operations_planner import _derive_shell_command as _planner_derive_shell_command
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -733,10 +732,6 @@ def _looks_like_shell_command(text: str) -> bool:
 def _derive_command_from_task(task: str, structured_input: Any = None):
     if _is_introspection_request(task):
         return None
-    if structured_input in (None, "", [], {}):
-        deterministic = _planner_derive_shell_command(task, 1)
-        if isinstance(deterministic, str) and deterministic.strip():
-            return deterministic.strip()
     decision_raw = _llm_preprocess(task, structured_input)
     decision = _parse_decision(decision_raw)
     if decision is None or not decision["processable"]:

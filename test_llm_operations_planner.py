@@ -1,4 +1,5 @@
 import copy
+import os
 import sys
 import types
 import unittest
@@ -44,13 +45,13 @@ sys.modules.setdefault("pydantic", pydantic_stub)
 
 import agent_library.agents.llm_operations_planner as planner_module
 from agent_library.agents.llm_operations_planner import (
-    _build_primary_plan,
     _capability_summary,
     _derive_presentation,
     _derive_shell_command,
     _fallback_steps,
     _format_discovered_agents,
     _infer_task_shape,
+    _llm_plan_with_retries,
     _normalize_task_shape,
     _parse_decision,
     _compound_fallback_steps,
@@ -258,27 +259,6 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(len(steps), 3)
         self.assertEqual(steps[0]["instruction"]["command"], "conda env remove -n vinith -y")
 
-    def test_build_primary_plan_repairs_single_step_conda_removal_collapse(self):
-        question = "emove conda environment named vinith, use -y and confirm it was removed, give me a final list of all env"
-        decision = {
-            "steps": [
-                {
-                    "id": "step1",
-                    "target_agent": "shell_runner",
-                    "task": question,
-                    "instruction": {
-                        "operation": "run_command",
-                        "command": "conda env remove -n vinith -y && conda env list",
-                    },
-                }
-            ]
-        }
-        steps = _build_primary_plan(question, decision, CAPABILITIES)
-        self.assertEqual(len(steps), 3)
-        self.assertEqual(steps[0]["instruction"]["command"], "conda env remove -n vinith -y")
-        self.assertEqual(steps[1]["instruction"]["capture"]["mode"], "json")
-        self.assertEqual(steps[2]["instruction"]["command"], "conda env list")
-
     def test_compound_fallback_steps_expand_git_branch_and_clean_state(self):
         steps = _compound_fallback_steps(
             "Show the current git branch and whether the working tree is clean.",
@@ -301,28 +281,6 @@ class PlannerSemanticValidationTests(unittest.TestCase):
             steps[1]["instruction"]["command"],
             'find agent_library/agents -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
         )
-        self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
-
-    def test_build_primary_plan_prefers_multi_domain_count_fallback_over_llm_steps(self):
-        question = (
-            "In the mydb database count the tables in the dicom schema, and in the repository root using the shell "
-            "count directories. Report both counts and the difference."
-        )
-        decision = {
-            "steps": [
-                {
-                    "id": "step1",
-                    "target_agent": "sql_runner_mydb",
-                    "task": "Count the tables in the dicom schema of the mydb database",
-                    "instruction": {"operation": "inspect_schema", "focus": "Count the tables in the dicom schema of the mydb database"},
-                }
-            ]
-        }
-        steps = _build_primary_plan(question, decision, CAPABILITIES)
-        self.assertEqual(len(steps), 3)
-        self.assertEqual(steps[0]["target_agent"], "sql_runner_mydb")
-        self.assertEqual(steps[0]["instruction"]["operation"], "query_from_request")
-        self.assertEqual(steps[1]["target_agent"], "shell_runner")
         self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
 
     def test_fallback_steps_use_explicit_root_markdown_inventory_commands(self):
@@ -429,18 +387,189 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertIn("graph", steps[1]["instruction"]["command"])
         self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
 
-    def test_handle_event_short_circuits_deterministic_shell_requests_before_llm(self):
+    def test_llm_plan_with_retries_requests_a_second_candidate_after_validation_failure(self):
+        question = (
+            "In the mydb database count the tables in the dicom schema, and in the repository root using the shell "
+            "count directories. Report both counts and the difference."
+        )
+        invalid_decision = {
+            "processable": True,
+            "reason": "first attempt",
+            "task_shape": "count",
+            "steps": [
+                {
+                    "id": "step1",
+                    "target_agent": "sql_runner_mydb",
+                    "task": "Count the tables in the dicom schema of the mydb database",
+                    "instruction": {
+                        "operation": "inspect_schema",
+                        "focus": "Count the tables in the dicom schema of the mydb database",
+                    },
+                }
+            ],
+            "presentation": {"format": "plain"},
+        }
+        valid_decision = {
+            "processable": True,
+            "reason": "second attempt",
+            "task_shape": "compare",
+            "steps": [
+                {
+                    "id": "step1",
+                    "target_agent": "sql_runner_mydb",
+                    "task": "count the tables in the dicom schema of the mydb database",
+                    "instruction": {
+                        "operation": "query_from_request",
+                        "question": "count the tables in the dicom schema of the mydb database",
+                    },
+                },
+                {
+                    "id": "step2",
+                    "target_agent": "shell_runner",
+                    "task": "count directories in the repository root",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": "find . -mindepth 1 -maxdepth 1 -type d | wc -l",
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+                {
+                    "id": "step3",
+                    "target_agent": "shell_runner",
+                    "task": "compute the absolute difference between the previous counts",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": "python3 -c 'import json,sys; data=json.load(sys.stdin); print(abs(int(data[0]) - int(data[1])))'",
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                    "depends_on": ["step1", "step2"],
+                },
+            ],
+            "presentation": {"format": "plain"},
+        }
+
+        with patch.object(planner_module, "_llm_decide", return_value=invalid_decision), patch.object(
+            planner_module,
+            "_llm_retry_decide",
+            return_value=valid_decision,
+        ) as retry_mock, patch.object(
+            planner_module,
+            "_llm_validate_plan_semantics",
+            side_effect=[
+                {"valid": False, "reason": "collapsed workflow", "issues": ["collapsed"], "goal_coverage": "partial", "decomposition": "collapsed", "user_action_alignment": "weak", "rewarded_paths": [], "disallowed_paths": ["step1"]},
+                {"valid": True, "reason": "good workflow", "issues": [], "goal_coverage": "complete", "decomposition": "good", "user_action_alignment": "strong", "rewarded_paths": ["step1", "step2", "step3"], "disallowed_paths": []},
+            ],
+        ), patch.object(
+            planner_module,
+            "_debug_log",
+        ):
+            result = _llm_plan_with_retries(question, CAPABILITIES)
+
+        self.assertTrue(result["steps"])
+        self.assertEqual(result["steps"][0]["target_agent"], "sql_runner_mydb")
+        self.assertEqual(result["steps"][1]["target_agent"], "shell_runner")
+        self.assertEqual(result["steps"][2]["depends_on"], ["step1", "step2"])
+        retry_mock.assert_called_once()
+
+    def test_llm_plan_with_retries_reasks_for_collapsed_compound_boolean_followup(self):
+        question = "list all conda environemtns and check if there is an environment named vinith ?"
+        invalid_decision = {
+            "processable": True,
+            "reason": "first attempt",
+            "task_shape": "lookup",
+            "steps": [
+                {
+                    "id": "step1",
+                    "target_agent": "shell_runner",
+                    "task": "list all conda environments",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": "conda env list",
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                }
+            ],
+            "presentation": {"format": "markdown"},
+        }
+        valid_decision = {
+            "processable": True,
+            "reason": "second attempt",
+            "task_shape": "lookup",
+            "steps": [
+                {
+                    "id": "step1",
+                    "target_agent": "shell_runner",
+                    "task": "list all conda environments",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": "conda env list",
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+                {
+                    "id": "step2",
+                    "target_agent": "shell_runner",
+                    "task": "check whether the conda environment named vinith exists",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": "conda env list --json | python3 -c 'import json,sys,os; name=\"vinith\"; envs=json.load(sys.stdin).get(\"envs\", []); exists=any(os.path.basename(path.rstrip(\"/\")) == name for path in envs); print(json.dumps({\"exists\": exists, \"name\": name})); raise SystemExit(0 if exists else 1)'",
+                        "capture": {"mode": "json"},
+                        "allow_returncodes": [0, 1],
+                    },
+                    "depends_on": ["step1"],
+                },
+            ],
+            "presentation": {"format": "markdown"},
+        }
+
+        with patch.object(planner_module, "_llm_decide", return_value=invalid_decision), patch.object(
+            planner_module,
+            "_llm_retry_decide",
+            return_value=valid_decision,
+        ) as retry_mock, patch.object(
+            planner_module,
+            "_llm_validate_plan_semantics",
+            side_effect=[
+                {"valid": False, "reason": "collapsed clause coverage", "issues": ["collapsed"], "goal_coverage": "partial", "decomposition": "collapsed", "user_action_alignment": "weak", "rewarded_paths": [], "disallowed_paths": ["step1"]},
+                {"valid": True, "reason": "good decomposition", "issues": [], "goal_coverage": "complete", "decomposition": "good", "user_action_alignment": "strong", "rewarded_paths": ["step1", "step2"], "disallowed_paths": []},
+            ],
+        ), patch.object(
+            planner_module,
+            "_debug_log",
+        ):
+            result = _llm_plan_with_retries(question, CAPABILITIES)
+
+        self.assertEqual(len(result["steps"]), 2)
+        self.assertEqual(result["steps"][0]["instruction"]["command"], "conda env list")
+        self.assertIn('"exists"', result["steps"][1]["instruction"]["command"])
+        self.assertEqual(result["steps"][1]["depends_on"], ["step1"])
+        retry_mock.assert_called_once()
+
+    def test_handle_event_uses_valid_llm_plan_before_deterministic_fallback(self):
         planner_module.CAPABILITIES["agents"] = copy.deepcopy(CAPABILITIES["agents"])
         planner_module.CAPABILITIES["available_events"] = {"task.plan", "plan.progress", "task.result"}
         with patch.object(
             planner_module,
-            "_llm_decide",
+            "_llm_plan_with_retries",
             return_value={
-                "processable": True,
-                "reason": "bad routing",
-                "steps": [{"id": "step1", "target_agent": "slurm_runner_cluster", "task": "bad"}],
-                "presentation": {"format": "plain"},
-                "task_shape": "count",
+                "decision": {
+                    "processable": True,
+                    "reason": "good routing",
+                    "presentation": {"format": "plain"},
+                    "task_shape": "count",
+                },
+                "steps": [
+                    {
+                        "id": "step1",
+                        "target_agent": "shell_runner",
+                        "task": "Using the shell, in openwebui_gateway.py how many times does the string PlannerGateway appear?",
+                        "instruction": {
+                            "operation": "run_command",
+                            "command": "rg -o --fixed-strings 'PlannerGateway' openwebui_gateway.py | wc -l",
+                            "capture": {"mode": "stdout_stripped"},
+                        },
+                    }
+                ],
             },
         ):
             response = handle_event(
@@ -453,9 +582,12 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         task_plan = next(item for item in response["emits"] if item["event"] == "task.plan")
         step = task_plan["payload"]["steps"][0]
         self.assertEqual(step["target_agent"], "shell_runner")
-        self.assertIn("PlannerGateway", step["command"])
+        self.assertEqual(
+            step["instruction"]["command"],
+            "rg -o --fixed-strings 'PlannerGateway' openwebui_gateway.py | wc -l",
+        )
 
-    def test_handle_event_repairs_invalid_single_step_shared_verb_shell_plan_before_emitting(self):
+    def test_handle_event_emits_llm_decomposed_shared_verb_shell_plan(self):
         request = types.SimpleNamespace(
             event="user.ask",
             payload={"question": "list all docker containers and docke r images on this machines"},
@@ -466,11 +598,14 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         planner_module.CAPABILITIES.update({"agents": copy.deepcopy(CAPABILITIES["agents"])})
         try:
             with patch(
-                "agent_library.agents.llm_operations_planner._llm_decide",
+                "agent_library.agents.llm_operations_planner._llm_plan_with_retries",
                 return_value={
-                    "processable": True,
-                    "reason": "bad condensed docker plan",
-                    "task_shape": "list",
+                    "decision": {
+                        "processable": True,
+                        "reason": "good decomposed docker plan",
+                        "task_shape": "list",
+                        "presentation": {"format": "markdown"},
+                    },
                     "steps": [
                         {
                             "id": "step1",
@@ -480,9 +615,19 @@ class PlannerSemanticValidationTests(unittest.TestCase):
                                 "operation": "run_command",
                                 "command": "docker ps -a",
                             },
-                        }
+                        },
+                        {
+                            "id": "step2",
+                            "target_agent": "shell_runner",
+                            "task": "list docker images on this machine",
+                            "instruction": {
+                                "operation": "run_command",
+                                "command": "docker images",
+                            },
+                        },
                     ],
-                    "presentation": {"format": "markdown"},
+                    "attempt": 2,
+                    "validation_reason": "good decomposition",
                 },
             ):
                 response = handle_event(request)
@@ -495,6 +640,108 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(task_plan["steps"][0]["target_agent"], "shell_runner")
         self.assertEqual(task_plan["steps"][0]["instruction"]["command"], "docker ps -a")
         self.assertEqual(task_plan["steps"][1]["instruction"]["command"], "docker images")
+
+    def test_handle_event_returns_validation_failure_when_llm_exhausts_retries(self):
+        request = types.SimpleNamespace(
+            event="user.ask",
+            payload={"question": "list all docker containers and docke r images on this machines"},
+        )
+
+        original_capabilities = copy.deepcopy(planner_module.CAPABILITIES)
+        planner_module.CAPABILITIES.clear()
+        planner_module.CAPABILITIES.update({"agents": copy.deepcopy(CAPABILITIES["agents"]), "available_events": {"task.result"}})
+        try:
+            with patch(
+                "agent_library.agents.llm_operations_planner._llm_plan_with_retries",
+                return_value={
+                    "decision": {
+                        "processable": True,
+                        "reason": "bad condensed docker plan",
+                        "task_shape": "list",
+                        "presentation": {"format": "markdown"},
+                    },
+                    "steps": [],
+                    "attempt": 3,
+                    "validation_reason": "Planner kept collapsing the request into one broad step.",
+                },
+            ):
+                response = handle_event(request)
+        finally:
+            planner_module.CAPABILITIES.clear()
+            planner_module.CAPABILITIES.update(original_capabilities)
+
+        payload = next(item["payload"] for item in response["emits"] if item["event"] == "task.result")
+        self.assertEqual(payload["detail"], "Planner kept collapsing the request into one broad step.")
+
+    def test_handle_event_emits_llm_decomposed_multi_domain_plan(self):
+        request = types.SimpleNamespace(
+            event="user.ask",
+            payload={
+                "question": (
+                    "In the dicom_mock database count patients, and in the repository root count Python files, "
+                    "then report both counts and the difference."
+                )
+            },
+        )
+
+        original_capabilities = copy.deepcopy(planner_module.CAPABILITIES)
+        planner_module.CAPABILITIES.clear()
+        planner_module.CAPABILITIES.update({"agents": copy.deepcopy(CAPABILITIES["agents"])})
+        try:
+            with patch(
+                "agent_library.agents.llm_operations_planner._llm_plan_with_retries",
+                return_value={
+                    "decision": {
+                        "processable": True,
+                        "reason": "processable multi-domain count workflow",
+                        "task_shape": "count",
+                        "presentation": {"format": "markdown"},
+                    },
+                    "steps": [
+                        {
+                            "id": "step1",
+                            "target_agent": "sql_runner_dicom_mock",
+                            "task": "count patients in the dicom_mock database",
+                            "instruction": {
+                                "operation": "query_from_request",
+                                "question": "count patients in the dicom_mock database",
+                            },
+                        },
+                        {
+                            "id": "step2",
+                            "target_agent": "shell_runner",
+                            "task": "count Python files in the repository root",
+                            "instruction": {
+                                "operation": "run_command",
+                                "command": "find . -type f -name '*.py' | wc -l",
+                            },
+                        },
+                        {
+                            "id": "step3",
+                            "target_agent": "shell_runner",
+                            "task": "compute the absolute difference between the previous counts",
+                            "instruction": {
+                                "operation": "run_command",
+                                "command": "python3 -c 'import json,sys; data=json.load(sys.stdin); print(abs(int(data[0]) - int(data[1])))'",
+                            },
+                            "depends_on": ["step1", "step2"],
+                        },
+                    ],
+                    "attempt": 2,
+                    "validation_reason": "good decomposition",
+                },
+            ):
+                response = handle_event(request)
+        finally:
+            planner_module.CAPABILITIES.clear()
+            planner_module.CAPABILITIES.update(original_capabilities)
+
+        task_plan = next(item["payload"] for item in response["emits"] if item["event"] == "task.plan")
+        self.assertEqual(len(task_plan["steps"]), 3)
+        self.assertEqual(task_plan["steps"][0]["target_agent"], "sql_runner_dicom_mock")
+        self.assertEqual(task_plan["steps"][1]["target_agent"], "shell_runner")
+        self.assertEqual(task_plan["steps"][2]["target_agent"], "shell_runner")
+        self.assertIn("difference", task_plan["steps"][2]["task"].lower())
 
     def test_detects_slurm_node_to_job_drift(self):
         self.assertTrue(
@@ -610,59 +857,6 @@ class PlannerSemanticValidationTests(unittest.TestCase):
             CAPABILITIES,
         )
         self.assertEqual(steps, [])
-
-    def test_handle_event_repairs_invalid_single_step_multi_domain_plan_before_emitting(self):
-        request = types.SimpleNamespace(
-            event="user.ask",
-            payload={
-                "question": (
-                    "In the dicom_mock database count patients, and in the repository root count Python files, "
-                    "then report both counts and the difference."
-                )
-            },
-        )
-
-        original_capabilities = copy.deepcopy(planner_module.CAPABILITIES)
-        planner_module.CAPABILITIES.clear()
-        planner_module.CAPABILITIES.update({"agents": copy.deepcopy(CAPABILITIES["agents"])})
-        try:
-            with patch(
-                "agent_library.agents.llm_operations_planner._llm_decide",
-                return_value={
-                    "processable": True,
-                    "reason": "processable multi-domain count workflow",
-                    "task_shape": "count",
-                    "steps": [
-                        {
-                            "id": "step1",
-                            "target_agent": "sql_runner_dicom_mock",
-                            "task": (
-                                "In the dicom_mock database count patients, and in the repository root count Python files, "
-                                "then report both counts and the difference."
-                            ),
-                            "instruction": {
-                                "operation": "query_from_request",
-                                "question": (
-                                    "In the dicom_mock database count patients, and in the repository root count Python files, "
-                                    "then report both counts and the difference."
-                                ),
-                            },
-                        }
-                    ],
-                    "presentation": {"format": "markdown"},
-                },
-            ):
-                response = handle_event(request)
-        finally:
-            planner_module.CAPABILITIES.clear()
-            planner_module.CAPABILITIES.update(original_capabilities)
-
-        task_plan = next(item["payload"] for item in response["emits"] if item["event"] == "task.plan")
-        self.assertEqual(len(task_plan["steps"]), 3)
-        self.assertEqual(task_plan["steps"][0]["target_agent"], "sql_runner_dicom_mock")
-        self.assertEqual(task_plan["steps"][1]["target_agent"], "shell_runner")
-        self.assertEqual(task_plan["steps"][2]["target_agent"], "shell_runner")
-        self.assertIn("difference", task_plan["steps"][2]["task"].lower())
 
     def test_derive_shell_command_for_save_rows_task(self):
         command = _derive_shell_command("create a list of these patients and save it in patient.txt")

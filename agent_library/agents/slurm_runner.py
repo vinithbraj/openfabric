@@ -26,7 +26,7 @@ from runtime.console import log_debug, log_raw
 
 app = FastAPI()
 
-SLURM_EXECUTION_MODEL = "deterministic_first_with_llm_fallback"
+SLURM_EXECUTION_MODEL = "llm_selected_local_execution"
 SLURM_DETERMINISTIC_CATALOG_VERSION = "v4-initial"
 SLURM_DETERMINISTIC_PRIMITIVES = [
     {
@@ -189,9 +189,9 @@ AGENT_DESCRIPTOR = agent_descriptor(
     name="slurm_runner",
     role="executor",
     description=(
-        "Connects to a remote Slurm gateway, executes deterministic Slurm primitives first for "
-        "cluster and job operations, and falls back to generated Slurm commands only when the "
-        "deterministic path cannot answer cleanly."
+        "Connects to a remote Slurm gateway, asks an LLM to select the best local execution strategy "
+        "for cluster and job operations, executes local Slurm primitives when selected, and falls back "
+        "to generated Slurm commands only when needed."
     ),
     capability_domains=[
         "slurm",
@@ -222,8 +222,8 @@ AGENT_DESCRIPTOR = agent_descriptor(
     deterministic_primitives=[item["primitive_id"] for item in SLURM_DETERMINISTIC_PRIMITIVES],
     deterministic_catalog_reference="VERSION_4_PRIMITIVE_CATALOG.md",
     fallback_policy=(
-        "Run deterministic Slurm primitive first. If the primitive cannot answer cleanly, "
-        "run the selector-provided fallback command or legacy generated Slurm command."
+        "Use the LLM-selected Slurm strategy. When it selects a local primitive, execute it locally. "
+        "Otherwise run the selector-provided fallback command or generated Slurm command."
     ),
     side_effect_policy="remote_slurm_operations_via_gateway",
     safety_enforced_by_agent=True,
@@ -710,179 +710,6 @@ def _looks_like_job_state_breakdown_task(task: str) -> bool:
 def _looks_like_job_history_task(task: str) -> bool:
     text = str(task or "").lower()
     return any(token in text for token in ("history", "historical", "yesterday", "failed", "completed", "finished", "past"))
-
-
-def _heuristic_slurm_selection(task: str, context: dict[str, Any]) -> dict[str, Any] | None:
-    text = str(task or "").strip().lower()
-    if not text:
-        return None
-
-    partition_name = _normalize_partition_name(_extract_partition_name(task), context)
-    user = _extract_user_name(task)
-    job_id = _extract_job_id(task)
-    job_states = _extract_requested_job_states(task)
-    node_states = _extract_requested_node_states(task)
-
-    if _looks_like_node_inventory_summary_task(task):
-        return {
-            "primitive_id": "slurm.cluster.node_inventory_summary",
-            "selection_reason": "Heuristic node inventory summary match.",
-            "parameters": {"partition_name": partition_name} if partition_name else {},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if any(token in text for token in ("list nodes", "show nodes", "node names", "node list")):
-        parameters: dict[str, Any] = {}
-        if partition_name:
-            parameters["partition_name"] = partition_name
-        if node_states:
-            parameters["node_states"] = node_states
-        return {
-            "primitive_id": "slurm.cluster.node_list",
-            "selection_reason": "Heuristic node list match.",
-            "parameters": parameters,
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if any(token in text for token in ("partition", "partitions", "availability", "available resources")) and not any(
-        token in text for token in ("job", "jobs")
-    ):
-        return {
-            "primitive_id": "slurm.cluster.partition_summary",
-            "selection_reason": "Heuristic partition summary match.",
-            "parameters": {"partition_name": partition_name} if partition_name else {},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if job_id and any(token in text for token in ("cancel", "scancel")):
-        return {
-            "primitive_id": "slurm.jobs.cancel",
-            "selection_reason": "Heuristic job cancel match.",
-            "parameters": {"job_id": job_id},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if job_id and "hold" in text:
-        return {
-            "primitive_id": "slurm.jobs.hold",
-            "selection_reason": "Heuristic job hold match.",
-            "parameters": {"job_id": job_id},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if job_id and "release" in text:
-        return {
-            "primitive_id": "slurm.jobs.release",
-            "selection_reason": "Heuristic job release match.",
-            "parameters": {"job_id": job_id},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if job_id and "requeue" in text:
-        return {
-            "primitive_id": "slurm.jobs.requeue",
-            "selection_reason": "Heuristic job requeue match.",
-            "parameters": {"job_id": job_id},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if job_id and "resume" in text:
-        return {
-            "primitive_id": "slurm.jobs.resume",
-            "selection_reason": "Heuristic job resume match.",
-            "parameters": {"job_id": job_id},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if job_id and "suspend" in text:
-        return {
-            "primitive_id": "slurm.jobs.suspend",
-            "selection_reason": "Heuristic job suspend match.",
-            "parameters": {"job_id": job_id},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if job_id and any(token in text for token in ("details", "detail", "inspect", "show job")):
-        return {
-            "primitive_id": "slurm.jobs.details",
-            "selection_reason": "Heuristic job details match.",
-            "parameters": {"job_id": job_id},
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if _looks_like_elapsed_summary_task(task):
-        parameters = {}
-        if partition_name:
-            parameters["partition_name"] = partition_name
-        if job_states:
-            parameters["job_states"] = job_states
-        return {
-            "primitive_id": "slurm.jobs.elapsed_summary",
-            "selection_reason": "Heuristic elapsed summary match.",
-            "parameters": parameters,
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if _looks_like_job_count_task(task):
-        parameters = {}
-        if user:
-            parameters["user"] = user
-        if partition_name:
-            parameters["partition_name"] = partition_name
-        if job_states:
-            parameters["job_states"] = job_states
-        primitive_id = "slurm.jobs.history_count" if _looks_like_job_history_task(task) else "slurm.jobs.queue_count"
-        return {
-            "primitive_id": primitive_id,
-            "selection_reason": "Heuristic job count match.",
-            "parameters": parameters,
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if _looks_like_job_state_breakdown_task(task):
-        parameters = {}
-        if user:
-            parameters["user"] = user
-        if partition_name:
-            parameters["partition_name"] = partition_name
-        return {
-            "primitive_id": "slurm.jobs.queue_state_breakdown",
-            "selection_reason": "Heuristic job state breakdown match.",
-            "parameters": parameters,
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    if any(token in text for token in ("job", "jobs", "queue", "queued", "pending", "running")):
-        parameters = {}
-        if user:
-            parameters["user"] = user
-        if partition_name:
-            parameters["partition_name"] = partition_name
-        if job_states:
-            parameters["job_states"] = job_states
-        primitive_id = "slurm.jobs.history_list" if _looks_like_job_history_task(task) else "slurm.jobs.queue_list"
-        return {
-            "primitive_id": primitive_id,
-            "selection_reason": "Heuristic job list match.",
-            "parameters": parameters,
-            "fallback_command": "",
-            "fallback_args": [],
-            "fallback_reason": "",
-        }
-    return None
 
 
 def _llm_select_slurm_strategy(task: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -1670,9 +1497,7 @@ def handle_event(req: EventRequest):
     if str(instruction.get("operation") or "").strip() == "query_from_request":
         context = _get_slurm_context()
         selector_started = time.perf_counter()
-        raw_selection = _heuristic_slurm_selection(task, context)
-        if raw_selection is None:
-            raw_selection = _llm_select_slurm_strategy(task, context)
+        raw_selection = _llm_select_slurm_strategy(task, context)
         stats["deterministic_selection_ms"] = _elapsed_ms(selector_started)
         selection = _normalize_slurm_selection(raw_selection, context)
 

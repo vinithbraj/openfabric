@@ -277,11 +277,9 @@ class PlannerReplanGuardTests(unittest.TestCase):
             response = handle_event(request)
 
         emits = response["emits"]
-        replan_payload = next(item["payload"] for item in emits if item["event"] == "planner.replan.result")
-        self.assertTrue(replan_payload["steps"])
-        self.assertEqual(replan_payload["steps"][0]["target_agent"], "slurm_runner_cluster")
-        self.assertIn("pending", replan_payload["steps"][0]["instruction"]["question"].lower())
-        self.assertIn("vinith", replan_payload["steps"][0]["instruction"]["question"].lower())
+        self.assertEqual(len(emits), 1)
+        self.assertEqual(emits[0]["event"], "task.result")
+        self.assertIn("pending jobs", emits[0]["payload"]["detail"].lower())
 
 
 if __name__ == "__main__":
