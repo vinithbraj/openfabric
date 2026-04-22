@@ -917,6 +917,13 @@ def _format_callout_section(label: str, value: Any) -> list[str]:
     return _format_console_section(label, text)
 
 
+def _format_exact_command_section(label: str, value: Any) -> list[str]:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return []
+    return _format_console_section(label, text)
+
+
 def _candidate_file_path(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1038,7 +1045,7 @@ def _append_shell_result(lines: list[str], result: dict, duration: str | None = 
     if summary:
         lines.append(summary)
     if isinstance(command, str) and command.strip():
-        lines.extend(_format_callout_section("Command", command.strip()))
+        lines.extend(_format_exact_command_section("Exact command", command.strip()))
     if stdout:
         lines.extend([""])
         lines.extend(_format_callout_section("Output", stdout))
@@ -1142,10 +1149,10 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             lines.extend(_trace_kv_lines(("task", _task_label(task))))
             sql = payload.get("sql")
             if isinstance(sql, str) and sql.strip():
-                lines.extend(_trace_snippet("SQL snippet", sql, 500))
+                lines.extend(_format_exact_command_section("Exact SQL", sql))
             command = payload.get("command")
             if isinstance(command, str) and command.strip():
-                lines.extend(_trace_snippet("Command snippet", command, 500))
+                lines.extend(_format_exact_command_section("Exact command", command))
             return _trace_block(lines)
         if stage == "replanning":
             lines = [_trace_title("Replanning step", f"`{step_id}` via {_agent_label(target)}")]
@@ -1192,15 +1199,15 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             
             local_cmd = payload.get("local_reduction_command")
             if isinstance(local_cmd, str) and local_cmd.strip():
-                lines.extend(_trace_snippet("Local reduction command", local_cmd, 500))
+                lines.extend(_format_exact_command_section("Exact local reduction command", local_cmd))
                 
             if isinstance(sql, str) and sql.strip():
-                lines.extend(_trace_snippet("SQL", sql, 700))
+                lines.extend(_format_exact_command_section("Exact SQL", sql))
             command = payload.get("command")
             if not command and isinstance(result, dict):
                 command = result.get("command")
             if isinstance(command, str) and command.strip():
-                lines.extend(_trace_snippet("Command", command, 700))
+                lines.extend(_format_exact_command_section("Exact command", command))
 
             # Raw Output Visibility
             raw_stdout = payload.get("stdout")
@@ -1238,6 +1245,19 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
                     stats_line = _format_stats(nested_result.get("stats"))
                 if stats_line:
                     lines.append(f"`timing` {stats_line}")
+            sql = payload.get("sql")
+            if not sql and isinstance(result, dict):
+                sql = result.get("sql")
+            if isinstance(sql, str) and sql.strip():
+                lines.extend(_format_exact_command_section("Exact SQL", sql))
+            command = payload.get("command")
+            if not command and isinstance(result, dict):
+                command = result.get("command")
+            if isinstance(command, str) and command.strip():
+                lines.extend(_format_exact_command_section("Exact command", command))
+            local_cmd = payload.get("local_reduction_command")
+            if isinstance(local_cmd, str) and local_cmd.strip():
+                lines.extend(_format_exact_command_section("Exact local reduction command", local_cmd))
             return _trace_block(lines)
     if event_name == "shell.result":
         command = payload.get("command", "")
@@ -1253,7 +1273,7 @@ def _format_progress(event_name: str, payload: dict, depth: int) -> str | None:
             row_count = result.get("row_count")
         lines = [_trace_title("SQL result", f"Completed query{f' with `{row_count}` row(s)' if row_count is not None else ''}.")]
         if isinstance(sql, str) and sql.strip():
-            lines.extend(_trace_snippet("SQL", sql, 700))
+            lines.extend(_format_exact_command_section("Exact SQL", sql))
         stats_line = _format_stats(payload.get("stats"))
         if stats_line:
             lines.append(f"`timing` {stats_line}")

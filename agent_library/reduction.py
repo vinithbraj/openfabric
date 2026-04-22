@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 
-from agent_library.common import run_local_reducer_loop, shared_llm_api_settings
+from agent_library.common import run_local_reducer_loop, serialize_for_stdin, shared_llm_api_settings
 
 ALLOWED_REDUCTION_PREFIXES = (
     "python",
@@ -202,50 +202,75 @@ def generate_sql_reduction_command(
         return ""
 
 
-def summarize_sql_rows(task: str, sql: str, columns: list[str], rows: list[dict[str, Any]]) -> str:
+def summarize_sql_rows_locally(task: str, sql: str, columns: list[str], rows: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
 
-    api_key, base_url, timeout_seconds, model = shared_llm_api_settings("gpt-4o-mini")
-    if not api_key:
-        return ""
+    column_names = [str(item).strip() for item in columns if isinstance(item, str) and str(item).strip()]
+    if not column_names and isinstance(rows[0], dict):
+        column_names = [str(key).strip() for key in rows[0].keys() if str(key).strip()]
 
-    sample = rows[:10]
-    prompt = (
-        "You are an expert SQL data analyst. I have a result set from a database query. "
-        "Your job is to provide a concise, factual summary of the data for the user.\n\n"
-        f"User Question: {task}\n"
-        f"SQL Query: {sql}\n"
-        f"Total rows found: {len(rows)}\n"
-        "Sample Data (first few rows):\n"
-        "```json\n"
-        f"{json.dumps(sample, indent=2, default=str)}\n"
-        "```\n"
-        "Instructions:\n"
-        "- Provide a concise summary of what this data shows in relation to the user's question.\n"
-        "- If the data shows a clear trend or answer, state it clearly.\n"
-        "- Be factual and do not speculate beyond what is in the sample and row count.\n"
-        "Summary:"
-    )
+    lines = [f"Returned {len(rows)} row(s)."]
+    if column_names:
+        lines.append("Columns: " + ", ".join(column_names[:12]))
 
-    try:
-        response = requests.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You are a concise data analyst."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0,
-            },
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return ""
+    preview_chunks: list[str] = []
+    for row in rows[:3]:
+        if not isinstance(row, dict):
+            continue
+        items = []
+        for key, value in list(row.items())[:4]:
+            compact = str(value).strip()
+            if len(compact) > 60:
+                compact = compact[:57].rstrip() + "..."
+            items.append(f"{key}={compact}")
+        if items:
+            preview_chunks.append("; ".join(items))
+    if preview_chunks:
+        lines.append("Preview: " + " | ".join(preview_chunks))
+
+    task_text = str(task or "").strip().lower()
+    if any(token in task_text for token in ("count", "how many", "number of", "total")):
+        lines.append(f"Local summary count: {len(rows)}")
+
+    return "\n".join(lines)
+
+
+def summarize_sql_rows(task: str, sql: str, columns: list[str], rows: list[dict[str, Any]]) -> str:
+    return summarize_sql_rows_locally(task, sql, columns, rows)
+
+
+def _progressive_text_samples(source_text: str) -> list[str]:
+    text = str(source_text or "")
+    if not text:
+        return [""]
+    limits = (5000, 12000, 25000)
+    samples: list[str] = []
+    for limit in limits:
+        sample = text[:limit]
+        if sample and sample not in samples:
+            samples.append(sample)
+        if len(text) <= limit:
+            break
+    if text not in samples and len(text) <= 25000:
+        samples.append(text)
+    return samples or [""]
+
+
+def _progressive_row_samples(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    if not rows:
+        return [[]]
+    limits = (10, 25, 50)
+    samples: list[list[dict[str, Any]]] = []
+    for limit in limits:
+        sample = rows[:limit]
+        if sample and sample not in samples:
+            samples.append(sample)
+        if len(rows) <= limit:
+            break
+    if rows not in samples and len(rows) <= 50:
+        samples.append(rows)
+    return samples or [[]]
 
 
 def looks_like_elapsed_summary_task(task: str) -> bool:
@@ -524,19 +549,9 @@ def build_sql_reduction_request(task: str, sql: str, result: dict[str, Any] | No
     columns = result.get("columns", [])
     row_count = result.get("total_matching_rows", result.get("row_count", len(rows)))
     normalized_row_count = row_count if isinstance(row_count, int) else len(rows)
-    if should_reduce_sql_result(task, result):
+    if should_reduce_sql_result(task, result) or len(rows) > 5:
         return {
             "kind": "sql.local_reducer",
-            "task": task,
-            "source_sql": sql,
-            "columns": columns,
-            "row_count": normalized_row_count,
-            "sample_rows": rows[:10],
-            "input_format": "json",
-        }
-    if len(rows) > 5:
-        return {
-            "kind": "sql.summary",
             "task": task,
             "source_sql": sql,
             "columns": columns,
@@ -645,15 +660,25 @@ def execute_reduction_request(request: dict[str, Any], input_data: Any) -> Reduc
         sample = str(request.get("sample") or "")
         task = str(request.get("task") or "")
         source_command = str(request.get("source_command") or "")
-        reduction = run_local_reducer_loop(
-            input_data,
-            lambda previous_command, previous_error: generate_shell_reduction_command(
+        sample_candidates = _progressive_text_samples(
+            serialize_for_stdin(input_data) or sample or ""
+        )
+        sample_state = {"index": 0}
+
+        def _next_shell_reducer(previous_command: str, previous_error: str) -> str:
+            if (previous_command or previous_error) and sample_state["index"] < len(sample_candidates) - 1:
+                sample_state["index"] += 1
+            return generate_shell_reduction_command(
                 task,
                 source_command,
-                sample,
+                sample_candidates[sample_state["index"]],
                 previous_command,
                 previous_error,
-            ),
+            )
+
+        reduction = run_local_reducer_loop(
+            input_data,
+            _next_shell_reducer,
             validate_output=lambda output: bool(output.strip()),
         )
         return ReductionExecutionResult(
@@ -673,17 +698,30 @@ def execute_reduction_request(request: dict[str, Any], input_data: Any) -> Reduc
             sample_rows = []
         row_count = request.get("row_count")
         normalized_row_count = int(row_count) if isinstance(row_count, int) else len(sample_rows)
-        reduction = run_local_reducer_loop(
-            input_data,
-            lambda previous_command, previous_error: generate_sql_reduction_command(
+        full_rows = []
+        if isinstance(input_data, dict):
+            raw_rows = input_data.get("rows")
+            if isinstance(raw_rows, list):
+                full_rows = [row for row in raw_rows if isinstance(row, dict)]
+        row_samples = _progressive_row_samples(full_rows or sample_rows)
+        row_sample_state = {"index": 0}
+
+        def _next_sql_reducer(previous_command: str, previous_error: str) -> str:
+            if (previous_command or previous_error) and row_sample_state["index"] < len(row_samples) - 1:
+                row_sample_state["index"] += 1
+            return generate_sql_reduction_command(
                 task,
                 source_sql,
                 columns,
-                sample_rows[:10],
+                row_samples[row_sample_state["index"]],
                 normalized_row_count,
                 previous_command,
                 previous_error,
-            ),
+            )
+
+        reduction = run_local_reducer_loop(
+            input_data,
+            _next_sql_reducer,
             validate_output=lambda output: bool(output.strip()),
         )
         return ReductionExecutionResult(
@@ -700,10 +738,10 @@ def execute_reduction_request(request: dict[str, Any], input_data: Any) -> Reduc
         rows = input_data.get("rows") if isinstance(input_data, dict) else None
         if not isinstance(rows, list):
             return ReductionExecutionResult(strategy="summary", error="SQL summary request did not receive row data.")
-        summary = summarize_sql_rows(str(request.get("task") or ""), source_sql, columns, rows)
+        summary = summarize_sql_rows_locally(str(request.get("task") or ""), source_sql, columns, rows)
         return ReductionExecutionResult(
             reduced_result=summary or None,
-            strategy="summary",
+            strategy="local_summary_compatibility",
             attempts=1 if summary else 0,
             error="" if summary else "SQL summary generation produced no output.",
         )

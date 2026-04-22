@@ -127,6 +127,41 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         self.assertNotIn("🟦", planning)
         self.assertNotIn("🟩", executing)
 
+    def test_step_progress_shows_exact_command_block(self):
+        block = _format_progress(
+            "step.progress",
+            {
+                "stage": "started",
+                "step_id": "step1",
+                "target_agent": "shell_runner",
+                "task": "list docker containers",
+                "command": "docker ps -a --format '{{.Names}}'",
+            },
+            0,
+        )
+        self.assertIn("**Exact command:**", block)
+        self.assertIn("docker ps -a --format '{{.Names}}'", block)
+        self.assertNotIn("Command snippet", block)
+
+    def test_failed_step_progress_shows_exact_sql_and_command(self):
+        block = _format_progress(
+            "step.progress",
+            {
+                "stage": "failed",
+                "step_id": "step2",
+                "target_agent": "sql_runner_dicom_mock",
+                "task": "count patients",
+                "error": "column does not exist",
+                "sql": 'SELECT COUNT(*) FROM "dicom"."patients"',
+                "command": "psql -c 'SELECT COUNT(*) FROM \"dicom\".\"patients\"'",
+            },
+            0,
+        )
+        self.assertIn("**Exact SQL:**", block)
+        self.assertIn('SELECT COUNT(*) FROM "dicom"."patients"', block)
+        self.assertIn("**Exact command:**", block)
+        self.assertIn("psql -c 'SELECT COUNT(*) FROM", block)
+
     def test_validation_progress_avoids_im_now_console_style_language(self):
         block = _format_progress(
             "validation.progress",
