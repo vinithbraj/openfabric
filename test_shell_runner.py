@@ -137,6 +137,38 @@ class ShellRunnerDataFlowTests(unittest.TestCase):
         self.assertEqual(emitted["payload"]["raw_returncode"], 1)
         self.assertIn("partial results", emitted["payload"]["detail"])
 
+    def test_multiline_stdin_gets_trailing_newline_for_line_counts(self):
+        captured = {}
+
+        class _Completed:
+            stdout = "3\n"
+            stderr = ""
+            returncode = 0
+
+        def fake_run(_args, input=None, **_kwargs):
+            captured["input"] = input
+            return _Completed()
+
+        with patch("agent_library.agents.shell_runner.subprocess.run", side_effect=fake_run):
+            response = handle_event(
+                types.SimpleNamespace(
+                    event="task.plan",
+                    payload={
+                        "task": "count the previous lines",
+                        "target_agent": "shell_runner",
+                        "instruction": {
+                            "operation": "run_command",
+                            "command": "wc -l",
+                            "input": "alpha\nbeta\ngamma",
+                        },
+                    },
+                )
+            )
+
+        self.assertEqual(captured["input"], "alpha\nbeta\ngamma\n")
+        emitted = response["emits"][0]
+        self.assertEqual(emitted["payload"]["stdout"], "3")
+
 
 if __name__ == "__main__":
     unittest.main()

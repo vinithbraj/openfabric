@@ -45,6 +45,15 @@ SQL_DETERMINISTIC_PRIMITIVES = [
         "read_only": True,
     },
     {
+        "primitive_id": "sql.schema.count_tables",
+        "family": "schema",
+        "summary": "Count tables across the database or within one schema.",
+        "required_params": [],
+        "optional_params": ["schema_name"],
+        "intent_tags": ["schema", "tables", "count", "database"],
+        "read_only": True,
+    },
+    {
         "primitive_id": "sql.schema.list_columns",
         "family": "schema",
         "summary": "List columns globally or for one table.",
@@ -566,6 +575,45 @@ def _heuristic_distinct_entity_row_count_selection(task: str, schema: dict) -> d
     }
 
 
+def _schema_name_hint(task: str, schema: dict) -> str:
+    text = str(task or "").strip().lower()
+    if not text:
+        return ""
+    identifiers = _schema_identifier_sets(schema)
+    schema_names = sorted(
+        (str(name).strip() for name in identifiers.get("schemas", set()) if str(name).strip()),
+        key=len,
+        reverse=True,
+    )
+    for schema_name in schema_names:
+        if re.search(rf"\b{re.escape(schema_name.lower())}\b", text):
+            return schema_name
+    return ""
+
+
+def _heuristic_schema_table_count_selection(task: str, schema: dict) -> dict[str, Any] | None:
+    text = str(task or "").strip().lower()
+    if not text:
+        return None
+    if not _schema_count_like_request(None, task):
+        return None
+    if not any(token in text for token in ("table", "tables")):
+        return None
+    if any(token in text for token in ("row", "rows", "column", "columns", "relationship", "relationships", "foreign key", "foreign keys")):
+        return None
+    if _schema_listing_request(None, task):
+        return None
+    parameters = {}
+    schema_name = _schema_name_hint(task, schema)
+    if schema_name:
+        parameters["schema_name"] = schema_name
+    return {
+        "primitive_id": "sql.schema.count_tables",
+        "selection_reason": "Heuristic table-count request matched schema metadata counting.",
+        "parameters": parameters,
+    }
+
+
 def _heuristic_sql_selection(task: str, schema: dict) -> dict[str, Any] | None:
     text = str(task or "").strip().lower()
     if not text:
@@ -575,6 +623,9 @@ def _heuristic_sql_selection(task: str, schema: dict) -> dict[str, Any] | None:
     table_name = table_match.group(1).strip() if table_match else ""
     if _schemas_only_schema_request(None, task):
         return {"primitive_id": "sql.schema.list_schemas", "selection_reason": "Heuristic schema listing match.", "parameters": {}}
+    schema_table_count = _heuristic_schema_table_count_selection(task, schema)
+    if schema_table_count is not None:
+        return schema_table_count
     if _tables_only_schema_request(None, task):
         parameters = {}
         if table_name and "." not in table_name and table_name in identifiers.get("schemas", set()):
@@ -729,6 +780,27 @@ def _execute_sql_deterministic_selection(
     params = selection.get("parameters") if isinstance(selection.get("parameters"), dict) else {}
     if primitive_id == "sql.schema.list_schemas":
         return {"detail": "Database schemas listed.", "sql": "", "result": _schema_schemas_result(schema)}
+    if primitive_id == "sql.schema.count_tables":
+        schema_name = str(params.get("schema_name") or "").strip()
+        rows = _schema_tables_result(schema)["rows"]
+        if schema_name:
+            rows = [
+                row for row in rows
+                if str(row.get("schema") or "").strip().lower() == schema_name.lower()
+            ]
+        count = len(rows)
+        result = {
+            "columns": ["count"],
+            "rows": [{"count": count}],
+            "row_count": 1,
+            "returned_row_count": 1,
+            "total_matching_rows": 1,
+            "truncated": False,
+            "limit": 1,
+        }
+        if schema_name:
+            return {"detail": f"Counted tables for schema {schema_name}.", "sql": "", "result": result}
+        return {"detail": "Counted tables across the database.", "sql": "", "result": result}
     if primitive_id == "sql.schema.list_tables":
         schema_name = str(params.get("schema_name") or "").strip()
         if not schema_name:
@@ -1324,6 +1396,33 @@ def _schema_summary(schema: dict) -> str:
     return _schema_prompt_text(schema)
 
 
+def _schema_count_like_request(focus: str | None, task: str | None) -> bool:
+    text = " ".join(part for part in (str(focus or "").strip(), str(task or "").strip()) if part).lower()
+    if not text:
+        return False
+    return text.startswith("count ") or any(
+        token in text for token in ("how many", "count ", "number of", "total count", "total number")
+    )
+
+
+def _schema_listing_request(focus: str | None, task: str | None) -> bool:
+    text = " ".join(part for part in (str(focus or "").strip(), str(task or "").strip()) if part).lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "list ",
+            "show ",
+            "display ",
+            "describe ",
+            "inspect ",
+            "include ",
+            "first few",
+        )
+    )
+
+
 def _schema_focus_terms(focus: str | None, task: str | None) -> set[str]:
     tokens = set()
     for text in (focus or "", task or ""):
@@ -1342,21 +1441,29 @@ def _schema_focus_terms(focus: str | None, task: str | None) -> set[str]:
 
 
 def _schemas_only_schema_request(focus: str | None, task: str | None) -> bool:
+    if _schema_count_like_request(focus, task) and not _schema_listing_request(focus, task):
+        return False
     terms = _schema_focus_terms(focus, task)
     return "schemas" in terms and "tables" not in terms and "columns" not in terms and "relationships" not in terms
 
 
 def _tables_only_schema_request(focus: str | None, task: str | None) -> bool:
+    if _schema_count_like_request(focus, task) and not _schema_listing_request(focus, task):
+        return False
     terms = _schema_focus_terms(focus, task)
     return "tables" in terms and "schemas" not in terms and "columns" not in terms and "relationships" not in terms
 
 
 def _columns_only_schema_request(focus: str | None, task: str | None) -> bool:
+    if _schema_count_like_request(focus, task) and not _schema_listing_request(focus, task):
+        return False
     terms = _schema_focus_terms(focus, task)
     return "columns" in terms and "schemas" not in terms and "tables" not in terms and "relationships" not in terms
 
 
 def _relationships_only_schema_request(focus: str | None, task: str | None) -> bool:
+    if _schema_count_like_request(focus, task) and not _schema_listing_request(focus, task):
+        return False
     terms = _schema_focus_terms(focus, task)
     return "relationships" in terms and "schemas" not in terms and "tables" not in terms and "columns" not in terms
 

@@ -299,6 +299,14 @@ def _run_shell_subprocess(command: str, stdin_text: str = "", timeout: int = 30)
     )
 
 
+def _normalized_stdin_text(stdin_text: str | None) -> str | None:
+    if not isinstance(stdin_text, str):
+        return stdin_text
+    if "\n" in stdin_text and not stdin_text.endswith("\n"):
+        return stdin_text + "\n"
+    return stdin_text
+
+
 def _attempt_python_dependency_repair(command: str, stdin_text: str, completed: subprocess.CompletedProcess[str]) -> tuple[subprocess.CompletedProcess[str], str | None, str | None]:
     if not _python_package_installs_allowed() or not _is_python_command(command):
         return completed, None, None
@@ -671,6 +679,7 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
 
     try:
         stdin_text = serialize_for_stdin(stdin_data)
+        stdin_text = _normalized_stdin_text(stdin_text)
         completed = _run_shell_subprocess(command, stdin_text=stdin_text, timeout=30)
     except subprocess.TimeoutExpired:
         return task_result("Command timed out after 30 seconds")

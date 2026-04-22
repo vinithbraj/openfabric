@@ -173,7 +173,8 @@ def _heuristic_validate(payload: dict):
             if not has_identifiers:
                 missing_requirements.append("identifier list")
     elif task_shape == "count":
-        if _structured_count_like(result):
+        evidence_candidates = _workflow_evidence_candidates(payload, result)
+        if any(_structured_count_like(candidate) for candidate in evidence_candidates):
             verdict = "valid"
             reason = "Detected count-like output."
         else:

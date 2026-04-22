@@ -128,6 +128,7 @@ class PostgresSafeSqlTests(unittest.TestCase):
     def test_tables_only_schema_request_detects_table_listing(self):
         self.assertTrue(_tables_only_schema_request("tables", "give me a list of all the tables in mydb"))
         self.assertFalse(_tables_only_schema_request("tables, columns, and relationships", "show database schema"))
+        self.assertFalse(_tables_only_schema_request(None, "count the tables in the dicom schema of mydb"))
 
     def test_schemas_only_schema_request_detects_schema_listing(self):
         self.assertTrue(_schemas_only_schema_request("schemas", "list all schemas in dicom_mock"))
@@ -339,6 +340,12 @@ class PostgresSafeSqlTests(unittest.TestCase):
         self.assertEqual(selection["primitive_id"], "sql.schema.list_tables")
         self.assertEqual(selection["parameters"], {})
 
+    def test_heuristic_sql_selection_detects_schema_table_count(self):
+        selection = _heuristic_sql_selection("count the tables in the dicom schema of mydb", DICOM_COUNT_SCHEMA)
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection["primitive_id"], "sql.schema.count_tables")
+        self.assertEqual(selection["parameters"]["schema_name"], "dicom")
+
     def test_execute_sql_deterministic_selection_for_row_count(self):
         executed = {}
 
@@ -373,6 +380,24 @@ class PostgresSafeSqlTests(unittest.TestCase):
         self.assertIn('COUNT(*) AS "count"', executed["sql"])
         self.assertEqual(executed["limit"], 1)
         self.assertEqual(payload["result"]["rows"][0]["count"], 7)
+
+    def test_execute_sql_deterministic_selection_for_schema_table_count(self):
+        payload = _execute_sql_deterministic_selection(
+            conn=object(),
+            dialect="postgres",
+            schema=DICOM_COUNT_SCHEMA,
+            task="count the tables in the dicom schema",
+            selection={
+                "primitive_id": "sql.schema.count_tables",
+                "parameters": {"schema_name": "dicom"},
+            },
+            limit=25,
+        )
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["detail"], "Counted tables for schema dicom.")
+        self.assertEqual(payload["result"]["columns"], ["count"])
+        self.assertEqual(payload["result"]["rows"], [{"count": 2}])
 
     def test_handle_event_prefers_deterministic_sql_selection_before_llm_sql(self):
         class _Conn:

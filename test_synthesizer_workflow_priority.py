@@ -353,6 +353,62 @@ class SynthesizerWorkflowPriorityTests(unittest.TestCase):
         self.assertIn("2", payload["answer"])
         self.assertIn("24", payload["answer"])
 
+    def test_lookup_workflow_preserves_sql_list_details_alongside_shell_count(self):
+        req = types.SimpleNamespace(
+            event="workflow.result",
+            payload={
+                "task": (
+                    "In the dicom_mock database list the tables in the dicom schema alphabetically, and in the repository root "
+                    "using the shell count Markdown files. Report the table count, the Markdown count, and include the first few table names."
+                ),
+                "task_shape": "lookup",
+                "status": "completed",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "task": "In the dicom_mock database list the tables in the dicom schema alphabetically",
+                        "target_agent": "sql_runner_dicom_mock",
+                        "status": "completed",
+                        "event": "sql.result",
+                        "payload": {
+                            "detail": "Database tables listed.",
+                            "result": {
+                                "columns": ["schema", "table", "type"],
+                                "rows": [
+                                    {"schema": "dicom", "table": "dicom_tags", "type": "table"},
+                                    {"schema": "dicom", "table": "instances", "type": "table"},
+                                    {"schema": "dicom", "table": "patients", "type": "table"},
+                                    {"schema": "dicom", "table": "rtdose", "type": "table"},
+                                ],
+                                "row_count": 8,
+                                "returned_row_count": 4,
+                                "total_matching_rows": 8,
+                                "truncated": True,
+                            },
+                        },
+                    },
+                    {
+                        "id": "step2",
+                        "task": "count Markdown files in the repository root",
+                        "target_agent": "shell_runner",
+                        "status": "completed",
+                        "event": "shell.result",
+                        "payload": {
+                            "stdout": "6\n",
+                            "returncode": 0,
+                        },
+                    },
+                ],
+            },
+        )
+
+        answer = _fallback_answer(req)
+        self.assertIn("`8`", answer)
+        self.assertIn("`6`", answer)
+        self.assertIn("dicom_tags", answer)
+        self.assertIn("instances", answer)
+        self.assertIn("patients", answer)
+
 
 if __name__ == "__main__":
     unittest.main()

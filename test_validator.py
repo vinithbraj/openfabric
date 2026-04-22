@@ -234,6 +234,27 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(payload["valid"])
         self.assertEqual(payload["verdict"], "valid")
 
+    def test_workflow_count_validation_accepts_prior_step_count_evidence(self):
+        response = handle_event(
+            types.SimpleNamespace(
+                event="validation.request",
+                payload={
+                    "task": "count Markdown files in the repository root",
+                    "task_shape": "count",
+                    "workflow_status": "completed",
+                    "result": ["README.md", "GRAPH_ARCHITECTURE.md"],
+                    "steps": [
+                        {"id": "step1", "status": "completed", "value": "7"},
+                        {"id": "step2", "status": "completed", "value": ["README.md", "GRAPH_ARCHITECTURE.md"]},
+                    ],
+                },
+            )
+        )
+        payload = response["emits"][0]["payload"]
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["verdict"], "valid")
+        self.assertFalse(payload["retry_recommended"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -529,6 +529,8 @@ def _infer_task_shape(question: str, *, target_agent: str | None = None, present
         and any(token in text for token in ("file", "path", "location", ".txt", ".csv", ".json", ".md"))
     ):
         return "save_artifact"
+    if len(compound_parts) > 1 and count_part_count and any(_planner_is_schema_request(part) for part in compound_parts):
+        return "lookup"
     if _planner_is_schema_request(text):
         return "schema_summary"
     if _looks_like_slurm_elapsed_summary_question(text):
@@ -1528,6 +1530,64 @@ def _derive_shell_command(task: str, step_index: int = 1) -> str | None:
     if "database files" in task_lc or ("database" in task_lc and "files" in task_lc):
         return 'find . -type f \\( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.sql" \\) | sort'
 
+    line_count_match = re.search(r"how many lines are in\s+([A-Za-z0-9_./-]+)", task, flags=re.IGNORECASE)
+    if line_count_match:
+        return f"wc -l < {shlex.quote(line_count_match.group(1))}"
+
+    string_count_match = re.search(
+        r"in\s+([A-Za-z0-9_./-]+)\s+how many times does the string\s+(.+?)\s+appear",
+        task,
+        flags=re.IGNORECASE,
+    )
+    if string_count_match:
+        path = string_count_match.group(1)
+        needle = string_count_match.group(2).strip().strip("\"'").rstrip("?.")
+        if needle:
+            return _build_file_text_count_command(path, needle)
+
+    reverse_string_count_match = re.search(
+        r"count\s+how\s+many\s+times(?:\s+the\s+string)?\s+(.+?)\s+appears?\s+in\s+([A-Za-z0-9_./-]+)",
+        task,
+        flags=re.IGNORECASE,
+    )
+    if reverse_string_count_match:
+        needle = reverse_string_count_match.group(1).strip().strip("\"'").rstrip("?.")
+        path = reverse_string_count_match.group(2).strip()
+        if needle and path:
+            return _build_file_text_count_command(path, needle)
+
+    markdown_word_match = re.search(
+        r"across the markdown files in the repository root how many times does the word\s+([A-Za-z0-9_.-]+)\s+appear",
+        task,
+        flags=re.IGNORECASE,
+    )
+    if markdown_word_match:
+        return _build_root_markdown_token_count_command(markdown_word_match.group(1).strip().strip("\"'"))
+
+    if "count" in task_lc or "how many" in task_lc or "total count" in task_lc or "number of" in task_lc:
+        if "repository root" in task_lc and "markdown" in task_lc and "file" in task_lc:
+            return 'find . -maxdepth 1 -type f -iname "*.md" | wc -l'
+        if "repository root" in task_lc and "test" in task_lc and "python" in task_lc and "file" in task_lc:
+            return 'find . -maxdepth 1 -type f \\( -name "test_*.py" -o -name "*_test.py" \\) | wc -l'
+        if "agent_library/agents" in task_lc and "python" in task_lc and any(token in task_lc for token in ("module", "modules", "file", "files")):
+            return 'find agent_library/agents -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l'
+        if _has_runtime_scope(task_lc) and "python" in task_lc and "file" in task_lc:
+            return 'find runtime -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l'
+        if _has_runtime_scope(task_lc) and any(token in task_lc for token in ("entries", "entry")):
+            return 'find runtime -mindepth 1 -maxdepth 1 | wc -l'
+        if "agent_library/specs" in task_lc and ("yaml" in task_lc or "yml" in task_lc) and "spec" in task_lc:
+            if "filename" in task_lc and "assistant" in task_lc:
+                return 'find agent_library/specs -mindepth 1 -maxdepth 1 -type f \\( -name "*.yml" -o -name "*.yaml" \\) -printf "%f\\n" | grep -ic assistant'
+            return 'find agent_library/specs -mindepth 1 -maxdepth 1 -type f \\( -name "*.yml" -o -name "*.yaml" \\) | wc -l'
+        if "scripts" in task_lc and "python" in task_lc and "file" in task_lc:
+            return 'find scripts -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l'
+        if "scripts" in task_lc and any(token in task_lc for token in ("entries", "entry")):
+            return 'find scripts -mindepth 1 -maxdepth 1 | wc -l'
+        if "repository root" in task_lc and any(token in task_lc for token in ("directories", "directory")):
+            return 'find . -mindepth 1 -maxdepth 1 -type d | wc -l'
+        if "repository root" in task_lc and "openwebui" in task_lc and "file" in task_lc:
+            return 'find . -maxdepth 1 -type f -iname "*openwebui*" | wc -l'
+
     if "count" in task_lc and "python" in task_lc and "file" in task_lc:
         if "repository root" in task_lc:
             return 'find . -maxdepth 1 -type f -name "*.py" | wc -l'
@@ -1752,6 +1812,10 @@ SHELL_COMMAND_OVERRIDE_MARKERS = (
     "top-level directories",
     "top level directories",
     "database files",
+    "how many lines are in",
+    "how many times does the string",
+    "how many times does the word",
+    "yaml spec filenames",
     "docker is installed",
     "docker installed",
     "docker available",
@@ -1881,6 +1945,61 @@ print(int(diff) if diff.is_integer() else diff)
     return f"python3 -c {shlex.quote(code)}"
 
 
+def _build_file_text_count_command(path: str, needle: str) -> str:
+    code = """
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+needle = sys.argv[2]
+print(path.read_text(encoding="utf-8").count(needle))
+""".strip()
+    return f"python3 -c {shlex.quote(code)} {shlex.quote(path)} {shlex.quote(needle)}"
+
+
+def _build_root_markdown_token_count_command(token: str) -> str:
+    code = """
+import pathlib
+import sys
+
+token = sys.argv[1].lower()
+total = 0
+for path in pathlib.Path(".").glob("*.md"):
+    total += path.read_text(encoding="utf-8").lower().count(token)
+print(total)
+""".strip()
+    return f"python3 -c {shlex.quote(code)} {shlex.quote(token)}"
+
+
+def _build_shell_inventory_steps(list_task: str, list_command: str, count_task: str, count_command: str) -> list[dict]:
+    return [
+        {
+            "id": "step1",
+            "target_agent": "shell_runner",
+            "task": list_task,
+            "instruction": {
+                "operation": "run_command",
+                "command": list_command,
+                "capture": {"mode": "stdout_stripped"},
+            },
+        },
+        {
+            "id": "step2",
+            "target_agent": "shell_runner",
+            "task": count_task,
+            "instruction": {
+                "operation": "run_command",
+                "command": count_command,
+                "capture": {"mode": "stdout_stripped"},
+            },
+        },
+    ]
+
+
+def _has_runtime_scope(text: str) -> bool:
+    return bool(re.search(r"\b(?:in|under)\s+runtime\b", str(text or "").lower()))
+
+
 def _looks_like_root_python_inventory_request(question: str) -> bool:
     text = str(question or "").strip().lower()
     return (
@@ -1895,28 +2014,285 @@ def _looks_like_root_python_inventory_request(question: str) -> bool:
 
 
 def _root_python_inventory_fallback_steps() -> list[dict]:
-    return [
-        {
-            "id": "step1",
-            "target_agent": "shell_runner",
-            "task": "list the first five Python files alphabetically in the repository root",
-            "instruction": {
-                "operation": "run_command",
-                "command": 'find . -maxdepth 1 -type f -name "*.py" -printf "%f\\n" | sort | head -n 5',
-                "capture": {"mode": "stdout_stripped"},
+    return _build_shell_inventory_steps(
+        "list the first five Python files alphabetically in the repository root",
+        'find . -maxdepth 1 -type f -name "*.py" -printf "%f\\n" | sort | head -n 5',
+        "count Python files in the repository root",
+        'find . -maxdepth 1 -type f -name "*.py" | wc -l',
+    )
+
+
+def _shell_inventory_fallback_steps(question: str) -> list[dict]:
+    text = str(question or "").strip().lower()
+    if not text:
+        return []
+
+    list_request = any(token in text for token in ("list", "show"))
+    count_request = any(token in text for token in ("count", "total count", "total number", "how many"))
+    if not (list_request and count_request):
+        return []
+
+    limit_match = re.search(r"\b(?:first|top)\s+(\d+)\b", text)
+    limit = limit_match.group(1) if limit_match else None
+
+    if _looks_like_root_python_inventory_request(question):
+        return _root_python_inventory_fallback_steps()
+
+    if "repository root" in text and "markdown" in text and "file" in text:
+        list_command = 'find . -maxdepth 1 -type f -iname "*.md" -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list the Markdown files alphabetically in the repository root",
+            list_command,
+            "count Markdown files in the repository root",
+            'find . -maxdepth 1 -type f -iname "*.md" | wc -l',
+        )
+
+    if "repository root" in text and "test" in text and "python" in text and "file" in text:
+        list_command = 'find . -maxdepth 1 -type f \\( -name "test_*.py" -o -name "*_test.py" \\) -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list the test Python files alphabetically in the repository root",
+            list_command,
+            "count test Python files in the repository root",
+            'find . -maxdepth 1 -type f \\( -name "test_*.py" -o -name "*_test.py" \\) | wc -l',
+        )
+
+    if "agent_library/agents" in text and "python" in text and any(token in text for token in ("module", "modules", "file", "files")):
+        list_command = 'find agent_library/agents -mindepth 1 -maxdepth 1 -type f -name "*.py" -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list Python modules in agent_library/agents alphabetically",
+            list_command,
+            "count Python modules in agent_library/agents",
+            'find agent_library/agents -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
+        )
+
+    if _has_runtime_scope(text) and "python" in text and "file" in text:
+        list_command = 'find runtime -mindepth 1 -maxdepth 1 -type f -name "*.py" -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list Python files in runtime alphabetically",
+            list_command,
+            "count Python files in runtime",
+            'find runtime -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
+        )
+
+    if "agent_library/specs" in text and ("yaml" in text or "yml" in text) and "spec" in text:
+        list_command = 'find agent_library/specs -mindepth 1 -maxdepth 1 -type f \\( -name "*.yml" -o -name "*.yaml" \\) -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list YAML spec files in agent_library/specs alphabetically",
+            list_command,
+            "count YAML spec files in agent_library/specs",
+            'find agent_library/specs -mindepth 1 -maxdepth 1 -type f \\( -name "*.yml" -o -name "*.yaml" \\) | wc -l',
+        )
+
+    if "scripts" in text and any(token in text for token in ("entries", "entry")):
+        list_command = 'find scripts -mindepth 1 -maxdepth 1 -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list direct entries in the scripts directory alphabetically",
+            list_command,
+            "count direct entries in the scripts directory",
+            'find scripts -mindepth 1 -maxdepth 1 | wc -l',
+        )
+
+    if "repository root" in text and any(token in text for token in ("directories", "directory")):
+        list_command = 'find . -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list directories in the repository root alphabetically",
+            list_command,
+            "count directories in the repository root",
+            'find . -mindepth 1 -maxdepth 1 -type d | wc -l',
+        )
+
+    if "repository root" in text and "openwebui" in text and "file" in text:
+        list_command = 'find . -maxdepth 1 -type f -iname "*openwebui*" -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list repository root files whose names contain openwebui",
+            list_command,
+            "count repository root files whose names contain openwebui",
+            'find . -maxdepth 1 -type f -iname "*openwebui*" | wc -l',
+        )
+
+    if "scripts" in text and "python" in text and "file" in text:
+        list_command = 'find scripts -mindepth 1 -maxdepth 1 -type f -name "*.py" -printf "%f\\n" | sort'
+        if limit:
+            list_command += f" | head -n {limit}"
+        return _build_shell_inventory_steps(
+            "list Python files in the scripts directory alphabetically",
+            list_command,
+            "count Python files in the scripts directory",
+            'find scripts -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
+        )
+
+    return []
+
+
+def _shell_pair_count_fallback_steps(question: str) -> list[dict]:
+    text = str(question or "").strip().lower()
+    if not text:
+        return []
+
+    wants_difference = any(token in text for token in ("difference", "compare", "versus", " vs "))
+
+    def _with_difference(base_steps: list[dict]) -> list[dict]:
+        if not wants_difference or len(base_steps) != 2:
+            return base_steps
+        return base_steps + [
+            {
+                "id": "step3",
+                "target_agent": "shell_runner",
+                "task": "compute the absolute difference between the previous counts",
+                "instruction": {
+                    "operation": "run_command",
+                    "command": _build_dependency_results_difference_command(),
+                    "capture": {"mode": "stdout_stripped"},
+                },
+                "depends_on": ["step1", "step2"],
+            }
+        ]
+
+    if "repository root" in text and "python files" in text and "markdown files" in text:
+        return _with_difference(
+            [
+                {
+                    "id": "step1",
+                    "target_agent": "shell_runner",
+                    "task": "count Python files in the repository root",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": 'find . -maxdepth 1 -type f -name "*.py" | wc -l',
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+                {
+                    "id": "step2",
+                    "target_agent": "shell_runner",
+                    "task": "count Markdown files in the repository root",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": 'find . -maxdepth 1 -type f -iname "*.md" | wc -l',
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+            ]
+        )
+
+    if "agent_library/agents" in text and "agent_library/specs" in text and "python" in text and ("yaml" in text or "yml" in text):
+        return _with_difference(
+            [
+                {
+                    "id": "step1",
+                    "target_agent": "shell_runner",
+                    "task": "count Python modules in agent_library/agents",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": 'find agent_library/agents -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+                {
+                    "id": "step2",
+                    "target_agent": "shell_runner",
+                    "task": "count YAML spec files in agent_library/specs",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": 'find agent_library/specs -mindepth 1 -maxdepth 1 -type f \\( -name "*.yml" -o -name "*.yaml" \\) | wc -l',
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+            ]
+        )
+
+    if _has_runtime_scope(text) and "test python files" in text:
+        return _with_difference(
+            [
+                {
+                    "id": "step1",
+                    "target_agent": "shell_runner",
+                    "task": "count Python files in runtime",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": 'find runtime -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+                {
+                    "id": "step2",
+                    "target_agent": "shell_runner",
+                    "task": "count test Python files in the repository root",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": 'find . -maxdepth 1 -type f \\( -name "test_*.py" -o -name "*_test.py" \\) | wc -l',
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+            ]
+        )
+
+    if _has_runtime_scope(text) and "direct entries" in text and "python files" in text:
+        return [
+            {
+                "id": "step1",
+                "target_agent": "shell_runner",
+                "task": "count direct entries in runtime",
+                "instruction": {
+                    "operation": "run_command",
+                    "command": 'find runtime -mindepth 1 -maxdepth 1 | wc -l',
+                    "capture": {"mode": "stdout_stripped"},
+                },
             },
-        },
-        {
-            "id": "step2",
-            "target_agent": "shell_runner",
-            "task": "count Python files in the repository root",
-            "instruction": {
-                "operation": "run_command",
-                "command": 'find . -maxdepth 1 -type f -name "*.py" | wc -l',
-                "capture": {"mode": "stdout_stripped"},
+            {
+                "id": "step2",
+                "target_agent": "shell_runner",
+                "task": "count Python files in runtime",
+                "instruction": {
+                    "operation": "run_command",
+                    "command": 'find runtime -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
+                    "capture": {"mode": "stdout_stripped"},
+                },
             },
-        },
-    ]
+        ]
+
+    if "repository root" in text and "agent_library/agents" in text and text.count("python files") >= 2:
+        return _with_difference(
+            [
+                {
+                    "id": "step1",
+                    "target_agent": "shell_runner",
+                    "task": "count Python files in the repository root",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": 'find . -maxdepth 1 -type f -name "*.py" | wc -l',
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+                {
+                    "id": "step2",
+                    "target_agent": "shell_runner",
+                    "task": "count Python files in agent_library/agents",
+                    "instruction": {
+                        "operation": "run_command",
+                        "command": 'find agent_library/agents -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l',
+                        "capture": {"mode": "stdout_stripped"},
+                    },
+                },
+            ]
+        )
+
+    return []
 
 
 def _storage_fallback_steps(question: str, capabilities: dict) -> list[dict]:
@@ -2078,9 +2454,21 @@ def _derive_presentation(question: str) -> dict:
     return presentation
 
 
+def _planner_is_count_like_request(task: str) -> bool:
+    task_lc = str(task or "").strip().lower()
+    if not task_lc:
+        return False
+    return task_lc.startswith("count ") or any(
+        token in task_lc for token in ("how many", "count ", "number of", "total count", "total number")
+    )
+
+
 def _planner_is_schema_request(task: str) -> bool:
-    task_lc = task.lower()
-    return any(
+    task_lc = str(task or "").strip().lower()
+    if not task_lc:
+        return False
+
+    schema_terms_present = any(
         token in task_lc
         for token in (
             "schema",
@@ -2099,6 +2487,24 @@ def _planner_is_schema_request(task: str) -> bool:
             "inspect the database schema",
         )
     )
+    if not schema_terms_present:
+        return False
+
+    if _planner_is_count_like_request(task_lc) and not any(
+        token in task_lc
+        for token in (
+            "list ",
+            "show ",
+            "display ",
+            "describe ",
+            "inspect ",
+            "include ",
+            "first few",
+        )
+    ):
+        return False
+
+    return True
 
 
 PRESENTATION_ONLY_PATTERNS = [
@@ -2327,6 +2733,21 @@ def _format_capability_answer(capabilities: dict) -> str:
 
 
 def _fallback_steps(question: str, capabilities: dict):
+    compound_steps = _compound_fallback_steps(question, capabilities)
+    compound_families = {
+        _agent_family(str(step.get("target_agent") or ""))
+        for step in compound_steps
+        if isinstance(step, dict)
+    }
+    compound_families.discard("")
+    if compound_steps and len(compound_families) > 1:
+        return compound_steps
+    inventory_steps = _shell_inventory_fallback_steps(question)
+    if inventory_steps:
+        return inventory_steps
+    shell_pair_steps = _shell_pair_count_fallback_steps(question)
+    if shell_pair_steps:
+        return shell_pair_steps
     if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
         target_agent = _first_agent_in_family(capabilities, "slurm_runner")
         if target_agent:
@@ -2341,8 +2762,6 @@ def _fallback_steps(question: str, capabilities: dict):
                     },
                 }
             ]
-    if _looks_like_root_python_inventory_request(question):
-        return _root_python_inventory_fallback_steps()
     mixed_parts = _mixed_count_and_detail_parts(question)
     if mixed_parts is not None and _looks_like_sql_question(question, capabilities):
         target_agent = _select_sql_target_agent(question, capabilities)
@@ -2361,20 +2780,18 @@ def _fallback_steps(question: str, capabilities: dict):
     storage_steps = _storage_fallback_steps(question, capabilities)
     if storage_steps:
         return storage_steps
-    compound_steps = _compound_fallback_steps(question, capabilities)
-    if compound_steps:
-        return compound_steps
     parts = [part.strip(" ,") for part in re.split(r"\s+(?:and then|then|after that|next)\s+", question, flags=re.IGNORECASE) if part.strip(" ,")]
     if not parts:
         parts = [question.strip()]
     steps = []
     for index, part in enumerate(parts, start=1):
-        target_agent = _select_target_agent(part, capabilities)
         task = part
+        derived_shell_command = _derive_shell_command(task, index)
+        target_agent = "shell_runner" if derived_shell_command else _select_target_agent(part, capabilities)
         if target_agent:
             step = {"id": f"step{index}", "target_agent": target_agent, "task": task}
             if target_agent == "shell_runner":
-                command = _derive_shell_command(task, index)
+                command = derived_shell_command
                 if command:
                     step["command"] = command
                     result_mode = _derive_shell_result_mode(task, command)
@@ -2480,7 +2897,8 @@ def _split_compound_request(question: str) -> list[str]:
     if not text:
         return []
     separator_re = re.compile(
-        r"\s*(?:;|,?\s+and\s+|,?\s+then\s+|,\s+also\s+)(?=(?:what\b|how\b|count\b|list\b|show\b|find\b|which\b|is\b|are\b|does\b|do\b|did\b|can\b|has\b|have\b|current\b|last\b|latest\b|get\b|provide\b|check\b|create\b|copy\b|save\b|write\b|tail\b|open\b|read\b|tell\b|report\b|give\b))",
+        r"\s*(?:;|\.\s+|,?\s+and\s+|,?\s+then\s+|,\s+also\s+)"
+        r"(?=(?:what\b|how\b|count\b|list\b|show\b|find\b|which\b|is\b|are\b|does\b|do\b|did\b|can\b|has\b|have\b|current\b|last\b|latest\b|get\b|provide\b|check\b|create\b|copy\b|save\b|write\b|tail\b|open\b|read\b|tell\b|report\b|give\b|in\b|under\b|within\b|using\b))",
         flags=re.IGNORECASE,
     )
     parts = [
@@ -2661,6 +3079,8 @@ def _looks_like_multi_domain_count_workflow(question: str, capabilities: dict) -
         ("python" in text and "file" in text)
         or _looks_like_workspace_file_question(question)
         or _looks_like_repo_file_scan(question)
+        or "using the shell" in text
+        or " use the shell" in text
     ):
         domain_count += 1
     return domain_count >= 2
@@ -2671,7 +3091,8 @@ def _split_multi_domain_count_request(question: str) -> list[str]:
     if not text:
         return []
     separator_re = re.compile(
-        r"\s*(?:;|,\s*|,\s+and\s+|,\s+then\s+|\.\s+|(?:and|then)\s+)(?=(?:(?:\S+\s+){0,6}(?:what|how|count|list|show|find|report|tell|give|provide)\b))",
+        r"\s*(?:;|,\s*|,\s+and\s+|,\s+then\s+|\.\s+|(?:and|then)\s+)"
+        r"(?=(?:(?:\S+\s+){0,10}(?:what|how|count|list|show|find|report|tell|give|provide|in|under|within|using)\b))",
         flags=re.IGNORECASE,
     )
     raw_parts = separator_re.split(text)
@@ -2695,6 +3116,10 @@ def _select_multi_domain_count_target_agent(part: str, question: str, capabiliti
     if _looks_like_sql_question(normalized_part, capabilities):
         return _select_sql_target_agent(normalized_part, capabilities)
     normalized_lc = normalized_part.lower()
+    if _derive_shell_command(normalized_part, 1):
+        return "shell_runner"
+    if "shell" in normalized_lc and any(token in normalized_lc for token in ("count", "list", "show", "find", "directory", "directories", "file", "files")):
+        return "shell_runner"
     if "python" in normalized_lc and "file" in normalized_lc:
         return "shell_runner"
     if _looks_like_workspace_file_question(normalized_part) or _looks_like_repo_file_scan(normalized_part):
@@ -2780,6 +3205,12 @@ def _compound_fallback_steps(question: str, capabilities: dict):
         previous_step_id = str(previous_step.get("id") or "") if isinstance(previous_step, dict) else ""
         followup_task = None
         part_lc = part.lower()
+        presentation_clause = bool(
+            re.match(r"^(?:report|tell|give|provide|show)\b", part_lc)
+            and any(token in part_lc for token in ("answer", "count", "counts", "difference", "summary", "include"))
+        )
+        if _is_presentation_only_task(part) or presentation_clause:
+            continue
         if previous_target == "shell_runner":
             if ("last" in part_lc or "tail" in part_lc) and ("line" in part_lc or "lines" in part_lc):
                 tail_match = re.search(r"\b(?:last|tail)\s+(\d+)\b", part_lc)
@@ -2787,7 +3218,8 @@ def _compound_fallback_steps(question: str, capabilities: dict):
                 followup_task = f"show the last {tail} lines of {{prev}}"
         normalized_part = _normalize_compound_shell_part(part, question)
         normalized_part = _contextualize_shell_followup_task(normalized_part, question)
-        target_agent = _select_target_agent(normalized_part, capabilities) or _select_target_agent(part, capabilities)
+        derived_shell_command = _derive_shell_command(normalized_part, index)
+        target_agent = "shell_runner" if derived_shell_command else (_select_target_agent(normalized_part, capabilities) or _select_target_agent(part, capabilities))
         normalized_lc = normalized_part.lower()
         if _looks_like_workspace_file_question(normalized_part) or _looks_like_repo_file_scan(normalized_part):
             target_agent = "shell_runner"
@@ -2830,6 +3262,12 @@ def _compound_fallback_steps(question: str, capabilities: dict):
 def _recover_compound_steps(question: str, steps: list[dict], capabilities: dict):
     if len(steps) != 1:
         return steps
+    inventory_steps = _shell_inventory_fallback_steps(question)
+    if len(inventory_steps) >= 2:
+        return inventory_steps
+    shell_pair_steps = _shell_pair_count_fallback_steps(question)
+    if len(shell_pair_steps) >= 2:
+        return shell_pair_steps
     compound_steps = _compound_fallback_steps(question, capabilities)
     if len(compound_steps) < 2:
         return steps
@@ -2901,7 +3339,15 @@ def _looks_like_mixed_count_and_detail_request(question: str) -> bool:
     has_count = any(marker in text for marker in COUNT_REQUEST_MARKERS)
     if not has_count:
         return False
-    return any(marker in text for marker in DETAIL_REQUEST_MARKERS)
+    if any(marker in text for marker in DETAIL_SPLIT_MARKERS):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:and|then)\s+(?:provide|show|list|include|return)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _strip_count_request_prefix(text: str) -> str:
@@ -3418,6 +3864,22 @@ def _validate_plan_steps(question: str, steps: list[dict], capabilities: dict) -
             return {"valid": False, "reason": f"Planner step '{step_id}' targeted a non-executor agent."}
         if target_agent not in valid_names:
             return {"valid": False, "reason": f"Planner step '{step_id}' targeted unknown agent '{target_agent}'."}
+        instruction = step.get("instruction") if isinstance(step.get("instruction"), dict) else {}
+        operation = str(instruction.get("operation") or "").strip().lower()
+        task_text = str(step.get("task") or "").strip()
+        if (
+            _agent_family(target_agent) == "sql_runner"
+            and operation == "inspect_schema"
+            and _planner_is_count_like_request(task_text)
+            and not _planner_is_schema_request(task_text)
+        ):
+            return {
+                "valid": False,
+                "reason": (
+                    f"Planner step '{step_id}' used schema introspection for a count-oriented SQL task "
+                    "that should execute as a database query."
+                ),
+            }
 
     for step in leaf_steps:
         step_id = str(step.get("id") or "").strip()
@@ -3436,10 +3898,18 @@ def _validate_plan_steps(question: str, steps: list[dict], capabilities: dict) -
                     "reason": f"Planner step '{step_id}' depends on unknown step '{dependency_id}'.",
                 }
 
-    if _looks_like_root_python_inventory_request(question) and len(leaf_steps) < 2:
+    expected_inventory_steps = _shell_inventory_fallback_steps(question)
+    if expected_inventory_steps and len(leaf_steps) < len(_leaf_plan_steps(expected_inventory_steps)):
         return {
             "valid": False,
-            "reason": "Planner collapsed the repository inventory request and lost the list/count workflow structure.",
+            "reason": "Planner collapsed the shell inventory request and lost the list/count workflow structure.",
+        }
+
+    expected_shell_pair_steps = _shell_pair_count_fallback_steps(question)
+    if expected_shell_pair_steps and len(leaf_steps) < len(_leaf_plan_steps(expected_shell_pair_steps)):
+        return {
+            "valid": False,
+            "reason": "Planner collapsed the shell count workflow and lost required comparison/count steps.",
         }
 
     compound_fallback = _compound_fallback_steps(question, capabilities)
@@ -3538,6 +4008,15 @@ def _validated_plan_steps(question: str, steps: list[dict], capabilities: dict, 
 
 
 def _build_primary_plan(question: str, decision: dict, capabilities: dict):
+    inventory_steps = _shell_inventory_fallback_steps(question)
+    if inventory_steps:
+        return inventory_steps
+    shell_pair_steps = _shell_pair_count_fallback_steps(question)
+    if shell_pair_steps:
+        return shell_pair_steps
+    compound_steps = _compound_fallback_steps(question, capabilities)
+    if compound_steps:
+        return compound_steps
     if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
         slurm_steps = _fallback_steps(question, capabilities)
         if slurm_steps:
@@ -3782,6 +4261,17 @@ def handle_event(req: EventRequest):
         )
     if _is_capability_question(current_question) and "task.result" in allowed_events:
         return task_result(_format_capability_answer(CAPABILITIES), result=_capability_summary(CAPABILITIES))
+
+    deterministic_shell_request = bool(
+        _shell_inventory_fallback_steps(current_question)
+        or _shell_pair_count_fallback_steps(current_question)
+        or _should_override_shell_command(current_question.lower())
+    )
+    if deterministic_shell_request:
+        deterministic_plan = _fallback_plan_emits(question, allowed_events, task_question=current_question)
+        if deterministic_plan is not None:
+            return emit_sequence(deterministic_plan)
+
     try:
         decision = _llm_decide(question, CAPABILITIES)
         if decision is not None:

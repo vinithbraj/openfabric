@@ -528,6 +528,16 @@ def _workflow_step_summary_value(step: dict[str, Any]) -> str | None:
                 scalar = _extract_scalar_sql_value(result)
                 if scalar is not None:
                     return str(scalar)
+                rows = result.get("rows")
+                row_count = result.get("total_matching_rows", result.get("row_count"))
+                task_lc = str(step.get("task") or "").strip().lower()
+                if (
+                    isinstance(row_count, int)
+                    and isinstance(rows, list)
+                    and rows
+                    and any(token in task_lc for token in ("list ", "show ", "display ", "tables", "columns", "rows"))
+                ):
+                    return str(row_count)
     if step.get("event") == "shell.result":
         stdout = _step_clean_stdout(step)
         fact = _shell_fact_value(stdout)
@@ -557,6 +567,18 @@ def _format_multi_agent_workflow_answer(steps: list[dict[str, Any]], task: str =
         rendered_detail = None
         if step.get("event") == "shell.result":
             rendered_detail = _format_shell_detail_answer(step)
+        elif step.get("event") == "sql.result":
+            payload = step.get("payload")
+            if isinstance(payload, dict):
+                result = payload.get("result")
+                task_lc = str(step.get("task") or task).strip().lower()
+                if (
+                    isinstance(result, dict)
+                    and isinstance(result.get("rows"), list)
+                    and result.get("rows")
+                    and any(token in task_lc for token in ("list ", "show ", "display ", "tables", "columns", "rows"))
+                ):
+                    rendered_detail = _format_schema_payload_answer(payload, str(step.get("task") or task))
         value = _workflow_step_summary_value(step)
         if isinstance(value, str) and "\n" in value:
             rendered_multiline = _format_simple_line_list_answer(value, _workflow_step_summary_label(step))
@@ -579,7 +601,9 @@ def _format_multi_agent_workflow_answer(steps: list[dict[str, Any]], task: str =
         numeric = _summary_numeric_value(value)
         if numeric is not None:
             numeric_values.append(numeric)
-        if rendered_detail and rendered_detail not in detail_sections and "\n" in _step_clean_stdout(step):
+        if rendered_detail and rendered_detail not in detail_sections and (
+            step.get("event") == "sql.result" or "\n" in _step_clean_stdout(step)
+        ):
             detail_sections.append(rendered_detail)
 
     task_lc = str(task or "").lower()

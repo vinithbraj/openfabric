@@ -44,6 +44,7 @@ sys.modules.setdefault("pydantic", pydantic_stub)
 
 import agent_library.agents.llm_operations_planner as planner_module
 from agent_library.agents.llm_operations_planner import (
+    _build_primary_plan,
     _capability_summary,
     _derive_presentation,
     _derive_shell_command,
@@ -56,6 +57,7 @@ from agent_library.agents.llm_operations_planner import (
     _normalize_followup_shell_instruction,
     _normalize_steps,
     _select_target_agent,
+    _should_override_shell_command,
     _sql_fallback_steps_for_task,
     _split_compound_request,
     _step_semantic_drift,
@@ -115,6 +117,15 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(steps[0]["instruction"]["operation"], "inspect_schema")
         self.assertEqual(steps[0]["instruction"]["focus"], "list all schemas in dicom_mock")
 
+    def test_sql_table_count_request_stays_in_count_shape(self):
+        question = "Count the tables in the dicom schema of the mydb database"
+        steps = _sql_fallback_steps_for_task(question, question, CAPABILITIES)
+        self.assertEqual(_infer_task_shape(question), "count")
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["target_agent"], "sql_runner_mydb")
+        self.assertEqual(steps[0]["instruction"]["operation"], "query_from_request")
+        self.assertEqual(steps[0]["instruction"]["question"], question)
+
     def test_split_compound_request_on_repeated_count_clause(self):
         parts = _split_compound_request(
             "how many jobs are running on my slurm cluster and how many jobs are pending on my slurm cluster ?"
@@ -170,6 +181,127 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(steps[1]["instruction"]["question"], "count patients in the dicom_mock database")
         self.assertIn("repository root", steps[2]["task"].lower())
         self.assertIn("wc -l", steps[2]["instruction"]["command"])
+
+    def test_build_primary_plan_prefers_multi_domain_count_fallback_over_llm_steps(self):
+        question = (
+            "In the mydb database count the tables in the dicom schema, and in the repository root using the shell "
+            "count directories. Report both counts and the difference."
+        )
+        decision = {
+            "steps": [
+                {
+                    "id": "step1",
+                    "target_agent": "sql_runner_mydb",
+                    "task": "Count the tables in the dicom schema of the mydb database",
+                    "instruction": {"operation": "inspect_schema", "focus": "Count the tables in the dicom schema of the mydb database"},
+                }
+            ]
+        }
+        steps = _build_primary_plan(question, decision, CAPABILITIES)
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(steps[0]["target_agent"], "sql_runner_mydb")
+        self.assertEqual(steps[0]["instruction"]["operation"], "query_from_request")
+        self.assertEqual(steps[1]["target_agent"], "shell_runner")
+        self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
+
+    def test_fallback_steps_use_explicit_root_markdown_inventory_commands(self):
+        steps = _fallback_steps(
+            "Using the shell in the repository root, list the Markdown files alphabetically and tell me the total count.",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 2)
+        self.assertIn("markdown", steps[0]["task"].lower())
+        self.assertEqual(
+            steps[0]["instruction"]["command"],
+            'find . -maxdepth 1 -type f -iname "*.md" -printf "%f\\n" | sort',
+        )
+        self.assertIn("count markdown files", steps[1]["task"].lower())
+        self.assertEqual(steps[1]["instruction"]["command"], 'find . -maxdepth 1 -type f -iname "*.md" | wc -l')
+
+    def test_fallback_steps_use_non_recursive_root_openwebui_inventory_commands(self):
+        steps = _fallback_steps(
+            "Using the shell in the repository root, count the files whose names contain openwebui and list them.",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(
+            steps[0]["instruction"]["command"],
+            'find . -maxdepth 1 -type f -iname "*openwebui*" -printf "%f\\n" | sort',
+        )
+        self.assertEqual(steps[1]["instruction"]["command"], 'find . -maxdepth 1 -type f -iname "*openwebui*" | wc -l')
+
+    def test_fallback_steps_expand_shell_only_root_python_vs_markdown_difference(self):
+        steps = _fallback_steps(
+            "Using the shell in the repository root, count Python files and Markdown files, then report both counts and the difference.",
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual([step["target_agent"] for step in steps], ["shell_runner", "shell_runner", "shell_runner"])
+        self.assertEqual(steps[0]["instruction"]["command"], 'find . -maxdepth 1 -type f -name "*.py" | wc -l')
+        self.assertEqual(steps[1]["instruction"]["command"], 'find . -maxdepth 1 -type f -iname "*.md" | wc -l')
+        self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
+        self.assertIn("dependency_results", steps[2]["instruction"]["command"])
+
+    def test_fallback_steps_use_deterministic_line_count_command(self):
+        question = "Using the shell, how many lines are in VERSION_4_PRIMITIVE_CATALOG.md?"
+        self.assertTrue(_should_override_shell_command(question.lower()))
+        steps = _fallback_steps(question, CAPABILITIES)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["target_agent"], "shell_runner")
+        self.assertEqual(steps[0]["command"], "wc -l < VERSION_4_PRIMITIVE_CATALOG.md")
+
+    def test_fallback_steps_use_runtime_scope_for_inventory_requests(self):
+        question = "Using the shell, under runtime list the Python files alphabetically and tell me the total count."
+        steps = _fallback_steps(question, CAPABILITIES)
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(
+            steps[0]["instruction"]["command"],
+            'find runtime -mindepth 1 -maxdepth 1 -type f -name "*.py" -printf "%f\\n" | sort',
+        )
+        self.assertEqual(steps[1]["instruction"]["command"], 'find runtime -mindepth 1 -maxdepth 1 -type f -name "*.py" | wc -l')
+
+    def test_fallback_steps_use_deterministic_string_count_command(self):
+        question = "Using the shell, in openwebui_gateway.py how many times does the string PlannerGateway appear?"
+        self.assertTrue(_should_override_shell_command(question.lower()))
+        steps = _fallback_steps(question, CAPABILITIES)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["target_agent"], "shell_runner")
+        self.assertEqual(steps[0]["command"], "python3 -c 'import pathlib\nimport sys\n\npath = pathlib.Path(sys.argv[1])\nneedle = sys.argv[2]\nprint(path.read_text(encoding=\"utf-8\").count(needle))' openwebui_gateway.py PlannerGateway")
+
+    def test_derive_shell_command_supports_reverse_string_count_phrasing(self):
+        command = _derive_shell_command(
+            "using the shell count how many times task.plan appears in runtime/engine.py"
+        )
+        self.assertEqual(
+            command,
+            "python3 -c 'import pathlib\nimport sys\n\npath = pathlib.Path(sys.argv[1])\nneedle = sys.argv[2]\nprint(path.read_text(encoding=\"utf-8\").count(needle))' runtime/engine.py task.plan",
+        )
+
+    def test_handle_event_short_circuits_deterministic_shell_requests_before_llm(self):
+        planner_module.CAPABILITIES["agents"] = copy.deepcopy(CAPABILITIES["agents"])
+        planner_module.CAPABILITIES["available_events"] = {"task.plan", "plan.progress", "task.result"}
+        with patch.object(
+            planner_module,
+            "_llm_decide",
+            return_value={
+                "processable": True,
+                "reason": "bad routing",
+                "steps": [{"id": "step1", "target_agent": "slurm_runner_cluster", "task": "bad"}],
+                "presentation": {"format": "plain"},
+                "task_shape": "count",
+            },
+        ):
+            response = handle_event(
+                types.SimpleNamespace(
+                    event="user.ask",
+                    payload={"question": "Using the shell, in openwebui_gateway.py how many times does the string PlannerGateway appear?"},
+                )
+            )
+
+        task_plan = next(item for item in response["emits"] if item["event"] == "task.plan")
+        step = task_plan["payload"]["steps"][0]
+        self.assertEqual(step["target_agent"], "shell_runner")
+        self.assertIn("PlannerGateway", step["command"])
 
     def test_detects_slurm_node_to_job_drift(self):
         self.assertTrue(
@@ -704,6 +836,49 @@ class PlannerSemanticValidationTests(unittest.TestCase):
             _infer_task_shape("show database schema and relationships"),
             "schema_summary",
         )
+
+    def test_infer_task_shape_uses_lookup_for_compound_schema_and_count_workflow(self):
+        self.assertEqual(
+            _infer_task_shape(
+                "In the dicom_mock database list the tables in the dicom schema alphabetically, and in the repository root using the shell count Markdown files. Report the table count, the Markdown count, and include the first few table names."
+            ),
+            "lookup",
+        )
+
+    def test_infer_task_shape_keeps_multi_domain_count_rows_workflow_out_of_list_shape(self):
+        self.assertEqual(
+            _infer_task_shape(
+                "In the dicom_mock database count rows in dicom_tags, and in agent_library/specs using the shell count YAML spec files. Report both counts and the difference."
+            ),
+            "lookup",
+        )
+
+    def test_infer_task_shape_keeps_count_files_by_name_workflow_out_of_list_shape(self):
+        self.assertEqual(
+            _infer_task_shape(
+                "In the mydb database count patients, and in the repository root using the shell count files whose names contain openwebui. Report both counts and the difference."
+            ),
+            "lookup",
+        )
+
+    def test_compound_fallback_steps_expand_mixed_db_and_string_count_workflow(self):
+        steps = _compound_fallback_steps(
+            (
+                "In the mydb database count studies, and using the shell count how many times task.plan appears in "
+                "runtime/engine.py. Report both counts and the difference."
+            ),
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(steps[0]["target_agent"], "sql_runner_mydb")
+        self.assertEqual(steps[0]["instruction"]["question"], "In the mydb database count studies")
+        self.assertEqual(steps[1]["target_agent"], "shell_runner")
+        self.assertEqual(
+            steps[1]["instruction"]["command"],
+            "python3 -c 'import pathlib\nimport sys\n\npath = pathlib.Path(sys.argv[1])\nneedle = sys.argv[2]\nprint(path.read_text(encoding=\"utf-8\").count(needle))' runtime/engine.py task.plan",
+        )
+        self.assertEqual(steps[2]["target_agent"], "shell_runner")
+        self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
 
 
 if __name__ == "__main__":
