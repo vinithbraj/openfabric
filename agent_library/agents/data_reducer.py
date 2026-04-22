@@ -1,7 +1,7 @@
 import subprocess
 from typing import Any
 
-from fastapi import FastAPI
+from web_compat import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, serialize_for_stdin, with_node_envelope
 from agent_library.reduction import execute_reduction_request, looks_like_safe_reducer_command

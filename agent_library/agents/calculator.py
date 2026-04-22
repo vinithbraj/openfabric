@@ -3,7 +3,7 @@ import os
 import re
 from typing import Any, List
 
-from fastapi import FastAPI
+from web_compat import FastAPI
 import requests
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope

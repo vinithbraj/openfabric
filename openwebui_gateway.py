@@ -10,9 +10,6 @@ import time
 import uuid
 from typing import Any, Iterator
 
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import requests
 
@@ -22,6 +19,7 @@ from agent_library.agents.synthesizer import _fallback_answer as _fallback_synth
 from runtime.engine import Engine
 from runtime.loader import load_spec
 from runtime.semantic_validator import validate_semantics
+from web_compat import FastAPI, HTTPException, Request, StreamingResponse
 
 
 DEFAULT_MODEL_ID = "openfabric-planner"
@@ -1506,6 +1504,8 @@ def create_app(spec_path: str, timeout_seconds: float | None = None, selected_ag
 
 
 def main():
+    import uvicorn
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", default=DEFAULT_SPEC_PATH)
     parser.add_argument("--host", default="0.0.0.0")

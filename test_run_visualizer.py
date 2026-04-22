@@ -35,7 +35,14 @@ class _HTTPExceptionStub(Exception):
 
 fastapi_stub.FastAPI = _FastAPIStub
 fastapi_stub.HTTPException = _HTTPExceptionStub
-sys.modules.setdefault("fastapi", fastapi_stub)
+
+
+class _RequestStub:
+    pass
+
+
+fastapi_stub.Request = _RequestStub
+sys.modules["fastapi"] = fastapi_stub
 
 responses_stub = types.ModuleType("fastapi.responses")
 
@@ -50,7 +57,9 @@ class _ResponseStub:
 responses_stub.HTMLResponse = _ResponseStub
 responses_stub.JSONResponse = _ResponseStub
 responses_stub.PlainTextResponse = _ResponseStub
-sys.modules.setdefault("fastapi.responses", responses_stub)
+responses_stub.StreamingResponse = _ResponseStub
+sys.modules["fastapi.responses"] = responses_stub
+sys.modules.pop("web_compat", None)
 
 requests_stub = types.ModuleType("requests")
 sys.modules.setdefault("requests", requests_stub)

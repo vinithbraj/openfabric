@@ -6,7 +6,7 @@ import subprocess
 import sys
 from typing import Any
 
-from fastapi import FastAPI
+from web_compat import FastAPI
 import requests
 
 from agent_library.common import EventRequest, EventResponse, serialize_for_stdin, shared_llm_api_settings, task_plan_context, with_node_envelope

@@ -4,8 +4,7 @@ import json
 from collections import defaultdict, deque
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from web_compat import FastAPI, HTTPException, HTMLResponse, JSONResponse, PlainTextResponse
 
 from .run_store import RunStore
 

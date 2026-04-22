@@ -43,13 +43,17 @@ RESULT_ENVELOPE_FIELDS = [
 def _model_dump(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()  # type: ignore[attr-defined]
-    return model.dict()
+    if hasattr(model, "dict"):
+        return model.dict()  # type: ignore[attr-defined]
+    return deepcopy(getattr(model, "__dict__", {}))
 
 
 def _model_json_schema(model_type: type[BaseModel]) -> dict[str, Any]:
     if hasattr(model_type, "model_json_schema"):
         return model_type.model_json_schema()  # type: ignore[attr-defined]
-    return model_type.schema()
+    if hasattr(model_type, "schema"):
+        return model_type.schema()  # type: ignore[attr-defined]
+    return {}
 
 
 def _metadata_dict(raw: Any) -> dict[str, Any]:

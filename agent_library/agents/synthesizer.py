@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 import requests
-from fastapi import FastAPI
+from web_compat import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
 from agent_library.template import agent_api, agent_descriptor, final_answer, noop
@@ -395,9 +395,6 @@ def _candidate_file_path(value: Any) -> str | None:
     basename = os.path.basename(normalized.replace("\\", "/"))
     if not basename or basename in {".", ".."}:
         return None
-    absolute_candidate = os.path.abspath(normalized)
-    if not os.path.isfile(absolute_candidate):
-        return None
     return candidate
 
 
@@ -408,6 +405,15 @@ def _markdown_link_for_file_path(value: Any) -> str | None:
     absolute_target = os.path.abspath(os.path.expanduser(candidate))
     target = f"<{absolute_target}>" if " " in absolute_target else absolute_target
     return f"[{_path_markdown_label(candidate)}]({target})"
+
+
+def _saved_artifact_summary(paths: list[str]) -> str:
+    if not isinstance(paths, list) or not paths:
+        return ""
+    artifact_links = [(_markdown_link_for_file_path(path) or path) for path in paths]
+    if len(artifact_links) == 1:
+        return f"Saved results to: {artifact_links[0]}"
+    return "Saved results to:\n" + "\n".join(f"- {link}" for link in artifact_links)
 
 
 def _extract_sql_results_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1237,11 +1243,7 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
             else:
                 primary_answer = _format_multi_sql_workflow_answer(sql_results, task) or _format_sql_result_answer(sql_results[-1], task)
         if artifact_paths:
-            artifact_links = [(_markdown_link_for_file_path(path) or path) for path in artifact_paths]
-            artifact_text = _markdown_section(
-                "Files",
-                artifact_links[0] if len(artifact_links) == 1 else "\n".join(f"- {link}" for link in artifact_links),
-            )
+            artifact_text = _saved_artifact_summary(artifact_paths)
             if isinstance(primary_answer, str) and primary_answer.strip():
                 primary_answer = _join_markdown_sections(primary_answer, artifact_text)
             else:
@@ -1273,6 +1275,10 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
         if primary_answer is None and status == "completed" and sql_results:
             primary_answer = _format_multi_sql_workflow_answer(sql_results, task) or _format_sql_result_answer(sql_results[-1], task)
         shell_steps = [step for step in flat_steps if step.get("status") == "completed" and step.get("event") == "shell.result"]
+        if primary_answer is None and status == "completed" and len(shell_steps) == 1 and presentation_format != "markdown_table":
+            shell_payload = shell_steps[0].get("payload")
+            if isinstance(shell_payload, dict):
+                primary_answer = _format_agent_result(shell_payload, "shell.result")
         if primary_answer is None and shell_steps:
             primary_answer = _format_compound_shell_workflow_answer(shell_steps, task)
         if primary_answer is None and status == "completed" and len(completed_steps) > 1:
@@ -1298,6 +1304,10 @@ def _format_workflow_answer(payload: dict[str, Any]) -> str:
         )
         if artifact_text not in primary_answer:
             primary_answer = _join_markdown_sections(primary_answer, artifact_text)
+    elif artifact_paths and isinstance(primary_answer, str) and primary_answer.strip():
+        artifact_summary = _saved_artifact_summary(artifact_paths)
+        if artifact_summary and artifact_summary not in primary_answer:
+            primary_answer = _join_markdown_sections(primary_answer, artifact_summary)
 
     if primary_answer is None and status == "completed" and task_shape == "schema_summary":
         for step in reversed(flat_steps):

@@ -34,7 +34,7 @@ class _RequestStub:
 
 
 fastapi_stub.Request = _RequestStub
-sys.modules.setdefault("fastapi", fastapi_stub)
+sys.modules["fastapi"] = fastapi_stub
 
 fastapi_responses_stub = types.ModuleType("fastapi.responses")
 
@@ -45,12 +45,23 @@ class _StreamingResponseStub:
         self.kwargs = kwargs
 
 
+class _ResponseStub:
+    def __init__(self, content=None, *args, **kwargs):
+        self.content = content
+        self.args = args
+        self.kwargs = kwargs
+
+
 fastapi_responses_stub.StreamingResponse = _StreamingResponseStub
-sys.modules.setdefault("fastapi.responses", fastapi_responses_stub)
+fastapi_responses_stub.HTMLResponse = _ResponseStub
+fastapi_responses_stub.JSONResponse = _ResponseStub
+fastapi_responses_stub.PlainTextResponse = _ResponseStub
+sys.modules["fastapi.responses"] = fastapi_responses_stub
+sys.modules.pop("web_compat", None)
 
 requests_stub = types.ModuleType("requests")
 requests_stub.post = lambda *args, **kwargs: None
-sys.modules.setdefault("requests", requests_stub)
+sys.modules["requests"] = requests_stub
 
 pydantic_stub = types.ModuleType("pydantic")
 
@@ -62,14 +73,14 @@ class _BaseModel:
 
 
 pydantic_stub.BaseModel = _BaseModel
-sys.modules.setdefault("pydantic", pydantic_stub)
+sys.modules["pydantic"] = pydantic_stub
 
 uvicorn_stub = types.ModuleType("uvicorn")
-sys.modules.setdefault("uvicorn", uvicorn_stub)
+sys.modules["uvicorn"] = uvicorn_stub
 
 jsonschema_stub = types.ModuleType("jsonschema")
 jsonschema_stub.validate = lambda instance, schema: None
-sys.modules.setdefault("jsonschema", jsonschema_stub)
+sys.modules["jsonschema"] = jsonschema_stub
 
 from openwebui_gateway import _format_progress, _should_use_gateway_direct_fallback, _stream_synthesis_parts
 

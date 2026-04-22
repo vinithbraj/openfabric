@@ -5,7 +5,7 @@ import shlex
 from typing import Any, Dict, List
 
 import requests
-from fastapi import FastAPI
+from web_compat import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
 from agent_library.contracts import api_emit_events, api_trigger_event
@@ -2040,8 +2040,8 @@ def _derive_presentation(question: str) -> dict:
         presentation["format"] = "markdown"
         presentation["task"] = "Report the total Slurm node count and state summary clearly in Markdown."
     elif docker_listing_request:
-        presentation["format"] = "markdown"
-        presentation["task"] = "Show the raw Docker command output clearly in a preformatted block."
+        presentation["format"] = "markdown_table"
+        presentation["task"] = "Show the Docker results in a clean Markdown table."
     elif any(token in question_lc for token in ("table", "tabulate", "columns", "rows", "compare", "comparison", "status", "list")):
         presentation["format"] = "markdown_table"
         presentation["task"] = "Render the result as a clean Markdown table with helpful context."
@@ -2389,6 +2389,11 @@ def _sql_fallback_steps(question: str, capabilities: dict):
 
 
 def _sql_fallback_steps_for_task(planning_question: str, task_question: str, capabilities: dict):
+    if _looks_like_multi_domain_count_workflow(task_question, capabilities) or _looks_like_multi_domain_count_workflow(
+        planning_question,
+        capabilities,
+    ):
+        return []
     if not _looks_like_sql_question(planning_question, capabilities):
         return []
     target_agent = _select_sql_target_agent(planning_question, capabilities)
@@ -2423,15 +2428,26 @@ def _sql_fallback_steps_for_task(planning_question: str, task_question: str, cap
         ]
     mixed_parts = _mixed_count_and_detail_parts(task_question)
     if mixed_parts is not None:
+        count_question, detail_question = mixed_parts
         return [
             {
                 "id": "step1",
                 "target_agent": target_agent,
+                "task": "Count the qualifying rows",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": count_question,
+                },
+            },
+            {
+                "id": "step2",
+                "target_agent": target_agent,
                 "task": "List the qualifying rows with requested details",
                 "instruction": {
                     "operation": "query_from_request",
-                    "question": _mixed_count_detail_sql_question(task_question),
+                    "question": detail_question,
                 },
+                "depends_on": ["step1"],
             },
         ]
     return [
@@ -2629,7 +2645,130 @@ def _contextualize_slurm_followup_task(task: str, question: str) -> str:
     return rewritten
 
 
+def _looks_like_multi_domain_count_workflow(question: str, capabilities: dict) -> bool:
+    text = re.sub(r"\s+", " ", str(question or "").strip().lower())
+    if not text:
+        return False
+    count_marker_count = sum(text.count(marker) for marker in COUNT_REQUEST_MARKERS)
+    if count_marker_count < 2:
+        return False
+    domain_count = 0
+    if _looks_like_sql_question(question, capabilities):
+        domain_count += 1
+    if _looks_like_slurm_question(question):
+        domain_count += 1
+    if (
+        ("python" in text and "file" in text)
+        or _looks_like_workspace_file_question(question)
+        or _looks_like_repo_file_scan(question)
+    ):
+        domain_count += 1
+    return domain_count >= 2
+
+
+def _split_multi_domain_count_request(question: str) -> list[str]:
+    text = re.sub(r"\s+", " ", str(question or "")).strip()
+    if not text:
+        return []
+    separator_re = re.compile(
+        r"\s*(?:;|,\s*|,\s+and\s+|,\s+then\s+|\.\s+|(?:and|then)\s+)(?=(?:(?:\S+\s+){0,6}(?:what|how|count|list|show|find|report|tell|give|provide)\b))",
+        flags=re.IGNORECASE,
+    )
+    raw_parts = separator_re.split(text)
+    parts: list[str] = []
+    for raw_part in raw_parts:
+        part = _sanitize_task_text(raw_part)
+        if not part:
+            continue
+        part_lc = part.lower()
+        if parts and part_lc in {"difference", "the difference"}:
+            parts[-1] = f"{parts[-1]} and the difference"
+            continue
+        parts.append(part)
+    return parts or [text]
+
+
+def _select_multi_domain_count_target_agent(part: str, question: str, capabilities: dict) -> str | None:
+    normalized_part = _normalize_compound_shell_part(part, question)
+    if _looks_like_slurm_question(normalized_part):
+        return _first_agent_in_family(capabilities, "slurm_runner")
+    if _looks_like_sql_question(normalized_part, capabilities):
+        return _select_sql_target_agent(normalized_part, capabilities)
+    normalized_lc = normalized_part.lower()
+    if "python" in normalized_lc and "file" in normalized_lc:
+        return "shell_runner"
+    if _looks_like_workspace_file_question(normalized_part) or _looks_like_repo_file_scan(normalized_part):
+        return "shell_runner"
+    return _select_target_agent(normalized_part, capabilities) or _select_target_agent(part, capabilities)
+
+
+def _multi_domain_count_steps(question: str, capabilities: dict):
+    if not _looks_like_multi_domain_count_workflow(question, capabilities):
+        return []
+
+    parts = _split_multi_domain_count_request(question)
+    if len(parts) < 2:
+        return []
+
+    steps = []
+    executable_step_ids: list[str] = []
+    wants_difference = any(token in question.lower() for token in ("difference", "compare", "versus", " vs "))
+
+    for part in parts:
+        part_lc = part.lower()
+        presentation_clause = bool(
+            re.match(r"^(?:report|tell|give|provide|show)\b", part_lc)
+            and any(token in part_lc for token in ("answer", "count", "counts", "difference", "summary"))
+        )
+        if _is_presentation_only_task(part) or presentation_clause:
+            continue
+        target_agent = _select_multi_domain_count_target_agent(part, question, capabilities)
+        if not target_agent or target_agent in {"ops_planner", "synthesizer"}:
+            return []
+
+        effective_task = _sanitize_task_text(part)
+        if _agent_family(target_agent) == "slurm_runner":
+            effective_task = _contextualize_slurm_followup_task(effective_task, question)
+        elif target_agent == "shell_runner":
+            effective_task = _contextualize_shell_followup_task(effective_task, question)
+
+        instruction = _normalize_agent_instruction(target_agent, effective_task, None, None, len(steps) + 1)
+        if not isinstance(instruction, dict) or not instruction:
+            return []
+
+        step_id = f"step{len(steps) + 1}"
+        step = {
+            "id": step_id,
+            "target_agent": target_agent,
+            "task": effective_task,
+            "instruction": instruction,
+        }
+        steps.append(step)
+        executable_step_ids.append(step_id)
+
+    if wants_difference and len(executable_step_ids) == 2:
+        steps.append(
+            {
+                "id": f"step{len(steps) + 1}",
+                "target_agent": "shell_runner",
+                "task": "compute the absolute difference between the previous counts",
+                "instruction": {
+                    "operation": "run_command",
+                    "command": _build_dependency_results_difference_command(),
+                    "capture": {"mode": "stdout_stripped"},
+                },
+                "depends_on": executable_step_ids[:2],
+            }
+        )
+
+    return steps if len(executable_step_ids) >= 2 else []
+
+
 def _compound_fallback_steps(question: str, capabilities: dict):
+    multi_domain_steps = _multi_domain_count_steps(question, capabilities)
+    if multi_domain_steps:
+        return multi_domain_steps
+
     parts = _split_compound_request(question)
     if len(parts) < 2:
         return []
@@ -2846,21 +2985,56 @@ def _expand_mixed_sql_steps(question: str, steps: list[dict], capabilities: dict
     if parts is None:
         return steps
     if len(steps) == 1 and _agent_family(str(steps[0].get("target_agent"))) == "sql_runner":
-        return steps
+        count_question, detail_question = parts
+        sql_step = steps[0]
+        step1_id = str(sql_step.get("id") or "step1")
+        target_agent = sql_step.get("target_agent")
+        return [
+            {
+                "id": step1_id,
+                "target_agent": target_agent,
+                "task": "Count the qualifying rows",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": count_question,
+                },
+            },
+            {
+                "id": f"{step1_id}_details" if step1_id != "step1" else "step2",
+                "target_agent": target_agent,
+                "task": "List the qualifying rows with requested details",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": detail_question,
+                },
+                "depends_on": [step1_id],
+            },
+        ]
     if not all(_agent_family(str(step.get("target_agent"))) == "sql_runner" for step in steps):
         return steps
-    sql_step = steps[-1]
+    count_question, detail_question = parts
+    sql_step = steps[0]
     target_agent = sql_step.get("target_agent")
     step1_id = str(sql_step.get("id") or "step1")
     return [
         {
             "id": step1_id,
             "target_agent": target_agent,
+            "task": "Count the qualifying rows",
+            "instruction": {
+                "operation": "query_from_request",
+                "question": count_question,
+            },
+        },
+        {
+            "id": f"{step1_id}_details" if step1_id != "step1" else "step2",
+            "target_agent": target_agent,
             "task": "List the qualifying rows with requested details",
             "instruction": {
                 "operation": "query_from_request",
-                "question": _mixed_count_detail_sql_question(question),
+                "question": detail_question,
             },
+            "depends_on": [step1_id],
         },
     ]
 
@@ -3111,7 +3285,8 @@ def _normalize_steps(question: str, steps: List[Dict[str, str]], capabilities: d
             normalized_step["when"] = when
         normalized.append(normalized_step)
         available_step_ids.add(normalized_step["id"])
-    normalized = _recover_compound_steps(question, normalized, capabilities)
+    if not _looks_like_save_list_sql_request(question, capabilities):
+        normalized = _recover_compound_steps(question, normalized, capabilities)
     normalized = _expand_mixed_sql_steps(question, normalized, capabilities)
     return _expand_sql_export_steps(question, normalized, capabilities)
 

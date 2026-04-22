@@ -1,7 +1,7 @@
 from pathlib import Path
 import re
 
-from fastapi import FastAPI
+from web_compat import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, task_plan_context, with_node_envelope
 from agent_library.template import agent_api, agent_descriptor, emit, needs_decomposition, noop, task_result

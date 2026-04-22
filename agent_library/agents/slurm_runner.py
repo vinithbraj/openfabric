@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 import requests
-from fastapi import FastAPI
+from web_compat import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, task_plan_context, with_node_envelope
 from agent_library.reduction import (

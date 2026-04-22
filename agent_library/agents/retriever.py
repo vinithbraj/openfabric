@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from web_compat import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, with_node_envelope
 from agent_library.template import agent_api, agent_descriptor, emit, noop

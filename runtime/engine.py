@@ -150,8 +150,16 @@ class Engine:
                 "adapter": runtime_cfg.get("adapter"),
                 "endpoint": runtime_cfg.get("endpoint"),
             }
+            descriptor_name = metadata.get("name")
+            if (
+                isinstance(descriptor_name, str)
+                and descriptor_name.strip()
+                and descriptor_name.strip() != agent_name
+                and not metadata.get("template_agent")
+            ):
+                entry["template_agent"] = descriptor_name.strip()
             for key, value in metadata.items():
-                if key in {"description", "methods", "routing_notes"}:
+                if key in {"description", "methods", "routing_notes", "name"}:
                     continue
                 entry[key] = value
             entry["graph_node"] = build_agent_graph_node(agent_name, config, metadata)
@@ -507,8 +515,81 @@ class Engine:
         subscribers = self.bus.get_subscribers(event_name)
         target_agent = payload.get("target_agent") if isinstance(payload, dict) else None
         if event_name == "task.plan" and isinstance(target_agent, str) and target_agent:
-            subscribers = [agent_name for agent_name in subscribers if agent_name == target_agent]
+            subscribers = self._resolve_target_subscribers(target_agent, subscribers, payload)
         return subscribers
+
+    def _agent_aliases(self, agent_name: str) -> set[str]:
+        aliases = {agent_name}
+        config = self.spec.get("agents", {}).get(agent_name, {})
+        metadata = config.get("metadata", {}) if isinstance(config.get("metadata"), dict) else {}
+        for key in ("argument_name", "template_agent"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                aliases.add(value.strip())
+        return aliases
+
+    def _target_resolution_text(self, payload: dict) -> str:
+        parts: list[str] = []
+        for key in ("task", "original_task"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+        instruction = payload.get("instruction")
+        if isinstance(instruction, dict):
+            for key in ("question", "command"):
+                value = instruction.get(key)
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
+        return " ".join(parts).lower()
+
+    def _target_match_score(self, agent_name: str, resolution_text: str) -> int:
+        config = self.spec.get("agents", {}).get(agent_name, {})
+        metadata = config.get("metadata", {}) if isinstance(config.get("metadata"), dict) else {}
+        text_tokens = set(re.findall(r"[a-z0-9_.-]+", resolution_text))
+        score = 0
+
+        routing_priority = metadata.get("routing_priority")
+        if isinstance(routing_priority, (int, float)):
+            score += int(routing_priority)
+
+        for key in ("database_name", "cluster_name", "argument_name", "template_agent"):
+            value = metadata.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            normalized = value.strip().lower()
+            if normalized and normalized in resolution_text:
+                score += 100
+            score += len(text_tokens & set(re.findall(r"[a-z0-9_.-]+", normalized))) * 25
+
+        for key in ("database_aliases", "cluster_aliases", "routing_hints"):
+            values = metadata.get(key)
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, str) or not item.strip():
+                    continue
+                normalized = item.strip().lower()
+                if normalized and normalized in resolution_text:
+                    score += 60
+                score += len(text_tokens & set(re.findall(r"[a-z0-9_.-]+", normalized))) * 15
+
+        return score
+
+    def _resolve_target_subscribers(self, target_agent: str, subscribers: list[str], payload: dict) -> list[str]:
+        if target_agent in subscribers:
+            return [target_agent]
+
+        alias_matches = [agent_name for agent_name in subscribers if target_agent in self._agent_aliases(agent_name)]
+        if len(alias_matches) <= 1:
+            return alias_matches
+
+        resolution_text = self._target_resolution_text(payload)
+        ranked = sorted(
+            alias_matches,
+            key=lambda agent_name: (self._target_match_score(agent_name, resolution_text), agent_name),
+            reverse=True,
+        )
+        return ranked[:1]
 
     def _invoke_subscribers(self, event_name: str, payload: dict, depth: int):
         results = []
@@ -2376,6 +2457,13 @@ class Engine:
             )
             return compact
         if event_name == "sql.result":
+            row_limit = 5
+            detail = str(payload.get("detail") or "").strip().lower()
+            result_payload = payload.get("result")
+            if "database tables listed" in detail and isinstance(result_payload, dict):
+                rows = result_payload.get("rows")
+                if isinstance(rows, list) and rows and len(rows) <= 50:
+                    row_limit = len(rows)
             compact.update(
                 {
                     "detail": payload.get("detail"),
@@ -2387,7 +2475,7 @@ class Engine:
                     "reduction": self._compact_value(payload.get("reduction"), text_limit=180, row_limit=3),
                     "schema": self._compact_schema(payload.get("schema")),
                     "stats": self._compact_value(payload.get("stats"), text_limit=120),
-                    "result": self._compact_value(payload.get("result"), text_limit=240, row_limit=5),
+                    "result": self._compact_value(result_payload, text_limit=240, row_limit=row_limit),
                     "node": self._compact_value(payload.get("node"), text_limit=160, row_limit=4),
                 }
             )
@@ -2859,6 +2947,13 @@ class Engine:
             step_payload["depends_on"] = [item for item in raw_step.get("depends_on") if isinstance(item, str)]
         if isinstance(raw_step.get("when"), dict) and raw_step.get("when"):
             step_payload["when"] = raw_step.get("when")
+        resolved_targets = self._resolve_target_subscribers(
+            str(step_payload.get("target_agent") or ""),
+            self.bus.get_subscribers("task.plan"),
+            step_payload,
+        )
+        if len(resolved_targets) == 1:
+            step_payload["target_agent"] = resolved_targets[0]
         instruction = step_payload.get("instruction") if isinstance(step_payload.get("instruction"), dict) else {}
         step_payload["node"] = self._node_request(
             agent=str(step_payload.get("target_agent") or ""),

@@ -17,6 +17,14 @@ class _FastAPIStub:
 
 
 fastapi_stub.FastAPI = _FastAPIStub
+fastapi_stub.HTTPException = Exception
+
+
+class _RequestStub:
+    pass
+
+
+fastapi_stub.Request = _RequestStub
 sys.modules.setdefault("fastapi", fastapi_stub)
 
 from agent_library.common import task_plan_context

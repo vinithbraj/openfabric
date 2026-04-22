@@ -535,6 +535,191 @@ class EngineValidationTests(unittest.TestCase):
             os.environ["OPENFABRIC_RUN_STORE_DIR"] = self.original_run_store_dir
         self.run_store_dir.cleanup()
 
+    def test_task_plan_family_target_resolves_to_matching_sql_instance(self):
+        spec = copy.deepcopy(TEST_SPEC)
+        spec["agents"] = {
+            "sql_runner_mydb": {
+                "runtime": {"adapter": "test_exec"},
+                "subscribes_to": ["task.plan"],
+                "emits": ["task.result"],
+                "metadata": {
+                    "template_agent": "sql_runner",
+                    "argument_name": "mydb",
+                    "database_name": "mydb",
+                    "database_aliases": ["mydb"],
+                    "routing_priority": 10,
+                },
+            },
+            "sql_runner_dicom_mock": {
+                "runtime": {"adapter": "test_exec"},
+                "subscribes_to": ["task.plan"],
+                "emits": ["task.result"],
+                "metadata": {
+                    "template_agent": "sql_runner",
+                    "argument_name": "dicom_mock",
+                    "database_name": "dicom_mock",
+                    "database_aliases": ["dicom_mock", "dicom mock"],
+                    "routing_priority": 50,
+                },
+            },
+        }
+        engine = Engine(spec)
+        engine.setup()
+
+        dicom_subscribers = engine._select_subscribers(
+            "task.plan",
+            {
+                "target_agent": "sql_runner",
+                "task": "list the tables in the dicom schema alphabetically",
+                "original_task": "In the dicom_mock database, list the tables in the dicom schema alphabetically and tell me the total count.",
+                "instruction": {"operation": "query_from_request", "question": "In the dicom_mock database, list the tables in the dicom schema alphabetically and tell me the total count."},
+            },
+        )
+        mydb_subscribers = engine._select_subscribers(
+            "task.plan",
+            {
+                "target_agent": "sql_runner",
+                "task": "how many patients have more than 2 studies",
+                "original_task": "In the mydb database, how many patients have more than 2 studies?",
+                "instruction": {"operation": "query_from_request", "question": "In the mydb database, how many patients have more than 2 studies?"},
+            },
+        )
+
+        self.assertEqual(dicom_subscribers, ["sql_runner_dicom_mock"])
+        self.assertEqual(mydb_subscribers, ["sql_runner_mydb"])
+
+    def test_build_agent_catalog_preserves_runtime_agent_name_when_metadata_has_template_name(self):
+        spec = copy.deepcopy(TEST_SPEC)
+        spec["agents"] = {
+            "sql_runner_mydb": {
+                "runtime": {"adapter": "test_exec"},
+                "subscribes_to": ["task.plan"],
+                "emits": ["task.result"],
+                "metadata": {
+                    "name": "sql_runner",
+                    "template_agent": "sql_runner",
+                    "database_name": "mydb",
+                },
+            },
+        }
+        engine = Engine(spec)
+
+        catalog = engine._build_agent_catalog()
+
+        self.assertEqual(catalog[0]["name"], "sql_runner_mydb")
+        self.assertEqual(catalog[0]["template_agent"], "sql_runner")
+        self.assertEqual(catalog[0]["database_name"], "mydb")
+
+    def test_compact_sql_schema_table_result_preserves_small_table_inventory(self):
+        engine = Engine(copy.deepcopy(TEST_SPEC))
+        payload = {
+            "detail": "Database tables listed.",
+            "result": {
+                "columns": ["schema", "table", "type"],
+                "rows": [
+                    {"schema": "dicom", "table": "dicom_tags", "type": "table"},
+                    {"schema": "dicom", "table": "instances", "type": "table"},
+                    {"schema": "dicom", "table": "patients", "type": "table"},
+                    {"schema": "dicom", "table": "rtdose", "type": "table"},
+                    {"schema": "dicom", "table": "rtplan", "type": "table"},
+                    {"schema": "dicom", "table": "rtstruct", "type": "table"},
+                    {"schema": "dicom", "table": "series", "type": "table"},
+                    {"schema": "dicom", "table": "studies", "type": "table"},
+                ],
+                "row_count": 8,
+            },
+        }
+
+        compact = engine._compact_event_payload("sql.result", payload)
+
+        self.assertEqual(len(compact["result"]["rows"]), 8)
+        self.assertNotIn("rows_note", compact["result"])
+
+    def test_task_plan_family_target_resolves_to_matching_slurm_instance(self):
+        spec = copy.deepcopy(TEST_SPEC)
+        spec["agents"] = {
+            "slurm_runner_cluster": {
+                "runtime": {"adapter": "test_exec"},
+                "subscribes_to": ["task.plan"],
+                "emits": ["task.result"],
+                "metadata": {
+                    "template_agent": "slurm_runner",
+                    "argument_name": "cluster",
+                    "cluster_name": "default",
+                    "cluster_aliases": ["slurm", "cluster", "hpc"],
+                    "routing_priority": 25,
+                },
+            },
+        }
+        engine = Engine(spec)
+        engine.setup()
+
+        subscribers = engine._select_subscribers(
+            "task.plan",
+            {
+                "target_agent": "slurm_runner",
+                "task": "how many pending jobs does vinith have",
+                "original_task": "In the Slurm cluster, how many pending jobs does vinith have, and list the job IDs.",
+                "instruction": {"operation": "query_from_request", "question": "In the Slurm cluster, how many pending jobs does vinith have, and list the job IDs."},
+            },
+        )
+
+        self.assertEqual(subscribers, ["slurm_runner_cluster"])
+
+    def test_execute_single_workflow_step_records_resolved_concrete_target_agent(self):
+        spec = copy.deepcopy(TEST_SPEC)
+        spec["agents"] = {
+            "sql_runner_mydb": {
+                "runtime": {"adapter": "test_exec"},
+                "subscribes_to": ["task.plan"],
+                "emits": ["task.result"],
+                "metadata": {
+                    "template_agent": "sql_runner",
+                    "argument_name": "mydb",
+                    "database_name": "mydb",
+                    "database_aliases": ["mydb"],
+                    "routing_priority": 10,
+                },
+            },
+            "sql_runner_dicom_mock": {
+                "runtime": {"adapter": "test_exec"},
+                "subscribes_to": ["task.plan"],
+                "emits": ["task.result"],
+                "metadata": {
+                    "template_agent": "sql_runner",
+                    "argument_name": "dicom_mock",
+                    "database_name": "dicom_mock",
+                    "database_aliases": ["dicom_mock", "dicom mock"],
+                    "routing_priority": 50,
+                },
+            },
+        }
+        engine = Engine(spec)
+        engine.setup()
+
+        outcome = engine._execute_single_workflow_step(
+            {
+                "id": "step1",
+                "target_agent": "sql_runner",
+                "task": "list the tables in the dicom schema alphabetically",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": "In the dicom_mock database, list the tables in the dicom schema alphabetically and tell me the total count.",
+                },
+            },
+            {
+                "task": "In the dicom_mock database, list the tables in the dicom schema alphabetically and tell me the total count.",
+                "task_shape": "schema_summary",
+                "run_id": "run-test",
+                "attempt": 1,
+            },
+            {"original_task": "In the dicom_mock database, list the tables in the dicom schema alphabetically and tell me the total count."},
+            0,
+        )
+
+        self.assertEqual(outcome.get("target_agent"), "sql_runner_dicom_mock")
+        self.assertEqual(outcome.get("step_payload", {}).get("target_agent"), "sql_runner_dicom_mock")
+
     def test_structured_step_result_exposes_shell_stdout_alias_for_followup_references(self):
         engine = Engine(TEST_SPEC)
         context = {"__step_results__": [], "__step_results_by_id__": {}}

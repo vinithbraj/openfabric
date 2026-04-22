@@ -15,6 +15,14 @@ class _FastAPIStub:
 
 
 fastapi_stub.FastAPI = _FastAPIStub
+fastapi_stub.HTTPException = Exception
+
+
+class _RequestStub:
+    pass
+
+
+fastapi_stub.Request = _RequestStub
 sys.modules.setdefault("fastapi", fastapi_stub)
 
 requests_stub = types.ModuleType("requests")
@@ -126,6 +134,39 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(steps[0]["instruction"]["question"], "how many jobs are running on my slurm cluster")
         self.assertEqual(steps[1]["instruction"]["question"], "how many jobs are pending on my slurm cluster ?")
 
+    def test_compound_fallback_steps_expand_multi_domain_counts_with_difference(self):
+        steps = _compound_fallback_steps(
+            (
+                "In the dicom_mock database count patients, and in the repository root count Python files, "
+                "then report both counts and the difference."
+            ),
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual(steps[0]["target_agent"], "sql_runner_dicom_mock")
+        self.assertEqual(steps[0]["instruction"]["question"], "In the dicom_mock database count patients")
+        self.assertEqual(steps[1]["target_agent"], "shell_runner")
+        self.assertIn("repository root", steps[1]["task"].lower())
+        self.assertIn("wc -l", steps[1]["instruction"]["command"])
+        self.assertEqual(steps[2]["target_agent"], "shell_runner")
+        self.assertEqual(steps[2]["task"], "compute the absolute difference between the previous counts")
+        self.assertEqual(steps[2]["depends_on"], ["step1", "step2"])
+
+    def test_compound_fallback_steps_expand_multi_domain_counts_without_difference(self):
+        steps = _compound_fallback_steps(
+            (
+                "Count pending Slurm jobs for vinith, count patients in the dicom_mock database, "
+                "and count Python files in the repository root. Report all three counts in one answer."
+            ),
+            CAPABILITIES,
+        )
+        self.assertEqual(len(steps), 3)
+        self.assertEqual([step["target_agent"] for step in steps], ["slurm_runner_cluster", "sql_runner_dicom_mock", "shell_runner"])
+        self.assertEqual(steps[0]["instruction"]["question"], "Count pending Slurm jobs for vinith")
+        self.assertEqual(steps[1]["instruction"]["question"], "count patients in the dicom_mock database")
+        self.assertIn("repository root", steps[2]["task"].lower())
+        self.assertIn("wc -l", steps[2]["instruction"]["command"])
+
     def test_detects_slurm_node_to_job_drift(self):
         self.assertTrue(
             _step_semantic_drift(
@@ -206,6 +247,40 @@ class PlannerSemanticValidationTests(unittest.TestCase):
         self.assertEqual(len(normalized), 2)
         self.assertEqual(normalized[0]["instruction"]["question"], "how many jobs are running on my slurm cluster")
         self.assertEqual(normalized[1]["instruction"]["question"], "how many jobs are pending on my slurm cluster ?")
+
+    def test_normalize_steps_recovers_multi_domain_count_workflow_when_llm_drops_other_agents(self):
+        steps = [
+            {
+                "id": "step1",
+                "target_agent": "sql_runner_dicom_mock",
+                "task": "Count pending Slurm jobs for vinith, count patients in the dicom_mock database, and count Python files in the repository root. Report all three counts in one answer.",
+                "instruction": {
+                    "operation": "query_from_request",
+                    "question": "Count pending Slurm jobs for vinith, count patients in the dicom_mock database, and count Python files in the repository root. Report all three counts in one answer.",
+                },
+            }
+        ]
+        normalized = _normalize_steps(
+            "Count pending Slurm jobs for vinith, count patients in the dicom_mock database, and count Python files in the repository root. Report all three counts in one answer.",
+            steps,
+            CAPABILITIES,
+        )
+        self.assertEqual(len(normalized), 3)
+        self.assertEqual([step["target_agent"] for step in normalized], ["slurm_runner_cluster", "sql_runner_dicom_mock", "shell_runner"])
+
+    def test_sql_fallback_declines_multi_domain_count_workflow(self):
+        steps = _sql_fallback_steps_for_task(
+            (
+                "In the dicom_mock database count patients, and in the repository root count Python files, "
+                "then report both counts and the difference."
+            ),
+            (
+                "In the dicom_mock database count patients, and in the repository root count Python files, "
+                "then report both counts and the difference."
+            ),
+            CAPABILITIES,
+        )
+        self.assertEqual(steps, [])
 
     def test_derive_shell_command_for_save_rows_task(self):
         command = _derive_shell_command("create a list of these patients and save it in patient.txt")
