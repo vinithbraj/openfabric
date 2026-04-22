@@ -11,18 +11,28 @@ import requests
 
 from agent_library.common import EventRequest, EventResponse, serialize_for_stdin, shared_llm_api_settings, task_plan_context, with_node_envelope
 from agent_library.reduction import build_shell_reduction_request, execute_reduction_request, generate_shell_reduction_command
+from agent_library.template import (
+    agent_api,
+    agent_descriptor,
+    emit,
+    needs_decomposition as shared_needs_decomposition,
+    noop,
+    task_result,
+)
 from agent_library.agents.llm_operations_planner import _derive_shell_command as _planner_derive_shell_command
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
 
-AGENT_METADATA = {
-    "description": (
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="shell_runner",
+    role="executor",
+    description=(
         "General-purpose local shell executor for safe machine, workspace, filesystem, "
         "repository, process, service, container, network, build, test, arithmetic, "
         "and text/data transformation operations."
     ),
-    "capability_domains": [
+    capability_domains=[
         "general_shell",
         "machine_operations",
         "workspace_operations",
@@ -39,7 +49,7 @@ AGENT_METADATA = {
         "data_transformation",
         "arithmetic",
     ],
-    "action_verbs": [
+    action_verbs=[
         "run",
         "execute",
         "inspect",
@@ -75,9 +85,9 @@ AGENT_METADATA = {
         "commit",
         "push",
     ],
-    "side_effect_policy": "general_machine_operations_with_safety_checks",
-    "safety_enforced_by_agent": True,
-    "routing_notes": [
+    side_effect_policy="general_machine_operations_with_safety_checks",
+    safety_enforced_by_agent=True,
+    routing_notes=[
         "Use for any request that can be expressed as safe local shell commands.",
         "Covers workspace and filesystem operations, process and network inspection, services, containers, repositories, builds, tests, package commands, arithmetic, and text/data transformations.",
         "Use for local machine hardware inspection such as checking whether a CLI is installed, inspecting GPUs with nvidia-smi, and reading local driver or CUDA details.",
@@ -87,26 +97,30 @@ AGENT_METADATA = {
         "Can derive shell commands from natural-language task plans using an LLM preprocessing step.",
         "If a task cannot be mapped to a safe local shell command, emit nothing for task.plan.",
     ],
-    "methods": [
-        {
-            "name": "execute_explicit_command",
-            "event": "shell.exec",
-            "when": "Runs explicitly provided shell command strings.",
-            "intent_tags": ["cli_exec"],
-            "risk_level": "medium",
-            "examples": [
+    apis=[
+        agent_api(
+            name="execute_explicit_command",
+            event="shell.exec",
+            summary="Runs explicitly provided shell command strings.",
+            when="Runs explicitly provided shell command strings.",
+            intent_tags=["cli_exec"],
+            risk_level="medium",
+            examples=[
                 "find . -iname \"*vinith*\"",
                 "ls -la agent_library/agents",
             ],
-            "anti_patterns": ["read a specific file's contents"],
-        },
-        {
-            "name": "execute_llm_derived_command",
-            "event": "task.plan",
-            "when": "Derives a shell command from natural language and executes it when safely processable.",
-            "intent_tags": ["cli_exec", "machine_operations", "workspace_operations", "data_transformation"],
-            "risk_level": "medium",
-            "examples": [
+            anti_patterns=["read a specific file's contents"],
+            deterministic=True,
+            side_effect_level="variable",
+        ),
+        agent_api(
+            name="execute_llm_derived_command",
+            event="task.plan",
+            summary="Derives a shell command from natural language and executes it when safely processable.",
+            when="Derives a shell command from natural language and executes it when safely processable.",
+            intent_tags=["cli_exec", "machine_operations", "workspace_operations", "data_transformation"],
+            risk_level="medium",
+            examples=[
                 "list files under agent_library",
                 "find python files containing FastAPI",
                 "find all files with extension sh in current directory",
@@ -120,10 +134,13 @@ AGENT_METADATA = {
                 "restart container named web",
                 "commit all git changes with message 'update shell prompt'",
             ],
-            "anti_patterns": ["delete system files", "modify system package managers without explicit need"],
-        }
+            anti_patterns=["delete system files", "modify system package managers without explicit need"],
+            deterministic=False,
+            side_effect_level="variable",
+        ),
     ],
-}
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 SHELL_CAPABILITIES = {
     "allowed_operations": [
@@ -177,23 +194,7 @@ METADATA_COMMAND_PATTERNS = [
 
 
 def _needs_decomposition(detail: str):
-    return {
-        "emits": [
-            {
-                "event": "task.result",
-                "payload": {
-                    "detail": detail,
-                    "status": "needs_decomposition",
-                    "error": detail,
-                    "replan_hint": {
-                        "reason": detail,
-                        "failure_class": "needs_decomposition",
-                        "suggested_capabilities": ["shell_runner"],
-                    },
-                },
-            }
-        ]
-    }
+    return shared_needs_decomposition(detail, suggested_capabilities=["shell_runner"])
 
 
 NONFATAL_SCAN_ERROR_PATTERNS = (
@@ -644,69 +645,33 @@ def _derive_command_from_task(task: str, structured_input: Any = None):
 
 def _execute_command(command: str, stdin_data: Any = None, task: str = None):
     if _looks_like_metadata_not_command(command):
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {"detail": "Rejected descriptive capability metadata because it is not an executable shell command."},
-                }
-            ]
-        }
+        return task_result("Rejected descriptive capability metadata because it is not an executable shell command.")
 
     if _is_blocked(command):
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {"detail": "Rejected potentially destructive command"},
-                }
-            ]
-        }
+        return task_result("Rejected potentially destructive command")
 
     if _is_environment_mutation(command):
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {
-                        "detail": (
-                            "Rejected environment-altering command. "
-                            "This shell agent currently allows inspection plus workspace-local file operations, "
-                            "but blocks destructive or service/container control commands."
-                        )
-                    },
-                }
-            ]
-        }
+        return task_result(
+            (
+                "Rejected environment-altering command. "
+                "This shell agent currently allows inspection plus workspace-local file operations, "
+                "but blocks destructive or service/container control commands."
+            )
+        )
 
     try:
         shlex.split(command)
     except ValueError as exc:
-        return {
-            "emits": [
-                {"event": "task.result", "payload": {"detail": f"Invalid command: {exc}"}}
-            ]
-        }
+        return task_result(f"Invalid command: {exc}")
 
     if not command.strip():
-        return {
-            "emits": [
-                {"event": "task.result", "payload": {"detail": "Empty command rejected"}}
-            ]
-        }
+        return task_result("Empty command rejected")
 
     try:
         stdin_text = serialize_for_stdin(stdin_data)
         completed = _run_shell_subprocess(command, stdin_text=stdin_text, timeout=30)
     except subprocess.TimeoutExpired:
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {"detail": "Command timed out after 30 seconds"},
-                }
-            ]
-        }
+        return task_result("Command timed out after 30 seconds")
 
     completed, install_command, install_detail = _attempt_python_dependency_repair(command, stdin_text, completed)
 
@@ -730,14 +695,7 @@ def _execute_command(command: str, stdin_data: Any = None, task: str = None):
     if details:
         payload["detail"] = " ".join(details)
 
-    return {
-        "emits": [
-            {
-                "event": "shell.result",
-                "payload": payload,
-            }
-        ]
-    }
+    return emit("shell.result", payload)
 
 
 @app.post("/handle", response_model=EventResponse)
@@ -748,9 +706,9 @@ def handle_event(req: EventRequest):
     if req.event == "shell.exec":
         command_raw = req.payload.get("command")
         if not isinstance(command_raw, str):
-            return {"emits": []}
+            return noop()
         if _is_introspection_request(command_raw):
-            return {"emits": []}
+            return noop()
         if _looks_like_shell_command(command_raw):
             command = command_raw.strip()
         else:
@@ -758,9 +716,9 @@ def handle_event(req: EventRequest):
                 command = _derive_command_from_task(command_raw)
             except Exception as exc:
                 _debug_log(f"Shell preprocessing failed for shell.exec: {type(exc).__name__}: {exc}")
-                return {"emits": []}
+                return noop()
             if not command:
-                return {"emits": []}
+                return noop()
     elif req.event == "task.plan":
         plan_context = task_plan_context(req.payload)
         instruction = req.payload.get("instruction")
@@ -784,9 +742,9 @@ def handle_event(req: EventRequest):
             return _execute_command(command_raw.strip(), structured_input, task=task)
         
         if not task:
-            return {"emits": []}
+            return noop()
         if _is_introspection_request(task):
-            return {"emits": []}
+            return noop()
         try:
             command = _derive_command_from_task(execution_task, structured_input)
         except Exception as exc:
@@ -795,5 +753,5 @@ def handle_event(req: EventRequest):
         if not command:
             return _needs_decomposition("Shell agent needs the task broken into smaller executable operations.")
     else:
-        return {"emits": []}
+        return noop()
     return _execute_command(command, stdin_data, task=task)

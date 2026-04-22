@@ -8,43 +8,63 @@ import requests
 from fastapi import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
+from agent_library.template import (
+    agent_api,
+    agent_descriptor,
+    emit_sequence,
+    failure_result,
+    noop,
+    task_result,
+)
 from runtime.console import log_debug
 
 app = FastAPI()
 
-AGENT_METADATA = {
-    "description": "LLM planner that decides whether a request is processable by discovered system capabilities.",
-    "capability_domains": ["planning", "routing", "operations"],
-    "action_verbs": ["plan", "route", "assess"],
-    "side_effect_policy": "read_only",
-    "safety_enforced_by_agent": True,
-    "routing_notes": [
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="ops_planner",
+    role="router",
+    description="LLM planner that decides whether a request is processable by discovered system capabilities.",
+    capability_domains=["planning", "routing", "operations"],
+    action_verbs=["plan", "route", "assess"],
+    side_effect_policy="read_only",
+    safety_enforced_by_agent=True,
+    routing_notes=[
         "Only decide if request is processable by discovered capabilities.",
         "If processable, emit task.plan with original task and the best target agent for focused execution.",
         "If not processable, emit task.result with reason.",
         "When an executing step fails or requests decomposition, emit planner.replan.result with a smaller replacement subplan.",
     ],
-    "methods": [
-        {
-            "name": "assess_processable_request",
-            "event": "task.plan",
-            "when": "When request can be handled by at least one discovered agent capability, including multi-step chains.",
-            "intent_tags": ["processable", "capability_match"],
-        },
-        {
-            "name": "reject_unprocessable_request",
-            "event": "task.result",
-            "when": "When request cannot be handled by discovered capabilities.",
-            "intent_tags": ["unprocessable"],
-        },
-        {
-            "name": "decompose_failed_step",
-            "event": "planner.replan.result",
-            "when": "When a running step requests further decomposition or clarification.",
-            "intent_tags": ["replan", "decomposition"],
-        },
+    apis=[
+        agent_api(
+            name="assess_processable_request",
+            event="task.plan",
+            summary="Assesses whether a request can be handled by discovered system capabilities.",
+            when="When request can be handled by at least one discovered agent capability, including multi-step chains.",
+            intent_tags=["processable", "capability_match"],
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="reject_unprocessable_request",
+            event="task.result",
+            summary="Explains why a request cannot be handled by discovered capabilities.",
+            when="When request cannot be handled by discovered capabilities.",
+            intent_tags=["unprocessable"],
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="decompose_failed_step",
+            event="planner.replan.result",
+            summary="Builds a smaller replacement subplan for a failed step.",
+            when="When a running step requests further decomposition or clarification.",
+            intent_tags=["replan", "decomposition"],
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
     ],
-}
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 SUPPORTED_EVENT_SCHEMAS = {
     "task.plan": '{"task":"...","task_shape":"lookup","steps":[{"id":"step1","target_agent":"shell_runner","task":"...","instruction":{"operation":"run_command","command":"docker ps","capture":{"mode":"stdout_first_line"}}}]}',
@@ -3297,15 +3317,15 @@ def handle_event(req: EventRequest):
             CAPABILITIES["available_events"] = _derive_available_events(agents)
         execution_policy = req.payload.get("execution_policy")
         CAPABILITIES["execution_policy"] = execution_policy if isinstance(execution_policy, dict) else {}
-        return {"emits": []}
+        return noop()
 
     if req.event == "planner.replan.request":
         allowed_events = set(CAPABILITIES.get("available_events", DEFAULT_ALLOWED_EVENTS))
         if "planner.replan.result" not in allowed_events:
-            return {"emits": []}
+            return noop()
         replace_step_id = str(req.payload.get("step_id") or "").strip()
         if not replace_step_id:
-            return {"emits": []}
+            return noop()
         steps = []
         try:
             decision = _llm_replan(req.payload, CAPABILITIES)
@@ -3322,18 +3342,10 @@ def handle_event(req: EventRequest):
         if not steps:
             steps = _fallback_replan_steps(req.payload, CAPABILITIES)
         if not steps:
-            return {
-                "emits": [
-                    {
-                        "event": "task.result",
-                        "payload": {
-                            "detail": req.payload.get("reason") or "Planner could not further decompose the failed step.",
-                            "status": "failed",
-                            "error": req.payload.get("error") or req.payload.get("reason"),
-                        },
-                    }
-                ]
-            }
+            return failure_result(
+                str(req.payload.get("reason") or "Planner could not further decompose the failed step."),
+                error=req.payload.get("error") or req.payload.get("reason"),
+            )
         emits = []
         if "plan.progress" in allowed_events:
             emits.append(
@@ -3356,40 +3368,20 @@ def handle_event(req: EventRequest):
                 },
             }
         )
-        return {"emits": emits}
+        return emit_sequence(emits)
 
     if req.event != "user.ask":
-        return {"emits": []}
+        return noop()
 
     question = req.payload["question"]
     current_question = _current_request_from_context(question)
     allowed_events = set(CAPABILITIES.get("available_events", DEFAULT_ALLOWED_EVENTS))
     if _is_unsafe_machine_request(current_question) and "task.result" in allowed_events:
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {
-                        "detail": (
-                            "I won’t autonomously plan high-risk destructive machine operations. "
-                            "Please use a safer, more specific alternative."
-                        )
-                    },
-                }
-            ]
-        }
+        return task_result(
+            "I won’t autonomously plan high-risk destructive machine operations. Please use a safer, more specific alternative."
+        )
     if _is_capability_question(current_question) and "task.result" in allowed_events:
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {
-                        "detail": _format_capability_answer(CAPABILITIES),
-                        "result": _capability_summary(CAPABILITIES),
-                    },
-                }
-            ]
-        }
+        return task_result(_format_capability_answer(CAPABILITIES), result=_capability_summary(CAPABILITIES))
     try:
         decision = _llm_decide(question, CAPABILITIES)
         if decision is not None:
@@ -3422,36 +3414,28 @@ def handle_event(req: EventRequest):
                         }
                     )
                 emits.append({"event": "task.plan", "payload": payload})
-                return {"emits": emits}
+                return emit_sequence(emits)
             emits = _sql_plan_emits(question, allowed_events, current_question)
             if emits is not None:
-                return {"emits": emits}
+                return emit_sequence(emits)
             if "task.result" in allowed_events:
                 reason = decision["reason"] or "No matching capability found."
-                return {"emits": [{"event": "task.result", "payload": {"detail": reason}}]}
-            return {"emits": []}
+                return task_result(reason)
+            return noop()
         _debug_log("LLM planner decision was invalid.")
     except Exception as exc:
         _debug_log(f"LLM planning failed. Error: {type(exc).__name__}: {exc}")
 
     emits = _sql_plan_emits(question, allowed_events, current_question)
     if emits is not None:
-        return {"emits": emits}
+        return emit_sequence(emits)
 
     emits = _fallback_plan_emits(question, allowed_events, current_question)
     if emits is not None:
-        return {"emits": emits}
+        return emit_sequence(emits)
 
     if "task.result" in allowed_events:
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {
-                        "detail": "Planner could not determine if the request is processable. "
-                        "Check LLM connectivity/response format and retry."
-                    },
-                }
-            ]
-        }
-    return {"emits": []}
+        return task_result(
+            "Planner could not determine if the request is processable. Check LLM connectivity/response format and retry."
+        )
+    return noop()

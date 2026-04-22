@@ -21,6 +21,7 @@ from agent_library.reduction import (
     looks_like_elapsed_summary_task,
     looks_like_node_inventory_summary_task,
 )
+from agent_library.template import agent_api, agent_descriptor, emit, failure_result, noop
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -184,13 +185,15 @@ SLURM_DETERMINISTIC_CATALOG_FAMILIES = sorted(
     }
 )
 
-AGENT_METADATA = {
-    "description": (
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="slurm_runner",
+    role="executor",
+    description=(
         "Connects to a remote Slurm gateway, executes deterministic Slurm primitives first for "
         "cluster and job operations, and falls back to generated Slurm commands only when the "
         "deterministic path cannot answer cleanly."
     ),
-    "capability_domains": [
+    capability_domains=[
         "slurm",
         "hpc",
         "cluster_operations",
@@ -199,7 +202,7 @@ AGENT_METADATA = {
         "accounting",
         "deterministic_primitives",
     ],
-    "action_verbs": [
+    action_verbs=[
         "inspect",
         "query",
         "list",
@@ -212,62 +215,72 @@ AGENT_METADATA = {
         "resume",
         "suspend",
     ],
-    "execution_model": SLURM_EXECUTION_MODEL,
-    "deterministic_catalog_version": SLURM_DETERMINISTIC_CATALOG_VERSION,
-    "deterministic_catalog_families": SLURM_DETERMINISTIC_CATALOG_FAMILIES,
-    "deterministic_catalog_size": len(SLURM_DETERMINISTIC_PRIMITIVES),
-    "deterministic_primitives": [item["primitive_id"] for item in SLURM_DETERMINISTIC_PRIMITIVES],
-    "deterministic_catalog_reference": "VERSION_4_PRIMITIVE_CATALOG.md",
-    "fallback_policy": (
+    execution_model=SLURM_EXECUTION_MODEL,
+    deterministic_catalog_version=SLURM_DETERMINISTIC_CATALOG_VERSION,
+    deterministic_catalog_families=SLURM_DETERMINISTIC_CATALOG_FAMILIES,
+    deterministic_catalog_size=len(SLURM_DETERMINISTIC_PRIMITIVES),
+    deterministic_primitives=[item["primitive_id"] for item in SLURM_DETERMINISTIC_PRIMITIVES],
+    deterministic_catalog_reference="VERSION_4_PRIMITIVE_CATALOG.md",
+    fallback_policy=(
         "Run deterministic Slurm primitive first. If the primitive cannot answer cleanly, "
         "run the selector-provided fallback command or legacy generated Slurm command."
     ),
-    "side_effect_policy": "remote_slurm_operations_via_gateway",
-    "safety_enforced_by_agent": True,
-    "routing_notes": [
+    side_effect_policy="remote_slurm_operations_via_gateway",
+    safety_enforced_by_agent=True,
+    routing_notes=[
         "Use for Slurm, HPC cluster, node, partition, queue, job, reservation, and accounting requests.",
         "This agent talks to a remote Slurm gateway over HTTP and does not run Slurm CLIs locally.",
         "Prefer query_from_request for natural-language requests and execute_command only for explicit Slurm commands.",
         "Natural-language Slurm requests now use deterministic primitives first and only fall back to free-form command generation when needed.",
         "Security is intentionally minimal for now; use only configured gateway endpoints.",
     ],
-    "methods": [
-        {
-            "name": "select_deterministic_slurm_primitive",
-            "event": "task.plan",
-            "when": "Selects one deterministic Slurm primitive plus a fallback command plan for a natural-language scheduler request.",
-            "intent_tags": ["slurm_primitive_selection", "cluster_status", "job_queue", "accounting"],
-            "examples": [
+    apis=[
+        agent_api(
+            name="select_deterministic_slurm_primitive",
+            event="task.plan",
+            summary="Selects one deterministic Slurm primitive plus a fallback command plan for a natural-language scheduler request.",
+            when="Selects one deterministic Slurm primitive plus a fallback command plan for a natural-language scheduler request.",
+            intent_tags=["slurm_primitive_selection", "cluster_status", "job_queue", "accounting"],
+            examples=[
                 "show cluster node status",
                 "list queued jobs for user vinith",
                 "show partition availability",
                 "give me failed jobs from yesterday",
             ],
-        },
-        {
-            "name": "execute_deterministic_slurm_primitive",
-            "event": "task.plan",
-            "when": "Executes deterministic Slurm primitives via the gateway before any fallback command generation.",
-            "intent_tags": ["slurm_deterministic_execution", "cluster_status", "job_queue", "accounting"],
-            "examples": [
+            deterministic=True,
+            side_effect_level="read_or_control",
+        ),
+        agent_api(
+            name="execute_deterministic_slurm_primitive",
+            event="task.plan",
+            summary="Executes deterministic Slurm primitives via the gateway before any fallback command generation.",
+            when="Executes deterministic Slurm primitives via the gateway before any fallback command generation.",
+            intent_tags=["slurm_deterministic_execution", "cluster_status", "job_queue", "accounting"],
+            examples=[
                 "how many nodes are in my slurm cluster and what is their state",
                 "how many pending jobs are there",
                 "cancel job 12345",
             ],
-        },
-        {
-            "name": "execute_explicit_slurm_command",
-            "event": "slurm.query",
-            "when": "Executes an explicit Slurm command via the configured gateway.",
-            "intent_tags": ["slurm_command", "scheduler_control"],
-            "examples": [
+            deterministic=True,
+            side_effect_level="read_or_control",
+        ),
+        agent_api(
+            name="execute_explicit_slurm_command",
+            event="slurm.query",
+            summary="Executes an explicit Slurm command via the configured gateway.",
+            when="Executes an explicit Slurm command via the configured gateway.",
+            intent_tags=["slurm_command", "scheduler_control"],
+            examples=[
                 "sinfo -Nel",
                 "squeue -u vinith",
                 "scancel 12345",
             ],
-        },
+            deterministic=True,
+            side_effect_level="read_or_control",
+        ),
     ],
-}
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 SLURM_COMMAND_CATALOG = {
     "sinfo": "cluster, partition, and node state",
@@ -1586,27 +1599,18 @@ def handle_event(req: EventRequest):
         classification_task = plan_context.classification_task
         explicitly_targeted = plan_context.targets("slurm_runner")
         if not classification_task or (not explicitly_targeted and not _is_slurm_task(classification_task)):
-            return {"emits": []}
+            return noop()
         instruction = req.payload.get("instruction") if isinstance(req.payload.get("instruction"), dict) else {}
         task = instruction.get("question") if isinstance(instruction.get("question"), str) else plan_context.execution_task
         natural_language_request = True
     else:
-        return {"emits": []}
+        return noop()
 
     if not _slurm_gateway_ready():
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {
-                        "detail": f"Slurm gateway is unavailable at {_gateway_base_url()}.",
-                        "status": "failed",
-                        "error": f"Slurm gateway is unavailable at {_gateway_base_url()}.",
-                        "result": None,
-                    },
-                }
-            ]
-        }
+        return failure_result(
+            f"Slurm gateway is unavailable at {_gateway_base_url()}.",
+            error=f"Slurm gateway is unavailable at {_gateway_base_url()}.",
+        )
 
     started = time.perf_counter()
     stats: dict[str, float] = {}
@@ -1655,7 +1659,7 @@ def handle_event(req: EventRequest):
                             selection=selection,
                             execution_strategy="deterministic",
                         )
-                        return {"emits": [{"event": "slurm.result", "payload": payload}]}
+                        return emit("slurm.result", payload)
             except Exception as exc:
                 _debug_log(f"Deterministic Slurm primitive failed: {type(exc).__name__}: {exc}")
 
@@ -1740,20 +1744,12 @@ def handle_event(req: EventRequest):
                 execution_strategy=execution_strategy,
             )
             if payload["returncode"] != 0:
-                return {
-                    "emits": [
-                        {
-                            "event": "task.result",
-                            "payload": {
-                                "detail": f"Slurm command failed: {payload['stderr'] or payload['stdout'] or payload['command']}",
-                                "status": "failed",
-                                "error": payload["stderr"] or payload["stdout"] or payload["command"],
-                                "result": {"ok": False, "stats": stats, "slurm": payload["result"]},
-                            },
-                        }
-                    ]
-                }
-            return {"emits": [{"event": "slurm.result", "payload": payload}]}
+                return failure_result(
+                    f"Slurm command failed: {payload['stderr'] or payload['stdout'] or payload['command']}",
+                    error=payload["stderr"] or payload["stdout"] or payload["command"],
+                    result={"ok": False, "stats": stats, "slurm": payload["result"]},
+                )
+            return emit("slurm.result", payload)
 
         except Exception as exc:
             if attempt == 0:
@@ -1762,16 +1758,8 @@ def handle_event(req: EventRequest):
             
             stats["total_ms"] = _elapsed_ms(started)
             _debug_log(f"Slurm task failed after retries: {type(exc).__name__}: {exc}")
-            return {
-                "emits": [
-                    {
-                        "event": "task.result",
-                        "payload": {
-                            "detail": f"Slurm task failed: {type(exc).__name__}: {exc}",
-                            "status": "failed",
-                            "error": f"{type(exc).__name__}: {exc}",
-                            "result": {"ok": False, "stats": stats} if stats else None,
-                        },
-                    }
-                ]
-            }
+            return failure_result(
+                f"Slurm task failed: {type(exc).__name__}: {exc}",
+                error=f"{type(exc).__name__}: {exc}",
+                result={"ok": False, "stats": stats} if stats else None,
+            )

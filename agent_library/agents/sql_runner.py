@@ -18,6 +18,7 @@ from agent_library.reduction import (
     should_reduce_sql_result,
     summarize_sql_rows,
 )
+from agent_library.template import agent_api, agent_descriptor, emit, failure_result, needs_decomposition, noop
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
@@ -136,13 +137,15 @@ SQL_DETERMINISTIC_CATALOG_FAMILIES = sorted(
     }
 )
 
-AGENT_METADATA = {
-    "description": (
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="sql_runner",
+    role="executor",
+    description=(
         "Connects to a configured SQL database, introspects schemas/tables/columns/"
         "relationships, executes deterministic read-only database primitives first, "
         "and falls back to generated read-only SQL only when deterministic coverage is insufficient."
     ),
-    "capability_domains": [
+    capability_domains=[
         "sql",
         "database",
         "schema_introspection",
@@ -151,7 +154,7 @@ AGENT_METADATA = {
         "read_only_analytics",
         "data_retrieval",
     ],
-    "action_verbs": [
+    action_verbs=[
         "connect",
         "introspect",
         "describe",
@@ -165,48 +168,58 @@ AGENT_METADATA = {
         "sort",
         "explain",
     ],
-    "execution_model": SQL_EXECUTION_MODEL,
-    "deterministic_catalog_version": SQL_DETERMINISTIC_CATALOG_VERSION,
-    "deterministic_catalog_families": SQL_DETERMINISTIC_CATALOG_FAMILIES,
-    "deterministic_catalog_size": len(SQL_DETERMINISTIC_PRIMITIVES),
-    "deterministic_primitives": [item["primitive_id"] for item in SQL_DETERMINISTIC_PRIMITIVES],
-    "deterministic_catalog_reference": "VERSION_4_PRIMITIVE_CATALOG.md",
-    "fallback_policy": (
+    execution_model=SQL_EXECUTION_MODEL,
+    deterministic_catalog_version=SQL_DETERMINISTIC_CATALOG_VERSION,
+    deterministic_catalog_families=SQL_DETERMINISTIC_CATALOG_FAMILIES,
+    deterministic_catalog_size=len(SQL_DETERMINISTIC_PRIMITIVES),
+    deterministic_primitives=[item["primitive_id"] for item in SQL_DETERMINISTIC_PRIMITIVES],
+    deterministic_catalog_reference="VERSION_4_PRIMITIVE_CATALOG.md",
+    fallback_policy=(
         "Run deterministic SQL primitive first. If the primitive cannot answer cleanly, "
         "run the selection-provided fallback SQL or legacy generated SQL."
     ),
-    "side_effect_policy": "read_only_sql_with_safety_checks",
-    "safety_enforced_by_agent": True,
-    "routing_notes": [
+    side_effect_policy="read_only_sql_with_safety_checks",
+    safety_enforced_by_agent=True,
+    routing_notes=[
         "Use for requests about SQL databases, schemas, tables, columns, relationships, or data questions that should be answered by querying a configured database.",
         "Requires SQL_AGENT_DSN or SQL_DATABASE_URL to be configured in the agent environment.",
         "Only read-only SQL is executed. Mutating statements are rejected.",
         "For natural-language database questions, this agent now uses deterministic primitives first and only falls back to free-form SQL generation when needed.",
     ],
-    "methods": [
-        {
-            "name": "introspect_database",
-            "event": "task.plan",
-            "when": "Lists schemas, tables, columns, and relationships for the configured SQL database.",
-            "intent_tags": ["sql_schema", "database_introspection"],
-            "examples": ["show database schema", "list all SQL tables", "describe relationships in the database"],
-        },
-        {
-            "name": "select_deterministic_sql_primitive",
-            "event": "task.plan",
-            "when": "Selects one deterministic SQL primitive plus a fallback SQL plan for a natural-language database question.",
-            "intent_tags": ["sql_primitive_selection", "database_question", "analytics"],
-            "examples": ["how many rows are in patients", "list all tables in mydb", "show distinct patient genders"],
-        },
-        {
-            "name": "execute_sql_fallback_when_needed",
-            "event": "task.plan",
-            "when": "Executes generated fallback SQL only when the deterministic SQL primitive cannot answer cleanly.",
-            "intent_tags": ["sql_query_fallback", "database_question", "analytics"],
-            "examples": ["which customers spent the most money last month", "show top 10 customers by revenue"],
-        },
+    apis=[
+        agent_api(
+            name="introspect_database",
+            event="task.plan",
+            summary="Lists schemas, tables, columns, and relationships for the configured SQL database.",
+            when="Lists schemas, tables, columns, and relationships for the configured SQL database.",
+            intent_tags=["sql_schema", "database_introspection"],
+            examples=["show database schema", "list all SQL tables", "describe relationships in the database"],
+            deterministic=True,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="select_deterministic_sql_primitive",
+            event="task.plan",
+            summary="Selects one deterministic SQL primitive plus a fallback SQL plan for a natural-language database question.",
+            when="Selects one deterministic SQL primitive plus a fallback SQL plan for a natural-language database question.",
+            intent_tags=["sql_primitive_selection", "database_question", "analytics"],
+            examples=["how many rows are in patients", "list all tables in mydb", "show distinct patient genders"],
+            deterministic=True,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="execute_sql_fallback_when_needed",
+            event="task.plan",
+            summary="Executes generated fallback SQL only when the deterministic SQL primitive cannot answer cleanly.",
+            when="Executes generated fallback SQL only when the deterministic SQL primitive cannot answer cleanly.",
+            intent_tags=["sql_query_fallback", "database_question", "analytics"],
+            examples=["which customers spent the most money last month", "show top 10 customers by revenue"],
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
     ],
-}
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 READ_ONLY_PREFIXES = ("select", "with", "show", "describe", "explain")
 MUTATING_PATTERN = re.compile(
@@ -2054,26 +2067,17 @@ def handle_event(req: EventRequest):
         explicitly_targeted = plan_context.targets("sql_runner")
         instruction = req.payload.get("instruction") if isinstance(req.payload.get("instruction"), dict) else {}
         if not classification_task or (not explicitly_targeted and not _is_sql_task(classification_task)):
-            return {"emits": []}
+            return noop()
         provided_sql = req.payload.get("sql")
     else:
-        return {"emits": []}
+        return noop()
 
     dsn = _dsn()
     if not dsn:
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {
-                        "detail": "SQL agent is not configured. Set SQL_AGENT_DSN or SQL_DATABASE_URL.",
-                        "status": "failed",
-                        "error": "SQL agent is not configured. Set SQL_AGENT_DSN or SQL_DATABASE_URL.",
-                        "result": None,
-                    },
-                }
-            ]
-        }
+        return failure_result(
+            "SQL agent is not configured. Set SQL_AGENT_DSN or SQL_DATABASE_URL.",
+            error="SQL agent is not configured. Set SQL_AGENT_DSN or SQL_DATABASE_URL.",
+        )
 
     total_started = time.perf_counter()
     stats: dict[str, float] = {}
@@ -2096,33 +2100,25 @@ def handle_event(req: EventRequest):
                 )
                 if focused_schema is not None:
                     detail, focused_result = focused_schema
-                    return {
-                        "emits": [
-                            {
-                                "event": "sql.result",
-                                "payload": {
-                                    "detail": detail,
-                                    "stats": stats,
-                                    "result": focused_result,
-                                },
-                            }
-                        ]
-                    }
-                return {
-                    "emits": [
+                    return emit(
+                        "sql.result",
                         {
-                            "event": "sql.result",
-                            "payload": {
-                                "detail": "Database schema introspected.",
-                                "schema": schema,
-                                "stats": stats,
-                                # NOTE: result intentionally omitted for schema introspection.
-                                # Setting result=schema caused the full schema to be sent twice
-                                # to the synthesizer, once via schema and once via result.
-                            },
-                        }
-                    ]
-                }
+                            "detail": detail,
+                            "stats": stats,
+                            "result": focused_result,
+                        },
+                    )
+                return emit(
+                    "sql.result",
+                    {
+                        "detail": "Database schema introspected.",
+                        "schema": schema,
+                        "stats": stats,
+                        # NOTE: result intentionally omitted for schema introspection.
+                        # Setting result=schema caused the full schema to be sent twice
+                        # to the synthesizer, once via schema and once via result.
+                    },
+                )
             if operation == "execute_sql":
                 provided_sql = instruction.get("sql")
             elif operation == "sample_rows":
@@ -2171,25 +2167,21 @@ def handle_event(req: EventRequest):
                     stats["sql_generation_ms"] = 0
                     stats["query_ms"] = stats.get("deterministic_execution_ms", 0.0)
                     stats["total_ms"] = _elapsed_ms(total_started)
-                    return {
-                        "emits": [
-                            {
-                                "event": "sql.result",
-                                "payload": _finalize_sql_success_payload(
-                                    query_task,
-                                    str(deterministic_payload.get("detail") or "SQL deterministic primitive executed."),
-                                    str(deterministic_payload.get("sql") or ""),
-                                    schema,
-                                    stats,
-                                    deterministic_payload.get("result")
-                                    if isinstance(deterministic_payload.get("result"), dict)
-                                    else None,
-                                    selection,
-                                    execution_strategy="deterministic",
-                                ),
-                            }
-                        ]
-                    }
+                    return emit(
+                        "sql.result",
+                        _finalize_sql_success_payload(
+                            query_task,
+                            str(deterministic_payload.get("detail") or "SQL deterministic primitive executed."),
+                            str(deterministic_payload.get("sql") or ""),
+                            schema,
+                            stats,
+                            deterministic_payload.get("result")
+                            if isinstance(deterministic_payload.get("result"), dict)
+                            else None,
+                            selection,
+                            execution_strategy="deterministic",
+                        ),
+                    )
 
                 query_specs = _sql_fallback_query_specs_from_selection(selection)
                 if query_specs:
@@ -2201,59 +2193,34 @@ def handle_event(req: EventRequest):
                     stats["sql_generation_ms"] = _elapsed_ms(started)
             if not query_specs:
                 stats["total_ms"] = _elapsed_ms(total_started)
-                return {
-                    "emits": [
-                        {
-                            "event": "task.result",
-                            "payload": {
-                                "detail": "Could not generate a SQL query.",
-                                "status": "needs_decomposition",
-                                "error": "Could not generate a SQL query.",
-                                "result": {"ok": False, "stats": stats},
-                                "replan_hint": {
-                                    "reason": "Could not generate a SQL query.",
-                                    "failure_class": "needs_decomposition",
-                                    "suggested_capabilities": ["sql_runner"],
-                                },
-                            },
-                        }
-                    ]
-                }
+                return needs_decomposition(
+                    "Could not generate a SQL query.",
+                    suggested_capabilities=["sql_runner"],
+                    result={"ok": False, "stats": stats},
+                )
             started = time.perf_counter()
             result, query_specs = _repair_sql_with_retries(conn, schema, query_task, query_specs, _row_limit(), stats)
             stats["query_ms"] = _elapsed_ms(started)
             stats["total_ms"] = _elapsed_ms(total_started)
             sql = result.get("sql", "")
-            return {
-                "emits": [
-                    {
-                        "event": "sql.result",
-                        "payload": _finalize_sql_success_payload(
-                            query_task,
-                            "SQL query executed.",
-                            sql,
-                            schema,
-                            stats,
-                            result,
-                            selection,
-                            execution_strategy=execution_strategy,
-                        ),
-                    }
-                ]
-            }
+            return emit(
+                "sql.result",
+                _finalize_sql_success_payload(
+                    query_task,
+                    "SQL query executed.",
+                    sql,
+                    schema,
+                    stats,
+                    result,
+                    selection,
+                    execution_strategy=execution_strategy,
+                ),
+            )
     except Exception as exc:
         stats["total_ms"] = _elapsed_ms(total_started)
         _debug_log(f"SQL task failed: {type(exc).__name__}: {exc}")
-        return {
-            "emits": [
-                {
-                    "event": "task.result",
-                    "payload": {
-                        "detail": f"SQL task failed: {type(exc).__name__}: {exc}",
-                        "status": "failed",
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "result": {"ok": False, "stats": stats} if stats else None,
-                    },
-                }
-            ]
-        }
+        return failure_result(
+            f"SQL task failed: {type(exc).__name__}: {exc}",
+            error=f"{type(exc).__name__}: {exc}",
+            result={"ok": False, "stats": stats} if stats else None,
+        )

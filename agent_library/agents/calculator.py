@@ -7,32 +7,52 @@ from fastapi import FastAPI
 import requests
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
+from agent_library.template import agent_api, agent_descriptor, noop, task_result
 from runtime.console import log_debug, log_raw
 
 app = FastAPI()
 
-AGENT_METADATA = {
-    "description": "Performs basic calculator operations from task plans using LLM-selected function invocation.",
-    "capability_domains": ["math", "arithmetic"],
-    "action_verbs": ["add", "subtract", "multiply", "divide", "compute", "calculate"],
-    "side_effect_policy": "read_only",
-    "safety_enforced_by_agent": True,
-    "routing_notes": [
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="calculator",
+    role="executor",
+    description="Performs basic calculator operations from task plans using LLM-selected function invocation.",
+    capability_domains=["math", "arithmetic"],
+    action_verbs=["add", "subtract", "multiply", "divide", "compute", "calculate"],
+    side_effect_policy="read_only",
+    safety_enforced_by_agent=True,
+    routing_notes=[
         "Only handle arithmetic requests that map to add/subtract/multiply/divide.",
         "Use an LLM preprocessing step to choose the calculator function and operands.",
         "If request does not map to calculator capabilities, emit nothing.",
     ],
-    "methods": [
-        {
-            "name": "compute_with_llm_selected_function",
-            "event": "task.plan",
-            "when": "Uses LLM to select add/subtract/multiply/divide and operands from task text.",
-            "intent_tags": ["math", "arithmetic"],
-            "examples": ["add 12 and 30", "what is 144 / 12"],
-            "anti_patterns": ["find files named vinith", "read README.md"],
-        }
+    apis=[
+        agent_api(
+            name="compute_with_llm_selected_function",
+            event="task.plan",
+            summary="Uses LLM to select add/subtract/multiply/divide and operands from task text.",
+            when="Uses LLM to select add/subtract/multiply/divide and operands from task text.",
+            intent_tags=["math", "arithmetic"],
+            examples=["add 12 and 30", "what is 144 / 12"],
+            anti_patterns=["find files named vinith", "read README.md"],
+            deterministic=False,
+            side_effect_level="read_only",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                },
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string"},
+                    "result": {},
+                },
+            },
+        )
     ],
-}
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 
 CALCULATOR_CAPABILITIES = {
@@ -283,27 +303,27 @@ def _format_result(function: str, operands: List[float], kind: str, value: Any):
 @with_node_envelope("calculator", "executor")
 def handle_event(req: EventRequest):
     if req.event != "task.plan":
-        return {"emits": []}
+        return noop()
 
     task = req.payload["task"]
     if not isinstance(task, str):
-        return {"emits": []}
+        return noop()
 
     try:
         decision_raw = _llm_preprocess(task)
         decision = _parse_decision(decision_raw)
     except Exception as exc:
         _debug_log(f"Calculator preprocessing failed: {type(exc).__name__}: {exc}")
-        return {"emits": []}
+        return noop()
 
     if decision is None:
         _debug_log("Calculator preprocessing returned invalid JSON shape.")
-        return {"emits": []}
+        return noop()
 
     if not decision["processable"]:
-        return {"emits": []}
+        return noop()
 
     kind, value = _execute(decision["function"], decision["operands"])
     detail = _format_result(decision["function"], decision["operands"], kind, value)
     result_value = value if kind != "error" else None
-    return {"emits": [{"event": "task.result", "payload": {"detail": detail, "result": result_value}}]}
+    return task_result(detail, result=result_value)

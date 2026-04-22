@@ -8,7 +8,7 @@ from agent_library.contracts import (
     build_agent_descriptor,
     normalize_agent_metadata,
 )
-from agent_library.template import emit_many, failure_result, needs_decomposition, noop
+from agent_library.template import emit_many, emit_sequence, failure_result, needs_decomposition, noop
 from runtime.engine import Engine
 from runtime.graph import build_agent_graph_node
 
@@ -123,6 +123,8 @@ class AgentContractTests(unittest.TestCase):
             ("answer.final", {"answer": "done"}),
         )
         self.assertEqual(len(combined["emits"]), 2)
+        rebuilt = emit_sequence([{"event": "task.result", "payload": {"detail": "ok"}}])
+        self.assertEqual(rebuilt["emits"][0]["event"], "task.result")
 
         failure = failure_result("something failed", error="boom")
         self.assertEqual(failure["emits"][0]["event"], "task.result")

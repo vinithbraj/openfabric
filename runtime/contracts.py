@@ -1,4 +1,17 @@
-from jsonschema import validate
+from typing import Any
+
+try:
+    from jsonschema import validate
+except ImportError:  # pragma: no cover - lightweight environments
+    def validate(*, instance: Any, schema: dict[str, Any]) -> None:
+        expected_type = schema.get("type")
+        if expected_type == "object" and not isinstance(instance, dict):
+            raise ValueError("Payload must be an object.")
+        required = schema.get("required")
+        if isinstance(required, list) and isinstance(instance, dict):
+            missing = [key for key in required if key not in instance]
+            if missing:
+                raise ValueError(f"Missing required contract fields: {', '.join(str(key) for key in missing)}")
 
 class ContractRegistry:
 

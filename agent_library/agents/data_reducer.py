@@ -5,26 +5,37 @@ from fastapi import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, serialize_for_stdin, with_node_envelope
 from agent_library.reduction import execute_reduction_request, looks_like_safe_reducer_command
+from agent_library.template import agent_api, agent_descriptor, emit, noop
 
 app = FastAPI()
 
-AGENT_METADATA = {
-    "description": (
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="data_reducer",
+    role="reducer",
+    description=(
         "Reduces raw executor outputs into smaller validated summaries using a concrete local "
         "reduction command or a provided fallback reduced result."
     ),
-    "capability_domains": ["data_reduction", "result_normalization", "workflow_graph"],
-    "action_verbs": ["reduce", "summarize", "normalize"],
-    "side_effect_policy": "read_only_local_processing",
-    "safety_enforced_by_agent": True,
-    "methods": [
-        {
-            "name": "reduce_step_output",
-            "event": "data.reduce",
-            "when": "Runs a local reducer command against raw step output and emits a normalized reduced result.",
-        }
+    capability_domains=["data_reduction", "result_normalization", "workflow_graph"],
+    action_verbs=["reduce", "summarize", "normalize"],
+    side_effect_policy="read_only_local_processing",
+    safety_enforced_by_agent=True,
+    routing_notes=[
+        "Use after executor output is available and a reduction_request or local_reduction_command exists.",
+        "Falls back to any existing reduced result when local reduction cannot safely produce output.",
     ],
-}
+    apis=[
+        agent_api(
+            name="reduce_step_output",
+            event="data.reduce",
+            summary="Reduces raw step output into a normalized result for downstream validation and synthesis.",
+            when="Runs a local reducer command against raw step output and emits a normalized reduced result.",
+            deterministic=True,
+            side_effect_level="read_only",
+        )
+    ],
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 def _emit_reduced_result(
     payload: dict[str, Any],
@@ -50,7 +61,7 @@ def _emit_reduced_result(
         result_payload["local_reduction_command"] = command.strip()
     if error:
         result_payload["error"] = error
-    return {"emits": [{"event": "data.reduced", "payload": result_payload}]}
+    return emit("data.reduced", result_payload)
 
 
 def _run_reduction_command(command: str, input_data: Any) -> tuple[str, str]:
@@ -73,7 +84,7 @@ def _run_reduction_command(command: str, input_data: Any) -> tuple[str, str]:
 @with_node_envelope("data_reducer", "reducer")
 def handle_event(req: EventRequest):
     if req.event != "data.reduce":
-        return {"emits": []}
+        return noop()
 
     payload = req.payload if isinstance(req.payload, dict) else {}
     command = str(payload.get("local_reduction_command") or "").strip()

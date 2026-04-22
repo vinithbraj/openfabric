@@ -29,6 +29,21 @@ def emit_many(*events: tuple[str, dict[str, Any]]) -> dict[str, Any]:
     return {"emits": emits}
 
 
+def emit_sequence(events: list[dict[str, Any]]) -> dict[str, Any]:
+    emits = []
+    for item in events:
+        if not isinstance(item, dict):
+            continue
+        event_name = item.get("event")
+        payload = item.get("payload")
+        if not isinstance(event_name, str) or not event_name.strip():
+            continue
+        if not isinstance(payload, dict):
+            continue
+        emits.append({"event": event_name, "payload": deepcopy(payload)})
+    return {"emits": emits}
+
+
 def noop() -> dict[str, Any]:
     return {"emits": []}
 

@@ -3,7 +3,15 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from pydantic import BaseModel, Field
+try:
+    from pydantic import BaseModel, Field
+except ImportError:  # pragma: no cover - lightweight test stubs
+    from pydantic import BaseModel  # type: ignore
+
+    def Field(default: Any = None, default_factory: Any | None = None, **_: Any) -> Any:  # type: ignore
+        if default_factory is not None:
+            return default_factory()
+        return default
 
 
 AGENT_CONTRACT_VERSION = "agent_contract_v1"

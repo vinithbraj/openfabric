@@ -7,24 +7,35 @@ import requests
 from fastapi import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
+from agent_library.template import agent_api, agent_descriptor, emit, noop
 from runtime.console import log_debug
 
 app = FastAPI()
 
-AGENT_METADATA = {
-    "description": "Validates whether a workflow attempt actually satisfied the user's request and explains retry decisions.",
-    "capability_domains": ["validation", "quality_control", "workflow_guardrails"],
-    "action_verbs": ["validate", "verify", "gate"],
-    "side_effect_policy": "read_only",
-    "safety_enforced_by_agent": True,
-    "methods": [
-        {
-            "name": "validate_workflow_attempt",
-            "event": "validation.request",
-            "when": "Checks whether an execution attempt answered the user's request and whether another workflow option should be tried.",
-        }
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="validator",
+    role="validator",
+    description="Validates whether a workflow attempt actually satisfied the user's request and explains retry decisions.",
+    capability_domains=["validation", "quality_control", "workflow_guardrails"],
+    action_verbs=["validate", "verify", "gate"],
+    side_effect_policy="read_only",
+    safety_enforced_by_agent=True,
+    routing_notes=[
+        "Use after step execution or workflow completion to decide whether the result should be accepted, retried, or replanned.",
+        "Uses deterministic heuristics first and an LLM only when the verdict remains uncertain and budget allows.",
     ],
-}
+    apis=[
+        agent_api(
+            name="validate_workflow_attempt",
+            event="validation.request",
+            summary="Validates step-level or workflow-level execution results.",
+            when="Checks whether an execution attempt answered the user's request and whether another workflow option should be tried.",
+            deterministic=False,
+            side_effect_level="read_only",
+        )
+    ],
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 
 def _debug_enabled() -> bool:
@@ -663,7 +674,7 @@ def _reduced_validation_payload(payload: dict):
 @with_node_envelope("validator", "validator")
 def handle_event(req: EventRequest):
     if req.event != "validation.request":
-        return {"emits": []}
+        return noop()
     if str(req.payload.get("validation_scope") or "").strip().lower() == "step":
         heuristic = _heuristic_validate_step(req.payload)
     else:
@@ -679,4 +690,4 @@ def handle_event(req: EventRequest):
             llm_result = None
         if llm_result is not None:
             result = llm_result
-    return {"emits": [{"event": "validation.result", "payload": result}]}
+    return emit("validation.result", result)

@@ -3,38 +3,58 @@ import re
 from fastapi import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, with_node_envelope
+from agent_library.template import agent_api, agent_descriptor, emit_sequence, noop, task_result
 
 app = FastAPI()
 
-AGENT_METADATA = {
-    "description": "Rule-based planner for file, shell, and notification operations.",
-    "capability_domains": ["planning", "routing", "operations"],
-    "action_verbs": ["plan", "route", "dispatch"],
-    "side_effect_policy": "read_only",
-    "safety_enforced_by_agent": True,
-    "methods": [
-        {
-            "name": "plan_file_read",
-            "event": "file.read",
-            "when": "Use for reading/opening files from user request.",
-        },
-        {
-            "name": "plan_cli_exec",
-            "event": "shell.exec",
-            "when": "Use for shell command execution requests.",
-        },
-        {
-            "name": "plan_notification",
-            "event": "notify.send",
-            "when": "Use for notify/alert requests.",
-        },
-        {
-            "name": "planner_fallback",
-            "event": "task.result",
-            "when": "Use only when no actionable tool event applies.",
-        },
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="ops_planner",
+    role="router",
+    description="Rule-based planner for file, shell, and notification operations.",
+    capability_domains=["planning", "routing", "operations"],
+    action_verbs=["plan", "route", "dispatch"],
+    side_effect_policy="read_only",
+    safety_enforced_by_agent=True,
+    routing_notes=[
+        "Use for simple rule-based routing of file reads, shell commands, and notifications.",
+        "Falls back to task.result guidance when it cannot identify an actionable operation.",
     ],
-}
+    apis=[
+        agent_api(
+            name="plan_file_read",
+            event="file.read",
+            summary="Routes file read/open requests to the filesystem path.",
+            when="Use for reading/opening files from user request.",
+            deterministic=True,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="plan_cli_exec",
+            event="shell.exec",
+            summary="Routes explicit shell execution requests.",
+            when="Use for shell command execution requests.",
+            deterministic=True,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="plan_notification",
+            event="notify.send",
+            summary="Routes notify or alert requests to the notifier.",
+            when="Use for notify/alert requests.",
+            deterministic=True,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="planner_fallback",
+            event="task.result",
+            summary="Explains how to phrase an actionable operations request.",
+            when="Use only when no actionable tool event applies.",
+            deterministic=True,
+            side_effect_level="read_only",
+        ),
+    ],
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 
 def _extract_filepath(question: str):
@@ -55,7 +75,7 @@ def _extract_command(question: str):
 @with_node_envelope("ops_planner", "router")
 def handle_event(req: EventRequest):
     if req.event != "user.ask":
-        return {"emits": []}
+        return noop()
 
     question = req.payload["question"]
     question_lc = question.lower()
@@ -81,14 +101,8 @@ def handle_event(req: EventRequest):
         )
 
     if not emits:
-        emits.append(
-            {
-                "event": "task.result",
-                "payload": {
-                    "detail": "No operations detected. Use phrases like "
-                    "'read <file>', 'run `<command>`', or 'notify ...'."
-                },
-            }
+        return task_result(
+            "No operations detected. Use phrases like 'read <file>', 'run `<command>`', or 'notify ...'."
         )
 
-    return {"emits": emits}
+    return emit_sequence(emits)

@@ -7,59 +7,91 @@ import requests
 from fastapi import FastAPI
 
 from agent_library.common import EventRequest, EventResponse, shared_llm_api_settings, with_node_envelope
+from agent_library.template import agent_api, agent_descriptor, final_answer, noop
 from runtime.console import log_debug
 
 app = FastAPI()
 
-AGENT_METADATA = {
-    "description": "Builds final user-facing answers from tool results.",
-    "capability_domains": ["response_synthesis", "final_answer"],
-    "action_verbs": ["summarize", "format", "respond"],
-    "side_effect_policy": "read_only",
-    "safety_enforced_by_agent": True,
-    "methods": [
-        {
-            "name": "synthesize_file_result",
-            "event": "file.content",
-            "when": "Converts file content into final answer.",
-        },
-        {
-            "name": "synthesize_shell_result",
-            "event": "shell.result",
-            "when": "Converts shell execution result into final answer.",
-        },
-        {
-            "name": "synthesize_notify_result",
-            "event": "notify.result",
-            "when": "Converts notify result into final answer.",
-        },
-        {
-            "name": "synthesize_sql_result",
-            "event": "sql.result",
-            "when": "Converts SQL schema/query results into final answer.",
-        },
-        {
-            "name": "synthesize_slurm_result",
-            "event": "slurm.result",
-            "when": "Converts Slurm command results into final answer.",
-        },
-        {
-            "name": "synthesize_task_result",
-            "event": "task.result",
-            "when": "Converts generic task result into final answer.",
-        },
-        {
-            "name": "synthesize_workflow_result",
-            "event": "workflow.result",
-            "when": "Converts aggregated multi-step workflow results into final answer.",
-        },
-        {
-            "name": "synthesize_clarification_required",
-            "event": "clarification.required",
-            "when": "Converts clarification requests into a user-facing follow-up question.",
-        },
+AGENT_DESCRIPTOR = agent_descriptor(
+    name="synthesizer",
+    role="synthesizer",
+    description="Builds final user-facing answers from tool results.",
+    capability_domains=["response_synthesis", "final_answer"],
+    action_verbs=["summarize", "format", "respond"],
+    side_effect_policy="read_only",
+    safety_enforced_by_agent=True,
+    routing_notes=[
+        "Use to convert completed tool or workflow outputs into the final user-facing response.",
+        "Prefers reduced_result or refined outputs when available, and falls back to structured formatting of raw results.",
     ],
-}
+    apis=[
+        agent_api(
+            name="synthesize_file_result",
+            event="file.content",
+            summary="Converts file content into a final user-facing answer.",
+            when="Converts file content into final answer.",
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="synthesize_shell_result",
+            event="shell.result",
+            summary="Converts shell execution results into a final user-facing answer.",
+            when="Converts shell execution result into final answer.",
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="synthesize_notify_result",
+            event="notify.result",
+            summary="Converts notification results into a final user-facing answer.",
+            when="Converts notify result into final answer.",
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="synthesize_sql_result",
+            event="sql.result",
+            summary="Converts SQL schema and query results into a final user-facing answer.",
+            when="Converts SQL schema/query results into final answer.",
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="synthesize_slurm_result",
+            event="slurm.result",
+            summary="Converts Slurm command results into a final user-facing answer.",
+            when="Converts Slurm command results into final answer.",
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="synthesize_task_result",
+            event="task.result",
+            summary="Converts generic task results into a final user-facing answer.",
+            when="Converts generic task result into final answer.",
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="synthesize_workflow_result",
+            event="workflow.result",
+            summary="Converts aggregated multi-step workflow results into a final answer.",
+            when="Converts aggregated multi-step workflow results into final answer.",
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+        agent_api(
+            name="synthesize_clarification_required",
+            event="clarification.required",
+            summary="Converts clarification requests into a user-facing follow-up question.",
+            when="Converts clarification requests into a user-facing follow-up question.",
+            deterministic=False,
+            side_effect_level="read_only",
+        ),
+    ],
+)
+AGENT_METADATA = AGENT_DESCRIPTOR
 
 
 def _debug_enabled() -> bool:
@@ -1798,6 +1830,6 @@ def _synthesize(req: EventRequest) -> str:
 @with_node_envelope("synthesizer", "synthesizer")
 def handle_event(req: EventRequest):
     if req.event not in {"research.result", "task.result", "file.content", "shell.result", "sql.result", "slurm.result", "notify.result", "workflow.result", "clarification.required"}:
-        return {"emits": []}
+        return noop()
     answer = _synthesize(req)
-    return {"emits": [{"event": "answer.final", "payload": {"answer": answer}}]}
+    return final_answer(answer)
