@@ -81,6 +81,17 @@ def _run_reduction_command(command: str, input_data: Any) -> tuple[str, str]:
     return completed.stdout.strip(), completed.stderr.strip()
 
 
+def _join_errors(*messages: str) -> str:
+    parts: list[str] = []
+    for message in messages:
+        if not isinstance(message, str):
+            continue
+        compact = message.strip()
+        if compact and compact not in parts:
+            parts.append(compact)
+    return " ".join(parts)
+
+
 @app.post("/handle", response_model=EventResponse)
 @with_node_envelope("data_reducer", "reducer")
 def handle_event(req: EventRequest):
@@ -92,34 +103,25 @@ def handle_event(req: EventRequest):
     existing_reduced_result = payload.get("existing_reduced_result")
     input_data = payload.get("input_data")
     reduction_request = payload.get("reduction_request") if isinstance(payload.get("reduction_request"), dict) else None
+    attempts = 0
+    accumulated_error = ""
+    structured_command = ""
 
     if isinstance(reduction_request, dict):
         reduction = execute_reduction_request(reduction_request, input_data)
+        attempts += max(1, int(reduction.attempts or 0))
+        structured_command = str(reduction.local_reduction_command or "").strip()
         if reduction.reduced_result not in (None, "", [], {}):
             return _emit_reduced_result(
                 payload,
                 reduced_result=reduction.reduced_result,
                 strategy=reduction.strategy or "reduction_request",
                 command=reduction.local_reduction_command,
-                attempts=reduction.attempts,
+                attempts=attempts,
             )
-        if existing_reduced_result not in (None, "", [], {}):
-            return _emit_reduced_result(
-                payload,
-                reduced_result=existing_reduced_result,
-                strategy="existing_reduced_result_fallback",
-                command=reduction.local_reduction_command,
-                attempts=reduction.attempts,
-                error=reduction.error,
-            )
-        return _emit_reduced_result(
-            payload,
-            reduced_result=None,
-            strategy=reduction.strategy or "reduction_request",
-            command=reduction.local_reduction_command,
-            attempts=reduction.attempts,
-            error=reduction.error or "Reduction request produced no output.",
-        )
+        accumulated_error = reduction.error or "Reduction request produced no output."
+        if not command and structured_command:
+            command = structured_command
 
     if command:
         if not looks_like_safe_reducer_command(command):
@@ -129,18 +131,25 @@ def handle_event(req: EventRequest):
                     reduced_result=existing_reduced_result,
                     strategy="existing_reduced_result_fallback",
                     command=command,
-                    attempts=0,
-                    error="Reducer command did not match the allowed local reducer prefixes.",
+                    attempts=attempts,
+                    error=_join_errors(
+                        accumulated_error,
+                        "Reducer command did not match the allowed local reducer prefixes.",
+                    ),
                 )
             return _emit_reduced_result(
                 payload,
                 reduced_result=None,
                 strategy="rejected",
                 command=command,
-                attempts=0,
-                error="Reducer command did not match the allowed local reducer prefixes.",
+                attempts=attempts,
+                error=_join_errors(
+                    accumulated_error,
+                    "Reducer command did not match the allowed local reducer prefixes.",
+                ),
             )
         try:
+            attempts += 1
             reduced_output, _stderr = _run_reduction_command(command, input_data)
             if reduced_output:
                 return _emit_reduced_result(
@@ -148,7 +157,7 @@ def handle_event(req: EventRequest):
                     reduced_result=reduced_output,
                     strategy="local_reduction_command",
                     command=command,
-                    attempts=1,
+                    attempts=attempts,
                 )
             if existing_reduced_result not in (None, "", [], {}):
                 return _emit_reduced_result(
@@ -156,16 +165,22 @@ def handle_event(req: EventRequest):
                     reduced_result=existing_reduced_result,
                     strategy="existing_reduced_result_fallback",
                     command=command,
-                    attempts=1,
-                    error="Reducer command produced empty output.",
+                    attempts=attempts,
+                    error=_join_errors(
+                        accumulated_error,
+                        "Reducer command produced empty output.",
+                    ),
                 )
             return _emit_reduced_result(
                 payload,
                 reduced_result=None,
                 strategy="local_reduction_command",
                 command=command,
-                attempts=1,
-                error="Reducer command produced empty output.",
+                attempts=attempts,
+                error=_join_errors(
+                    accumulated_error,
+                    "Reducer command produced empty output.",
+                ),
             )
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
             if existing_reduced_result not in (None, "", [], {}):
@@ -174,16 +189,16 @@ def handle_event(req: EventRequest):
                     reduced_result=existing_reduced_result,
                     strategy="existing_reduced_result_fallback",
                     command=command,
-                    attempts=1,
-                    error=str(exc),
+                    attempts=attempts,
+                    error=_join_errors(accumulated_error, str(exc)),
                 )
             return _emit_reduced_result(
                 payload,
                 reduced_result=None,
                 strategy="failed",
                 command=command,
-                attempts=1,
-                error=str(exc),
+                attempts=attempts,
+                error=_join_errors(accumulated_error, str(exc)),
             )
 
     if existing_reduced_result not in (None, "", [], {}):
@@ -191,13 +206,17 @@ def handle_event(req: EventRequest):
             payload,
             reduced_result=existing_reduced_result,
             strategy="existing_reduced_result",
-            attempts=0,
+            attempts=attempts,
+            error=accumulated_error,
         )
 
     return _emit_reduced_result(
         payload,
         reduced_result=None,
         strategy="noop",
-        attempts=0,
-        error="No reduction command or existing reduced result was provided.",
+        attempts=attempts,
+        error=_join_errors(
+            accumulated_error,
+            "No reduction command or existing reduced result was provided.",
+        ),
     )

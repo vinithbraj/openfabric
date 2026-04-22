@@ -1554,6 +1554,155 @@ def _workflow_has_grounded_sql_output(payload: dict[str, Any]) -> bool:
     return bool(_extract_sql_results_from_steps(payload.get("steps", []) if isinstance(payload.get("steps"), list) else []))
 
 
+def _normalized_answer_text(value: Any) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _answer_contains_fragment(answer_text: str, fragment: str) -> bool:
+    normalized_fragment = _normalized_answer_text(fragment)
+    if not normalized_fragment:
+        return False
+    return normalized_fragment in answer_text
+
+
+def _extract_numeric_fragments(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return re.findall(r"-?\d+(?:\.\d+)?", value)
+
+
+def _extract_line_fragments(value: Any, *, limit: int = 5) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    lines = [line.strip() for line in _clean_terminal_output(value).splitlines() if line.strip()]
+    if len(lines) < 2:
+        return []
+    return [line for line in lines[:limit] if len(line) <= 120]
+
+
+def _step_answer_signal_group(step: dict[str, Any]) -> list[str]:
+    payload = step.get("payload") if isinstance(step.get("payload"), dict) else {}
+    task_text = str(step.get("task") or "").lower()
+    event_name = str(step.get("event") or "")
+    candidates: list[str] = []
+
+    for candidate in (
+        payload.get("reduced_result"),
+        payload.get("refined_answer"),
+        payload.get("detail"),
+        payload.get("stdout"),
+        payload.get("stdout_excerpt"),
+        payload.get("content"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            candidates.append(candidate.strip())
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for candidate in (
+            result.get("reduced_result"),
+            result.get("refined_answer"),
+            result.get("detail"),
+            result.get("stdout"),
+            result.get("stdout_excerpt"),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                candidates.append(candidate.strip())
+        rows = result.get("rows")
+        columns = result.get("columns")
+        if isinstance(rows, list) and len(rows) == 1 and rows and isinstance(rows[0], dict):
+            row = rows[0]
+            if isinstance(columns, list) and len(columns) == 1:
+                scalar = row.get(columns[0])
+                if scalar not in (None, "", [], {}):
+                    candidates.append(str(scalar))
+            elif len(row) == 1:
+                scalar = next(iter(row.values()))
+                if scalar not in (None, "", [], {}):
+                    candidates.append(str(scalar))
+
+    fragments: list[str] = []
+    wants_identifiers = any(token in task_text for token in ("job id", "job ids", "identifier", "identifiers"))
+    wants_list_details = any(token in task_text for token in ("first five", "list", "alphabetically"))
+    wants_count = any(token in task_text for token in ("count", "how many", "difference", "total", "number"))
+
+    for candidate in candidates:
+        if wants_count or event_name in {"sql.result", "slurm.result"}:
+            fragments.extend(_extract_numeric_fragments(candidate))
+        if wants_identifiers or wants_list_details:
+            fragments.extend(_extract_line_fragments(candidate))
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for fragment in fragments:
+        compact = str(fragment or "").strip()
+        if not compact:
+            continue
+        normalized = _normalized_answer_text(compact)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(compact)
+    return unique[:5]
+
+
+def _validate_answer_candidate(req: EventRequest, answer: str) -> dict[str, Any]:
+    candidate = str(answer or "").strip()
+    if not candidate:
+        return {"valid": False, "reason": "Synthesizer produced an empty answer."}
+
+    if req.event == "clarification.required":
+        question = str(req.payload.get("question") or "").strip()
+        if question and not _answer_contains_fragment(_normalized_answer_text(candidate), question):
+            return {"valid": False, "reason": "Clarification answer omitted the follow-up question."}
+        return {"valid": True, "reason": "Clarification answer preserved the needed follow-up prompt."}
+
+    if req.event != "workflow.result":
+        return {"valid": True, "reason": "No workflow-level answer coverage checks were required."}
+
+    steps = req.payload.get("steps")
+    if not isinstance(steps, list):
+        return {"valid": True, "reason": "Workflow answer had no structured step records to validate."}
+
+    groups: list[dict[str, Any]] = []
+    for step in _flatten_workflow_steps(steps):
+        if not isinstance(step, dict) or step.get("status") != "completed":
+            continue
+        fragments = _step_answer_signal_group(step)
+        if fragments:
+            groups.append(
+                {
+                    "step_id": step.get("id"),
+                    "task": step.get("task"),
+                    "fragments": fragments,
+                }
+            )
+
+    if len(groups) <= 1:
+        return {"valid": True, "reason": "Workflow answer did not require multi-step coverage validation."}
+
+    normalized_answer = _normalized_answer_text(candidate)
+    missing = [
+        group
+        for group in groups
+        if not any(_answer_contains_fragment(normalized_answer, fragment) for fragment in group["fragments"])
+    ]
+    if missing:
+        return {
+            "valid": False,
+            "reason": "Synthesized answer omitted one or more completed workflow findings.",
+            "missing_steps": [
+                {
+                    "step_id": group.get("step_id"),
+                    "task": group.get("task"),
+                    "fragments": group.get("fragments"),
+                }
+                for group in missing
+            ],
+        }
+    return {"valid": True, "reason": "Synthesized answer covered the completed workflow findings."}
+
+
 def _build_source_payload(req: EventRequest) -> dict[str, Any]:
     # Gatekeeper: Truncate large raw data before sending to LLM for final polish
     if req.event == "shell.result":
@@ -1815,17 +1964,17 @@ def _llm_synthesize(req: EventRequest) -> str | None:
     return answer or None
 
 
-def _synthesize(req: EventRequest) -> str:
+def _candidate_answer(req: EventRequest) -> tuple[str, bool]:
     if req.event == "task.result":
         detail = req.payload.get("detail")
         if isinstance(detail, str) and detail.strip():
-            return detail.strip()
+            return detail.strip(), False
     if req.event == "clarification.required":
         question = req.payload.get("question")
         if isinstance(question, str) and question.strip():
-            return _fallback_answer(req)
+            return _fallback_answer(req), True
     if req.event == "sql.result" and _should_use_grounded_sql_fallback(req.payload):
-        return _fallback_answer(req)
+        return _fallback_answer(req), True
     if req.event == "workflow.result" and (
         str(req.payload.get("status") or "").strip().lower() != "completed"
         or
@@ -1834,14 +1983,42 @@ def _synthesize(req: EventRequest) -> str:
         or str(req.payload.get("task_shape") or "").strip().lower() == "save_artifact"
         or _workflow_requests_internal_steps(req.payload)
     ):
-        return _fallback_answer(req)
+        return _fallback_answer(req), True
     try:
         answer = _llm_synthesize(req)
         if answer:
-            return answer
+            return answer, False
     except Exception as exc:
         _debug_log(f"Synthesizer LLM failed: {type(exc).__name__}: {exc}")
-    return _fallback_answer(req)
+    return _fallback_answer(req), True
+
+
+def _synthesize(req: EventRequest) -> str:
+    answer, used_grounded_fallback = _candidate_answer(req)
+    validation = _validate_answer_candidate(req, answer)
+    if validation.get("valid"):
+        return answer
+
+    _debug_log(
+        "Synthesizer rejected candidate answer during validation: "
+        + json.dumps(
+            {
+                "event": req.event,
+                "reason": validation.get("reason"),
+                "details": validation.get("missing_steps"),
+            },
+            ensure_ascii=True,
+        )
+    )
+
+    grounded_answer = _fallback_answer(req)
+    grounded_validation = _validate_answer_candidate(req, grounded_answer)
+    if grounded_validation.get("valid"):
+        return grounded_answer
+
+    if used_grounded_fallback:
+        return answer
+    return grounded_answer or answer
 
 
 @app.post("/handle", response_model=EventResponse)

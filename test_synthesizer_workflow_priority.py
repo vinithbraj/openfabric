@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 fastapi_stub = types.ModuleType("fastapi")
@@ -45,7 +46,7 @@ class _BaseModel:
 pydantic_stub.BaseModel = _BaseModel
 sys.modules.setdefault("pydantic", pydantic_stub)
 
-from agent_library.agents.synthesizer import _fallback_answer
+from agent_library.agents.synthesizer import _fallback_answer, handle_event
 
 
 class SynthesizerWorkflowPriorityTests(unittest.TestCase):
@@ -309,6 +310,48 @@ class SynthesizerWorkflowPriorityTests(unittest.TestCase):
         self.assertIn("2", answer)
         self.assertIn("101", answer)
         self.assertIn("104", answer)
+
+    def test_handle_event_rejects_incomplete_workflow_answer_and_uses_grounded_fallback(self):
+        req = types.SimpleNamespace(
+            event="workflow.result",
+            payload={
+                "task": "Count pending Slurm jobs for vinith and count Python files in the repository root. Report both counts.",
+                "task_shape": "lookup",
+                "status": "completed",
+                "steps": [
+                    {
+                        "id": "step1",
+                        "task": "Count pending Slurm jobs for vinith",
+                        "target_agent": "slurm_runner_cluster",
+                        "status": "completed",
+                        "event": "slurm.result",
+                        "payload": {
+                            "reduced_result": "Matching jobs: 2",
+                        },
+                    },
+                    {
+                        "id": "step2",
+                        "task": "Count Python files in the repository root",
+                        "target_agent": "shell_runner",
+                        "status": "completed",
+                        "event": "shell.result",
+                        "payload": {
+                            "reduced_result": "24",
+                        },
+                    },
+                ],
+            },
+        )
+
+        with patch(
+            "agent_library.agents.synthesizer._llm_synthesize",
+            return_value="### Summary\n\n- **Pending jobs:** `2`",
+        ):
+            response = handle_event(req)
+
+        payload = response["emits"][0]["payload"]
+        self.assertIn("2", payload["answer"])
+        self.assertIn("24", payload["answer"])
 
 
 if __name__ == "__main__":

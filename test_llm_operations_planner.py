@@ -1,6 +1,8 @@
+import copy
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 fastapi_stub = types.ModuleType("fastapi")
@@ -40,6 +42,7 @@ class _BaseModel:
 pydantic_stub.BaseModel = _BaseModel
 sys.modules.setdefault("pydantic", pydantic_stub)
 
+import agent_library.agents.llm_operations_planner as planner_module
 from agent_library.agents.llm_operations_planner import (
     _capability_summary,
     _derive_presentation,
@@ -56,6 +59,7 @@ from agent_library.agents.llm_operations_planner import (
     _sql_fallback_steps_for_task,
     _split_compound_request,
     _step_semantic_drift,
+    handle_event,
 )
 
 
@@ -281,6 +285,59 @@ class PlannerSemanticValidationTests(unittest.TestCase):
             CAPABILITIES,
         )
         self.assertEqual(steps, [])
+
+    def test_handle_event_repairs_invalid_single_step_multi_domain_plan_before_emitting(self):
+        request = types.SimpleNamespace(
+            event="user.ask",
+            payload={
+                "question": (
+                    "In the dicom_mock database count patients, and in the repository root count Python files, "
+                    "then report both counts and the difference."
+                )
+            },
+        )
+
+        original_capabilities = copy.deepcopy(planner_module.CAPABILITIES)
+        planner_module.CAPABILITIES.clear()
+        planner_module.CAPABILITIES.update({"agents": copy.deepcopy(CAPABILITIES["agents"])})
+        try:
+            with patch(
+                "agent_library.agents.llm_operations_planner._llm_decide",
+                return_value={
+                    "processable": True,
+                    "reason": "processable multi-domain count workflow",
+                    "task_shape": "count",
+                    "steps": [
+                        {
+                            "id": "step1",
+                            "target_agent": "sql_runner_dicom_mock",
+                            "task": (
+                                "In the dicom_mock database count patients, and in the repository root count Python files, "
+                                "then report both counts and the difference."
+                            ),
+                            "instruction": {
+                                "operation": "query_from_request",
+                                "question": (
+                                    "In the dicom_mock database count patients, and in the repository root count Python files, "
+                                    "then report both counts and the difference."
+                                ),
+                            },
+                        }
+                    ],
+                    "presentation": {"format": "markdown"},
+                },
+            ):
+                response = handle_event(request)
+        finally:
+            planner_module.CAPABILITIES.clear()
+            planner_module.CAPABILITIES.update(original_capabilities)
+
+        task_plan = next(item["payload"] for item in response["emits"] if item["event"] == "task.plan")
+        self.assertEqual(len(task_plan["steps"]), 3)
+        self.assertEqual(task_plan["steps"][0]["target_agent"], "sql_runner_dicom_mock")
+        self.assertEqual(task_plan["steps"][1]["target_agent"], "shell_runner")
+        self.assertEqual(task_plan["steps"][2]["target_agent"], "shell_runner")
+        self.assertIn("difference", task_plan["steps"][2]["task"].lower())
 
     def test_derive_shell_command_for_save_rows_task(self):
         command = _derive_shell_command("create a list of these patients and save it in patient.txt")

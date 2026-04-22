@@ -3378,6 +3378,165 @@ def _steps_signature(steps: list[dict]) -> str:
     return json.dumps(steps, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
 
 
+def _leaf_plan_steps(steps: list[dict]) -> list[dict]:
+    leaves: list[dict] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        nested = step.get("steps")
+        if isinstance(nested, list) and nested:
+            leaves.extend(_leaf_plan_steps(nested))
+        else:
+            leaves.append(step)
+    return leaves
+
+
+def _validate_plan_steps(question: str, steps: list[dict], capabilities: dict) -> dict[str, Any]:
+    if not isinstance(steps, list) or not steps:
+        return {"valid": False, "reason": "Planner produced no executable steps."}
+
+    leaf_steps = _leaf_plan_steps(steps)
+    if not leaf_steps:
+        return {"valid": False, "reason": "Planner produced no leaf steps to execute."}
+
+    valid_names = _agent_names_with_task_plan(capabilities)
+    seen_ids: set[str] = set()
+    available_ids: set[str] = set()
+    for step in leaf_steps:
+        step_id = str(step.get("id") or "").strip()
+        if not step_id:
+            return {"valid": False, "reason": "Planner produced a step without an id."}
+        if step_id in seen_ids:
+            return {"valid": False, "reason": f"Planner produced duplicate step id '{step_id}'."}
+        seen_ids.add(step_id)
+        available_ids.add(step_id)
+
+        target_agent = str(step.get("target_agent") or "").strip()
+        if not target_agent:
+            return {"valid": False, "reason": f"Planner step '{step_id}' is missing a target agent."}
+        if target_agent in {"ops_planner", "synthesizer"}:
+            return {"valid": False, "reason": f"Planner step '{step_id}' targeted a non-executor agent."}
+        if target_agent not in valid_names:
+            return {"valid": False, "reason": f"Planner step '{step_id}' targeted unknown agent '{target_agent}'."}
+
+    for step in leaf_steps:
+        step_id = str(step.get("id") or "").strip()
+        depends_on = step.get("depends_on")
+        if not isinstance(depends_on, list):
+            continue
+        for dependency in depends_on:
+            dependency_id = str(dependency or "").strip()
+            if not dependency_id:
+                continue
+            if dependency_id == step_id:
+                return {"valid": False, "reason": f"Planner step '{step_id}' depends on itself."}
+            if dependency_id not in available_ids:
+                return {
+                    "valid": False,
+                    "reason": f"Planner step '{step_id}' depends on unknown step '{dependency_id}'.",
+                }
+
+    if _looks_like_root_python_inventory_request(question) and len(leaf_steps) < 2:
+        return {
+            "valid": False,
+            "reason": "Planner collapsed the repository inventory request and lost the list/count workflow structure.",
+        }
+
+    compound_fallback = _compound_fallback_steps(question, capabilities)
+    compound_parts = _split_compound_request(question)
+    if len(compound_parts) >= 2 and len(compound_fallback) >= 2 and len(leaf_steps) < 2:
+        return {
+            "valid": False,
+            "reason": "Planner collapsed a compound request into too few executable steps.",
+        }
+
+    if _looks_like_multi_domain_count_workflow(question, capabilities):
+        expected_families: set[str] = set()
+        if _looks_like_sql_question(question, capabilities):
+            expected_families.add("sql_runner")
+        if _looks_like_slurm_question(question):
+            expected_families.add("slurm_runner")
+        text = re.sub(r"\s+", " ", str(question or "").strip().lower())
+        if (
+            ("python" in text and "file" in text)
+            or _looks_like_workspace_file_question(question)
+            or _looks_like_repo_file_scan(question)
+        ):
+            expected_families.add("shell_runner")
+
+        present_families = {
+            _agent_family(str(step.get("target_agent") or ""))
+            for step in leaf_steps
+        }
+        present_families.discard("")
+        required_family_count = min(len(expected_families), 2)
+        if len(present_families & expected_families) < required_family_count:
+            return {
+                "valid": False,
+                "reason": "Planner did not preserve all required execution domains for the multi-domain count workflow.",
+            }
+        if any(token in text for token in ("difference", "compare", "versus", " vs ")):
+            if not any("difference" in str(step.get("task") or "").lower() for step in leaf_steps):
+                return {
+                    "valid": False,
+                    "reason": "Planner lost the explicit difference step for a comparison workflow.",
+                }
+
+    return {"valid": True, "reason": "Plan passed structural validation."}
+
+
+def _repair_plan_steps(question: str, capabilities: dict, replan_payload: dict | None = None) -> list[dict]:
+    candidates: list[list[dict]] = []
+    if isinstance(replan_payload, dict):
+        candidates.append(_fallback_replan_steps(replan_payload, capabilities))
+    candidates.append(_fallback_steps(question, capabilities))
+    candidates.append(_sql_fallback_steps_for_task(question, question, capabilities))
+
+    seen_signatures: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, list) or not candidate:
+            continue
+        normalized = _normalize_steps(question, candidate, capabilities)
+        if not normalized:
+            continue
+        signature = _steps_signature(normalized)
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        validation = _validate_plan_steps(question, normalized, capabilities)
+        if validation.get("valid"):
+            _debug_log(
+                "Planner repaired invalid plan via deterministic fallback: "
+                + json.dumps({"task": question, "steps": normalized}, ensure_ascii=True)
+            )
+            return normalized
+    return []
+
+
+def _validated_plan_steps(question: str, steps: list[dict], capabilities: dict, replan_payload: dict | None = None) -> list[dict]:
+    normalized = _normalize_steps(question, steps, capabilities) if isinstance(steps, list) and steps else []
+    if normalized:
+        validation = _validate_plan_steps(question, normalized, capabilities)
+        if validation.get("valid"):
+            return normalized
+        _debug_log(
+            "Planner rejected candidate plan during validation: "
+            + json.dumps(
+                {
+                    "task": question,
+                    "reason": validation.get("reason"),
+                    "steps": normalized,
+                },
+                ensure_ascii=True,
+            )
+        )
+
+    repaired = _repair_plan_steps(question, capabilities, replan_payload=replan_payload)
+    if repaired:
+        return repaired
+    return []
+
+
 def _build_primary_plan(question: str, decision: dict, capabilities: dict):
     if _looks_like_slurm_elapsed_summary_question(question) or _looks_like_slurm_node_inventory_summary_question(question):
         slurm_steps = _fallback_steps(question, capabilities)
@@ -3392,15 +3551,15 @@ def _build_primary_plan(question: str, decision: dict, capabilities: dict):
         if deterministic_shell_steps:
             return deterministic_shell_steps
     raw_primary = decision.get("steps", [])
-    primary_steps = _normalize_steps(question, raw_primary, capabilities) if raw_primary else []
+    primary_steps = _validated_plan_steps(question, raw_primary, capabilities) if raw_primary else []
     if primary_steps:
         return primary_steps
     fallback_steps = _fallback_steps(question, capabilities)
     if fallback_steps:
-        return fallback_steps
+        return _validated_plan_steps(question, fallback_steps, capabilities)
     sql_fallback = _sql_fallback_steps_for_task(question, question, capabilities)
     if sql_fallback:
-        return sql_fallback
+        return _validated_plan_steps(question, sql_fallback, capabilities)
     return []
 
 
@@ -3561,7 +3720,12 @@ def handle_event(req: EventRequest):
         try:
             decision = _llm_replan(req.payload, CAPABILITIES)
             if decision is not None and decision["replace_step_id"] == replace_step_id:
-                steps = _normalize_steps(str(req.payload.get("task") or ""), decision.get("steps", []), CAPABILITIES)
+                steps = _validated_plan_steps(
+                    str(req.payload.get("task") or ""),
+                    decision.get("steps", []),
+                    CAPABILITIES,
+                    replan_payload=req.payload,
+                )
                 if steps and not _replan_steps_respect_workflow_context(req.payload, steps, CAPABILITIES):
                     _debug_log(
                         "Discarding workflow replan candidate that drifted to the wrong agent family: "
@@ -3571,7 +3735,12 @@ def handle_event(req: EventRequest):
         except Exception as exc:
             _debug_log(f"Planner replan failed. Error: {type(exc).__name__}: {exc}")
         if not steps:
-            steps = _fallback_replan_steps(req.payload, CAPABILITIES)
+            steps = _validated_plan_steps(
+                str(req.payload.get("task") or ""),
+                [],
+                CAPABILITIES,
+                replan_payload=req.payload,
+            )
         if not steps:
             return failure_result(
                 str(req.payload.get("reason") or "Planner could not further decompose the failed step."),
