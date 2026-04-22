@@ -7,16 +7,24 @@ from typing_extensions import TypedDict
 
 
 class RuntimeState(TypedDict, total=False):
+    session_id: str
     run_id: str
     spec_name: str
+    spec_path: str
     goal: str
     input: dict[str, Any]
+    compiled_spec: dict[str, Any]
     plan: dict[str, Any]
     history: list[dict[str, Any]]
+    attempt_history: list[dict[str, Any]]
     status: str
+    done: bool
     retries: int
+    attempt: int
+    current_step_index: int
+    trigger: str
     current_node: str
-    next_node: str
+    next_action: str
     validation: dict[str, Any] | None
     validation_checks: list[dict[str, Any]]
     final_output: dict[str, Any]
@@ -27,20 +35,36 @@ class RuntimeState(TypedDict, total=False):
     updated_at: str
 
 
-def initial_runtime_state(*, run_id: str, spec_name: str, input_payload: dict[str, Any]) -> RuntimeState:
+def initial_runtime_state(
+    *,
+    session_id: str,
+    spec_name: str,
+    spec_path: str,
+    input_payload: dict[str, Any],
+    compiled_spec: dict[str, Any],
+    trigger: str = "manual",
+) -> RuntimeState:
     goal = str(input_payload.get("task") or input_payload.get("prompt") or input_payload.get("input") or "")
     timestamp = datetime.now(timezone.utc).isoformat()
     return {
-        "run_id": run_id,
+        "session_id": session_id,
+        "run_id": session_id,
         "spec_name": spec_name,
+        "spec_path": spec_path,
         "goal": goal,
         "input": input_payload,
+        "compiled_spec": compiled_spec,
         "plan": {},
         "history": [],
+        "attempt_history": [],
         "status": "planning",
+        "done": False,
         "retries": 0,
+        "attempt": 0,
+        "current_step_index": 0,
+        "trigger": trigger,
         "current_node": "",
-        "next_node": "",
+        "next_action": "planner",
         "validation": None,
         "validation_checks": [],
         "final_output": {"content": "", "artifacts": [], "metadata": {}},

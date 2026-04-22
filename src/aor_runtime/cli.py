@@ -12,7 +12,9 @@ from aor_runtime.runtime.engine import ExecutionEngine
 
 app = typer.Typer(help="Agent Orchestration Runtime CLI")
 runs_app = typer.Typer(help="Inspect persisted runs")
+sessions_app = typer.Typer(help="Manage long-running agent sessions")
 app.add_typer(runs_app, name="runs")
+app.add_typer(sessions_app, name="sessions")
 
 
 def _final_answer_from_state(state: dict[str, Any]) -> str:
@@ -46,6 +48,13 @@ def run(spec_path: Path, input: str = typer.Option("{}", help="JSON input payloa
     payload = json.loads(input)
     engine = ExecutionEngine()
     state = engine.run_spec(str(spec_path), payload)
+    typer.echo(dumps_json(state, indent=2))
+
+
+@app.command()
+def resume(session_id: str, trigger: str = "manual", max_cycles: int | None = None) -> None:
+    engine = ExecutionEngine()
+    state = engine.resume_session(session_id, trigger=trigger, max_cycles=max_cycles)
     typer.echo(dumps_json(state, indent=2))
 
 
@@ -110,6 +119,42 @@ def list_runs(limit: int = 20) -> None:
 def show_run(run_id: str) -> None:
     engine = ExecutionEngine()
     payload = engine.get_run(run_id)
+    if payload is None:
+        raise typer.Exit(code=1)
+    typer.echo(dumps_json(payload, indent=2))
+
+
+@sessions_app.command("create")
+def create_session(
+    spec_path: Path,
+    input: str = typer.Option("{}", help="JSON input payload"),
+    run_immediately: bool = typer.Option(True, help="Run the loop immediately after creating the session."),
+) -> None:
+    payload = json.loads(input)
+    engine = ExecutionEngine()
+    session = engine.create_session(str(spec_path), payload, trigger="manual")
+    if run_immediately:
+        typer.echo(dumps_json(engine.resume_session(session["id"], trigger="manual"), indent=2))
+        return
+    typer.echo(dumps_json(session, indent=2))
+
+
+@sessions_app.command("resume")
+def resume_session(session_id: str, trigger: str = "manual", max_cycles: int | None = None) -> None:
+    engine = ExecutionEngine()
+    typer.echo(dumps_json(engine.resume_session(session_id, trigger=trigger, max_cycles=max_cycles), indent=2))
+
+
+@sessions_app.command("list")
+def list_sessions(limit: int = 20) -> None:
+    engine = ExecutionEngine()
+    typer.echo(dumps_json(engine.list_sessions(limit=limit), indent=2))
+
+
+@sessions_app.command("show")
+def show_session(session_id: str) -> None:
+    engine = ExecutionEngine()
+    payload = engine.get_session(session_id)
     if payload is None:
         raise typer.Exit(code=1)
     typer.echo(dumps_json(payload, indent=2))

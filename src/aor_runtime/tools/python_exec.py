@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import io
+import importlib
 import json
 import multiprocessing as mp
 import re
@@ -42,8 +43,6 @@ SAFE_BUILTINS = {
 }
 
 FORBIDDEN_NODES = (
-    ast.Import,
-    ast.ImportFrom,
     ast.Global,
     ast.Nonlocal,
     ast.Try,
@@ -73,6 +72,26 @@ FORBIDDEN_NAMES = {
 
 NETWORK_COMMAND_RE = re.compile(r"\b(curl|wget|ssh|scp|sftp|ftp|ping|nc|ncat|telnet)\b", re.IGNORECASE)
 
+SAFE_IMPORT_MODULES = {
+    "collections",
+    "functools",
+    "itertools",
+    "json",
+    "math",
+    "operator",
+    "re",
+    "statistics",
+    "string",
+}
+
+
+class _AttrDict(dict):
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
 
 class _PythonFsFacade:
     def __init__(self, settings: Settings) -> None:
@@ -101,11 +120,11 @@ class _PythonShellFacade:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def exec(self, command: str, cwd: str = "", timeout: int = 60) -> dict[str, Any]:
+    def exec(self, command: str, cwd: str = "", timeout: int = 60) -> _AttrDict:
         if NETWORK_COMMAND_RE.search(command):
             raise ToolExecutionError("Network-oriented shell commands are not allowed inside python.exec.")
         bounded_timeout = max(1, min(int(timeout), 5))
-        return run_shell(self.settings, command, cwd=cwd, timeout=bounded_timeout)
+        return _AttrDict(run_shell(self.settings, command, cwd=cwd, timeout=bounded_timeout))
 
 
 def _validate_code(code: str) -> ast.AST:
@@ -120,6 +139,15 @@ def _validate_code(code: str) -> ast.AST:
     return parsed
 
 
+def _safe_import(name: str, globals: dict[str, Any] | None = None, locals: dict[str, Any] | None = None, fromlist: tuple[str, ...] = (), level: int = 0):
+    if level != 0:
+        raise ToolExecutionError("Relative imports are not allowed in python.exec.")
+    root = name.split(".", 1)[0]
+    if root not in SAFE_IMPORT_MODULES:
+        raise ToolExecutionError(f"Import of module {root!r} is not allowed in python.exec.")
+    return importlib.import_module(name)
+
+
 def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any]) -> None:
     settings = Settings.model_validate(settings_data)
     parsed = _validate_code(code)
@@ -127,9 +155,11 @@ def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any
     shell = _PythonShellFacade(settings)
     namespace: dict[str, Any] = {"fs": fs, "shell": shell, "result": None}
     stdout_buffer = io.StringIO()
+    safe_builtins = dict(SAFE_BUILTINS)
+    safe_builtins["__import__"] = _safe_import
     try:
         with redirect_stdout(stdout_buffer):
-            exec(compile(parsed, "<python.exec>", "exec"), {"__builtins__": SAFE_BUILTINS}, namespace)
+            exec(compile(parsed, "<python.exec>", "exec"), {"__builtins__": safe_builtins}, namespace)
         queue.put(
             {
                 "ok": True,

@@ -11,48 +11,47 @@ class PlanExecutor:
     def __init__(self, tools: ToolRegistry) -> None:
         self.tools = tools
 
+    def execute_step(self, step: PlanStep) -> StepLog:
+        started = datetime.now(timezone.utc).isoformat()
+        try:
+            output = self.tools.invoke(step.action, step.args)
+            finished = datetime.now(timezone.utc).isoformat()
+            if step.action == "python.exec" and not bool(output.get("success", False)):
+                raise ToolExecutionError(str(output.get("error") or "python.exec failed."))
+            if step.action == "fs.exists" and not bool(output.get("exists")):
+                raise ToolExecutionError(f"Path does not exist: {step.args.get('path', '')}")
+            return StepLog(
+                step=step,
+                result=output,
+                success=True,
+                started_at=started,
+                finished_at=finished,
+            )
+        except Exception as exc:  # noqa: BLE001
+            finished = datetime.now(timezone.utc).isoformat()
+            return StepLog(
+                step=step,
+                result={},
+                success=False,
+                error=str(exc),
+                started_at=started,
+                finished_at=finished,
+            )
+
     def execute(self, plan: ExecutionPlan) -> tuple[list[StepLog], dict[str, Any] | None]:
         history: list[StepLog] = []
         failure: dict[str, Any] | None = None
-
         for step in plan.steps:
-            started = datetime.now(timezone.utc).isoformat()
-            try:
-                output = self.tools.invoke(step.action, step.args)
-                finished = datetime.now(timezone.utc).isoformat()
-                if step.action == "python.exec" and not bool(output.get("success", False)):
-                    raise ToolExecutionError(str(output.get("error") or "python.exec failed."))
-                if step.action == "fs.exists" and not bool(output.get("exists")):
-                    raise ToolExecutionError(f"Path does not exist: {step.args.get('path', '')}")
-                history.append(
-                    StepLog(
-                        step=step,
-                        result=output,
-                        success=True,
-                        started_at=started,
-                        finished_at=finished,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                finished = datetime.now(timezone.utc).isoformat()
-                history.append(
-                    StepLog(
-                        step=step,
-                        result={},
-                        success=False,
-                        error=str(exc),
-                        started_at=started,
-                        finished_at=finished,
-                    )
-                )
+            log = self.execute_step(step)
+            history.append(log)
+            if not log.success:
                 failure = {
                     "reason": "tool_execution_failed",
                     "step": step.model_dump(),
-                    "error": str(exc),
+                    "error": log.error or "step failed",
                     "history": [item.model_dump() for item in history],
                 }
                 break
-
         return history, failure
 
 

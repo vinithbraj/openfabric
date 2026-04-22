@@ -78,6 +78,24 @@ class RunMetrics(BaseModel):
     retries: int = 0
 
 
+AgentTriggerType = Literal["manual", "timer", "external"]
+
+
+class AgentSession(BaseModel):
+    id: str
+    spec_name: str
+    spec_path: str
+    goal: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    compiled_spec: dict[str, Any] = Field(default_factory=dict)
+    state: dict[str, Any] = Field(default_factory=dict)
+    history: list[dict[str, Any]] = Field(default_factory=list)
+    status: str
+    current_trigger: AgentTriggerType = "manual"
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
 class RunEvent(BaseModel):
     run_id: str
     node: str

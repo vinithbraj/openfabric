@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from aor_runtime.core.contracts import RunEvent, RunSummary
+from aor_runtime.core.contracts import AgentSession, RunEvent
 from aor_runtime.core.utils import ensure_jsonable
 
 
@@ -35,13 +35,17 @@ class SQLiteRunStore:
         with self._connect() as conn:
             conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS runs (
-                    run_id TEXT PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
                     spec_name TEXT NOT NULL,
+                    spec_path TEXT NOT NULL,
+                    goal TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL,
                     input_json TEXT NOT NULL,
-                    final_state_json TEXT,
-                    metadata_json TEXT,
+                    compiled_spec_json TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    history_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -65,89 +69,125 @@ class SQLiteRunStore:
                 """
             )
 
-    def create_run(self, *, run_id: str, spec_name: str, input_payload: dict[str, Any], metadata: dict[str, Any] | None = None) -> None:
-        now = utc_now_iso()
+    def create_session(self, session: AgentSession) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO runs(run_id, spec_name, status, input_json, final_state_json, metadata_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions(
+                    session_id, spec_name, spec_path, goal, status, trigger_type,
+                    input_json, compiled_spec_json, state_json, history_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    run_id,
-                    spec_name,
-                    "running",
-                    json.dumps(ensure_jsonable(input_payload), default=str),
-                    None,
-                    json.dumps(ensure_jsonable(metadata or {}), default=str),
-                    now,
-                    now,
+                    session.id,
+                    session.spec_name,
+                    session.spec_path,
+                    session.goal,
+                    session.status,
+                    session.current_trigger,
+                    json.dumps(ensure_jsonable(session.input), default=str),
+                    json.dumps(ensure_jsonable(session.compiled_spec), default=str),
+                    json.dumps(ensure_jsonable(session.state), default=str),
+                    json.dumps(ensure_jsonable(session.history), default=str),
+                    session.created_at,
+                    session.updated_at,
                 ),
             )
 
-    def append_event(self, *, run_id: str, node_name: str, event_type: str, payload: dict[str, Any]) -> None:
-        event = RunEvent(run_id=run_id, node=node_name, event_type=event_type, payload=ensure_jsonable(payload))
+    def update_session(self, session: AgentSession) -> None:
+        session.updated_at = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE sessions
+                SET status = ?, trigger_type = ?, state_json = ?, history_json = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    session.status,
+                    session.current_trigger,
+                    json.dumps(ensure_jsonable(session.state), default=str),
+                    json.dumps(ensure_jsonable(session.history), default=str),
+                    session.updated_at,
+                    session.id,
+                ),
+            )
+
+    def get_session(self, session_id: str) -> AgentSession | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+        if row is None:
+            return None
+        return AgentSession(
+            id=row["session_id"],
+            spec_name=row["spec_name"],
+            spec_path=row["spec_path"],
+            goal=row["goal"],
+            input=json.loads(row["input_json"]),
+            compiled_spec=json.loads(row["compiled_spec_json"]),
+            state=json.loads(row["state_json"]),
+            history=json.loads(row["history_json"]),
+            status=row["status"],
+            current_trigger=row["trigger_type"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def list_sessions(self, limit: int = 50) -> list[AgentSession]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [
+            AgentSession(
+                id=row["session_id"],
+                spec_name=row["spec_name"],
+                spec_path=row["spec_path"],
+                goal=row["goal"],
+                input=json.loads(row["input_json"]),
+                compiled_spec=json.loads(row["compiled_spec_json"]),
+                state=json.loads(row["state_json"]),
+                history=json.loads(row["history_json"]),
+                status=row["status"],
+                current_trigger=row["trigger_type"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    def append_event(self, *, session_id: str, node_name: str, event_type: str, payload: dict[str, Any]) -> None:
+        event = RunEvent(run_id=session_id, node=node_name, event_type=event_type, payload=ensure_jsonable(payload))
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO events(run_id, node_name, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (event.run_id, event.node, event.event_type, json.dumps(event.payload, default=str), event.created_at),
             )
-            conn.execute("UPDATE runs SET updated_at = ? WHERE run_id = ?", (event.created_at, run_id))
+            conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (event.created_at, session_id))
 
-    def save_snapshot(self, *, run_id: str, node_name: str, state: dict[str, Any]) -> None:
+    def save_snapshot(self, *, session_id: str, node_name: str, state: dict[str, Any]) -> None:
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO snapshots(run_id, node_name, state_json, created_at) VALUES (?, ?, ?, ?)",
-                (run_id, node_name, json.dumps(ensure_jsonable(state), default=str), utc_now_iso()),
+                (session_id, node_name, json.dumps(ensure_jsonable(state), default=str), utc_now_iso()),
             )
 
-    def finalize_run(self, *, run_id: str, status: str, final_state: dict[str, Any]) -> None:
+    def get_latest_snapshot(self, session_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE runs SET status = ?, final_state_json = ?, updated_at = ? WHERE run_id = ?",
-                (status, json.dumps(ensure_jsonable(final_state), default=str), utc_now_iso(), run_id),
-            )
-
-    def get_run(self, run_id: str) -> RunSummary | None:
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            row = conn.execute(
+                "SELECT state_json FROM snapshots WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
         if row is None:
             return None
-        return RunSummary(
-            run_id=row["run_id"],
-            spec_name=row["spec_name"],
-            status=row["status"],
-            input=json.loads(row["input_json"]),
-            final_state=json.loads(row["final_state_json"]) if row["final_state_json"] else {},
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
+        return json.loads(row["state_json"])
 
-    def list_runs(self, limit: int = 50) -> list[RunSummary]:
+    def get_events(self, session_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-        results = []
-        for row in rows:
-            results.append(
-                RunSummary(
-                    run_id=row["run_id"],
-                    spec_name=row["spec_name"],
-                    status=row["status"],
-                    input=json.loads(row["input_json"]),
-                    final_state=json.loads(row["final_state_json"]) if row["final_state_json"] else {},
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                )
-            )
-        return results
-
-    def get_events(self, run_id: str) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM events WHERE run_id = ? ORDER BY id ASC", (run_id,)).fetchall()
+            rows = conn.execute("SELECT * FROM events WHERE run_id = ? ORDER BY id ASC", (session_id,)).fetchall()
         return [
             {
                 "id": row["id"],
-                "run_id": row["run_id"],
+                "session_id": row["run_id"],
                 "node_name": row["node_name"],
                 "event_type": row["event_type"],
                 "payload": json.loads(row["payload_json"]),
@@ -155,3 +195,10 @@ class SQLiteRunStore:
             }
             for row in rows
         ]
+
+    # Backward-compatible helpers for older run-centric callers.
+    def get_run(self, run_id: str) -> AgentSession | None:
+        return self.get_session(run_id)
+
+    def list_runs(self, limit: int = 50) -> list[AgentSession]:
+        return self.list_sessions(limit=limit)

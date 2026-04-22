@@ -13,6 +13,11 @@ class RunRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
 
 
+class SessionTriggerRequest(BaseModel):
+    trigger: str = "manual"
+    max_cycles: int | None = None
+
+
 class ValidateRequest(BaseModel):
     spec_path: str
 
@@ -29,6 +34,38 @@ def create_app() -> FastAPI:
     def compile_spec(request: ValidateRequest) -> dict[str, Any]:
         compiled = engine.validate_spec(request.spec_path)
         return compiled.model_dump()
+
+    @app.post("/sessions")
+    def create_session(request: RunRequest, run_immediately: bool = True) -> dict[str, Any]:
+        session = engine.create_session(request.spec_path, request.input, trigger="manual")
+        if not run_immediately:
+            return session
+        return engine.resume_session(session["id"], trigger="manual")
+
+    @app.post("/sessions/{session_id}/trigger")
+    def trigger_session(session_id: str, request: SessionTriggerRequest) -> dict[str, Any]:
+        try:
+            return engine.trigger_session(session_id, trigger=request.trigger, max_cycles=request.max_cycles)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/sessions/{session_id}/resume")
+    def resume_session(session_id: str, request: SessionTriggerRequest) -> dict[str, Any]:
+        try:
+            return engine.resume_session(session_id, trigger=request.trigger, max_cycles=request.max_cycles)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/sessions")
+    def list_sessions(limit: int = 50) -> list[dict[str, Any]]:
+        return engine.list_sessions(limit=limit)
+
+    @app.get("/sessions/{session_id}")
+    def get_session(session_id: str) -> dict[str, Any]:
+        payload = engine.get_session(session_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return payload
 
     @app.post("/runs")
     def create_run(request: RunRequest) -> dict[str, Any]:
