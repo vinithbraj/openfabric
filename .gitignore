@@ -12,3 +12,4 @@ services/postgres/postgres_data/
 services/postgres/pgadmin_data/
 services/postgres/init/
 artifacts/runtime_runs/
+artifacts/
