@@ -233,6 +233,11 @@ DU_COMMAND_RE = re.compile(r"\bdu\b")
 DF_COMMAND_RE = re.compile(r"\bdf\b")
 
 
+def summarize_plan(plan: ExecutionPlan) -> str:
+    actions = [step.action for step in plan.steps]
+    return f"Plan with {len(actions)} steps: " + ", ".join(actions)
+
+
 class TaskPlanner:
     def __init__(self, *, llm: LLMClient, tools: ToolRegistry, settings: Settings | None = None) -> None:
         self.llm = llm

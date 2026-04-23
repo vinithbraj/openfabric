@@ -12,7 +12,7 @@ from aor_runtime.dsl.models import CompiledRuntimeSpec
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.compiler import GraphCompiler
 from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
-from aor_runtime.runtime.planner import TaskPlanner
+from aor_runtime.runtime.planner import TaskPlanner, summarize_plan
 from aor_runtime.runtime.sessions import SessionManager
 from aor_runtime.runtime.state import RuntimeState
 from aor_runtime.runtime.store import SQLiteRunStore
@@ -149,12 +149,14 @@ class ExecutionEngine:
                 input_payload=dict(state.get("input", {})),
                 failure_context=state.get("failure_context"),
             )
+            plan_summary = summarize_plan(plan)
             state.update(
                 {
                     "current_node": "planner",
                     "next_action": "executor",
                     "status": "executing",
                     "plan": plan.model_dump(),
+                    "plan_summary": plan_summary,
                     "attempt_history": [],
                     "current_step_index": 0,
                     "attempt": int(state.get("attempt", 0)) + 1,
@@ -177,6 +179,7 @@ class ExecutionEngine:
                     "next_action": "",
                     "status": "failed",
                     "done": True,
+                    "plan_summary": None,
                     "error": str(exc),
                     "final_output": {"content": str(exc), "artifacts": [], "metadata": {"goal": state.get("goal", "")}},
                 }
@@ -339,6 +342,7 @@ class ExecutionEngine:
                     "failure_context": failure_context,
                     "error": detail,
                     "plan": {},
+                    "plan_summary": None,
                     "attempt_history": [],
                     "current_step_index": 0,
                 }
@@ -352,6 +356,7 @@ class ExecutionEngine:
                     "done": True,
                     "failure_context": failure_context,
                     "error": detail,
+                    "plan_summary": None,
                     "final_output": {
                         "content": detail,
                         "artifacts": list((state.get("final_output") or {}).get("artifacts", [])),

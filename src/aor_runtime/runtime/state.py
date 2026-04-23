@@ -15,6 +15,7 @@ class RuntimeState(TypedDict, total=False):
     input: dict[str, Any]
     compiled_spec: dict[str, Any]
     plan: dict[str, Any]
+    plan_summary: str | None
     history: list[dict[str, Any]]
     attempt_history: list[dict[str, Any]]
     status: str
@@ -55,6 +56,7 @@ def initial_runtime_state(
         "input": input_payload,
         "compiled_spec": compiled_spec,
         "plan": {},
+        "plan_summary": None,
         "history": [],
         "attempt_history": [],
         "status": "planning",
