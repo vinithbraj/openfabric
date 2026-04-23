@@ -36,8 +36,22 @@ class RuntimeValidator:
 
         try:
             if step.action == "fs.exists":
-                current = fs_exists(self.settings, str(step.args["path"]))
-                return {"name": f"step_{step.id}_{step.action}", "success": bool(current["exists"]), "detail": f"exists={current['exists']} path={current['path']}"}
+                observed_exists = bool(item.result.get("exists"))
+                observed_path = str(item.result.get("path", step.args["path"]))
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": observed_exists,
+                    "detail": f"exists={observed_exists} path={observed_path}",
+                }
+
+            if step.action == "fs.not_exists":
+                observed_exists = bool(item.result.get("exists"))
+                observed_path = str(item.result.get("path", step.args["path"]))
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": not observed_exists,
+                    "detail": f"exists={observed_exists} path={observed_path}",
+                }
 
             if step.action == "fs.copy":
                 src = str(step.args["src"])

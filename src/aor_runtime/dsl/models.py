@@ -7,6 +7,7 @@ from aor_runtime.core.contracts import PlannerConfig, RuntimePolicy
 
 DEFAULT_TOOLS = [
     "fs.exists",
+    "fs.not_exists",
     "fs.copy",
     "fs.read",
     "fs.write",

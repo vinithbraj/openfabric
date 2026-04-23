@@ -12,6 +12,7 @@ runtime:
 
 tools:
   - fs.exists
+  - fs.not_exists
   - fs.copy
   - fs.read
   - fs.write

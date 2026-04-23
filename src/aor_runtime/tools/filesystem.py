@@ -26,6 +26,10 @@ def fs_exists(settings: Settings, path: str) -> dict[str, Any]:
     }
 
 
+def fs_not_exists(settings: Settings, path: str) -> dict[str, Any]:
+    return fs_exists(settings, path)
+
+
 def fs_read(settings: Settings, path: str) -> dict[str, Any]:
     resolved = resolve_path(settings, path)
     if not resolved.exists():
@@ -92,6 +96,30 @@ class FileExistsTool(BaseTool):
 
     def run(self, arguments: ToolArgs) -> ToolResult:
         return self.ToolResult.model_validate(fs_exists(self.settings, arguments.path))
+
+
+class FileNotExistsTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+
+    class ToolResult(ToolResultModel):
+        path: str
+        exists: bool
+        is_file: bool
+        is_dir: bool
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
+        self.spec = ToolSpec(
+            name="fs.not_exists",
+            description="Check that a file or directory does not exist.",
+            arguments_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        )
+
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_not_exists(self.settings, arguments.path))
 
 
 class FileCopyTool(BaseTool):

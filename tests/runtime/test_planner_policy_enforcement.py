@@ -125,6 +125,28 @@ def test_validate_plan_efficiency_accepts_compliant_plan() -> None:
     validate_plan_efficiency(plan)
 
 
+def test_planner_accepts_delete_plan_with_fs_not_exists(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        {
+            "steps": [
+                {"id": 1, "action": "fs.exists", "args": {"path": "notes.txt"}},
+                {"id": 2, "action": "shell.exec", "args": {"command": "rm notes.txt"}},
+                {"id": 3, "action": "fs.not_exists", "args": {"path": "notes.txt"}},
+            ]
+        },
+    )
+
+    plan = planner.build_plan(
+        goal="Delete notes.txt",
+        planner=_planner_config(),
+        allowed_tools=["fs.exists", "fs.not_exists", "shell.exec"],
+        input_payload={"task": "Delete notes.txt"},
+    )
+
+    assert [step.action for step in plan.steps] == ["fs.exists", "shell.exec", "fs.not_exists"]
+
+
 def test_planner_tracks_raw_output_and_error_type_for_malformed_json(tmp_path: Path) -> None:
     raw_response = """
     {
@@ -162,6 +184,7 @@ def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
         "shell.exec(...) returns an object with stdout, stderr, and returncode fields",
         "Every args value must be valid JSON as written.",
         "Prefer a direct shell.exec step for simple command-output formatting tasks.",
+        "Use fs.not_exists to verify that a path is absent after deletion or cleanup.",
     ]
 
     for snippet in required_snippets:

@@ -44,7 +44,9 @@ You MUST:
 - Use fs.mkdir for creating directories.
 - Use fs.write for exact file content.
 - Use fs.read to verify exact contents when the task requires exact text verification.
-- Use fs.exists to assert that an important path exists before or after an operation when applicable.
+- Use fs.exists to assert that a path exists before reads, copies, or removals, or after operations that create something.
+- Use fs.not_exists to verify that a path is absent after deletion or cleanup.
+- For delete-like shell commands, verify removed paths with fs.not_exists after the shell step.
 - For folder or directory disk-usage questions, prefer du-based shell commands.
 - For filesystem or disk-capacity questions, prefer df-based shell commands.
 
@@ -60,6 +62,7 @@ You MUST NOT:
 - Use python.exec for a single-step task that a direct fs.* or shell.exec step can handle.
 - Put expressions, string concatenation, comprehensions, or variable references in args outside a python.exec code string.
 - Use shell -> python -> fs.write -> fs.read round-trips when a direct shell.exec step can produce the requested text output.
+- Do not reuse earlier fs.exists prechecks as deletion verification.
 
 Tool selection policy:
 - Use sql.query for filtering or querying structured data.
@@ -195,6 +198,15 @@ Task: return the current directory entries as a csv string
         "command": "ls -1 | paste -sd, -"
       }
     }
+  ]
+}
+
+Task: delete notes.txt
+{
+  "steps": [
+    {"id": 1, "action": "fs.exists", "args": {"path": "notes.txt"}},
+    {"id": 2, "action": "shell.exec", "args": {"command": "rm notes.txt"}},
+    {"id": 3, "action": "fs.not_exists", "args": {"path": "notes.txt"}}
   ]
 }
 

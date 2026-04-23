@@ -21,6 +21,8 @@ class PlanExecutor:
                 raise ToolExecutionError(str(output.get("error") or "python.exec failed."))
             if step.action == "fs.exists" and not bool(output.get("exists")):
                 raise ToolExecutionError(f"Path does not exist: {step.args.get('path', '')}")
+            if step.action == "fs.not_exists" and bool(output.get("exists")):
+                raise ToolExecutionError(f"Path still exists: {step.args.get('path', '')}")
             return StepLog(
                 step=step,
                 result=output,
@@ -81,6 +83,8 @@ def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
         content = "\n".join(str(entry) for entry in entries)
     elif action == "fs.exists":
         content = "true" if result.get("exists") else "false"
+    elif action == "fs.not_exists":
+        content = "true" if not result.get("exists") else "false"
     elif action == "python.exec":
         content = str(result.get("output") or "").strip()
     elif action == "sql.query":
