@@ -5,7 +5,7 @@ from typing import Any
 
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
-from aor_runtime.core.utils import dumps_json
+from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.policies import render_policy_text, select_policies, validate_plan_efficiency
 from aor_runtime.tools.base import ToolRegistry
@@ -46,9 +46,12 @@ You MUST:
 - Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - In python.exec, you may call sql.query through the provided sql helper.
 - In python.exec, fs.read returns the file content string, fs.list returns a list of entry names, and fs.exists returns a boolean.
+- In python.exec, shell.exec(...) returns an object with stdout, stderr, and returncode fields. If you need command output text, parse shell.exec(...).stdout.
 - In python.exec, call sql.query with explicit keyword arguments like sql.query(database='clinical_db', query='SELECT ...').
 - In python.exec, assign the final JSON-serializable answer to a variable named result.
 - Keep python.exec code in a single-line JSON string and use semicolons instead of raw newlines.
+- Every args value must be valid JSON as written.
+- For straightforward command-output extraction, filtering, or CSV/text formatting, prefer a single shell.exec step when shell can produce the final answer directly.
 - Prefer filesystem tools over shell commands for filesystem tasks.
 - Use fs.copy for copying files.
 - Use fs.mkdir for creating directories.
@@ -68,6 +71,8 @@ You MUST NOT:
 - Emit natural-language pseudo-steps.
 - Use shell.exec when a filesystem tool already covers the task.
 - Use python.exec for a single-step task that a direct fs.* or shell.exec step can handle.
+- Put expressions, string concatenation, comprehensions, or variable references in args outside a python.exec code string.
+- Use shell -> python -> fs.write -> fs.read round-trips when a direct shell.exec step can produce the requested text output.
 
 Tool selection policy:
 - Use sql.query for filtering or querying structured data.
@@ -103,6 +108,7 @@ Optimization rules:
 - Use the minimal number of steps.
 - Avoid switching between domains unless necessary.
 - Combine operations when possible.
+- Prefer a direct shell.exec step for simple command-output formatting tasks.
 
 Examples:
 
@@ -207,6 +213,21 @@ Plan:
 }
 
 Task:
+return the current directory entries as a csv string
+Plan:
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "shell.exec",
+      "args": {
+        "command": "ls -1 | paste -sd, -"
+      }
+    }
+  ]
+}
+
+Task:
 which folder is consuming the most space?
 Plan:
 {
@@ -256,11 +277,21 @@ DATABASE_NAME_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_]*_db\b")
 STORAGE_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 DU_COMMAND_RE = re.compile(r"\bdu\b")
 DF_COMMAND_RE = re.compile(r"\bdf\b")
+PLANNER_RAW_OUTPUT_PREVIEW_CHARS = 600
 
 
 def summarize_plan(plan: ExecutionPlan) -> str:
     actions = [step.action for step in plan.steps]
     return f"Plan with {len(actions)} steps: " + ", ".join(actions)
+
+
+def summarize_planner_raw_output(raw_output: str | None, limit: int = PLANNER_RAW_OUTPUT_PREVIEW_CHARS) -> str | None:
+    text = str(raw_output or "").strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 class TaskPlanner:
@@ -269,6 +300,8 @@ class TaskPlanner:
         self.tools = tools
         self.settings = settings or get_settings()
         self.last_policies_used: list[str] = []
+        self.last_raw_output: str | None = None
+        self.last_error_type: str | None = None
 
     def build_plan(
         self,
@@ -281,6 +314,8 @@ class TaskPlanner:
     ) -> ExecutionPlan:
         system_prompt = self.llm.load_prompt(planner.prompt, DEFAULT_PLANNER_PROMPT)
         self.last_policies_used = []
+        self.last_raw_output = None
+        self.last_error_type = None
         schema_payload: dict[str, Any] | None = None
         planner_context: dict[str, Any] = {
             "goal": goal,
@@ -299,21 +334,29 @@ class TaskPlanner:
         self.last_policies_used = [policy.name for policy in policies]
         planner_context["policies"] = render_policy_text(policies)
         user_prompt = dumps_json(planner_context, indent=2)
-        payload = self.llm.complete_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=planner.model,
-            temperature=planner.temperature,
-        )
-        plan = ExecutionPlan.model_validate(payload)
-        self._apply_storage_shell_semantics(goal, plan)
-        for step in plan.steps:
-            if step.action not in allowed_tools:
-                raise ValueError(f"Planner selected disallowed tool {step.action!r}.")
-            self.tools.validate_step(step.action, step.args)
-        self._validate_explicit_database_targets(goal, plan)
-        validate_plan_efficiency(plan)
-        return plan
+        try:
+            raw_output = self.llm.complete(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=planner.model,
+                temperature=planner.temperature,
+            )
+            self.last_raw_output = raw_output
+            payload = extract_json_object(raw_output)
+            if not isinstance(payload, dict):
+                raise ValueError("Expected JSON object response from model")
+            plan = ExecutionPlan.model_validate(payload)
+            self._apply_storage_shell_semantics(goal, plan)
+            for step in plan.steps:
+                if step.action not in allowed_tools:
+                    raise ValueError(f"Planner selected disallowed tool {step.action!r}.")
+                self.tools.validate_step(step.action, step.args)
+            self._validate_explicit_database_targets(goal, plan)
+            validate_plan_efficiency(plan)
+            return plan
+        except Exception as exc:
+            self.last_error_type = type(exc).__name__
+            raise
 
     def _validate_explicit_database_targets(self, goal: str, plan: ExecutionPlan) -> None:
         configured_databases = resolve_sql_databases(self.settings)

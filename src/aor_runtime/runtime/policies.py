@@ -105,18 +105,22 @@ FILESYSTEM_KEYWORDS = {
     "write",
 }
 PYTHON_COMPOSITION_KEYWORDS = {
-    "all",
     "bulk",
-    "count",
     "each",
     "every",
-    "how",
     "iterate",
     "iterating",
     "loop",
     "loops",
-    "many",
     "multiple",
+}
+PYTHON_COMPOSITION_PHRASES = {
+    "copy all",
+    "for each",
+    "for every",
+    "move all",
+    "per file",
+    "rename all",
 }
 
 
@@ -140,8 +144,7 @@ def select_policies(goal: str, allowed_tools: list[str], schema: dict[str, Any] 
     if "python.exec" in allowed_tools and (
         explicit_python_requested
         or goal_tokens & PYTHON_COMPOSITION_KEYWORDS
-        or "how many" in goal_text
-        or "for each" in goal_text
+        or any(phrase in goal_text for phrase in PYTHON_COMPOSITION_PHRASES)
     ):
         selected_names.append("python_usage")
 

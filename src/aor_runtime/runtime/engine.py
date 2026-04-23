@@ -13,7 +13,7 @@ from aor_runtime.dsl.models import CompiledRuntimeSpec
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.compiler import GraphCompiler
 from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
-from aor_runtime.runtime.planner import TaskPlanner, summarize_plan
+from aor_runtime.runtime.planner import TaskPlanner, summarize_plan, summarize_planner_raw_output
 from aor_runtime.runtime.sessions import SessionManager
 from aor_runtime.runtime.state import RuntimeState
 from aor_runtime.runtime.store import SQLiteRunStore
@@ -228,6 +228,12 @@ class ExecutionEngine:
                 payload={**plan.model_dump(), "policies": policies_used},
             )
         except Exception as exc:  # noqa: BLE001
+            failed_policies = list(self.planner.last_policies_used)
+            planner_error_type = str(self.planner.last_error_type or type(exc).__name__)
+            raw_output_preview = summarize_planner_raw_output(self.planner.last_raw_output)
+            final_output_metadata = {"goal": state.get("goal", ""), "planner_error_type": planner_error_type}
+            if raw_output_preview is not None:
+                final_output_metadata["planner_raw_output_preview"] = raw_output_preview
             state.update(
                 {
                     "current_node": "planner",
@@ -241,14 +247,17 @@ class ExecutionEngine:
                     "policies_used": [],
                     "plan_summary": None,
                     "error": str(exc),
-                    "final_output": {"content": str(exc), "artifacts": [], "metadata": {"goal": state.get("goal", "")}},
+                    "final_output": {"content": str(exc), "artifacts": [], "metadata": final_output_metadata},
                 }
             )
+            failure_payload = {"error": str(exc), "error_type": planner_error_type, "policies": failed_policies}
+            if raw_output_preview is not None:
+                failure_payload["raw_output_preview"] = raw_output_preview
             self.store.append_event(
                 session_id=session.id,
                 node_name="planner",
                 event_type="planner.failed",
-                payload={"error": str(exc)},
+                payload=failure_payload,
             )
         self._persist(session, node_name="planner")
 

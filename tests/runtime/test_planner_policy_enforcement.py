@@ -7,36 +7,37 @@ import pytest
 
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
-from aor_runtime.runtime.planner import TaskPlanner
+from aor_runtime.runtime.planner import DEFAULT_PLANNER_PROMPT, TaskPlanner
 from aor_runtime.runtime.policies import validate_plan_efficiency
 from aor_runtime.tools.factory import build_tool_registry
 
 
 class FakeLLM:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
+    def __init__(self, raw_response: str) -> None:
+        self.raw_response = raw_response
         self.last_system_prompt: str | None = None
         self.last_user_prompt: str | None = None
 
     def load_prompt(self, path: str | None, fallback: str) -> str:
         return fallback
 
-    def complete_json(
+    def complete(
         self,
         *,
         system_prompt: str,
         user_prompt: str,
         model: str | None = None,
         temperature: float | None = None,
-    ) -> dict:
+    ) -> str:
         self.last_system_prompt = system_prompt
         self.last_user_prompt = user_prompt
-        return self.payload
+        return self.raw_response
 
 
-def _planner(tmp_path: Path, payload: dict) -> tuple[TaskPlanner, FakeLLM]:
+def _planner(tmp_path: Path, raw_response: str | dict) -> tuple[TaskPlanner, FakeLLM]:
     settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
-    llm = FakeLLM(payload)
+    serialized = json.dumps(raw_response) if isinstance(raw_response, dict) else raw_response
+    llm = FakeLLM(serialized)
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
     return planner, llm
 
@@ -122,3 +123,47 @@ def test_validate_plan_efficiency_accepts_compliant_plan() -> None:
     )
 
     validate_plan_efficiency(plan)
+
+
+def test_planner_tracks_raw_output_and_error_type_for_malformed_json(tmp_path: Path) -> None:
+    raw_response = """
+    {
+      "steps": [
+        {
+          "id": 1,
+          "action": "fs.write",
+          "args": {
+            "path": "notes.txt",
+            "content": "hello" + "world"
+          }
+        }
+      ]
+    }
+    """
+    planner, _ = _planner(tmp_path, raw_response)
+
+    with pytest.raises(ValueError, match="Expecting ',' delimiter"):
+        planner.build_plan(
+            goal="Write notes.txt",
+            planner=_planner_config(),
+            allowed_tools=["fs.write"],
+            input_payload={"task": "Write notes.txt"},
+        )
+
+    assert planner.last_error_type == "JSONDecodeError"
+    assert planner.last_raw_output is not None
+    assert '"content": "hello" + "world"' in planner.last_raw_output
+
+
+def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
+    file_prompt = (Path(__file__).resolve().parents[2] / "prompts" / "planner_system.txt").read_text()
+
+    required_snippets = [
+        "shell.exec(...) returns an object with stdout, stderr, and returncode fields",
+        "Every args value must be valid JSON as written.",
+        "Prefer a direct shell.exec step for simple command-output formatting tasks.",
+    ]
+
+    for snippet in required_snippets:
+        assert snippet in DEFAULT_PLANNER_PROMPT
+        assert snippet in file_prompt

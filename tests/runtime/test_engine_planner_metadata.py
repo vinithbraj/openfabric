@@ -59,6 +59,9 @@ def test_planner_failure_clears_stale_policies_used(tmp_path: Path, monkeypatch)
     engine.planner.last_policies_used = ["stale_policy"]
 
     def failing_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["efficiency"]
+        engine.planner.last_raw_output = '{"steps":[{"id":1,"action":"fs.write","args":{"content":"hello" + "world"}}]}'
+        engine.planner.last_error_type = "JSONDecodeError"
         raise RuntimeError("planner boom")
 
     monkeypatch.setattr(engine.planner, "build_plan", failing_build_plan)
@@ -67,6 +70,14 @@ def test_planner_failure_clears_stale_policies_used(tmp_path: Path, monkeypatch)
 
     assert session.state["status"] == "failed"
     assert session.state["policies_used"] == []
+    metadata = session.state["final_output"]["metadata"]
+    assert metadata["planner_error_type"] == "JSONDecodeError"
+    assert '"content":"hello" + "world"' in metadata["planner_raw_output_preview"]
+    events = engine.store.get_events(session.id)
+    planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
+    assert planner_failed["payload"]["error_type"] == "JSONDecodeError"
+    assert planner_failed["payload"]["policies"] == ["efficiency"]
+    assert '"content":"hello" + "world"' in planner_failed["payload"]["raw_output_preview"]
 
 
 def test_retry_and_terminal_failure_clear_policies_used(tmp_path: Path) -> None:

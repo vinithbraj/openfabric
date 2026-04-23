@@ -49,6 +49,17 @@ def test_select_policies_adds_python_usage_for_bulk_goal() -> None:
     assert "efficiency" in names
 
 
+def test_select_policies_does_not_force_python_for_simple_formatting_goal() -> None:
+    policies = select_policies(
+        "Get a list of all upgradable packages and extract the names as csv",
+        ["shell.exec", "python.exec"],
+    )
+
+    names = [policy.name for policy in policies]
+    assert "python_usage" not in names
+    assert names == ["efficiency"]
+
+
 def test_select_policies_honors_explicit_python_request() -> None:
     schema = {
         "databases": [
