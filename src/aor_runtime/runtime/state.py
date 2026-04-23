@@ -14,6 +14,8 @@ class RuntimeState(TypedDict, total=False):
     goal: str
     input: dict[str, Any]
     compiled_spec: dict[str, Any]
+    dry_run: bool
+    awaiting_confirmation: bool
     plan: dict[str, Any]
     plan_summary: str | None
     history: list[dict[str, Any]]
@@ -55,6 +57,8 @@ def initial_runtime_state(
         "goal": goal,
         "input": input_payload,
         "compiled_spec": compiled_spec,
+        "dry_run": False,
+        "awaiting_confirmation": False,
         "plan": {},
         "plan_summary": None,
         "history": [],

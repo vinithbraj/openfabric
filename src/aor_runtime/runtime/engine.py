@@ -35,11 +35,17 @@ class ExecutionEngine:
         self.executor = PlanExecutor(self.tool_registry)
         self.validator = RuntimeValidator(self.settings)
 
-    def run_spec(self, spec_path: str, input_payload: dict[str, Any]) -> dict[str, Any]:
-        session = self.create_session(spec_path, input_payload, trigger="manual")
+    def run_spec(self, spec_path: str, input_payload: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
+        session = self.create_session(spec_path, input_payload, trigger="manual", dry_run=dry_run)
         return self.resume_session(session["id"], trigger="manual")
 
-    def create_session(self, spec_path: str, input_payload: dict[str, Any], trigger: str = "manual") -> dict[str, Any]:
+    def create_session(
+        self,
+        spec_path: str,
+        input_payload: dict[str, Any],
+        trigger: str = "manual",
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
         spec = load_runtime_spec(spec_path)
         compiled = self.compiler.compile(spec)
         session_id = self._new_session_id()
@@ -50,6 +56,8 @@ class ExecutionEngine:
             input_payload=input_payload,
             trigger=trigger,
         )
+        session.state["dry_run"] = bool(dry_run)
+        session.state["awaiting_confirmation"] = False
         self.store.append_event(
             session_id=session.id,
             node_name="session",
@@ -66,6 +74,9 @@ class ExecutionEngine:
 
         session.current_trigger = trigger
         session.state["trigger"] = trigger
+        if bool(session.state.get("awaiting_confirmation")):
+            session.state["awaiting_confirmation"] = False
+            session.state["dry_run"] = False
         self._touch_state(session.state)
         self.store.append_event(
             session_id=session.id,
@@ -82,6 +93,8 @@ class ExecutionEngine:
             action = self._decide_next_action(session.state)
             if action == "planner":
                 self._run_planner(session)
+                if bool(session.state.get("awaiting_confirmation")):
+                    break
             elif action == "executor":
                 self._run_executor_step(session)
             elif action == "validator":
@@ -97,6 +110,8 @@ class ExecutionEngine:
             self._finalize_session(session)
         else:
             self.session_manager.persist_session(session, node_name="loop")
+        if bool(session.state.get("awaiting_confirmation")):
+            return self._dry_run_preview(session.state)
         return ensure_jsonable(session.state)
 
     def trigger_session(self, session_id: str, trigger: str = "manual", max_cycles: int | None = None) -> dict[str, Any]:
@@ -150,11 +165,13 @@ class ExecutionEngine:
                 failure_context=state.get("failure_context"),
             )
             plan_summary = summarize_plan(plan)
+            awaiting_confirmation = bool(state.get("dry_run"))
             state.update(
                 {
                     "current_node": "planner",
                     "next_action": "executor",
                     "status": "executing",
+                    "awaiting_confirmation": awaiting_confirmation,
                     "plan": plan.model_dump(),
                     "plan_summary": plan_summary,
                     "attempt_history": [],
@@ -179,6 +196,7 @@ class ExecutionEngine:
                     "next_action": "",
                     "status": "failed",
                     "done": True,
+                    "awaiting_confirmation": False,
                     "plan_summary": None,
                     "error": str(exc),
                     "final_output": {"content": str(exc), "artifacts": [], "metadata": {"goal": state.get("goal", "")}},
@@ -341,6 +359,7 @@ class ExecutionEngine:
                     "retries": retries + 1,
                     "failure_context": failure_context,
                     "error": detail,
+                    "awaiting_confirmation": False,
                     "plan": {},
                     "plan_summary": None,
                     "attempt_history": [],
@@ -356,6 +375,7 @@ class ExecutionEngine:
                     "done": True,
                     "failure_context": failure_context,
                     "error": detail,
+                    "awaiting_confirmation": False,
                     "plan_summary": None,
                     "final_output": {
                         "content": detail,
@@ -457,3 +477,11 @@ class ExecutionEngine:
         if session is None:
             raise KeyError(f"Unknown session: {session_id}")
         return session
+
+    @staticmethod
+    def _dry_run_preview(state: RuntimeState) -> dict[str, Any]:
+        return {
+            "session_id": str(state.get("session_id", "")),
+            "plan": state.get("plan", {}),
+            "summary": state.get("plan_summary"),
+        }

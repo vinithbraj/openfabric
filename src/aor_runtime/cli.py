@@ -17,6 +17,10 @@ app.add_typer(runs_app, name="runs")
 app.add_typer(sessions_app, name="sessions")
 
 
+def _is_dry_run_preview(payload: dict[str, Any]) -> bool:
+    return all(key in payload for key in ("session_id", "plan", "summary")) and "status" not in payload
+
+
 def _final_answer_from_state(state: dict[str, Any]) -> str:
     final_output = state.get("final_output")
     if isinstance(final_output, dict):
@@ -44,10 +48,20 @@ def validate(spec_path: Path) -> None:
 
 
 @app.command()
-def run(spec_path: Path, input: str = typer.Option("{}", help="JSON input payload")) -> None:
+def run(
+    spec_path: Path,
+    input: str = typer.Option("{}", help="JSON input payload"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview the plan and confirm before execution."),
+) -> None:
     payload = json.loads(input)
     engine = ExecutionEngine()
-    state = engine.run_spec(str(spec_path), payload)
+    state = engine.run_spec(str(spec_path), payload, dry_run=dry_run)
+    if dry_run and _is_dry_run_preview(state):
+        typer.echo(dumps_json(state, indent=2))
+        if typer.confirm("Run this plan?", default=False):
+            resumed = engine.resume_session(str(state["session_id"]), trigger="manual")
+            typer.echo(dumps_json(resumed, indent=2))
+        return
     typer.echo(dumps_json(state, indent=2))
 
 
