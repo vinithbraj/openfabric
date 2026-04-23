@@ -19,6 +19,7 @@ class RuntimeState(TypedDict, total=False):
     confirmation_kind: str | None
     confirmation_step: dict[str, Any] | None
     confirmation_message: str | None
+    policies_used: list[str]
     plan: dict[str, Any]
     plan_summary: str | None
     history: list[dict[str, Any]]
@@ -65,6 +66,7 @@ def initial_runtime_state(
         "confirmation_kind": None,
         "confirmation_step": None,
         "confirmation_message": None,
+        "policies_used": [],
         "plan": {},
         "plan_summary": None,
         "history": [],

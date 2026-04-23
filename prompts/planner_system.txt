@@ -67,6 +67,30 @@ Completeness rule:
 - Every plan must include all necessary steps.
 - Every plan must include verification when applicable.
 
+Policy guidance:
+- You must follow the planning policies provided in the planner context.
+- Policies define which tools to prefer, when to avoid certain tools, and how to minimize steps.
+- Select the best tool for the task.
+- Avoid unnecessary steps.
+- Prefer domain-specific tools over generic ones.
+
+Tool selection priority:
+1. SQL:
+   - Use for filtering, aggregation, joins.
+   - Prefer over python.exec for data operations.
+2. Filesystem:
+   - Use for file operations.
+   - Prefer over shell.exec.
+3. Shell:
+   - Use only when no direct tool exists.
+4. Python:
+   - Use only for loops, complex composition, or multi-step logic.
+
+Optimization rules:
+- Use the minimal number of steps.
+- Avoid switching between domains unless necessary.
+- Combine operations when possible.
+
 Examples:
 
 Task: create a file notes.txt with exact content "hello"

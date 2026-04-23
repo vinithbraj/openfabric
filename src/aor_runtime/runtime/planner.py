@@ -7,6 +7,7 @@ from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
 from aor_runtime.core.utils import dumps_json
 from aor_runtime.llm.client import LLMClient
+from aor_runtime.runtime.policies import render_policy_text, select_policies, validate_plan_efficiency
 from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.sql import get_schema, prune_schema, resolve_sql_databases
 
@@ -78,6 +79,30 @@ Completeness rule:
 - Every plan must fully satisfy the user request.
 - Every plan must include all necessary steps.
 - Every plan must include verification when applicable.
+
+Policy guidance:
+- You must follow the planning policies provided in the planner context.
+- Policies define which tools to prefer, when to avoid certain tools, and how to minimize steps.
+- Select the best tool for the task.
+- Avoid unnecessary steps.
+- Prefer domain-specific tools over generic ones.
+
+Tool selection priority:
+1. SQL:
+   - Use for filtering, aggregation, joins.
+   - Prefer over python.exec for data operations.
+2. Filesystem:
+   - Use for file operations.
+   - Prefer over shell.exec.
+3. Shell:
+   - Use only when no direct tool exists.
+4. Python:
+   - Use only for loops, complex composition, or multi-step logic.
+
+Optimization rules:
+- Use the minimal number of steps.
+- Avoid switching between domains unless necessary.
+- Combine operations when possible.
 
 Examples:
 
@@ -243,6 +268,7 @@ class TaskPlanner:
         self.llm = llm
         self.tools = tools
         self.settings = settings or get_settings()
+        self.last_policies_used: list[str] = []
 
     def build_plan(
         self,
@@ -254,6 +280,8 @@ class TaskPlanner:
         failure_context: dict[str, Any] | None = None,
     ) -> ExecutionPlan:
         system_prompt = self.llm.load_prompt(planner.prompt, DEFAULT_PLANNER_PROMPT)
+        self.last_policies_used = []
+        schema_payload: dict[str, Any] | None = None
         planner_context: dict[str, Any] = {
             "goal": goal,
             "input": input_payload,
@@ -262,9 +290,14 @@ class TaskPlanner:
         }
         if "sql.query" in allowed_tools:
             try:
-                planner_context["schema"] = prune_schema(get_schema(self.settings), goal, settings=self.settings).model_dump()
+                schema_payload = prune_schema(get_schema(self.settings), goal, settings=self.settings).model_dump()
+                planner_context["schema"] = schema_payload
             except Exception as exc:  # noqa: BLE001
-                planner_context["schema"] = {"databases": [], "error": str(exc)}
+                schema_payload = {"databases": [], "error": str(exc)}
+                planner_context["schema"] = schema_payload
+        policies = select_policies(goal, allowed_tools, schema_payload)
+        self.last_policies_used = [policy.name for policy in policies]
+        planner_context["policies"] = render_policy_text(policies)
         user_prompt = dumps_json(planner_context, indent=2)
         payload = self.llm.complete_json(
             system_prompt=system_prompt,
@@ -279,6 +312,7 @@ class TaskPlanner:
                 raise ValueError(f"Planner selected disallowed tool {step.action!r}.")
             self.tools.validate_step(step.action, step.args)
         self._validate_explicit_database_targets(goal, plan)
+        validate_plan_efficiency(plan)
         return plan
 
     def _validate_explicit_database_targets(self, goal: str, plan: ExecutionPlan) -> None:

@@ -64,6 +64,7 @@ class ExecutionEngine:
         session.state["confirmation_kind"] = None
         session.state["confirmation_step"] = None
         session.state["confirmation_message"] = None
+        session.state["policies_used"] = []
         self.store.append_event(
             session_id=session.id,
             node_name="session",
@@ -197,6 +198,7 @@ class ExecutionEngine:
                 failure_context=state.get("failure_context"),
             )
             plan_summary = summarize_plan(plan)
+            policies_used = list(self.planner.last_policies_used)
             awaiting_confirmation = bool(state.get("dry_run"))
             state.update(
                 {
@@ -207,6 +209,7 @@ class ExecutionEngine:
                     "confirmation_kind": "dry_run" if awaiting_confirmation else None,
                     "confirmation_step": None,
                     "confirmation_message": None,
+                    "policies_used": policies_used,
                     "plan": plan.model_dump(),
                     "plan_summary": plan_summary,
                     "attempt_history": [],
@@ -222,7 +225,7 @@ class ExecutionEngine:
                 session_id=session.id,
                 node_name="planner",
                 event_type="planner.completed",
-                payload=plan.model_dump(),
+                payload={**plan.model_dump(), "policies": policies_used},
             )
         except Exception as exc:  # noqa: BLE001
             state.update(
@@ -235,6 +238,7 @@ class ExecutionEngine:
                     "confirmation_kind": None,
                     "confirmation_step": None,
                     "confirmation_message": None,
+                    "policies_used": [],
                     "plan_summary": None,
                     "error": str(exc),
                     "final_output": {"content": str(exc), "artifacts": [], "metadata": {"goal": state.get("goal", "")}},
@@ -425,6 +429,7 @@ class ExecutionEngine:
                     "confirmation_kind": None,
                     "confirmation_step": None,
                     "confirmation_message": None,
+                    "policies_used": [],
                     "plan": {},
                     "plan_summary": None,
                     "attempt_history": [],
@@ -444,6 +449,7 @@ class ExecutionEngine:
                     "confirmation_kind": None,
                     "confirmation_step": None,
                     "confirmation_message": None,
+                    "policies_used": [],
                     "plan_summary": None,
                     "final_output": {
                         "content": detail,
