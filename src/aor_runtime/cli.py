@@ -21,7 +21,47 @@ def _is_dry_run_preview(payload: dict[str, Any]) -> bool:
     return all(key in payload for key in ("session_id", "plan", "summary")) and "status" not in payload
 
 
+def _is_dangerous_confirmation_pause(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("awaiting_confirmation")) and str(payload.get("confirmation_kind") or "") == "dangerous_step"
+
+
+def _dangerous_confirmation_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_id": str(payload.get("session_id", "")),
+        "confirmation_message": payload.get("confirmation_message"),
+        "confirmation_step": payload.get("confirmation_step"),
+    }
+
+
+def _resolve_dangerous_confirmation(
+    engine: ExecutionEngine,
+    state: dict[str, Any],
+    *,
+    trigger: str,
+    max_cycles: int | None = None,
+    approve_dangerous: bool = False,
+) -> dict[str, Any]:
+    auto_approve = approve_dangerous
+    while _is_dangerous_confirmation_pause(state):
+        typer.echo(dumps_json(_dangerous_confirmation_preview(state), indent=2))
+        if not auto_approve and not typer.confirm("Continue with dangerous operation?", default=False):
+            return state
+        state = engine.resume_session(
+            str(state["session_id"]),
+            trigger=trigger,
+            max_cycles=max_cycles,
+            approve_dangerous=True,
+        )
+        auto_approve = False
+    return state
+
+
 def _final_answer_from_state(state: dict[str, Any]) -> str:
+    if bool(state.get("awaiting_confirmation")):
+        confirmation_message = state.get("confirmation_message")
+        if isinstance(confirmation_message, str) and confirmation_message.strip():
+            return confirmation_message.strip()
+
     final_output = state.get("final_output")
     if isinstance(final_output, dict):
         content = final_output.get("content")
@@ -60,15 +100,32 @@ def run(
         typer.echo(dumps_json(state, indent=2))
         if typer.confirm("Run this plan?", default=False):
             resumed = engine.resume_session(str(state["session_id"]), trigger="manual")
+            resumed = _resolve_dangerous_confirmation(engine, resumed, trigger="manual")
             typer.echo(dumps_json(resumed, indent=2))
         return
+    state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
     typer.echo(dumps_json(state, indent=2))
 
 
 @app.command()
-def resume(session_id: str, trigger: str = "manual", max_cycles: int | None = None) -> None:
+def resume(
+    session_id: str,
+    trigger: str = "manual",
+    max_cycles: int | None = None,
+    approve_dangerous: bool = typer.Option(
+        False,
+        "--approve-dangerous",
+        help="Approve a paused dangerous step before resuming execution.",
+    ),
+) -> None:
     engine = ExecutionEngine()
-    state = engine.resume_session(session_id, trigger=trigger, max_cycles=max_cycles)
+    state = engine.resume_session(
+        session_id,
+        trigger=trigger,
+        max_cycles=max_cycles,
+        approve_dangerous=approve_dangerous,
+    )
+    state = _resolve_dangerous_confirmation(engine, state, trigger=trigger, max_cycles=max_cycles)
     typer.echo(dumps_json(state, indent=2))
 
 
@@ -113,6 +170,7 @@ def chat(
             payload["session_history"] = session_history[-max_history:]
 
         state = engine.run_spec(str(spec_path), payload)
+        state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
         answer = _final_answer_from_state(state)
         run_id = state.get("run_id", "")
 
@@ -148,15 +206,33 @@ def create_session(
     engine = ExecutionEngine()
     session = engine.create_session(str(spec_path), payload, trigger="manual")
     if run_immediately:
-        typer.echo(dumps_json(engine.resume_session(session["id"], trigger="manual"), indent=2))
+        state = engine.resume_session(session["id"], trigger="manual")
+        state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
+        typer.echo(dumps_json(state, indent=2))
         return
     typer.echo(dumps_json(session, indent=2))
 
 
 @sessions_app.command("resume")
-def resume_session(session_id: str, trigger: str = "manual", max_cycles: int | None = None) -> None:
+def resume_session(
+    session_id: str,
+    trigger: str = "manual",
+    max_cycles: int | None = None,
+    approve_dangerous: bool = typer.Option(
+        False,
+        "--approve-dangerous",
+        help="Approve a paused dangerous step before resuming execution.",
+    ),
+) -> None:
     engine = ExecutionEngine()
-    typer.echo(dumps_json(engine.resume_session(session_id, trigger=trigger, max_cycles=max_cycles), indent=2))
+    state = engine.resume_session(
+        session_id,
+        trigger=trigger,
+        max_cycles=max_cycles,
+        approve_dangerous=approve_dangerous,
+    )
+    state = _resolve_dangerous_confirmation(engine, state, trigger=trigger, max_cycles=max_cycles)
+    typer.echo(dumps_json(state, indent=2))
 
 
 @sessions_app.command("list")

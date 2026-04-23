@@ -16,6 +16,9 @@ class RuntimeState(TypedDict, total=False):
     compiled_spec: dict[str, Any]
     dry_run: bool
     awaiting_confirmation: bool
+    confirmation_kind: str | None
+    confirmation_step: dict[str, Any] | None
+    confirmation_message: str | None
     plan: dict[str, Any]
     plan_summary: str | None
     history: list[dict[str, Any]]
@@ -59,6 +62,9 @@ def initial_runtime_state(
         "compiled_spec": compiled_spec,
         "dry_run": False,
         "awaiting_confirmation": False,
+        "confirmation_kind": None,
+        "confirmation_step": None,
+        "confirmation_message": None,
         "plan": {},
         "plan_summary": None,
         "history": [],

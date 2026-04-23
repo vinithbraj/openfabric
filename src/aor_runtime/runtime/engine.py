@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from aor_runtime.config import Settings, get_settings
-from aor_runtime.core.contracts import AgentSession, ExecutionPlan, FinalOutput, RunMetrics
+from aor_runtime.core.contracts import AgentSession, ExecutionPlan, ExecutionStep, FinalOutput, RunMetrics
 from aor_runtime.core.utils import ensure_jsonable
 from aor_runtime.dsl.loader import load_runtime_spec
 from aor_runtime.dsl.models import CompiledRuntimeSpec
@@ -18,9 +19,11 @@ from aor_runtime.runtime.state import RuntimeState
 from aor_runtime.runtime.store import SQLiteRunStore
 from aor_runtime.runtime.validator import RuntimeValidator
 from aor_runtime.tools.factory import build_tool_registry
+from aor_runtime.tools.filesystem import resolve_path
 
 
 TERMINAL_STATUSES = {"completed", "failed"}
+DANGEROUS_SHELL_PATTERN = re.compile(r"(?:^|&&|\|\||;|\|)\s*(?:sudo\s+)?(?:rm|rmdir|unlink)\b")
 
 
 class ExecutionEngine:
@@ -58,6 +61,9 @@ class ExecutionEngine:
         )
         session.state["dry_run"] = bool(dry_run)
         session.state["awaiting_confirmation"] = False
+        session.state["confirmation_kind"] = None
+        session.state["confirmation_step"] = None
+        session.state["confirmation_message"] = None
         self.store.append_event(
             session_id=session.id,
             node_name="session",
@@ -67,16 +73,30 @@ class ExecutionEngine:
         self.session_manager.persist_session(session, node_name="session")
         return session.model_dump()
 
-    def resume_session(self, session_id: str, trigger: str = "manual", max_cycles: int | None = None) -> dict[str, Any]:
+    def resume_session(
+        self,
+        session_id: str,
+        trigger: str = "manual",
+        max_cycles: int | None = None,
+        approve_dangerous: bool = False,
+    ) -> dict[str, Any]:
         session = self._get_required_session(session_id)
         if self._is_done(session.state):
             return ensure_jsonable(session.state)
 
+        approved_dangerous_step_id: int | None = None
+        if bool(session.state.get("awaiting_confirmation")):
+            confirmation_kind = str(session.state.get("confirmation_kind") or "")
+            if confirmation_kind == "dangerous_step":
+                if not approve_dangerous:
+                    return ensure_jsonable(session.state)
+                confirmation_step = session.state.get("confirmation_step") or {}
+                if isinstance(confirmation_step.get("id"), int):
+                    approved_dangerous_step_id = int(confirmation_step["id"])
+            self._clear_confirmation_state(session.state)
+            session.state["dry_run"] = False
         session.current_trigger = trigger
         session.state["trigger"] = trigger
-        if bool(session.state.get("awaiting_confirmation")):
-            session.state["awaiting_confirmation"] = False
-            session.state["dry_run"] = False
         self._touch_state(session.state)
         self.store.append_event(
             session_id=session.id,
@@ -93,10 +113,9 @@ class ExecutionEngine:
             action = self._decide_next_action(session.state)
             if action == "planner":
                 self._run_planner(session)
-                if bool(session.state.get("awaiting_confirmation")):
-                    break
             elif action == "executor":
-                self._run_executor_step(session)
+                self._run_executor_step(session, approved_dangerous_step_id=approved_dangerous_step_id)
+                approved_dangerous_step_id = None
             elif action == "validator":
                 self._run_validator(session)
             else:
@@ -104,18 +123,31 @@ class ExecutionEngine:
                 session.state["error"] = f"Unknown next action: {action}"
                 session.state["done"] = True
                 break
+            if bool(session.state.get("awaiting_confirmation")):
+                break
             cycles += 1
 
         if self._is_done(session.state):
             self._finalize_session(session)
         else:
             self.session_manager.persist_session(session, node_name="loop")
-        if bool(session.state.get("awaiting_confirmation")):
+        if bool(session.state.get("awaiting_confirmation")) and str(session.state.get("confirmation_kind") or "") == "dry_run":
             return self._dry_run_preview(session.state)
         return ensure_jsonable(session.state)
 
-    def trigger_session(self, session_id: str, trigger: str = "manual", max_cycles: int | None = None) -> dict[str, Any]:
-        return self.resume_session(session_id, trigger=trigger, max_cycles=max_cycles)
+    def trigger_session(
+        self,
+        session_id: str,
+        trigger: str = "manual",
+        max_cycles: int | None = None,
+        approve_dangerous: bool = False,
+    ) -> dict[str, Any]:
+        return self.resume_session(
+            session_id,
+            trigger=trigger,
+            max_cycles=max_cycles,
+            approve_dangerous=approve_dangerous,
+        )
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         session = self.session_manager.get_session(session_id)
@@ -172,6 +204,9 @@ class ExecutionEngine:
                     "next_action": "executor",
                     "status": "executing",
                     "awaiting_confirmation": awaiting_confirmation,
+                    "confirmation_kind": "dry_run" if awaiting_confirmation else None,
+                    "confirmation_step": None,
+                    "confirmation_message": None,
                     "plan": plan.model_dump(),
                     "plan_summary": plan_summary,
                     "attempt_history": [],
@@ -197,6 +232,9 @@ class ExecutionEngine:
                     "status": "failed",
                     "done": True,
                     "awaiting_confirmation": False,
+                    "confirmation_kind": None,
+                    "confirmation_step": None,
+                    "confirmation_message": None,
                     "plan_summary": None,
                     "error": str(exc),
                     "final_output": {"content": str(exc), "artifacts": [], "metadata": {"goal": state.get("goal", "")}},
@@ -210,7 +248,7 @@ class ExecutionEngine:
             )
         self._persist(session, node_name="planner")
 
-    def _run_executor_step(self, session: AgentSession) -> None:
+    def _run_executor_step(self, session: AgentSession, approved_dangerous_step_id: int | None = None) -> None:
         state = session.state
         plan = ExecutionPlan.model_validate(state.get("plan", {}))
         step_index = int(state.get("current_step_index", 0))
@@ -220,6 +258,30 @@ class ExecutionEngine:
             return
 
         step = plan.steps[step_index]
+        dangerous_message = self._dangerous_step_message(step)
+        if dangerous_message is not None and approved_dangerous_step_id != step.id:
+            state.update(
+                {
+                    "current_node": "executor",
+                    "next_action": "executor",
+                    "status": "executing",
+                    "awaiting_confirmation": True,
+                    "confirmation_kind": "dangerous_step",
+                    "confirmation_step": step.model_dump(),
+                    "confirmation_message": dangerous_message,
+                    "error": None,
+                }
+            )
+            self.store.append_event(
+                session_id=session.id,
+                node_name="executor",
+                event_type="executor.step.awaiting_confirmation",
+                payload={"step": step.model_dump(), "step_index": step_index, "message": dangerous_message},
+            )
+            self._persist(session, node_name="executor")
+            return
+
+        self._clear_confirmation_state(state)
         self.store.append_event(
             session_id=session.id,
             node_name="executor",
@@ -360,6 +422,9 @@ class ExecutionEngine:
                     "failure_context": failure_context,
                     "error": detail,
                     "awaiting_confirmation": False,
+                    "confirmation_kind": None,
+                    "confirmation_step": None,
+                    "confirmation_message": None,
                     "plan": {},
                     "plan_summary": None,
                     "attempt_history": [],
@@ -376,6 +441,9 @@ class ExecutionEngine:
                     "failure_context": failure_context,
                     "error": detail,
                     "awaiting_confirmation": False,
+                    "confirmation_kind": None,
+                    "confirmation_step": None,
+                    "confirmation_message": None,
                     "plan_summary": None,
                     "final_output": {
                         "content": detail,
@@ -410,6 +478,10 @@ class ExecutionEngine:
                 "next_action": "",
                 "status": status,
                 "done": True,
+                "awaiting_confirmation": False,
+                "confirmation_kind": None,
+                "confirmation_step": None,
+                "confirmation_message": None,
                 "final_output": final_output,
             }
         )
@@ -477,6 +549,43 @@ class ExecutionEngine:
         if session is None:
             raise KeyError(f"Unknown session: {session_id}")
         return session
+
+    @staticmethod
+    def _clear_confirmation_state(state: RuntimeState) -> None:
+        state["awaiting_confirmation"] = False
+        state["confirmation_kind"] = None
+        state["confirmation_step"] = None
+        state["confirmation_message"] = None
+
+    def is_dangerous(self, step: ExecutionStep) -> bool:
+        return self._dangerous_step_message(step) is not None
+
+    def _dangerous_step_message(self, step: ExecutionStep) -> str | None:
+        args = dict(step.args)
+
+        if step.action == "fs.write":
+            path = str(args.get("path", "")).strip()
+            if path:
+                target = resolve_path(self.settings, path)
+                if target.exists():
+                    return f"Overwrite existing path via fs.write: {target}"
+            return None
+
+        if step.action == "fs.copy":
+            dst = str(args.get("dst", "")).strip()
+            if dst:
+                target = resolve_path(self.settings, dst)
+                if target.exists():
+                    return f"Overwrite existing path via fs.copy: {target}"
+            return None
+
+        if step.action == "shell.exec":
+            command = str(args.get("command", "")).strip()
+            if command and DANGEROUS_SHELL_PATTERN.search(command.lower()):
+                return f"Run potentially destructive shell command: {command}"
+            return None
+
+        return None
 
     @staticmethod
     def _dry_run_preview(state: RuntimeState) -> dict[str, Any]:

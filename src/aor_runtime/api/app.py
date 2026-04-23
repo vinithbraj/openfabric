@@ -16,6 +16,7 @@ class RunRequest(BaseModel):
 class SessionTriggerRequest(BaseModel):
     trigger: str = "manual"
     max_cycles: int | None = None
+    approve_dangerous: bool = False
 
 
 class ValidateRequest(BaseModel):
@@ -45,14 +46,24 @@ def create_app() -> FastAPI:
     @app.post("/sessions/{session_id}/trigger")
     def trigger_session(session_id: str, request: SessionTriggerRequest) -> dict[str, Any]:
         try:
-            return engine.trigger_session(session_id, trigger=request.trigger, max_cycles=request.max_cycles)
+            return engine.trigger_session(
+                session_id,
+                trigger=request.trigger,
+                max_cycles=request.max_cycles,
+                approve_dangerous=request.approve_dangerous,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/sessions/{session_id}/resume")
     def resume_session(session_id: str, request: SessionTriggerRequest) -> dict[str, Any]:
         try:
-            return engine.resume_session(session_id, trigger=request.trigger, max_cycles=request.max_cycles)
+            return engine.resume_session(
+                session_id,
+                trigger=request.trigger,
+                max_cycles=request.max_cycles,
+                approve_dangerous=request.approve_dangerous,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
