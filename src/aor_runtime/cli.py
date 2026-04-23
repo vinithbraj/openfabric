@@ -80,6 +80,10 @@ def _final_answer_from_state(state: dict[str, Any]) -> str:
     return dumps_json(state, indent=2)
 
 
+def _reset_chat_history(session_history: list[dict[str, str]]) -> None:
+    session_history.clear()
+
+
 @app.command()
 def validate(spec_path: Path) -> None:
     engine = ExecutionEngine()
@@ -144,7 +148,7 @@ def chat(
     session_history: list[dict[str, str]] = []
 
     typer.echo(f"Interactive session started for {spec_path}. Type /exit to quit.")
-    typer.echo("Commands: /exit, /quit, /history, /last")
+    typer.echo("Commands: /exit, /quit, /history, /last, /new, /clear")
 
     while True:
         prompt = typer.prompt("\nYou").strip()
@@ -161,6 +165,16 @@ def chat(
                 typer.echo("No turns yet.")
             else:
                 typer.echo(dumps_json(session_history[-2:], indent=2))
+            continue
+        if prompt == "/new":
+            _reset_chat_history(session_history)
+            typer.echo("Started a new conversation.")
+            continue
+        if prompt == "/clear":
+            _reset_chat_history(session_history)
+            typer.echo("\033[2J\033[H", nl=False)
+            typer.echo(f"Interactive session started for {spec_path}. Type /exit to quit.")
+            typer.echo("Commands: /exit, /quit, /history, /last, /new, /clear")
             continue
 
         payload: dict[str, Any] = {"task": prompt}
