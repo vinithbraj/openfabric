@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -82,6 +83,16 @@ def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
         content = "true" if result.get("exists") else "false"
     elif action == "python.exec":
         content = str(result.get("output") or "").strip()
+    elif action == "sql.query":
+        content = json.dumps(
+            {
+                "database": str(result.get("database", "")),
+                "row_count": int(result.get("row_count", 0)),
+                "rows": result.get("rows", []),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     elif action == "shell.exec":
         content = str(result.get("stdout", "")).strip()
     else:

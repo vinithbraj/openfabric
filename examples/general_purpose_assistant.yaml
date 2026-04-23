@@ -19,3 +19,4 @@ tools:
   - fs.list
   - shell.exec
   - python.exec
+  - sql.query

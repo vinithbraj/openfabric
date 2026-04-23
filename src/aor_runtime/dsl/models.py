@@ -14,6 +14,7 @@ DEFAULT_TOOLS = [
     "fs.list",
     "shell.exec",
     "python.exec",
+    "sql.query",
 ]
 
 

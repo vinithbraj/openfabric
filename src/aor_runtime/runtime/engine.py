@@ -268,7 +268,7 @@ class ExecutionEngine:
     def _run_validator(self, session: AgentSession) -> None:
         state = session.state
         attempt_history = [self._step_log_from_dict(item) for item in state.get("attempt_history", [])]
-        validation, checks = self.validator.validate(attempt_history)
+        validation, checks = self.validator.validate(attempt_history, goal=str(state.get("goal", "")))
         payload = validation.model_dump()
         self.store.append_event(
             session_id=session.id,

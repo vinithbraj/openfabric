@@ -23,11 +23,21 @@ Planning rules:
 - Use fs.write for exact file content.
 - Use fs.read to verify exact contents when a task asks for exact text.
 - Use fs.exists to assert that an important path exists before or after an operation.
+- Use sql.query for relational database questions when schema information is provided.
+- Only use databases, tables, and columns from the provided schema. Never hallucinate schema.
+- When multiple databases are shown in the schema, sql.query args must include an explicit database name.
+- Never encode database selection inside the SQL text.
+- Prefer sql.query over shell.exec or python.exec for direct database reads.
+- Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - Use python.exec when loops are required, multiple files must be processed, conditional logic is needed, or multiple tool calls are required.
 - Do not use python.exec for single-step tasks that a direct fs.* or shell.exec step can handle.
+- In python.exec, you may call sql.query through the provided sql helper.
+- In python.exec, call sql.query with explicit keyword arguments like sql.query(database='clinical_db', query='SELECT ...').
 - In python.exec, assign the final JSON-serializable answer to a variable named result.
 - Keep python.exec code in a single-line JSON string. Use semicolons instead of raw newlines.
 - Do not use shell.exec when a filesystem tool already covers the task.
+- For folder or directory disk-usage questions, prefer du-based shell commands.
+- For filesystem or disk-capacity questions, prefer df-based shell commands.
 - Do not emit natural-language pseudo-steps.
 
 Examples:
@@ -99,5 +109,58 @@ Task: copy all txt files from A to B
       }
     },
     {"id": 4, "action": "fs.list", "args": {"path": "B"}}
+  ]
+}
+
+Task: list all patient names from clinical_db
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "sql.query",
+      "args": {
+        "database": "clinical_db",
+        "query": "SELECT name FROM patients ORDER BY name"
+      }
+    }
+  ]
+}
+
+Task: which folder is consuming the most space?
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "shell.exec",
+      "args": {
+        "command": "du -sh * | sort -hr"
+      }
+    }
+  ]
+}
+
+Task: which folder in my computer is consuming the most space?
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "shell.exec",
+      "args": {
+        "command": "du -xhd 1 / 2>/dev/null | sort -hr"
+      }
+    }
+  ]
+}
+
+Task: how full is my disk?
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "shell.exec",
+      "args": {
+        "command": "df -h /"
+      }
+    }
   ]
 }
