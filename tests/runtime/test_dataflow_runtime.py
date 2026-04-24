@@ -204,3 +204,22 @@ def test_normalize_execution_plan_dataflow_backfills_python_inputs_from_prior_sh
     normalize_execution_plan_dataflow(plan)
 
     assert plan.steps[1].args["inputs"] == {"py_files": {"$ref": "py_files", "path": "stdout"}}
+
+
+def test_executor_ignores_internal_canonicalizer_args(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    executor = PlanExecutor(build_tool_registry(settings))
+    target = tmp_path / "summary.json"
+    target.write_text('{"ok": true}')
+    step = ExecutionStep.model_validate(
+        {
+            "id": 3,
+            "action": "fs.read",
+            "args": {"path": str(target), "__canonicalizer_added": True},
+        }
+    )
+
+    log = executor.execute_step(step)
+
+    assert log.success is True
+    assert log.result["content"] == '{"ok": true}'

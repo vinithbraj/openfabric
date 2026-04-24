@@ -62,6 +62,7 @@ class TableSchema(ToolResultModel):
 
 class DatabaseSchema(ToolResultModel):
     name: str
+    dialect: str | None = None
     tables: list[TableSchema]
     error: str | None = None
 
@@ -168,9 +169,16 @@ def get_schema(settings: Settings | None = None) -> SchemaInfo:
     for database_name, database_url in sorted(databases.items()):
         try:
             engine = _engine_for_url(database_url)
-            discovered.append(DatabaseSchema(name=database_name, tables=_inspect_tables_for_engine(engine)))
+            discovered.append(
+                DatabaseSchema(name=database_name, dialect=engine.dialect.name, tables=_inspect_tables_for_engine(engine))
+            )
         except Exception as exc:  # noqa: BLE001
-            discovered.append(DatabaseSchema(name=database_name, tables=[], error=str(exc)))
+            dialect: str | None = None
+            try:
+                dialect = _engine_for_url(database_url).dialect.name
+            except Exception:  # noqa: BLE001
+                dialect = None
+            discovered.append(DatabaseSchema(name=database_name, dialect=dialect, tables=[], error=str(exc)))
     return SchemaInfo(databases=discovered)
 
 
@@ -236,7 +244,9 @@ def prune_schema(
             tables = [table for _, table in positive_tables[:max_tables_per_database]]
         else:
             tables = sorted(database.tables, key=lambda item: item.name)[:max_tables_per_database]
-        pruned_databases.append(DatabaseSchema(name=database.name, tables=tables, error=database.error))
+        pruned_databases.append(
+            DatabaseSchema(name=database.name, dialect=database.dialect, tables=tables, error=database.error)
+        )
 
     return SchemaInfo(databases=pruned_databases)
 

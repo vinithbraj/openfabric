@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from aor_runtime import __version__
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import AgentSession, ExecutionPlan, ExecutionStep, FinalOutput, RunMetrics
 from aor_runtime.core.utils import ensure_jsonable
@@ -28,10 +30,21 @@ from aor_runtime.tools.gateway import resolve_execution_node
 
 TERMINAL_STATUSES = {"completed", "failed"}
 DANGEROUS_SHELL_PATTERN = re.compile(r"(?:^|&&|\|\||;|\|)\s*(?:sudo\s+)?(?:rm|rmdir|unlink)\b")
+STARTUP_BANNER = r"""
+   ___   ____  ____
+  / _ | / __ \/ __/
+ / __ |/ /_/ / /_
+/_/ |_|\____/\__/
+""".strip("\n")
+
+
+def render_startup_banner() -> str:
+    return f"{STARTUP_BANNER}\naor-runtime v{__version__}"
 
 
 class ExecutionEngine:
     def __init__(self, settings: Settings | None = None) -> None:
+        self._emit_startup_banner()
         self.base_settings = settings or get_settings()
         self.settings = self.base_settings
         self.store = SQLiteRunStore(self.settings.run_store_path)
@@ -42,6 +55,10 @@ class ExecutionEngine:
         self.planner = TaskPlanner(llm=self.llm, tools=self.tool_registry, settings=self.settings)
         self.executor = PlanExecutor(self.tool_registry)
         self.validator = RuntimeValidator(self.settings)
+
+    def _emit_startup_banner(self) -> None:
+        sys.stderr.write(f"{render_startup_banner()}\n")
+        sys.stderr.flush()
 
     def run_spec(self, spec_path: str, input_payload: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
         session = self.create_session(spec_path, input_payload, trigger="manual", dry_run=dry_run)
@@ -212,6 +229,9 @@ class ExecutionEngine:
             plan_summary = summarize_plan(plan)
             policies_used = list(self.planner.last_policies_used)
             high_level_plan = list(self.planner.last_high_level_plan) if self.planner.last_high_level_plan is not None else None
+            repair_trace = list(self.planner.last_plan_repairs)
+            canonicalized = bool(self.planner.last_plan_canonicalized)
+            original_execution_plan = self.planner.last_original_execution_plan if canonicalized else None
             awaiting_confirmation = bool(state.get("dry_run"))
             state.update(
                 {
@@ -227,6 +247,8 @@ class ExecutionEngine:
                     "step_outputs": {},
                     "plan": plan.model_dump(),
                     "plan_summary": plan_summary,
+                    "plan_canonicalized": canonicalized,
+                    "plan_repairs": repair_trace,
                     "attempt_history": [],
                     "current_step_index": 0,
                     "attempt": int(state.get("attempt", 0)) + 1,
@@ -246,6 +268,9 @@ class ExecutionEngine:
                     "planning_mode": str(self.planner.last_planning_mode or planning_mode),
                     "high_level_plan": high_level_plan,
                     "execution_plan": plan.model_dump(),
+                    "original_execution_plan": original_execution_plan,
+                    "canonicalization_changed": canonicalized,
+                    "repair_trace": repair_trace,
                     "policies": policies_used,
                 },
             )
@@ -282,6 +307,8 @@ class ExecutionEngine:
                     "high_level_plan": None,
                     "step_outputs": {},
                     "plan_summary": None,
+                    "plan_canonicalized": False,
+                    "plan_repairs": [],
                     "error": final_error,
                     "final_output": {"content": final_error, "artifacts": [], "metadata": final_output_metadata},
                 }
@@ -295,6 +322,13 @@ class ExecutionEngine:
             }
             if raw_output_preview is not None:
                 failure_payload["raw_output_preview"] = raw_output_preview
+            if self.planner.last_original_execution_plan is not None:
+                failure_payload["original_execution_plan"] = self.planner.last_original_execution_plan
+            if self.planner.last_canonicalized_execution_plan is not None:
+                failure_payload["execution_plan"] = self.planner.last_canonicalized_execution_plan
+            if self.planner.last_plan_repairs:
+                failure_payload["repair_trace"] = list(self.planner.last_plan_repairs)
+                failure_payload["canonicalization_changed"] = bool(self.planner.last_plan_canonicalized)
             if normalized_error is not None:
                 failure_payload.update(normalized_error.as_metadata())
             self.store.append_event(
@@ -521,6 +555,8 @@ class ExecutionEngine:
                     "step_outputs": {},
                     "plan": {},
                     "plan_summary": None,
+                    "plan_canonicalized": False,
+                    "plan_repairs": [],
                     "attempt_history": [],
                     "current_step_index": 0,
                 }
@@ -542,6 +578,8 @@ class ExecutionEngine:
                     "high_level_plan": None,
                     "step_outputs": {},
                     "plan_summary": None,
+                    "plan_canonicalized": False,
+                    "plan_repairs": [],
                     "final_output": {
                         "content": final_detail,
                         "artifacts": list((state.get("final_output") or {}).get("artifacts", [])),

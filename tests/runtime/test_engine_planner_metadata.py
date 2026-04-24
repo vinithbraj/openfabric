@@ -54,6 +54,8 @@ def test_successful_planner_run_persists_policies_and_logs_event(tmp_path: Path,
     assert session.state["high_level_plan"] is None
     assert session.state["step_outputs"] == {}
     assert session.state["metrics"]["llm_calls"] == 1
+    assert session.state["plan_canonicalized"] is False
+    assert session.state["plan_repairs"] == []
     events = engine.store.get_events(session.id)
     planner_started = next(event for event in events if event["event_type"] == "planner.started")
     planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
@@ -63,6 +65,9 @@ def test_successful_planner_run_persists_policies_and_logs_event(tmp_path: Path,
     assert planner_completed["payload"]["high_level_plan"] is None
     assert planner_completed["payload"]["goal"] == "Create notes.txt with hello"
     assert planner_completed["payload"]["execution_plan"]["steps"] == session.state["plan"]["steps"]
+    assert planner_completed["payload"]["canonicalization_changed"] is False
+    assert planner_completed["payload"]["repair_trace"] == []
+    assert planner_completed["payload"]["original_execution_plan"] is None
     assert "steps" in planner_completed["payload"]
 
 
@@ -91,12 +96,75 @@ def test_hierarchical_planner_run_persists_high_level_plan_and_metrics(tmp_path:
 
     assert session.state["high_level_plan"] == ["query patients", "save the top 10 to a file"]
     assert session.state["metrics"]["llm_calls"] == 2
+    assert session.state["plan_canonicalized"] is False
     events = engine.store.get_events(session.id)
     planner_started = next(event for event in events if event["event_type"] == "planner.started")
     planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
     assert planner_started["payload"]["planning_mode"] == "hierarchical"
     assert planner_completed["payload"]["planning_mode"] == "hierarchical"
     assert planner_completed["payload"]["high_level_plan"] == ["query patients", "save the top 10 to a file"]
+
+
+def test_successful_planner_run_logs_canonicalization_trace(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Query patients and save them to patients.csv")
+    canonical_plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "sql.query",
+                    "args": {"database": "clinical_db", "query": "SELECT name FROM patients"},
+                    "output": "step_1_rows",
+                },
+                {
+                    "id": 2,
+                    "action": "fs.write",
+                    "input": ["step_1_rows"],
+                    "args": {"path": "patients.csv", "content": "{\"ok\": true}"},
+                },
+            ]
+        }
+    )
+
+    def fake_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["sql_preference", "filesystem_preference", "efficiency"]
+        engine.planner.last_high_level_plan = ["query patients", "save them"]
+        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_llm_calls = 2
+        engine.planner.last_error_stage = None
+        engine.planner.last_original_execution_plan = {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "sql.query",
+                    "args": {"database": "clinical_db", "query": "SELECT name FROM patients"},
+                    "output": "rows",
+                },
+                {
+                    "id": 2,
+                    "action": "fs.write",
+                    "input": ["csv_result"],
+                    "args": {"path": "patients.csv", "content": {"$ref": "csv", "path": "csv"}},
+                },
+            ]
+        }
+        engine.planner.last_canonicalized_execution_plan = canonical_plan.model_dump()
+        engine.planner.last_plan_repairs = ["output:rows->step_1_rows", "input:synthesized_from_refs"]
+        engine.planner.last_plan_canonicalized = True
+        return canonical_plan
+
+    monkeypatch.setattr(engine.planner, "build_plan", fake_build_plan)
+
+    engine._run_planner(session)
+
+    assert session.state["plan_canonicalized"] is True
+    assert session.state["plan_repairs"] == ["output:rows->step_1_rows", "input:synthesized_from_refs"]
+    events = engine.store.get_events(session.id)
+    planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
+    assert planner_completed["payload"]["canonicalization_changed"] is True
+    assert planner_completed["payload"]["repair_trace"] == ["output:rows->step_1_rows", "input:synthesized_from_refs"]
+    assert planner_completed["payload"]["original_execution_plan"]["steps"][0]["output"] == "rows"
 
 
 def test_planner_failure_clears_stale_policies_used_and_logs_stage(tmp_path: Path, monkeypatch) -> None:

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from aor_runtime import __version__
 from aor_runtime import cli
 
 
@@ -42,6 +43,18 @@ def test_build_engine_loads_yaml_settings(tmp_path: Path) -> None:
     assert engine.settings.server_port == 9010
     assert engine.settings.default_model == "model-y"
     assert engine.settings.sql_row_limit == 444
+
+
+def test_build_engine_prints_startup_banner(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "custom.yaml"
+    config_path.write_text(CONFIG_TEXT)
+
+    cli._build_engine(config_path)
+    captured = capsys.readouterr()
+
+    assert "aor-runtime" in captured.err
+    assert f"v{__version__}" in captured.err
+    assert "___" in captured.err
 
 
 def test_serve_uses_yaml_host_port(monkeypatch, tmp_path: Path) -> None:

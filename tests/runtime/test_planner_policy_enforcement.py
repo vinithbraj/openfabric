@@ -7,6 +7,7 @@ import pytest
 
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
+from aor_runtime.tools.sql import DatabaseSchema, SchemaInfo, TableSchema, ColumnSchema
 from aor_runtime.runtime.decomposer import DEFAULT_DECOMPOSER_PROMPT
 from aor_runtime.runtime.planner import DEFAULT_PLANNER_PROMPT, TaskPlanner
 from aor_runtime.runtime.policies import validate_plan_efficiency
@@ -463,6 +464,126 @@ def test_planner_rejects_invalid_data_dependency(tmp_path: Path) -> None:
         )
 
 
+def test_planner_canonicalizes_repairable_dataflow_plan(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        [
+            {"tasks": ["query patient names", "format them as csv", "write the file"]},
+            {
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "sql.query",
+                        "args": {"database": "clinical_db", "query": "SELECT name FROM patients ORDER BY name"},
+                        "output": "rows",
+                    },
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "args": {
+                            "inputs": {"rows": {"$ref": "rows", "path": "rows"}},
+                            "code": "result = {'csv': ','.join(row['name'] for row in inputs['rows'])}",
+                        },
+                        "output": "csv",
+                    },
+                    {
+                        "id": 3,
+                        "action": "fs.write",
+                        "input": ["csv_result"],
+                        "args": {
+                            "path": "patients.csv",
+                            "content": {"$ref": "csv", "path": "csv"},
+                        },
+                    },
+                ]
+            },
+        ],
+    )
+
+    plan = planner.build_plan(
+        goal="Query patient names from clinical_db, format them as csv, and save them to patients.csv",
+        planner=_planner_config(),
+        allowed_tools=["sql.query", "python.exec", "fs.write"],
+        input_payload={"task": "Query patient names from clinical_db, format them as csv, and save them to patients.csv"},
+    )
+
+    assert plan.steps[0].output == "step_1_rows"
+    assert plan.steps[1].input == ["step_1_rows"]
+    assert plan.steps[1].args["inputs"]["rows"]["$ref"] == "step_1_rows"
+    assert plan.steps[2].input == ["step_2_data"]
+    assert plan.steps[2].args["content"]["$ref"] == "step_2_data"
+    assert planner.last_plan_canonicalized is True
+    assert planner.last_plan_repairs
+
+
+def test_planner_appends_text_readback_for_save_and_return_goal(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        [
+            {"tasks": ["query patient names", "format them as csv", "save them and return the csv"]},
+            {
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "sql.query",
+                        "args": {"database": "clinical_db", "query": "SELECT name FROM patients ORDER BY score DESC LIMIT 3"},
+                        "output": "patient_rows",
+                    },
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "input": ["patient_rows"],
+                        "output": "patient_csv",
+                        "args": {
+                            "inputs": {"rows": {"$ref": "patient_rows", "path": "rows"}},
+                            "code": "result = {'csv': ','.join(row['name'] for row in inputs['rows'])}",
+                        },
+                    },
+                    {
+                        "id": 3,
+                        "action": "fs.write",
+                        "input": ["patient_csv"],
+                        "args": {
+                            "path": "outputs/top_patients.csv",
+                            "content": {"$ref": "patient_csv", "path": "csv"},
+                        },
+                    },
+                ]
+            },
+        ],
+    )
+
+    plan = planner.build_plan(
+        goal="Query the top 3 patients by score from clinical_db, save the result to outputs/top_patients.csv, and return it.",
+        planner=_planner_config(),
+        allowed_tools=["sql.query", "python.exec", "fs.write", "fs.read"],
+        input_payload={"task": "Query the top 3 patients by score from clinical_db, save the result to outputs/top_patients.csv, and return it."},
+    )
+
+    assert [step.id for step in plan.steps] == [1, 2, 3, 4]
+    assert plan.steps[-1].action == "fs.read"
+    assert plan.steps[-1].args["path"] == "outputs/top_patients.csv"
+    assert plan.steps[-1].args["__canonicalizer_added"] is True
+
+
+def test_planner_keeps_already_valid_simple_plan_unchanged(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        {"steps": [{"id": 1, "action": "fs.read", "args": {"path": "notes.txt"}}]},
+    )
+
+    plan = planner.build_plan(
+        goal="Read notes.txt",
+        planner=_planner_config(),
+        allowed_tools=["fs.read"],
+        input_payload={"task": "Read notes.txt"},
+    )
+
+    assert plan.model_dump() == {"steps": [{"id": 1, "action": "fs.read", "args": {"path": "notes.txt"}, "input": [], "output": None}]}
+    assert planner.last_plan_canonicalized is False
+    assert planner.last_plan_repairs == []
+
+
 def test_planner_rejects_placeholder_write_when_upstream_output_exists(tmp_path: Path) -> None:
     planner, _ = _planner(
         tmp_path,
@@ -661,6 +782,8 @@ def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
     required_snippets = [
         "If the task explicitly names a node, include that node in shell.exec args.",
         "Never invent node names outside the provided logical node list.",
+        "If schema information includes a database dialect, generate SQL that is valid for that dialect.",
+        "For PostgreSQL, do not use SQLite-only functions like strftime.",
         "shell.exec(...) returns an object with stdout, stderr, and returncode fields",
         "Every args value must be valid JSON as written.",
         "Prefer a direct shell.exec step for simple command-output formatting tasks.",
@@ -677,3 +800,52 @@ def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
 
     assert "break the user's goal into an ordered list of high-level tasks" in DEFAULT_DECOMPOSER_PROMPT.lower()
     assert "break the user's goal into an ordered list of high-level tasks" in decomposer_file_prompt.lower()
+
+
+def test_planner_context_includes_database_dialect(tmp_path: Path, monkeypatch) -> None:
+    planner, llm = _planner(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "sql.query",
+                    "args": {
+                        "database": "dicom",
+                        "query": "SELECT patient_id, name, dob FROM patient WHERE dob <= CURRENT_DATE - INTERVAL '45 years'",
+                    },
+                }
+            ]
+        },
+    )
+
+    def fake_schema(settings):
+        return SchemaInfo(
+            databases=[
+                DatabaseSchema(
+                    name="dicom",
+                    dialect="postgresql",
+                    tables=[
+                        TableSchema(
+                            name="patient",
+                            columns=[ColumnSchema(name="patient_id", type="INTEGER"), ColumnSchema(name="name", type="TEXT"), ColumnSchema(name="dob", type="DATE")],
+                        )
+                    ],
+                )
+            ]
+        )
+
+    monkeypatch.setattr("aor_runtime.runtime.planner.get_schema", fake_schema)
+
+    plan = planner.build_plan(
+        goal="list all patients above 45 years of age in dicom",
+        planner=_planner_config(),
+        allowed_tools=["sql.query"],
+        input_payload={"task": "list all patients above 45 years of age in dicom"},
+    )
+
+    assert isinstance(plan, ExecutionPlan)
+    assert llm.last_user_prompt is not None
+    planner_context = json.loads(llm.last_user_prompt)
+    assert planner_context["schema"]["databases"][0]["name"] == "dicom"
+    assert planner_context["schema"]["databases"][0]["dialect"] == "postgresql"

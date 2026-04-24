@@ -9,6 +9,7 @@ from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow
 from aor_runtime.runtime.decomposer import GoalDecomposer, is_complex_goal
+from aor_runtime.runtime.plan_canonicalizer import canonicalize_plan, coerce_plan_payload
 from aor_runtime.runtime.policies import render_policy_text, select_policies, validate_plan
 from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.sql import get_schema, prune_schema, resolve_sql_databases
@@ -44,6 +45,8 @@ You MUST:
 - Refinement must preserve outputs from previous steps, use outputs in subsequent steps, avoid placeholder or hardcoded values, and maintain logical dataflow across steps.
 - Use sql.query for relational database questions when schema information is provided.
 - Only use databases, tables, and columns from the provided schema. Never hallucinate schema.
+- If schema information includes a database dialect, generate SQL that is valid for that dialect.
+- For PostgreSQL, do not use SQLite-only functions like strftime. Prefer PostgreSQL date functions such as CURRENT_DATE, AGE, DATE_PART, EXTRACT, or INTERVAL arithmetic.
 - When multiple databases are shown in the schema, sql.query args must include an explicit database name.
 - Never encode database selection inside the SQL text.
 - Prefer sql.query over shell.exec or python.exec for direct database reads.
@@ -343,6 +346,22 @@ Plan:
 }
 
 Task:
+list all patients above 45 years of age in dicom
+Plan:
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "sql.query",
+      "args": {
+        "database": "dicom",
+        "query": "SELECT patient_id, name, dob FROM patient WHERE dob <= CURRENT_DATE - INTERVAL '45 years' ORDER BY dob"
+      }
+    }
+  ]
+}
+
+Task:
 return the current directory entries as a csv string
 Plan:
 {
@@ -499,6 +518,10 @@ class TaskPlanner:
         self.last_error_stage: str | None = None
         self.last_raw_output: str | None = None
         self.last_error_type: str | None = None
+        self.last_original_execution_plan: dict[str, Any] | None = None
+        self.last_canonicalized_execution_plan: dict[str, Any] | None = None
+        self.last_plan_repairs: list[str] = []
+        self.last_plan_canonicalized: bool = False
 
     def build_plan(
         self,
@@ -568,6 +591,10 @@ class TaskPlanner:
         self.last_error_stage = None
         self.last_raw_output = None
         self.last_error_type = None
+        self.last_original_execution_plan = None
+        self.last_canonicalized_execution_plan = None
+        self.last_plan_repairs = []
+        self.last_plan_canonicalized = False
 
     def _schema_payload(self, goal: str, allowed_tools: list[str]) -> dict[str, Any] | None:
         if "sql.query" not in allowed_tools:
@@ -639,7 +666,7 @@ class TaskPlanner:
         payload = extract_json_object(raw_output)
         if not isinstance(payload, dict):
             raise ValueError("Expected JSON object response from model")
-        return ExecutionPlan.model_validate(payload)
+        return ExecutionPlan.model_validate(coerce_plan_payload(payload))
 
     def _build_planner_context(
         self,
@@ -677,6 +704,13 @@ class TaskPlanner:
 
     def _finalize_plan(self, goal: str, plan: ExecutionPlan, allowed_tools: list[str], explicit_tool_intent: list[str]) -> ExecutionPlan:
         self._apply_storage_shell_semantics(goal, plan)
+        normalize_execution_plan_dataflow(plan)
+        self.last_original_execution_plan = plan.model_dump()
+        canonicalized = canonicalize_plan(plan, goal, allowed_tools)
+        plan = canonicalized.plan
+        self.last_plan_repairs = list(canonicalized.repairs)
+        self.last_plan_canonicalized = canonicalized.changed
+        self.last_canonicalized_execution_plan = plan.model_dump() if canonicalized.changed else None
         normalize_execution_plan_dataflow(plan)
         for step in plan.steps:
             if step.action not in allowed_tools:

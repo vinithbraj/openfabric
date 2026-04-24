@@ -31,7 +31,7 @@ class BaseTool(ABC):
         raise NotImplementedError
 
     def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        validated_args = self.args_model.model_validate(arguments)
+        validated_args = self.args_model.model_validate(_strip_internal_args(arguments))
         raw_result = self.run(validated_args)
         if isinstance(raw_result, self.result_model):
             return raw_result.model_dump()
@@ -55,8 +55,16 @@ class ToolRegistry:
         tool = self.get(action)
         if collect_step_references(args):
             return
-        tool.args_model.model_validate(args)
+        tool.args_model.model_validate(_strip_internal_args(args))
 
     def invoke(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self.get(name)
         return tool.invoke(arguments)
+
+
+def _strip_internal_args(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _strip_internal_args(nested) for key, nested in value.items() if not str(key).startswith("__")}
+    if isinstance(value, list):
+        return [_strip_internal_args(item) for item in value]
+    return value

@@ -24,6 +24,8 @@ class RuntimeState(TypedDict, total=False):
     step_outputs: dict[str, Any]
     plan: dict[str, Any]
     plan_summary: str | None
+    plan_canonicalized: bool
+    plan_repairs: list[str]
     history: list[dict[str, Any]]
     attempt_history: list[dict[str, Any]]
     status: str
@@ -73,6 +75,8 @@ def initial_runtime_state(
         "step_outputs": {},
         "plan": {},
         "plan_summary": None,
+        "plan_canonicalized": False,
+        "plan_repairs": [],
         "history": [],
         "attempt_history": [],
         "status": "planning",
