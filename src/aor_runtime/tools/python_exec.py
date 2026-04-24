@@ -331,6 +331,7 @@ def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any
         "sql": sql,
         "inputs": inputs,
         "result": None,
+        "_json_dumps_safe": _json_dumps_safe,
         "__codex_subprocess__": _SubprocessModule(shell),
         "_shell_substitution": lambda command: _shell_substitution(shell, str(command)),
     }
@@ -350,6 +351,13 @@ def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any
         )
     except Exception as exc:  # noqa: BLE001
         queue.put({"ok": False, "error": str(exc), "stdout": stdout_buffer.getvalue()})
+
+
+def _json_dumps_safe(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return json.dumps(value, default=str, ensure_ascii=False, sort_keys=True)
 
 
 class PythonExecTool(BaseTool):

@@ -8,6 +8,7 @@ from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, ExecutionStep
 from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow, resolve_execution_step
 from aor_runtime.runtime.executor import PlanExecutor
+from aor_runtime.runtime.plan_canonicalizer import canonicalize_plan
 from aor_runtime.tools.factory import build_tool_registry
 
 
@@ -223,3 +224,44 @@ def test_executor_ignores_internal_canonicalizer_args(tmp_path: Path) -> None:
 
     assert log.success is True
     assert log.result["content"] == '{"ok": true}'
+
+
+def test_executor_runs_canonicalized_structured_write_as_python_writer(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    executor = PlanExecutor(build_tool_registry(settings))
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "fs.write",
+                    "args": {"path": "reports/histogram.json", "content": {"histogram": {"2": 500}}},
+                }
+            ]
+        }
+    )
+
+    canonicalized = canonicalize_plan(plan, "Write reports/histogram.json", ["fs.write", "python.exec"])
+    log = executor.execute_step(canonicalized.plan.steps[0])
+
+    assert log.success is True
+    assert log.step.action == "python.exec"
+    assert (tmp_path / "reports" / "histogram.json").read_text() == '{"histogram": {"2": 500}}'
+
+
+def test_python_exec_supports_safe_json_serialization_fallback(tmp_path: Path) -> None:
+    executor = PlanExecutor(build_tool_registry(_settings(tmp_path)))
+    step = ExecutionStep.model_validate(
+        {
+            "id": 1,
+            "action": "python.exec",
+            "args": {
+                "code": "result = _json_dumps_safe({'value': 1 + 2j})",
+            },
+        }
+    )
+
+    log = executor.execute_step(step)
+
+    assert log.success is True
+    assert log.result["result"] == '{"value": "(1+2j)"}'

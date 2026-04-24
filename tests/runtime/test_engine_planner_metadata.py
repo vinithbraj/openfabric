@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from aor_runtime.config import Settings
@@ -454,3 +455,42 @@ def test_retry_and_terminal_failure_clear_policies_used(tmp_path: Path) -> None:
     assert terminal_session.state["policies_used"] == []
     assert terminal_session.state["high_level_plan"] is None
     assert terminal_session.state["step_outputs"] == {}
+
+
+def test_retry_failure_context_is_summarized_and_size_capped(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Retry with compact history")
+
+    huge_history = []
+    for index in range(5):
+        huge_history.append(
+            {
+                "step": {"id": index + 1, "action": "sql.query", "args": {"database": "dicom", "query": "SELECT * FROM patient"}},
+                "success": index < 4,
+                "result": {"rows": [{"patient_id": row, "name": "x" * 200} for row in range(200)], "row_count": 200},
+                "error": "boom" if index == 4 else None,
+            }
+        )
+
+    engine._handle_retry_or_failure(
+        session,
+        node_name="executor",
+        reason="tool_execution_failed",
+        detail="write failed",
+        extra_context={
+            "step": {"id": 6, "action": "fs.write", "args": {"path": "reports/output.json", "content": {"rows": "too big"}}},
+            "history": huge_history,
+        },
+    )
+
+    failure_context = session.state["failure_context"]
+    assert session.state["status"] == "retrying"
+    assert "history" not in failure_context
+    assert failure_context["failed_step"] == "fs.write"
+    assert len(failure_context["summary"]) <= 3
+    assert failure_context["summary"][-1]["action"] == "sql.query"
+    assert json.dumps(failure_context, ensure_ascii=False, sort_keys=True)
+    assert len(json.dumps(failure_context, ensure_ascii=False, sort_keys=True)) <= 4096
+    events = engine.store.get_events(session.id)
+    executor_failed = next(event for event in events if event["event_type"] == "executor.failed")
+    assert "history" not in executor_failed["payload"]

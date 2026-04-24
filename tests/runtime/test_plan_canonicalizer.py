@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from aor_runtime.core.contracts import ExecutionPlan
-from aor_runtime.runtime.plan_canonicalizer import CANONICALIZER_ADDED_ARG, canonicalize_plan
+from aor_runtime.runtime.plan_canonicalizer import (
+    CANONICALIZER_ADDED_ARG,
+    CANONICALIZER_WRITE_PATH_ARG,
+    canonicalize_plan,
+)
 
 
 def test_canonicalizer_rewrites_generic_aliases_and_downstream_refs() -> None:
@@ -184,6 +188,61 @@ def test_canonicalizer_repairs_write_content_from_single_upstream_alias() -> Non
     result = canonicalize_plan(plan, "Write and return the summary", ["python.exec", "fs.write", "fs.read"])
 
     assert result.plan.steps[1].args["content"] == {"$ref": "json_summary", "path": "json"}
+
+
+def test_canonicalizer_rewrites_structured_fs_write_into_python_writer() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "fs.write",
+                    "args": {"path": "reports/histogram.json", "content": {"histogram": {"2": 500}}},
+                }
+            ]
+        }
+    )
+
+    result = canonicalize_plan(plan, "Write reports/histogram.json", ["fs.write", "python.exec"])
+
+    assert [step.id for step in result.plan.steps] == [1]
+    assert result.plan.steps[0].action == "python.exec"
+    assert result.plan.steps[0].args["inputs"]["path"] == "reports/histogram.json"
+    assert result.plan.steps[0].args["inputs"]["content"] == {"histogram": {"2": 500}}
+    assert "_json_dumps_safe" in result.plan.steps[0].args["code"]
+    assert result.plan.steps[0].args[CANONICALIZER_WRITE_PATH_ARG] == "reports/histogram.json"
+
+
+def test_canonicalizer_rewrites_structured_ref_write_and_appends_readback() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {"code": "result = {'histogram': {'2': 500}}"},
+                    "output": "histogram_result",
+                },
+                {
+                    "id": 2,
+                    "action": "fs.write",
+                    "input": ["histogram_result"],
+                    "args": {"path": "reports/histogram.json", "content": {"$ref": "histogram_result", "path": "histogram"}},
+                },
+            ]
+        }
+    )
+
+    result = canonicalize_plan(plan, "Write reports/histogram.json and return it", ["python.exec", "fs.write", "fs.read"])
+
+    assert [step.id for step in result.plan.steps] == [1, 2, 3]
+    assert result.plan.steps[1].action == "python.exec"
+    assert result.plan.steps[1].input == ["histogram_result"]
+    assert result.plan.steps[1].args["inputs"]["content"] == {"$ref": "histogram_result", "path": "histogram"}
+    assert result.plan.steps[1].args[CANONICALIZER_WRITE_PATH_ARG] == "reports/histogram.json"
+    assert result.plan.steps[2].action == "fs.read"
+    assert result.plan.steps[2].args["path"] == "reports/histogram.json"
+    assert result.plan.steps[2].args[CANONICALIZER_ADDED_ARG] is True
 
 
 def test_canonicalizer_skips_binary_readback() -> None:

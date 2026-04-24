@@ -39,8 +39,10 @@ TEXT_READBACK_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".yaml", ".yml"}
 PATH_ARG_KEYS = {"path", "src", "dst"}
 DEFAULT_REPAIR_BUDGET = 24
 CANONICALIZER_ADDED_ARG = "__canonicalizer_added"
+CANONICALIZER_WRITE_PATH_ARG = "__canonicalizer_write_path"
 VALID_ALIAS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RETURN_REQUEST_RE = re.compile(r"\b(return|show|provide|list)\b", re.IGNORECASE)
+TEXTUAL_CONTENT_PATHS = {"content", "csv", "json", "markdown", "text", "value"}
 
 
 @dataclass(slots=True)
@@ -160,10 +162,20 @@ def canonicalize_plan(
             budget_used += len(path_repairs)
             repairs.extend(path_repairs)
 
+        repaired_action, repaired_path_args, rewritten_inputs, structured_write_repairs = _rewrite_structured_fs_write_step(
+            step,
+            repaired_path_args,
+            rewritten_inputs,
+        )
+        if structured_write_repairs:
+            _consume_budget(repair_budget, budget_used + len(structured_write_repairs))
+            budget_used += len(structured_write_repairs)
+            repairs.extend(structured_write_repairs)
+
         repaired_step = ExecutionStep.model_validate(
             {
                 "id": step.id,
-                "action": step.action,
+                "action": repaired_action,
                 "args": repaired_path_args,
                 "input": rewritten_inputs,
                 "output": step.output,
@@ -457,6 +469,45 @@ def _repair_write_content_from_inputs(
     return repaired, [f"write_content:{path_value}<-{output_alias}.{content_path}"]
 
 
+def _rewrite_structured_fs_write_step(
+    step: ExecutionStep,
+    args: dict[str, Any],
+    inputs: list[str],
+) -> tuple[str, dict[str, Any], list[str], list[str]]:
+    if step.action != "fs.write":
+        return step.action, args, inputs, []
+    path_value = args.get("path")
+    content_value = args.get("content")
+    if not isinstance(path_value, str):
+        return step.action, args, inputs, []
+    if not _is_structured_write_content(content_value):
+        return step.action, args, inputs, []
+
+    repaired_inputs = list(inputs)
+    for alias in _ordered_step_references({"content": content_value}):
+        if alias not in repaired_inputs:
+            repaired_inputs.append(alias)
+
+    repaired_args = {
+        "inputs": {
+            "path": path_value,
+            "content": deepcopy(content_value),
+        },
+        "code": "serialized_content = _json_dumps_safe(inputs['content']); result = fs.write(inputs['path'], serialized_content)",
+        CANONICALIZER_WRITE_PATH_ARG: path_value,
+    }
+    return "python.exec", repaired_args, repaired_inputs, [f"write_structured:{path_value}->python.exec"]
+
+
+def _is_structured_write_content(value: Any) -> bool:
+    if isinstance(value, (dict, list)):
+        if is_step_reference(value):
+            path_text = str(value.get("path") or "").strip().split(".", 1)[0]
+            return path_text not in TEXTUAL_CONTENT_PATHS
+        return True
+    return False
+
+
 def _repair_single_path(value: str, prior_paths: list[str]) -> str | None:
     path_text = str(value).strip()
     if not path_text or "/" in path_text or path_text.startswith(".") or "*" in path_text:
@@ -504,10 +555,16 @@ def _append_final_readback_if_needed(
     last_step = steps[-1]
     if last_step.action == "fs.read" and bool(last_step.args.get(CANONICALIZER_ADDED_ARG)):
         return steps, []
-    if last_step.action != "fs.write":
-        return steps, []
-    path_value = last_step.args.get("path")
-    if not isinstance(path_value, str):
+    path_value: str | None = None
+    if last_step.action == "fs.write":
+        raw_path = last_step.args.get("path")
+        if isinstance(raw_path, str):
+            path_value = raw_path
+    elif last_step.action == "python.exec":
+        raw_path = last_step.args.get(CANONICALIZER_WRITE_PATH_ARG)
+        if isinstance(raw_path, str):
+            path_value = raw_path
+    if path_value is None:
         return steps, []
     suffix = PurePosixPath(path_value).suffix.lower()
     if suffix not in TEXT_READBACK_EXTENSIONS:

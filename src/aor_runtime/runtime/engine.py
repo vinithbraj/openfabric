@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
 import uuid
@@ -30,6 +31,9 @@ from aor_runtime.tools.gateway import resolve_execution_node
 
 TERMINAL_STATUSES = {"completed", "failed"}
 DANGEROUS_SHELL_PATTERN = re.compile(r"(?:^|&&|\|\||;|\|)\s*(?:sudo\s+)?(?:rm|rmdir|unlink)\b")
+FAILURE_SUMMARY_MAX_STEPS = 3
+FAILURE_SUMMARY_MAX_BYTES = 4096
+FAILURE_SUMMARY_MAX_STRING = 240
 STARTUP_BANNER = r"""
    ___   ____  ____
   / _ | / __ \/ __/
@@ -40,6 +44,121 @@ STARTUP_BANNER = r"""
 
 def render_startup_banner() -> str:
     return f"{STARTUP_BANNER}\naor-runtime v{__version__}"
+
+
+def summarize_failure_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for item in list(history or [])[-FAILURE_SUMMARY_MAX_STEPS:]:
+        payload = dict(item or {})
+        step_payload = dict(payload.get("step") or {})
+        result = payload.get("result")
+        summary.append(
+            {
+                "step_id": step_payload.get("id"),
+                "action": step_payload.get("action"),
+                "success": bool(payload.get("success")),
+                "result_type": type(result).__name__,
+                "result_keys": sorted(str(key) for key in result.keys())[:8] if isinstance(result, dict) else None,
+                "size_hint": _value_size_hint(result),
+                "error_excerpt": _truncate_string(payload.get("error")),
+            }
+        )
+    return summary
+
+
+def _value_size_hint(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return len(value)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+
+
+def _truncate_string(value: Any, limit: int = FAILURE_SUMMARY_MAX_STRING) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 13)]}...[truncated]"
+
+
+def _summarize_step_payload(step_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(step_payload, dict) or not step_payload:
+        return None
+    summary: dict[str, Any] = {}
+    if "id" in step_payload:
+        summary["id"] = step_payload.get("id")
+    if "action" in step_payload:
+        summary["action"] = step_payload.get("action")
+    raw_args = step_payload.get("args")
+    if isinstance(raw_args, dict) and raw_args:
+        summarized_args: dict[str, Any] = {}
+        for key in ("database", "node", "path", "src", "dst", "command", "query"):
+            if key not in raw_args:
+                continue
+            value = raw_args.get(key)
+            if isinstance(value, str):
+                summarized_args[key] = _truncate_string(value)
+            elif isinstance(value, (int, float, bool)) or value is None:
+                summarized_args[key] = value
+            else:
+                summarized_args[key] = type(value).__name__
+        if not summarized_args:
+            summarized_args["arg_keys"] = sorted(str(key) for key in raw_args.keys() if not str(key).startswith("__"))[:8]
+        summary["args"] = summarized_args
+    return summary
+
+
+def _serialized_size(value: Any) -> int:
+    return len(json.dumps(value, default=str, ensure_ascii=False, sort_keys=True))
+
+
+def _cap_failure_context_size(failure_context: dict[str, Any], *, limit: int = FAILURE_SUMMARY_MAX_BYTES) -> dict[str, Any]:
+    capped = dict(failure_context)
+    if _serialized_size(capped) <= limit:
+        return capped
+
+    summary = list(capped.get("summary") or [])
+    while summary and _serialized_size(capped) > limit:
+        summary = summary[1:]
+        capped["summary"] = summary
+    if _serialized_size(capped) <= limit:
+        return capped
+
+    capped = _truncate_failure_context_strings(capped)
+    if _serialized_size(capped) <= limit:
+        return capped
+
+    if summary:
+        capped["summary"] = [{"truncated": True}]
+    if isinstance(capped.get("step"), dict):
+        step_summary = dict(capped["step"])
+        step_summary.pop("args", None)
+        step_summary["truncated"] = True
+        capped["step"] = step_summary
+    if _serialized_size(capped) <= limit:
+        return capped
+
+    return {
+        "reason": capped.get("reason"),
+        "error": _truncate_string(capped.get("error"), limit=512),
+        "failed_step": capped.get("failed_step"),
+        "summary": [{"truncated": True}],
+        "truncated": True,
+        **{key: capped[key] for key in ("error_source", "error_kind", "error_target", "error_detail") if key in capped},
+    }
+
+
+def _truncate_failure_context_strings(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _truncate_failure_context_strings(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_truncate_failure_context_strings(item) for item in value]
+    if isinstance(value, str):
+        return _truncate_string(value)
+    return value
 
 
 class ExecutionEngine:
@@ -526,9 +645,30 @@ class ExecutionEngine:
             settings=self.settings,
         )
         final_detail = normalized_error.message if normalized_error is not None else detail
-        failure_context = {"reason": reason, "error": final_detail, **extra_context}
+        history_payload = extra_context.get("history")
+        validation_payload = extra_context.get("validation")
+        validation_checks = extra_context.get("validation_checks")
+        failure_context: dict[str, Any] = {
+            "reason": reason,
+            "error": final_detail,
+            "failed_step": str(step_payload.get("action") or "") if isinstance(step_payload, dict) else None,
+            "step": _summarize_step_payload(step_payload if isinstance(step_payload, dict) else None),
+            "summary": summarize_failure_history(history_payload if isinstance(history_payload, list) else []),
+        }
+        if isinstance(validation_payload, dict):
+            failure_context["validation"] = {
+                "success": validation_payload.get("success"),
+                "reason": _truncate_string(validation_payload.get("reason")),
+            }
+        if isinstance(validation_checks, list):
+            failure_context["validation_checks"] = [
+                _truncate_string(item, limit=120) or ""
+                for item in validation_checks[:5]
+                if _truncate_string(item, limit=120)
+            ]
         if normalized_error is not None:
             failure_context.update(normalized_error.as_metadata())
+        failure_context = _cap_failure_context_size(failure_context)
 
         self.store.append_event(
             session_id=session.id,

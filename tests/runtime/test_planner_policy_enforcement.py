@@ -99,6 +99,11 @@ def test_planner_injects_rendered_policies_into_context(tmp_path: Path) -> None:
     assert planner.last_policies_used == ["filesystem_preference", "efficiency"]
 
 
+def test_default_planner_prompt_prefers_sql_for_aggregation_and_counting() -> None:
+    assert "aggregation, grouping, counting" in DEFAULT_PLANNER_PROMPT
+    assert "Prefer pushing computation into SQL whenever possible." in DEFAULT_PLANNER_PROMPT
+
+
 def test_simple_goal_uses_direct_planning_only(tmp_path: Path) -> None:
     planner, llm = _planner(
         tmp_path,
@@ -689,6 +694,50 @@ def test_planner_backfills_python_inputs_from_prior_shell_output(tmp_path: Path)
 
     assert plan.steps[1].input == ["py_files"]
     assert plan.steps[1].args["inputs"] == {"py_files": {"$ref": "py_files", "path": "stdout"}}
+    assert "inputs['py_files'].splitlines()" in plan.steps[1].args["code"]
+    assert "['stdout']" not in plan.steps[1].args["code"]
+
+
+def test_planner_accepts_sql_rows_as_direct_list_values_in_python_exec(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        [
+            {"tasks": ["count studies", "return the count safely"]},
+            {
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "sql.query",
+                        "args": {"database": "clinical_db", "query": "SELECT COUNT(*) AS study_count FROM studies"},
+                        "output": "study_rows",
+                    },
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "input": ["study_rows"],
+                        "output": "study_count",
+                        "args": {
+                            "inputs": {"rows": {"$ref": "study_rows", "path": "rows"}},
+                            "code": "rows = inputs['rows']; result = {'count': rows[0]['study_count'] if rows else 0}",
+                        },
+                    },
+                ]
+            },
+        ],
+    )
+
+    plan = planner.build_plan(
+        goal="Count studies in clinical_db and return the count safely.",
+        planner=_planner_config(),
+        allowed_tools=["sql.query", "python.exec"],
+        input_payload={"task": "Count studies in clinical_db and return the count safely."},
+    )
+
+    assert plan.steps[1].args["inputs"]["rows"] == {"$ref": "study_rows", "path": "rows"}
+    assert "rows = inputs['rows']" in plan.steps[1].args["code"]
+    assert "if rows else 0" in plan.steps[1].args["code"]
+    assert "['rows']" not in plan.steps[1].args["code"].replace("inputs['rows']", "")
+    assert plan.steps[1].output == "study_count"
 
 
 def test_planner_rejects_when_explicit_shell_intent_is_ignored(tmp_path: Path) -> None:
@@ -784,7 +833,7 @@ def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
         "Never invent node names outside the provided logical node list.",
         "If schema information includes a database dialect, generate SQL that is valid for that dialect.",
         "For PostgreSQL, do not use SQLite-only functions like strftime.",
-        "shell.exec(...) returns an object with stdout, stderr, and returncode fields",
+        "shell.exec(...) called directly inside the sandbox returns an object with stdout, stderr, and returncode fields",
         "Every args value must be valid JSON as written.",
         "Prefer a direct shell.exec step for simple command-output formatting tasks.",
         "Use fs.not_exists to verify that a path is absent after deletion or cleanup.",
@@ -800,6 +849,31 @@ def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
 
     assert "break the user's goal into an ordered list of high-level tasks" in DEFAULT_DECOMPOSER_PROMPT.lower()
     assert "break the user's goal into an ordered list of high-level tasks" in decomposer_file_prompt.lower()
+
+
+def test_prompt_sources_describe_resolved_python_input_shapes() -> None:
+    file_prompt = (Path(__file__).resolve().parents[2] / "prompts" / "planner_system.txt").read_text()
+
+    required_snippets = [
+        "inputs[...] values are fully computed runtime results, not references, wrappers, or tool-response objects.",
+        "inputs[...] is the value itself, not an object containing the value, and it does not contain implicit nested structure.",
+        "sql.query -> list of dict rows, fs.find -> list of file path strings, fs.read -> string content, shell.exec -> stdout string, python.exec -> arbitrary resolved value.",
+        'never access nested wrapper fields like ["stdout"], ["rows"], or ["content"]',
+        "do not add defensive wrapper-detection logic or shape-probing branches for inputs[...]",
+        "do not wrap inputs[...] into new containers unless the actual computation requires it",
+        "do not rename inputs[...] unless needed for readability or a real transformation.",
+        "shell.exec output passed through inputs[...] is a string; use .splitlines() when you need a list of lines.",
+        "always handle empty SQL result lists safely before indexing.",
+        "do not assume SQL result fields unless they were explicitly selected by the SQL query.",
+        "downstream steps consume the python.exec output value directly",
+        "If the user asks to return, list, show, or provide data, the final step must surface that data",
+        "\"code\": \"result = {'csv': ','.join(inputs['py_files'].splitlines())}\"",
+        "\"code\": \"rows = inputs['rows']; result = {'count': rows[0]['study_count'] if rows else 0}\"",
+    ]
+
+    for snippet in required_snippets:
+        assert snippet in DEFAULT_PLANNER_PROMPT
+        assert snippet in file_prompt
 
 
 def test_planner_context_includes_database_dialect(tmp_path: Path, monkeypatch) -> None:
