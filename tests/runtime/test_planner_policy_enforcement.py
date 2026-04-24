@@ -191,7 +191,7 @@ def test_planner_rejects_plan_that_exceeds_step_limit(tmp_path: Path) -> None:
         {
             "steps": [
                 {"id": index, "action": "fs.exists", "args": {"path": f"item_{index}.txt"}}
-                for index in range(1, 10)
+                for index in range(1, 14)
             ]
         },
     )

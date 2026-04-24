@@ -153,6 +153,33 @@ def test_resolve_execution_step_supports_python_result_field_shortcuts(tmp_path:
     assert resolved.args["content"] == "Arun,Lena,Maya"
 
 
+def test_resolve_execution_step_supports_textual_python_alias_paths(tmp_path: Path) -> None:
+    step = ExecutionStep.model_validate(
+        {
+            "id": 3,
+            "action": "fs.write",
+            "input": ["size_summary"],
+            "args": {
+                "path": "summary.json",
+                "content": {"$ref": "size_summary", "path": "json_string"},
+            },
+        }
+    )
+
+    resolved = resolve_execution_step(
+        step,
+        {
+            "size_summary": {
+                "success": True,
+                "output": "{\"file_count\": 2, \"total_size_bytes\": 11}",
+                "result": "{\"file_count\": 2, \"total_size_bytes\": 11}",
+            }
+        },
+    )
+
+    assert resolved.args["content"] == "{\"file_count\": 2, \"total_size_bytes\": 11}"
+
+
 def test_normalize_execution_plan_dataflow_backfills_python_inputs_from_prior_shell_output() -> None:
     plan = ExecutionPlan.model_validate(
         {

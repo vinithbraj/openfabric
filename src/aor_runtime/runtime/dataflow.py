@@ -5,6 +5,8 @@ from typing import Any
 
 from aor_runtime.core.contracts import ExecutionPlan, ExecutionStep
 
+TEXTUAL_OUTPUT_PATH_ALIASES = {"text", "content", "value", "csv", "csv_string", "json", "json_string", "summary_json"}
+
 
 def is_step_reference(value: Any) -> bool:
     return isinstance(value, dict) and isinstance(value.get("$ref"), str) and str(value.get("$ref")).strip() != ""
@@ -90,13 +92,13 @@ def _resolve_output_path(value: Any, path: str) -> Any:
         if not segment:
             raise ValueError(f"Invalid reference path: {path}")
         if isinstance(current, dict):
-            if segment not in current and segment == "json" and isinstance(current.get("output"), str):
-                return deepcopy(current["output"])
             if segment not in current and "result" in current:
                 nested_result = current["result"]
                 if isinstance(nested_result, dict) and segment in nested_result:
                     current = nested_result[segment]
                     continue
+                if isinstance(nested_result, str) and segment in TEXTUAL_OUTPUT_PATH_ALIASES:
+                    return deepcopy(nested_result)
                 if isinstance(nested_result, list):
                     try:
                         index = int(segment)
@@ -108,6 +110,8 @@ def _resolve_output_path(value: Any, path: str) -> Any:
                             continue
                         except IndexError as exc:
                             raise ValueError(f"Reference path index out of range: {path}") from exc
+            if segment not in current and segment in TEXTUAL_OUTPUT_PATH_ALIASES and isinstance(current.get("output"), str):
+                return deepcopy(current["output"])
             if segment not in current:
                 raise ValueError(f"Reference path not found: {path}")
             current = current[segment]

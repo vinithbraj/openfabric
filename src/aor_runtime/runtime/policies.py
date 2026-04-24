@@ -12,7 +12,7 @@ from aor_runtime.runtime.dataflow import collect_step_references
 TOKEN_RE = re.compile(r"[a-z0-9_]+")
 PLACEHOLDER_TOKEN_RE = re.compile(r"\b(?:name|item|value|row|col|file)\d+\b", re.IGNORECASE)
 PYTHON_INPUT_ACCESS_RE = re.compile(r"\binputs(?:\[[^\]]+\]|\.)")
-MAX_ALLOWED_STEPS = 8
+MAX_ALLOWED_STEPS = 12
 
 
 class PlanningPolicy(BaseModel):
