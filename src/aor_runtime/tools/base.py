@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from aor_runtime.core.contracts import ToolSpec
+from aor_runtime.runtime.dataflow import collect_step_references
 
 
 class ToolExecutionError(RuntimeError):
@@ -52,6 +53,8 @@ class ToolRegistry:
 
     def validate_step(self, action: str, args: dict[str, Any]) -> None:
         tool = self.get(action)
+        if collect_step_references(args):
+            return
         tool.args_model.model_validate(args)
 
     def invoke(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:

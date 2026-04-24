@@ -14,6 +14,8 @@ class ExecutionStep(BaseModel):
     id: int
     action: str
     args: dict[str, Any] = Field(default_factory=dict)
+    input: list[str] = Field(default_factory=list)
+    output: str | None = None
 
 
 class ExecutionPlan(BaseModel):
@@ -32,6 +34,23 @@ class ExecutionPlan(BaseModel):
             if step.id != expected_id:
                 raise ValueError("Step ids must be sequential starting at 1.")
             expected_id += 1
+        return self
+
+
+class HighLevelPlan(BaseModel):
+    tasks: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_tasks(self) -> "HighLevelPlan":
+        if not self.tasks:
+            raise ValueError("High-level plan requires at least one task.")
+        normalized: list[str] = []
+        for task in self.tasks:
+            text = str(task).strip()
+            if not text:
+                raise ValueError("High-level plan tasks must be non-empty.")
+            normalized.append(text)
+        self.tasks = normalized
         return self
 
 
@@ -58,6 +77,7 @@ class ValidationResult(BaseModel):
 class PlannerConfig(BaseModel):
     model: str | None = None
     prompt: str | None = None
+    decomposer_prompt: str | None = None
     temperature: float = 0.0
 
 

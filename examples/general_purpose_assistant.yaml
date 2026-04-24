@@ -5,6 +5,7 @@ description: Deterministic local assistant with explicit planning, tool executio
 planner:
   model: qwen-coder
   prompt: ../prompts/planner_system.txt
+  decomposer_prompt: ../prompts/decomposer_system.txt
   temperature: 0.0
 
 runtime:

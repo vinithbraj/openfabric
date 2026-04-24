@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from aor_runtime.core.contracts import ExecutionPlan, PlanStep, StepLog
+from aor_runtime.runtime.dataflow import resolve_execution_step
 from aor_runtime.tools.base import ToolExecutionError, ToolRegistry
 
 
@@ -12,19 +13,20 @@ class PlanExecutor:
     def __init__(self, tools: ToolRegistry) -> None:
         self.tools = tools
 
-    def execute_step(self, step: PlanStep) -> StepLog:
+    def execute_step(self, step: PlanStep, *, step_outputs: dict[str, Any] | None = None) -> StepLog:
         started = datetime.now(timezone.utc).isoformat()
         try:
-            output = self.tools.invoke(step.action, step.args)
+            resolved_step = resolve_execution_step(step, step_outputs or {})
+            output = self.tools.invoke(resolved_step.action, resolved_step.args)
             finished = datetime.now(timezone.utc).isoformat()
-            if step.action == "python.exec" and not bool(output.get("success", False)):
+            if resolved_step.action == "python.exec" and not bool(output.get("success", False)):
                 raise ToolExecutionError(str(output.get("error") or "python.exec failed."))
-            if step.action == "fs.exists" and not bool(output.get("exists")):
-                raise ToolExecutionError(f"Path does not exist: {step.args.get('path', '')}")
-            if step.action == "fs.not_exists" and bool(output.get("exists")):
-                raise ToolExecutionError(f"Path still exists: {step.args.get('path', '')}")
+            if resolved_step.action == "fs.exists" and not bool(output.get("exists")):
+                raise ToolExecutionError(f"Path does not exist: {resolved_step.args.get('path', '')}")
+            if resolved_step.action == "fs.not_exists" and bool(output.get("exists")):
+                raise ToolExecutionError(f"Path still exists: {resolved_step.args.get('path', '')}")
             return StepLog(
-                step=step,
+                step=resolved_step,
                 result=output,
                 success=True,
                 started_at=started,
@@ -44,9 +46,12 @@ class PlanExecutor:
     def execute(self, plan: ExecutionPlan) -> tuple[list[StepLog], dict[str, Any] | None]:
         history: list[StepLog] = []
         failure: dict[str, Any] | None = None
+        step_outputs: dict[str, Any] = {}
         for step in plan.steps:
-            log = self.execute_step(step)
+            log = self.execute_step(step, step_outputs=step_outputs)
             history.append(log)
+            if log.success and log.step.output:
+                step_outputs[log.step.output] = log.result
             if not log.success:
                 failure = {
                     "reason": "tool_execution_failed",

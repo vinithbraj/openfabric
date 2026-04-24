@@ -318,7 +318,9 @@ def _safe_import(
 
 
 def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any]) -> None:
-    settings = Settings.model_validate(settings_data)
+    settings_payload = dict(settings_data)
+    inputs = dict(settings_payload.pop("__python_inputs__", {}) or {})
+    settings = Settings.model_validate(settings_payload)
     parsed, _ = _validate_code(code)
     fs = _PythonFsFacade(settings)
     shell = _PythonShellFacade(settings)
@@ -327,6 +329,7 @@ def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any
         "fs": fs,
         "shell": shell,
         "sql": sql,
+        "inputs": inputs,
         "result": None,
         "__codex_subprocess__": _SubprocessModule(shell),
         "_shell_substitution": lambda command: _shell_substitution(shell, str(command)),
@@ -352,11 +355,13 @@ def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any
 class PythonExecTool(BaseTool):
     class ToolArgs(ToolArgsModel):
         code: str
+        inputs: dict[str, Any] = Field(default_factory=dict)
         timeout: int = Field(default=5, ge=1, le=5)
 
     class ToolResult(ToolResultModel):
         success: bool
         output: str | None = None
+        result: Any | None = None
         error: str | None = None
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -370,6 +375,7 @@ class PythonExecTool(BaseTool):
                 "type": "object",
                 "properties": {
                     "code": {"type": "string"},
+                    "inputs": {"type": "object"},
                     "timeout": {"type": "integer"},
                 },
                 "required": ["code"],
@@ -378,37 +384,44 @@ class PythonExecTool(BaseTool):
 
     def run(self, arguments: ToolArgs) -> ToolResult:
         code = arguments.code
+        inputs = dict(arguments.inputs or {})
         timeout = arguments.timeout
         _, normalized_code = _validate_code(code)
 
         queue: mp.Queue = mp.Queue()
         process = mp.Process(
             target=_python_exec_worker,
-            args=(queue, normalized_code, self.settings.model_dump(mode="json")),
+            args=(queue, normalized_code, {**self.settings.model_dump(mode="json"), "__python_inputs__": inputs}),
         )
         process.start()
         process.join(timeout)
         if process.is_alive():
             process.terminate()
             process.join()
-            return self.ToolResult(success=False, output=None, error="python.exec timed out.")
+            return self.ToolResult(success=False, output=None, result=None, error="python.exec timed out.")
 
         if queue.empty():
-            return self.ToolResult(success=False, output=None, error="python.exec did not return a result.")
+            return self.ToolResult(success=False, output=None, result=None, error="python.exec did not return a result.")
 
         payload = queue.get()
         if not payload.get("ok"):
             return self.ToolResult(
                 success=False,
                 output=str(payload.get("stdout") or "") or None,
+                result=None,
                 error=str(payload.get("error") or "python.exec failed."),
             )
 
         result = payload.get("result")
         try:
-            json.dumps(result, default=str)
+            serialized_result = json.dumps(result, default=str, ensure_ascii=False, sort_keys=True)
         except TypeError as exc:  # noqa: PERF203
-            return self.ToolResult(success=False, output=str(payload.get("stdout") or "") or None, error=f"python.exec result must be JSON serializable: {exc}")
+            return self.ToolResult(
+                success=False,
+                output=str(payload.get("stdout") or "") or None,
+                result=None,
+                error=f"python.exec result must be JSON serializable: {exc}",
+            )
 
         stdout = str(payload.get("stdout") or "").strip()
         output: str | None
@@ -419,13 +432,13 @@ class PythonExecTool(BaseTool):
         elif isinstance(result, (int, float, bool)):
             output = str(result)
         else:
-            output = json.dumps(result, ensure_ascii=False, sort_keys=True)
+            output = serialized_result
         if stdout and output and stdout != output:
             output = f"{stdout}\n{output}"
         if output:
             output = self._expand_shell_substitutions(output)
 
-        return self.ToolResult(success=True, output=output, error=None)
+        return self.ToolResult(success=True, output=output, result=result, error=None)
 
     def _expand_shell_substitutions(self, value: str) -> str:
         expanded = str(value)

@@ -7,14 +7,17 @@ import pytest
 
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
+from aor_runtime.runtime.decomposer import DEFAULT_DECOMPOSER_PROMPT
 from aor_runtime.runtime.planner import DEFAULT_PLANNER_PROMPT, TaskPlanner
 from aor_runtime.runtime.policies import validate_plan_efficiency
 from aor_runtime.tools.factory import build_tool_registry
 
 
 class FakeLLM:
-    def __init__(self, raw_response: str) -> None:
-        self.raw_response = raw_response
+    def __init__(self, raw_responses: list[str]) -> None:
+        self.raw_responses = raw_responses
+        self.system_prompts: list[str] = []
+        self.user_prompts: list[str] = []
         self.last_system_prompt: str | None = None
         self.last_user_prompt: str | None = None
 
@@ -29,23 +32,36 @@ class FakeLLM:
         model: str | None = None,
         temperature: float | None = None,
     ) -> str:
+        if len(self.user_prompts) >= len(self.raw_responses):
+            raise AssertionError("LLM called more times than expected")
+        self.system_prompts.append(system_prompt)
+        self.user_prompts.append(user_prompt)
         self.last_system_prompt = system_prompt
         self.last_user_prompt = user_prompt
-        return self.raw_response
+        return self.raw_responses[len(self.user_prompts) - 1]
+
+    @property
+    def call_count(self) -> int:
+        return len(self.user_prompts)
 
 
-def _planner(tmp_path: Path, raw_response: str | dict) -> tuple[TaskPlanner, FakeLLM]:
+def _serialize_responses(raw_response: str | dict | list[str | dict]) -> list[str]:
+    responses = raw_response if isinstance(raw_response, list) else [raw_response]
+    return [json.dumps(item) if isinstance(item, dict) else item for item in responses]
+
+
+def _planner(tmp_path: Path, raw_response: str | dict | list[str | dict]) -> tuple[TaskPlanner, FakeLLM]:
     settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
-    serialized = json.dumps(raw_response) if isinstance(raw_response, dict) else raw_response
-    llm = FakeLLM(serialized)
+    llm = FakeLLM(_serialize_responses(raw_response))
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
     return planner, llm
 
 
-def _planner_with_settings(tmp_path: Path, raw_response: str | dict, **settings_overrides) -> tuple[TaskPlanner, FakeLLM]:
+def _planner_with_settings(
+    tmp_path: Path, raw_response: str | dict | list[str | dict], **settings_overrides
+) -> tuple[TaskPlanner, FakeLLM]:
     settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", **settings_overrides)
-    serialized = json.dumps(raw_response) if isinstance(raw_response, dict) else raw_response
-    llm = FakeLLM(serialized)
+    llm = FakeLLM(_serialize_responses(raw_response))
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
     return planner, llm
 
@@ -80,6 +96,95 @@ def test_planner_injects_rendered_policies_into_context(tmp_path: Path) -> None:
     assert planner.last_policies_used == ["filesystem_preference", "efficiency"]
 
 
+def test_simple_goal_uses_direct_planning_only(tmp_path: Path) -> None:
+    planner, llm = _planner(
+        tmp_path,
+        {"steps": [{"id": 1, "action": "fs.read", "args": {"path": "notes.txt"}}]},
+    )
+
+    plan = planner.build_plan(
+        goal="Read notes.txt",
+        planner=_planner_config(),
+        allowed_tools=["fs.read"],
+        input_payload={"task": "Read notes.txt"},
+    )
+
+    assert isinstance(plan, ExecutionPlan)
+    assert planner.last_planning_mode == "direct"
+    assert planner.last_high_level_plan is None
+    assert planner.last_llm_calls == 1
+    assert llm.call_count == 1
+
+
+def test_complex_goal_uses_decomposition_and_refinement(tmp_path: Path) -> None:
+    planner, llm = _planner(
+        tmp_path,
+        [
+            {"tasks": ["find matching txt files", "format the list as csv"]},
+            {
+                "steps": [
+                    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}, "output": "txt_matches"},
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "input": ["txt_matches"],
+                        "output": "csv_result",
+                        "args": {
+                            "inputs": {"matches": {"$ref": "txt_matches", "path": "matches"}},
+                            "code": "result = {'csv': ','.join(inputs['matches'])}",
+                        },
+                    },
+                ]
+            },
+        ],
+    )
+
+    plan = planner.build_plan(
+        goal="find all *.txt files in this folder and provide list as csv",
+        planner=_planner_config(),
+        allowed_tools=["fs.find", "python.exec"],
+        input_payload={"task": "find all *.txt files in this folder and provide list as csv"},
+    )
+
+    assert [step.action for step in plan.steps] == ["fs.find", "python.exec"]
+    assert planner.last_planning_mode == "hierarchical"
+    assert planner.last_high_level_plan == ["find matching txt files", "format the list as csv"]
+    assert planner.last_llm_calls == 2
+    assert llm.call_count == 2
+    assert json.loads(llm.user_prompts[1])["high_level_plan"] == ["find matching txt files", "format the list as csv"]
+
+
+def test_empty_high_level_plan_fails(tmp_path: Path) -> None:
+    planner, _ = _planner(tmp_path, [{"tasks": []}])
+
+    with pytest.raises(ValueError, match="at least one task"):
+        planner.build_plan(
+            goal="find all txt files in this folder and provide list as csv",
+            planner=_planner_config(),
+            allowed_tools=["fs.find", "python.exec"],
+            input_payload={"task": "find all txt files in this folder and provide list as csv"},
+        )
+
+    assert planner.last_error_stage == "decompose"
+    assert planner.last_planning_mode == "hierarchical"
+    assert planner.last_llm_calls == 1
+
+
+def test_empty_execution_plan_fails(tmp_path: Path) -> None:
+    planner, _ = _planner(tmp_path, {"steps": []})
+
+    with pytest.raises(ValueError, match="Execution plan requires at least one step"):
+        planner.build_plan(
+            goal="Read notes.txt",
+            planner=_planner_config(),
+            allowed_tools=["fs.read"],
+            input_payload={"task": "Read notes.txt"},
+        )
+
+    assert planner.last_error_stage == "direct"
+    assert planner.last_planning_mode == "direct"
+
+
 def test_planner_rejects_plan_that_exceeds_step_limit(tmp_path: Path) -> None:
     planner, _ = _planner(
         tmp_path,
@@ -105,19 +210,28 @@ def test_planner_rejects_multiple_python_exec_steps(tmp_path: Path) -> None:
         tmp_path,
         {
             "steps": [
-                {"id": 1, "action": "python.exec", "args": {"code": "result = {'value': 1}"}},
-                {"id": 2, "action": "python.exec", "args": {"code": "result = {'value': 2}"}},
+                {"id": 1, "action": "python.exec", "args": {"code": "result = {'value': 1}"}, "output": "first"},
+                {
+                    "id": 2,
+                    "action": "python.exec",
+                    "input": ["first"],
+                    "args": {
+                        "inputs": {"previous": {"$ref": "first", "path": "value"}},
+                        "code": "result = {'value': inputs['previous'] + 1}",
+                    },
+                },
             ]
         },
     )
 
-    with pytest.raises(ValueError, match="Too many python\\.exec steps"):
-        planner.build_plan(
-            goal="Run multiple loops over local data",
-            planner=_planner_config(),
-            allowed_tools=["python.exec"],
-            input_payload={"task": "Run multiple loops over local data"},
-        )
+    plan = planner.build_plan(
+        goal="Run multiple loops over local data",
+        planner=_planner_config(),
+        allowed_tools=["python.exec"],
+        input_payload={"task": "Run multiple loops over local data"},
+    )
+
+    assert [step.action for step in plan.steps] == ["python.exec", "python.exec"]
 
 
 def test_validate_plan_efficiency_accepts_compliant_plan() -> None:
@@ -204,16 +318,24 @@ def test_planner_uses_implicit_localhost_default_when_not_configured(tmp_path: P
 def test_planner_accepts_recursive_file_search_plan_with_fs_find(tmp_path: Path) -> None:
     planner, llm = _planner(
         tmp_path,
-        {
-            "steps": [
-                {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}},
-                {
-                    "id": 2,
-                    "action": "python.exec",
-                    "args": {"code": "matches = fs.find('.', '*.txt'); result = {'csv': ','.join(matches)}"},
-                },
-            ]
-        },
+        [
+            {"tasks": ["find matching txt files", "format the list as csv"]},
+            {
+                "steps": [
+                    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}, "output": "txt_matches"},
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "input": ["txt_matches"],
+                        "output": "csv_result",
+                        "args": {
+                            "inputs": {"matches": {"$ref": "txt_matches", "path": "matches"}},
+                            "code": "result = {'csv': ','.join(inputs['matches'])}",
+                        },
+                    },
+                ]
+            },
+        ],
     )
 
     plan = planner.build_plan(
@@ -224,8 +346,8 @@ def test_planner_accepts_recursive_file_search_plan_with_fs_find(tmp_path: Path)
     )
 
     assert [step.action for step in plan.steps] == ["fs.find", "python.exec"]
-    assert llm.last_system_prompt is not None
-    assert "Use fs.find for recursive file discovery" in llm.last_system_prompt
+    assert llm.system_prompts[-1] is not None
+    assert "Use fs.find for recursive file discovery" in llm.system_prompts[-1]
 
 
 def test_planner_accepts_total_file_size_plan_with_fs_size(tmp_path: Path) -> None:
@@ -233,12 +355,15 @@ def test_planner_accepts_total_file_size_plan_with_fs_size(tmp_path: Path) -> No
         tmp_path,
         {
             "steps": [
-                {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}},
+                {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}, "output": "txt_matches"},
                 {
                     "id": 2,
                     "action": "python.exec",
+                    "input": ["txt_matches"],
+                    "output": "size_summary",
                     "args": {
-                        "code": "files = fs.find('.', '*.txt'); total_size = sum(fs.size(path) for path in files); result = {'file_count': len(files), 'total_size_bytes': total_size}"
+                        "inputs": {"files": {"$ref": "txt_matches", "path": "matches"}},
+                        "code": "total_size = sum(fs.size(path) for path in inputs['files']); result = {'file_count': len(inputs['files']), 'total_size_bytes': total_size}"
                     },
                 },
             ]
@@ -290,6 +415,191 @@ def test_planner_rejects_shell_plan_with_disallowed_node(tmp_path: Path) -> None
         )
 
 
+def test_planner_rejects_invalid_data_dependency(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "fs.write",
+                    "input": ["missing_alias"],
+                    "args": {"path": "notes.txt", "content": {"$ref": "missing_alias", "path": "csv"}},
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="Invalid data dependency"):
+        planner.build_plan(
+            goal="Write a file from previous data",
+            planner=_planner_config(),
+            allowed_tools=["fs.write"],
+            input_payload={"task": "Write a file from previous data"},
+        )
+
+
+def test_planner_rejects_placeholder_write_when_upstream_output_exists(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        [
+            {"tasks": ["query patient names", "write the csv file"]},
+            {
+                "steps": [
+                    {"id": 1, "action": "sql.query", "output": "patient_rows", "args": {"database": "clinical_db", "query": "SELECT name FROM patients"}},
+                    {"id": 2, "action": "fs.write", "args": {"path": "patients.csv", "content": "name1,name2,name3"}},
+                ]
+            },
+        ],
+    )
+
+    with pytest.raises(ValueError, match="placeholder output"):
+        planner.build_plan(
+            goal="Query patient names from clinical_db and save them to patients.csv",
+            planner=_planner_config(),
+            allowed_tools=["sql.query", "fs.write"],
+            input_payload={"task": "Query patient names from clinical_db and save them to patients.csv"},
+        )
+
+
+def test_planner_backfills_step_inputs_from_structured_refs(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        [
+            {"tasks": ["query the top patients", "format the names as csv", "write the csv file"]},
+            {
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "sql.query",
+                        "args": {"database": "clinical_db", "query": "SELECT name FROM patients ORDER BY score DESC LIMIT 3"},
+                        "output": "patient_rows",
+                    },
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "args": {
+                            "inputs": {"rows": {"$ref": "patient_rows", "path": "rows"}},
+                            "code": "result = {'csv': ','.join(row['name'] for row in inputs['rows'])}",
+                        },
+                        "output": "patient_csv",
+                    },
+                    {
+                        "id": 3,
+                        "action": "fs.write",
+                        "args": {
+                            "path": "outputs/top_patients.csv",
+                            "content": {"$ref": "patient_csv", "path": "csv"},
+                        },
+                    },
+                ]
+            },
+        ],
+    )
+
+    plan = planner.build_plan(
+        goal="Query the top 3 patients by score from clinical_db, format the names as csv, and save the result to outputs/top_patients.csv.",
+        planner=_planner_config(),
+        allowed_tools=["sql.query", "python.exec", "fs.write"],
+        input_payload={
+            "task": "Query the top 3 patients by score from clinical_db, format the names as csv, and save the result to outputs/top_patients.csv."
+        },
+    )
+
+    assert plan.steps[1].input == ["patient_rows"]
+    assert plan.steps[2].input == ["patient_csv"]
+
+
+def test_planner_backfills_python_inputs_from_prior_shell_output(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        [
+            {"tasks": ["list matching python files with shell", "format the list as csv"]},
+            {
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "shell.exec",
+                        "args": {"command": "find src/aor_runtime/runtime -type f -name \"*.py\""},
+                        "output": "py_files",
+                    },
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "input": ["py_files"],
+                        "args": {"code": "result = {'csv': ','.join(inputs['py_files'].splitlines())}"},
+                        "output": "csv_result",
+                    },
+                ]
+            },
+        ],
+    )
+
+    plan = planner.build_plan(
+        goal="Using shell, list all .py files under src/aor_runtime/runtime and then return the list as a csv string.",
+        planner=_planner_config(),
+        allowed_tools=["shell.exec", "python.exec"],
+        input_payload={"task": "Using shell, list all .py files under src/aor_runtime/runtime and then return the list as a csv string."},
+    )
+
+    assert plan.steps[1].input == ["py_files"]
+    assert plan.steps[1].args["inputs"] == {"py_files": {"$ref": "py_files", "path": "stdout"}}
+
+
+def test_planner_rejects_when_explicit_shell_intent_is_ignored(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        [
+            {"tasks": ["list matching python files", "format the list as csv"]},
+            {
+                "steps": [
+                    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.py"}, "output": "py_matches"},
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "input": ["py_matches"],
+                        "args": {
+                            "inputs": {"matches": {"$ref": "py_matches", "path": "matches"}},
+                            "code": "result = {'csv': ','.join(inputs['matches'])}",
+                        },
+                    },
+                ]
+            },
+        ],
+    )
+
+    with pytest.raises(ValueError, match="explicit tool request for shell\\.exec"):
+        planner.build_plan(
+            goal="Using shell, list all .py files here and return them as csv",
+            planner=_planner_config(),
+            allowed_tools=["fs.find", "python.exec", "shell.exec"],
+            input_payload={"task": "Using shell, list all .py files here and return them as csv"},
+        )
+
+
+def test_planner_rejects_python_inputs_usage_without_args_inputs(tmp_path: Path) -> None:
+    planner, _ = _planner(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {"code": "result = {'csv': ','.join(inputs['rows'])}"},
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="must declare args\\.inputs"):
+        planner.build_plan(
+            goal="Using python, join rows as csv",
+            planner=_planner_config(),
+            allowed_tools=["python.exec"],
+            input_payload={"task": "Using python, join rows as csv"},
+        )
+
+
 def test_planner_tracks_raw_output_and_error_type_for_malformed_json(tmp_path: Path) -> None:
     raw_response = """
     {
@@ -322,6 +632,7 @@ def test_planner_tracks_raw_output_and_error_type_for_malformed_json(tmp_path: P
 
 def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
     file_prompt = (Path(__file__).resolve().parents[2] / "prompts" / "planner_system.txt").read_text()
+    decomposer_file_prompt = (Path(__file__).resolve().parents[2] / "prompts" / "decomposer_system.txt").read_text()
 
     required_snippets = [
         "If the task explicitly names a node, include that node in shell.exec args.",
@@ -330,8 +641,15 @@ def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
         "Every args value must be valid JSON as written.",
         "Prefer a direct shell.exec step for simple command-output formatting tasks.",
         "Use fs.not_exists to verify that a path is absent after deletion or cleanup.",
+        "If a high_level_plan is provided in the planner context, refine it into executable steps",
+        "If explicit_tool_intent is provided in the planner context, you MUST use those requested tools",
+        "Every step that produces data for later use must declare an output alias.",
+        "inputs dict",
     ]
 
     for snippet in required_snippets:
         assert snippet in DEFAULT_PLANNER_PROMPT
         assert snippet in file_prompt
+
+    assert "break the user's goal into an ordered list of high-level tasks" in DEFAULT_DECOMPOSER_PROMPT.lower()
+    assert "break the user's goal into an ordered list of high-level tasks" in decomposer_file_prompt.lower()

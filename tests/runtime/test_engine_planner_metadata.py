@@ -40,6 +40,10 @@ def test_successful_planner_run_persists_policies_and_logs_event(tmp_path: Path,
 
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["filesystem_preference", "efficiency"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_llm_calls = 1
+        engine.planner.last_error_stage = None
         return _write_plan()
 
     monkeypatch.setattr(engine.planner, "build_plan", fake_build_plan)
@@ -47,19 +51,65 @@ def test_successful_planner_run_persists_policies_and_logs_event(tmp_path: Path,
     engine._run_planner(session)
 
     assert session.state["policies_used"] == ["filesystem_preference", "efficiency"]
+    assert session.state["high_level_plan"] is None
+    assert session.state["step_outputs"] == {}
+    assert session.state["metrics"]["llm_calls"] == 1
     events = engine.store.get_events(session.id)
+    planner_started = next(event for event in events if event["event_type"] == "planner.started")
     planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
+    assert planner_started["payload"]["planning_mode"] == "direct"
     assert planner_completed["payload"]["policies"] == ["filesystem_preference", "efficiency"]
+    assert planner_completed["payload"]["planning_mode"] == "direct"
+    assert planner_completed["payload"]["high_level_plan"] is None
+    assert planner_completed["payload"]["goal"] == "Create notes.txt with hello"
+    assert planner_completed["payload"]["execution_plan"]["steps"] == session.state["plan"]["steps"]
     assert "steps" in planner_completed["payload"]
 
 
-def test_planner_failure_clears_stale_policies_used(tmp_path: Path, monkeypatch) -> None:
+def test_hierarchical_planner_run_persists_high_level_plan_and_metrics(tmp_path: Path, monkeypatch) -> None:
     engine = _engine(tmp_path)
-    session = _session(engine, "This planner run should fail")
+    session = _session(engine, "Query patients and save the top 10 to a file")
+
+    def fake_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["sql_preference", "filesystem_preference", "efficiency"]
+        engine.planner.last_high_level_plan = ["query patients", "save the top 10 to a file"]
+        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_llm_calls = 2
+        engine.planner.last_error_stage = None
+        return ExecutionPlan.model_validate(
+            {
+                "steps": [
+                    {"id": 1, "action": "sql.query", "args": {"database": "clinical_db", "query": "SELECT 1"}},
+                    {"id": 2, "action": "fs.write", "args": {"path": "patients.txt", "content": "ok"}},
+                ]
+            }
+        )
+
+    monkeypatch.setattr(engine.planner, "build_plan", fake_build_plan)
+
+    engine._run_planner(session)
+
+    assert session.state["high_level_plan"] == ["query patients", "save the top 10 to a file"]
+    assert session.state["metrics"]["llm_calls"] == 2
+    events = engine.store.get_events(session.id)
+    planner_started = next(event for event in events if event["event_type"] == "planner.started")
+    planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
+    assert planner_started["payload"]["planning_mode"] == "hierarchical"
+    assert planner_completed["payload"]["planning_mode"] == "hierarchical"
+    assert planner_completed["payload"]["high_level_plan"] == ["query patients", "save the top 10 to a file"]
+
+
+def test_planner_failure_clears_stale_policies_used_and_logs_stage(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Find all txt files in this folder and provide list as csv")
     engine.planner.last_policies_used = ["stale_policy"]
 
     def failing_build_plan(**kwargs):
         engine.planner.last_policies_used = ["efficiency"]
+        engine.planner.last_high_level_plan = ["find files", "format as csv"]
+        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_llm_calls = 2
+        engine.planner.last_error_stage = "refine"
         engine.planner.last_raw_output = '{"steps":[{"id":1,"action":"fs.write","args":{"content":"hello" + "world"}}]}'
         engine.planner.last_error_type = "JSONDecodeError"
         raise RuntimeError("planner boom")
@@ -70,14 +120,44 @@ def test_planner_failure_clears_stale_policies_used(tmp_path: Path, monkeypatch)
 
     assert session.state["status"] == "failed"
     assert session.state["policies_used"] == []
+    assert session.state["high_level_plan"] is None
+    assert session.state["metrics"]["llm_calls"] == 2
     metadata = session.state["final_output"]["metadata"]
     assert metadata["planner_error_type"] == "JSONDecodeError"
     assert '"content":"hello" + "world"' in metadata["planner_raw_output_preview"]
     events = engine.store.get_events(session.id)
     planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
     assert planner_failed["payload"]["error_type"] == "JSONDecodeError"
+    assert planner_failed["payload"]["stage"] == "refine"
+    assert planner_failed["payload"]["planning_mode"] == "hierarchical"
     assert planner_failed["payload"]["policies"] == ["efficiency"]
     assert '"content":"hello" + "world"' in planner_failed["payload"]["raw_output_preview"]
+
+
+def test_decomposition_failure_logs_decompose_stage(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Query patients and then save results after filtering the top 10 rows")
+
+    def failing_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["sql_preference", "efficiency"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_llm_calls = 1
+        engine.planner.last_error_stage = "decompose"
+        engine.planner.last_raw_output = '{"tasks":[]}'
+        engine.planner.last_error_type = "ValidationError"
+        raise RuntimeError("decomposer boom")
+
+    monkeypatch.setattr(engine.planner, "build_plan", failing_build_plan)
+
+    engine._run_planner(session)
+
+    events = engine.store.get_events(session.id)
+    planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
+    assert planner_failed["payload"]["stage"] == "decompose"
+    assert planner_failed["payload"]["planning_mode"] == "hierarchical"
+    assert session.state["high_level_plan"] is None
+    assert session.state["metrics"]["llm_calls"] == 1
 
 
 def test_retry_and_terminal_failure_clear_policies_used(tmp_path: Path) -> None:
@@ -85,6 +165,8 @@ def test_retry_and_terminal_failure_clear_policies_used(tmp_path: Path) -> None:
 
     retry_session = _session(engine, "Retry path")
     retry_session.state["policies_used"] = ["sql_preference"]
+    retry_session.state["high_level_plan"] = ["query data"]
+    retry_session.state["step_outputs"] = {"query_data": {"rows": []}}
     engine._handle_retry_or_failure(
         retry_session,
         node_name="executor",
@@ -94,9 +176,13 @@ def test_retry_and_terminal_failure_clear_policies_used(tmp_path: Path) -> None:
     )
     assert retry_session.state["status"] == "retrying"
     assert retry_session.state["policies_used"] == []
+    assert retry_session.state["high_level_plan"] is None
+    assert retry_session.state["step_outputs"] == {}
 
     terminal_session = _session(engine, "Terminal failure path")
     terminal_session.state["policies_used"] = ["filesystem_preference"]
+    terminal_session.state["high_level_plan"] = ["write file"]
+    terminal_session.state["step_outputs"] = {"write_data": {"content": "ok"}}
     terminal_session.state["retries"] = 2
     engine._handle_retry_or_failure(
         terminal_session,
@@ -107,3 +193,5 @@ def test_retry_and_terminal_failure_clear_policies_used(tmp_path: Path) -> None:
     )
     assert terminal_session.state["status"] == "failed"
     assert terminal_session.state["policies_used"] == []
+    assert terminal_session.state["high_level_plan"] is None
+    assert terminal_session.state["step_outputs"] == {}

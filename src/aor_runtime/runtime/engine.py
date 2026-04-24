@@ -12,6 +12,8 @@ from aor_runtime.dsl.loader import load_runtime_spec
 from aor_runtime.dsl.models import CompiledRuntimeSpec
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.compiler import GraphCompiler
+from aor_runtime.runtime.dataflow import resolve_execution_step
+from aor_runtime.runtime.decomposer import is_complex_goal
 from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
 from aor_runtime.runtime.planner import TaskPlanner, summarize_plan, summarize_planner_raw_output
 from aor_runtime.runtime.sessions import SessionManager
@@ -183,25 +185,32 @@ class ExecutionEngine:
         state = session.state
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
         self._configure_runtime_for_compiled(compiled)
-        metrics = dict(state.get("metrics", {}))
-        metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + 1
-        state["metrics"] = metrics
+        goal = str(state.get("goal", ""))
+        planning_mode = "hierarchical" if is_complex_goal(goal) else "direct"
         self.store.append_event(
             session_id=session.id,
             node_name="planner",
             event_type="planner.started",
-            payload={"retry": state.get("retries", 0), "attempt": state.get("attempt", 0) + 1},
+            payload={
+                "retry": state.get("retries", 0),
+                "attempt": state.get("attempt", 0) + 1,
+                "planning_mode": planning_mode,
+            },
         )
         try:
             plan = self.planner.build_plan(
-                goal=str(state.get("goal", "")),
+                goal=goal,
                 planner=compiled.planner,
                 allowed_tools=compiled.tools,
                 input_payload=dict(state.get("input", {})),
                 failure_context=state.get("failure_context"),
             )
+            metrics = dict(state.get("metrics", {}))
+            metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + int(self.planner.last_llm_calls)
+            state["metrics"] = metrics
             plan_summary = summarize_plan(plan)
             policies_used = list(self.planner.last_policies_used)
+            high_level_plan = list(self.planner.last_high_level_plan) if self.planner.last_high_level_plan is not None else None
             awaiting_confirmation = bool(state.get("dry_run"))
             state.update(
                 {
@@ -213,6 +222,8 @@ class ExecutionEngine:
                     "confirmation_step": None,
                     "confirmation_message": None,
                     "policies_used": policies_used,
+                    "high_level_plan": high_level_plan,
+                    "step_outputs": {},
                     "plan": plan.model_dump(),
                     "plan_summary": plan_summary,
                     "attempt_history": [],
@@ -228,11 +239,22 @@ class ExecutionEngine:
                 session_id=session.id,
                 node_name="planner",
                 event_type="planner.completed",
-                payload={**plan.model_dump(), "policies": policies_used},
+                payload={
+                    **plan.model_dump(),
+                    "goal": goal,
+                    "planning_mode": str(self.planner.last_planning_mode or planning_mode),
+                    "high_level_plan": high_level_plan,
+                    "execution_plan": plan.model_dump(),
+                    "policies": policies_used,
+                },
             )
         except Exception as exc:  # noqa: BLE001
+            metrics = dict(state.get("metrics", {}))
+            metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + int(self.planner.last_llm_calls)
+            state["metrics"] = metrics
             failed_policies = list(self.planner.last_policies_used)
             planner_error_type = str(self.planner.last_error_type or type(exc).__name__)
+            planner_error_stage = str(self.planner.last_error_stage or planning_mode)
             raw_output_preview = summarize_planner_raw_output(self.planner.last_raw_output)
             final_output_metadata = {"goal": state.get("goal", ""), "planner_error_type": planner_error_type}
             if raw_output_preview is not None:
@@ -248,12 +270,20 @@ class ExecutionEngine:
                     "confirmation_step": None,
                     "confirmation_message": None,
                     "policies_used": [],
+                    "high_level_plan": None,
+                    "step_outputs": {},
                     "plan_summary": None,
                     "error": str(exc),
                     "final_output": {"content": str(exc), "artifacts": [], "metadata": final_output_metadata},
                 }
             )
-            failure_payload = {"error": str(exc), "error_type": planner_error_type, "policies": failed_policies}
+            failure_payload = {
+                "error": str(exc),
+                "error_type": planner_error_type,
+                "stage": planner_error_stage,
+                "planning_mode": str(self.planner.last_planning_mode or planning_mode),
+                "policies": failed_policies,
+            }
             if raw_output_preview is not None:
                 failure_payload["raw_output_preview"] = raw_output_preview
             self.store.append_event(
@@ -276,7 +306,22 @@ class ExecutionEngine:
             return
 
         step = plan.steps[step_index]
-        dangerous_message = self._dangerous_step_message(step)
+        try:
+            resolved_step = resolve_execution_step(step, dict(state.get("step_outputs", {})))
+        except Exception as exc:  # noqa: BLE001
+            self._handle_retry_or_failure(
+                session,
+                node_name="executor",
+                reason="tool_execution_failed",
+                detail=str(exc),
+                extra_context={
+                    "step": step.model_dump(),
+                    "history": list(state.get("attempt_history", [])),
+                },
+            )
+            return
+
+        dangerous_message = self._dangerous_step_message(resolved_step)
         if dangerous_message is not None and approved_dangerous_step_id != step.id:
             state.update(
                 {
@@ -285,7 +330,7 @@ class ExecutionEngine:
                     "status": "executing",
                     "awaiting_confirmation": True,
                     "confirmation_kind": "dangerous_step",
-                    "confirmation_step": step.model_dump(),
+                    "confirmation_step": resolved_step.model_dump(),
                     "confirmation_message": dangerous_message,
                     "error": None,
                 }
@@ -294,7 +339,7 @@ class ExecutionEngine:
                 session_id=session.id,
                 node_name="executor",
                 event_type="executor.step.awaiting_confirmation",
-                payload={"step": step.model_dump(), "step_index": step_index, "message": dangerous_message},
+                payload={"step": resolved_step.model_dump(), "step_index": step_index, "message": dangerous_message},
             )
             self._persist(session, node_name="executor")
             return
@@ -304,17 +349,21 @@ class ExecutionEngine:
             session_id=session.id,
             node_name="executor",
             event_type="executor.step.started",
-            payload={"step": step.model_dump(), "step_index": step_index},
+            payload={"step": resolved_step.model_dump(), "step_index": step_index},
         )
-        log = self.executor.execute_step(step)
+        log = self.executor.execute_step(resolved_step)
         log_payload = log.model_dump()
 
         history = list(state.get("history", []))
         attempt_history = list(state.get("attempt_history", []))
+        step_outputs = dict(state.get("step_outputs", {}))
         history.append(log_payload)
         attempt_history.append(log_payload)
         state["history"] = history
         state["attempt_history"] = attempt_history
+        if log.success and log.step.output:
+            step_outputs[log.step.output] = log.result
+        state["step_outputs"] = step_outputs
 
         metrics = dict(state.get("metrics", {}))
         metrics["steps_executed"] = int(metrics.get("steps_executed", 0)) + 1
@@ -447,6 +496,8 @@ class ExecutionEngine:
                     "confirmation_step": None,
                     "confirmation_message": None,
                     "policies_used": [],
+                    "high_level_plan": None,
+                    "step_outputs": {},
                     "plan": {},
                     "plan_summary": None,
                     "attempt_history": [],
@@ -467,6 +518,8 @@ class ExecutionEngine:
                     "confirmation_step": None,
                     "confirmation_message": None,
                     "policies_used": [],
+                    "high_level_plan": None,
+                    "step_outputs": {},
                     "plan_summary": None,
                     "final_output": {
                         "content": detail,

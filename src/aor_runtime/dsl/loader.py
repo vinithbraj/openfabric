@@ -13,4 +13,6 @@ def load_runtime_spec(path: str | Path) -> RuntimeSpec:
     spec = RuntimeSpec.model_validate(payload)
     if spec.planner.prompt:
         spec.planner.prompt = str((source.parent / spec.planner.prompt).resolve())
+    if spec.planner.decomposer_prompt:
+        spec.planner.decomposer_prompt = str((source.parent / spec.planner.decomposer_prompt).resolve())
     return spec

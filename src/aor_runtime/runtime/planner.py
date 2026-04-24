@@ -4,10 +4,12 @@ import re
 from typing import Any
 
 from aor_runtime.config import Settings, get_settings
-from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
+from aor_runtime.core.contracts import ExecutionPlan, HighLevelPlan, PlannerConfig
 from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
-from aor_runtime.runtime.policies import render_policy_text, select_policies, validate_plan_efficiency
+from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow
+from aor_runtime.runtime.decomposer import GoalDecomposer, is_complex_goal
+from aor_runtime.runtime.policies import render_policy_text, select_policies, validate_plan
 from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.sql import get_schema, prune_schema, resolve_sql_databases
 
@@ -33,8 +35,13 @@ You MUST:
 - Ensure every step can be executed exactly as written without further interpretation.
 - Keep steps explicit, concrete, and sequential.
 - Fully satisfy the user request.
+- If a high_level_plan is provided in the planner context, refine it into executable steps and preserve the task order unless correctness requires a tighter merge.
+- If explicit_tool_intent is provided in the planner context, you MUST use those requested tools and MUST NOT substitute a different tool family.
 - Include all necessary prerequisite, execution, and verification steps.
 - Include verification when the task changes state or requires exactness.
+- Every step that produces data for later use must declare an output alias.
+- Later steps that consume prior results must declare input aliases and reference previous outputs explicitly with structured refs like {"$ref": "alias"} or {"$ref": "alias", "path": "rows.0.name"}.
+- Refinement must preserve outputs from previous steps, use outputs in subsequent steps, avoid placeholder or hardcoded values, and maintain logical dataflow across steps.
 - Use sql.query for relational database questions when schema information is provided.
 - Only use databases, tables, and columns from the provided schema. Never hallucinate schema.
 - When multiple databases are shown in the schema, sql.query args must include an explicit database name.
@@ -47,8 +54,10 @@ You MUST:
 - If a default node is provided in the planner context, you may omit node and shell.exec will run there.
 - Never invent node names outside the provided logical node list.
 - Use python.exec only when loops, conditional logic, or multi-step composition are required.
+- Use python.exec once for simple composition, combine logic into a single block when possible, and use multiple python.exec steps only if necessary.
 - Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - In python.exec, you may call sql.query through the provided sql helper.
+- In python.exec, upstream data is passed through args.inputs and available in the sandbox as the inputs dict.
 - In python.exec, fs.read returns the file content string, fs.list returns a list of entry names, fs.find returns a list of relative matching file paths, fs.size returns a file size in bytes as an integer, and fs.exists returns a boolean.
 - In python.exec, shell.exec(...) returns an object with stdout, stderr, and returncode fields. If you need command output text, parse shell.exec(...).stdout.
 - In python.exec, shell.exec(command, node='edge-1') runs on the requested logical node. If node is omitted, the default node is used when configured.
@@ -78,6 +87,8 @@ You MUST NOT:
 - Rely on implicit assumptions or invent missing details.
 - Generate non-executable natural-language descriptions.
 - Emit natural-language pseudo-steps.
+- Ignore a provided high_level_plan.
+- Ignore explicit tool intent.
 - Use shell.exec when a filesystem tool already covers the task.
 - Use python.exec for a single-step task that a direct fs.* or shell.exec step can handle.
 - Put expressions, string concatenation, comprehensions, or variable references in args outside a python.exec code string.
@@ -85,6 +96,7 @@ You MUST NOT:
 - Do not reuse earlier fs.exists prechecks as deletion verification.
 - Do not use fs.list when the user asked to find matching files recursively by pattern and fs.find is available.
 - Do not use shell.exec or Python imports like os.path for file sizes when fs.size is available.
+- Do not generate placeholder values like name1,name2,name3 when upstream data is available.
 
 Tool selection policy:
 - Use sql.query for filtering or querying structured data.
@@ -180,12 +192,15 @@ find all *.txt files in this folder and provide list as csv
 Plan:
 {
   "steps": [
-    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}},
+    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}, "output": "txt_matches"},
     {
       "id": 2,
       "action": "python.exec",
+      "input": ["txt_matches"],
+      "output": "csv_result",
       "args": {
-        "code": "matches = fs.find('.', '*.txt'); result = {'csv': ','.join(matches)}"
+        "inputs": {"matches": {"$ref": "txt_matches", "path": "matches"}},
+        "code": "result = {'csv': ','.join(inputs['matches'])}"
       }
     }
   ]
@@ -196,12 +211,81 @@ compute the total size of all the txt files in this folder
 Plan:
 {
   "steps": [
-    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}},
+    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}, "output": "txt_matches"},
     {
       "id": 2,
       "action": "python.exec",
+      "input": ["txt_matches"],
+      "output": "size_summary",
       "args": {
-        "code": "files = fs.find('.', '*.txt'); total_size = sum(fs.size(path) for path in files); result = {'file_count': len(files), 'total_size_bytes': total_size}"
+        "inputs": {"files": {"$ref": "txt_matches", "path": "matches"}},
+        "code": "total_size = sum(fs.size(path) for path in inputs['files']); result = {'file_count': len(inputs['files']), 'total_size_bytes': total_size}"
+      }
+    }
+  ]
+}
+
+Task:
+query the top 3 patients by score from clinical_db, format the names as csv, and save the result to outputs/top_patients.csv
+Plan:
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "sql.query",
+      "output": "patient_rows",
+      "args": {
+        "database": "clinical_db",
+        "query": "SELECT name FROM patients ORDER BY score DESC LIMIT 3"
+      }
+    },
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["patient_rows"],
+      "output": "patient_csv",
+      "args": {
+        "inputs": {"rows": {"$ref": "patient_rows", "path": "rows"}},
+        "code": "result = {'csv': ','.join(row['name'] for row in inputs['rows'])}"
+      }
+    },
+    {"id": 3, "action": "fs.mkdir", "args": {"path": "outputs"}},
+    {
+      "id": 4,
+      "action": "fs.write",
+      "input": ["patient_csv"],
+      "args": {
+        "path": "outputs/top_patients.csv",
+        "content": {"$ref": "patient_csv", "path": "csv"}
+      }
+    }
+  ]
+}
+
+Task:
+find all *.txt files under inputs, compute their total size, and write a JSON summary to reports/txt_summary.json
+Plan:
+{
+  "steps": [
+    {"id": 1, "action": "fs.find", "args": {"path": "inputs", "pattern": "*.txt"}, "output": "txt_matches"},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["txt_matches"],
+      "output": "size_summary",
+      "args": {
+        "inputs": {"files": {"$ref": "txt_matches", "path": "matches"}},
+        "code": "import json; total_size = sum(fs.size(f'inputs/{path}') for path in inputs['files']); result = {'summary_json': json.dumps({'file_count': len(inputs['files']), 'total_size_bytes': total_size})}"
+      }
+    },
+    {"id": 3, "action": "fs.mkdir", "args": {"path": "reports"}},
+    {
+      "id": 4,
+      "action": "fs.write",
+      "input": ["size_summary"],
+      "args": {
+        "path": "reports/txt_summary.json",
+        "content": {"$ref": "size_summary", "path": "summary_json"}
       }
     }
   ]
@@ -249,6 +333,7 @@ Plan:
     {
       "id": 1,
       "action": "sql.query",
+      "output": "patient_rows",
       "args": {
         "database": "clinical_db",
         "query": "SELECT name FROM patients ORDER BY name"
@@ -350,6 +435,23 @@ STORAGE_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 DU_COMMAND_RE = re.compile(r"\bdu\b")
 DF_COMMAND_RE = re.compile(r"\bdf\b")
 PLANNER_RAW_OUTPUT_PREVIEW_CHARS = 600
+TOOL_INTENT_PATTERNS = {
+    "shell.exec": [r"\b(?:using|use|with)\s+shell(?:\.exec)?\b"],
+    "python.exec": [r"\b(?:using|use|with)\s+python(?:\.exec)?\b"],
+    "sql.query": [r"\b(?:using|use|with)\s+sql(?:\.query)?\b"],
+    "fs.*": [r"\b(?:using|use|with)\s+(?:filesystem|fs)\b"],
+}
+FILESYSTEM_TOOL_INTENT_PATTERNS = {
+    "fs.copy": [r"\b(?:using|use|with)\s+fs\.copy\b"],
+    "fs.exists": [r"\b(?:using|use|with)\s+fs\.exists\b"],
+    "fs.find": [r"\b(?:using|use|with)\s+fs\.find\b"],
+    "fs.list": [r"\b(?:using|use|with)\s+fs\.list\b"],
+    "fs.mkdir": [r"\b(?:using|use|with)\s+fs\.mkdir\b"],
+    "fs.not_exists": [r"\b(?:using|use|with)\s+fs\.not_exists\b"],
+    "fs.read": [r"\b(?:using|use|with)\s+fs\.read\b"],
+    "fs.size": [r"\b(?:using|use|with)\s+fs\.size\b"],
+    "fs.write": [r"\b(?:using|use|with)\s+fs\.write\b"],
+}
 
 
 def summarize_plan(plan: ExecutionPlan) -> str:
@@ -366,12 +468,35 @@ def summarize_planner_raw_output(raw_output: str | None, limit: int = PLANNER_RA
     return text[: limit - 3].rstrip() + "..."
 
 
+def extract_explicit_tool_intent(goal: str, allowed_tools: list[str]) -> list[str]:
+    goal_text = str(goal or "").lower()
+    requested: list[str] = []
+    for tool_name, patterns in TOOL_INTENT_PATTERNS.items():
+        if tool_name != "fs.*" and tool_name not in allowed_tools:
+            continue
+        if tool_name == "fs.*" and not any(name.startswith("fs.") for name in allowed_tools):
+            continue
+        if any(re.search(pattern, goal_text) for pattern in patterns):
+            requested.append(tool_name)
+    for tool_name, patterns in FILESYSTEM_TOOL_INTENT_PATTERNS.items():
+        if tool_name not in allowed_tools:
+            continue
+        if any(re.search(pattern, goal_text) for pattern in patterns):
+            requested.append(tool_name)
+    return list(dict.fromkeys(requested))
+
+
 class TaskPlanner:
     def __init__(self, *, llm: LLMClient, tools: ToolRegistry, settings: Settings | None = None) -> None:
         self.llm = llm
         self.tools = tools
         self.settings = settings or get_settings()
+        self.decomposer = GoalDecomposer(llm=llm)
         self.last_policies_used: list[str] = []
+        self.last_high_level_plan: list[str] | None = None
+        self.last_planning_mode: str = "direct"
+        self.last_llm_calls: int = 0
+        self.last_error_stage: str | None = None
         self.last_raw_output: str | None = None
         self.last_error_type: str | None = None
 
@@ -385,57 +510,195 @@ class TaskPlanner:
         failure_context: dict[str, Any] | None = None,
     ) -> ExecutionPlan:
         system_prompt = self.llm.load_prompt(planner.prompt, DEFAULT_PLANNER_PROMPT)
+        self._reset_tracking()
+        schema_payload = self._schema_payload(goal, allowed_tools)
+        policies = select_policies(goal, allowed_tools, schema_payload)
+        explicit_tool_intent = extract_explicit_tool_intent(goal, allowed_tools)
+        self.last_policies_used = [policy.name for policy in policies]
+        self.last_planning_mode = "hierarchical" if is_complex_goal(goal) else "direct"
+
+        try:
+            if self.last_planning_mode == "hierarchical":
+                high_level_plan = self._decompose_goal(
+                    goal=goal,
+                    planner=planner,
+                    input_payload=input_payload,
+                    failure_context=failure_context,
+                )
+                self.last_high_level_plan = list(high_level_plan.tasks)
+                plan = self._generate_execution_plan(
+                    system_prompt=system_prompt,
+                    goal=goal,
+                    planner=planner,
+                    allowed_tools=allowed_tools,
+                    input_payload=input_payload,
+                    failure_context=failure_context,
+                    schema_payload=schema_payload,
+                    policies=policies,
+                    explicit_tool_intent=explicit_tool_intent,
+                    high_level_plan=high_level_plan,
+                    stage="refine",
+                )
+            else:
+                plan = self._generate_execution_plan(
+                    system_prompt=system_prompt,
+                    goal=goal,
+                    planner=planner,
+                    allowed_tools=allowed_tools,
+                    input_payload=input_payload,
+                    failure_context=failure_context,
+                    schema_payload=schema_payload,
+                    policies=policies,
+                    explicit_tool_intent=explicit_tool_intent,
+                    high_level_plan=None,
+                    stage="direct",
+                )
+            finalized_plan = self._finalize_plan(goal, plan, allowed_tools, explicit_tool_intent)
+            self.last_error_stage = None
+            return finalized_plan
+        except Exception as exc:
+            self.last_error_type = type(exc).__name__
+            raise
+
+    def _reset_tracking(self) -> None:
         self.last_policies_used = []
+        self.last_high_level_plan = None
+        self.last_planning_mode = "direct"
+        self.last_llm_calls = 0
+        self.last_error_stage = None
         self.last_raw_output = None
         self.last_error_type = None
-        schema_payload: dict[str, Any] | None = None
+
+    def _schema_payload(self, goal: str, allowed_tools: list[str]) -> dict[str, Any] | None:
+        if "sql.query" not in allowed_tools:
+            return None
+        try:
+            return prune_schema(get_schema(self.settings), goal, settings=self.settings).model_dump()
+        except Exception as exc:  # noqa: BLE001
+            return {"databases": [], "error": str(exc)}
+
+    def _decompose_goal(
+        self,
+        *,
+        goal: str,
+        planner: PlannerConfig,
+        input_payload: dict[str, Any],
+        failure_context: dict[str, Any] | None,
+    ) -> HighLevelPlan:
+        self.last_error_stage = "decompose"
+        self.last_llm_calls += 1
+        try:
+            high_level_plan = self.decomposer.decompose_goal(
+                goal=goal,
+                planner=planner,
+                input_payload=input_payload,
+                failure_context=failure_context,
+            )
+            self.last_raw_output = self.decomposer.last_raw_output
+            self.last_error_stage = None
+            return high_level_plan
+        except Exception:
+            self.last_raw_output = self.decomposer.last_raw_output
+            raise
+
+    def _generate_execution_plan(
+        self,
+        *,
+        system_prompt: str,
+        goal: str,
+        planner: PlannerConfig,
+        allowed_tools: list[str],
+        input_payload: dict[str, Any],
+        failure_context: dict[str, Any] | None,
+        schema_payload: dict[str, Any] | None,
+        policies: list[Any],
+        explicit_tool_intent: list[str],
+        high_level_plan: HighLevelPlan | None,
+        stage: str,
+    ) -> ExecutionPlan:
+        planner_context = self._build_planner_context(
+            goal=goal,
+            allowed_tools=allowed_tools,
+            input_payload=input_payload,
+            failure_context=failure_context,
+            schema_payload=schema_payload,
+            policies=policies,
+            explicit_tool_intent=explicit_tool_intent,
+            high_level_plan=high_level_plan,
+        )
+        user_prompt = dumps_json(planner_context, indent=2)
+        self.last_error_stage = stage
+        self.last_llm_calls += 1
+        raw_output = self.llm.complete(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=planner.model,
+            temperature=planner.temperature,
+        )
+        self.last_raw_output = raw_output
+        payload = extract_json_object(raw_output)
+        if not isinstance(payload, dict):
+            raise ValueError("Expected JSON object response from model")
+        return ExecutionPlan.model_validate(payload)
+
+    def _build_planner_context(
+        self,
+        *,
+        goal: str,
+        allowed_tools: list[str],
+        input_payload: dict[str, Any],
+        failure_context: dict[str, Any] | None,
+        schema_payload: dict[str, Any] | None,
+        policies: list[Any],
+        explicit_tool_intent: list[str],
+        high_level_plan: HighLevelPlan | None,
+    ) -> dict[str, Any]:
         planner_context: dict[str, Any] = {
             "goal": goal,
             "input": input_payload,
             "allowed_tools": self.tools.specs(allowed_tools),
             "failure_context": failure_context or {},
+            "policies": render_policy_text(policies),
         }
-        available_nodes = self.settings.available_nodes
+        if explicit_tool_intent:
+            planner_context["explicit_tool_intent"] = explicit_tool_intent
+        if high_level_plan is not None:
+            planner_context["high_level_plan"] = list(high_level_plan.tasks)
+
         if "shell.exec" in allowed_tools:
-            planner_context["nodes"] = {"available": available_nodes}
+            planner_context["nodes"] = {"available": self.settings.available_nodes}
             default_node = self.settings.resolved_default_node()
             if default_node:
                 planner_context["nodes"]["default"] = default_node
-        if "sql.query" in allowed_tools:
-            try:
-                schema_payload = prune_schema(get_schema(self.settings), goal, settings=self.settings).model_dump()
-                planner_context["schema"] = schema_payload
-            except Exception as exc:  # noqa: BLE001
-                schema_payload = {"databases": [], "error": str(exc)}
-                planner_context["schema"] = schema_payload
-        policies = select_policies(goal, allowed_tools, schema_payload)
-        self.last_policies_used = [policy.name for policy in policies]
-        planner_context["policies"] = render_policy_text(policies)
-        user_prompt = dumps_json(planner_context, indent=2)
-        try:
-            raw_output = self.llm.complete(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                model=planner.model,
-                temperature=planner.temperature,
-            )
-            self.last_raw_output = raw_output
-            payload = extract_json_object(raw_output)
-            if not isinstance(payload, dict):
-                raise ValueError("Expected JSON object response from model")
-            plan = ExecutionPlan.model_validate(payload)
-            self._apply_storage_shell_semantics(goal, plan)
-            for step in plan.steps:
-                if step.action not in allowed_tools:
-                    raise ValueError(f"Planner selected disallowed tool {step.action!r}.")
-                self.tools.validate_step(step.action, step.args)
-            self._validate_explicit_database_targets(goal, plan)
-            self._validate_shell_targets(plan)
-            validate_plan_efficiency(plan)
-            return plan
-        except Exception as exc:
-            self.last_error_type = type(exc).__name__
-            raise
+
+        if schema_payload is not None:
+            planner_context["schema"] = schema_payload
+        return planner_context
+
+    def _finalize_plan(self, goal: str, plan: ExecutionPlan, allowed_tools: list[str], explicit_tool_intent: list[str]) -> ExecutionPlan:
+        self._apply_storage_shell_semantics(goal, plan)
+        normalize_execution_plan_dataflow(plan)
+        for step in plan.steps:
+            if step.action not in allowed_tools:
+                raise ValueError(f"Planner selected disallowed tool {step.action!r}.")
+            self.tools.validate_step(step.action, step.args)
+        self._validate_explicit_database_targets(goal, plan)
+        self._validate_shell_targets(plan)
+        self._validate_explicit_tool_intent(plan, explicit_tool_intent)
+        validate_plan(plan)
+        return plan
+
+    def _validate_explicit_tool_intent(self, plan: ExecutionPlan, explicit_tool_intent: list[str]) -> None:
+        if not explicit_tool_intent:
+            return
+        actions = [step.action for step in plan.steps]
+        for requested_tool in explicit_tool_intent:
+            if requested_tool == "fs.*":
+                if not any(action.startswith("fs.") for action in actions):
+                    raise ValueError("Planner ignored the explicit filesystem tool request.")
+                continue
+            if requested_tool not in actions:
+                raise ValueError(f"Planner ignored the explicit tool request for {requested_tool}.")
 
     def _validate_explicit_database_targets(self, goal: str, plan: ExecutionPlan) -> None:
         configured_databases = resolve_sql_databases(self.settings)
