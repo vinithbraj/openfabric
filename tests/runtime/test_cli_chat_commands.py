@@ -21,7 +21,7 @@ class FakeEngine:
 
 
 def test_chat_new_resets_session_history(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(cli, "ExecutionEngine", lambda: FakeEngine())
+    monkeypatch.setattr(cli, "_build_engine", lambda config_path=None: FakeEngine())
     spec_path = tmp_path / "spec.yaml"
 
     result = runner.invoke(
@@ -39,7 +39,7 @@ def test_chat_new_resets_session_history(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_chat_clear_resets_history_and_reprints_banner(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(cli, "ExecutionEngine", lambda: FakeEngine())
+    monkeypatch.setattr(cli, "_build_engine", lambda config_path=None: FakeEngine())
     spec_path = tmp_path / "spec.yaml"
 
     result = runner.invoke(

@@ -32,20 +32,18 @@ The LLM is used only to create the execution plan and optional retry plans. Exec
    pip install -e .
    ```
 
-2. Configure the LLM endpoint:
+2. Create the local app config:
 
    ```bash
-   export AOR_LLM_BASE_URL=http://127.0.0.1:8000/v1
-   export AOR_LLM_API_KEY=local
-   export AOR_DEFAULT_MODEL=qwen-coder
+   cp config.example.yaml config.yaml
    ```
 
-   The runtime can auto-resolve against `/v1/models` if the requested model name is a shorthand or alias.
+   Edit `config.yaml` with your LLM and optional SQL settings. The runtime auto-loads `config.yaml` from the current working directory, or you can pass `--config /path/to/config.yaml`.
 
 3. Start the API:
 
    ```bash
-   uvicorn aor_runtime.api.app:create_app --factory --reload
+   aor serve
    ```
 
 4. Execute the example workflow:
@@ -59,6 +57,16 @@ The LLM is used only to create the execution plan and optional retry plans. Exec
    ```bash
    aor chat examples/general_purpose_assistant.yaml
    ```
+
+## App Config
+
+Application-level settings now live in `config.yaml`, not `.env.example`.
+
+- `config.example.yaml` is the tracked template
+- `config.yaml` is your local, untracked config
+- use `--config` on CLI commands if you want to point at a different file
+
+The runtime spec continues to own agent behavior, tools, and node routing. The app config owns process settings such as LLM, SQL, retry, and server defaults.
 
 ## Gateway Agent
 

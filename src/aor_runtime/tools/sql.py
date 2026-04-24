@@ -73,20 +73,16 @@ class SchemaInfo(ToolResultModel):
 def resolve_sql_databases(settings: Settings) -> dict[str, str]:
     mapping: dict[str, str] = {}
 
-    if settings.sql_databases_json:
-        try:
-            payload = json.loads(settings.sql_databases_json)
-        except json.JSONDecodeError as exc:
-            raise ToolExecutionError(f"Invalid AOR_SQL_DATABASES JSON: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise ToolExecutionError("AOR_SQL_DATABASES must be a JSON object mapping names to URLs.")
+    if settings.sql_databases:
+        payload = dict(settings.sql_databases)
         for name, value in payload.items():
-            if not isinstance(name, str) or not isinstance(value, str):
-                raise ToolExecutionError("AOR_SQL_DATABASES entries must map string names to string URLs.")
-            normalized_name = _normalize_name(name)
+            normalized_name = _normalize_name(str(name))
+            normalized_url = str(value or "").strip()
             if not normalized_name:
-                raise ToolExecutionError("AOR_SQL_DATABASES contains an empty database name.")
-            mapping[normalized_name] = value.strip()
+                raise ToolExecutionError("SQL database config contains an empty database name.")
+            if not normalized_url:
+                raise ToolExecutionError(f"SQL database URL is empty for database {name!r}.")
+            mapping[normalized_name] = normalized_url
         return mapping
 
     if settings.sql_database_url:
@@ -111,7 +107,7 @@ def resolve_default_database(settings: Settings, databases: dict[str, str]) -> s
 def resolve_database_selection(settings: Settings, requested_database: str | None) -> tuple[str, str]:
     databases = resolve_sql_databases(settings)
     if not databases:
-        raise ToolExecutionError("SQL tool is not configured. Set AOR_SQL_DATABASES or AOR_SQL_DATABASE_URL.")
+        raise ToolExecutionError("SQL tool is not configured. Add sql.database_url or sql.databases to config.yaml.")
 
     if requested_database is not None and str(requested_database).strip():
         normalized_name = _normalize_name(str(requested_database))

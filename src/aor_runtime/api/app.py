@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from aor_runtime.app_config import APP_CONFIG_PATH_ENV
+from aor_runtime.config import Settings, get_settings
 from aor_runtime.runtime.engine import ExecutionEngine
 
 
@@ -23,9 +26,10 @@ class ValidateRequest(BaseModel):
     spec_path: str
 
 
-def create_app() -> FastAPI:
+def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Agent Orchestration Runtime", version="0.1.0")
-    engine = ExecutionEngine()
+    configured_settings = settings or get_settings(config_path=os.getenv(APP_CONFIG_PATH_ENV) or None)
+    engine = ExecutionEngine(configured_settings)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

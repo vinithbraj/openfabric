@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import typer
 import uvicorn
 
+from aor_runtime.app_config import APP_CONFIG_PATH_ENV
+from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.utils import dumps_json
 from aor_runtime.runtime.engine import ExecutionEngine
 
@@ -84,9 +87,21 @@ def _reset_chat_history(session_history: list[dict[str, str]]) -> None:
     session_history.clear()
 
 
+def _build_engine(config_path: Path | None = None) -> ExecutionEngine:
+    settings = get_settings(config_path=config_path)
+    return ExecutionEngine(settings)
+
+
+def _resolve_server_binding(settings: Settings, host: str | None, port: int | None) -> tuple[str, int]:
+    return (host or settings.server_host, port or settings.server_port)
+
+
 @app.command()
-def validate(spec_path: Path) -> None:
-    engine = ExecutionEngine()
+def validate(
+    spec_path: Path,
+    config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
+) -> None:
+    engine = _build_engine(config)
     compiled = engine.validate_spec(str(spec_path))
     typer.echo(dumps_json(compiled.model_dump(), indent=2))
 
@@ -96,9 +111,10 @@ def run(
     spec_path: Path,
     input: str = typer.Option("{}", help="JSON input payload"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview the plan and confirm before execution."),
+    config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
     payload = json.loads(input)
-    engine = ExecutionEngine()
+    engine = _build_engine(config)
     state = engine.run_spec(str(spec_path), payload, dry_run=dry_run)
     if dry_run and _is_dry_run_preview(state):
         typer.echo(dumps_json(state, indent=2))
@@ -121,8 +137,9 @@ def resume(
         "--approve-dangerous",
         help="Approve a paused dangerous step before resuming execution.",
     ),
+    config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
-    engine = ExecutionEngine()
+    engine = _build_engine(config)
     state = engine.resume_session(
         session_id,
         trigger=trigger,
@@ -134,8 +151,17 @@ def resume(
 
 
 @app.command()
-def serve(host: str = "127.0.0.1", port: int = 8011, reload: bool = False) -> None:
-    uvicorn.run("aor_runtime.api.app:create_app", host=host, port=port, reload=reload, factory=True)
+def serve(
+    host: str | None = typer.Option(None, "--host", help="Host for the API server."),
+    port: int | None = typer.Option(None, "--port", help="Port for the API server."),
+    reload: bool = False,
+    config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
+) -> None:
+    settings = get_settings(config_path=config)
+    resolved_host, resolved_port = _resolve_server_binding(settings, host, port)
+    if settings.app_config_path is not None:
+        os.environ[APP_CONFIG_PATH_ENV] = str(settings.app_config_path)
+    uvicorn.run("aor_runtime.api.app:create_app", host=resolved_host, port=resolved_port, reload=reload, factory=True)
 
 
 @app.command()
@@ -143,8 +169,9 @@ def chat(
     spec_path: Path,
     system_note: str = typer.Option("", help="Optional operator note injected into each turn."),
     max_history: int = typer.Option(8, help="Number of prior turns to include in session context."),
+    config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
-    engine = ExecutionEngine()
+    engine = _build_engine(config)
     session_history: list[dict[str, str]] = []
 
     typer.echo(f"Interactive session started for {spec_path}. Type /exit to quit.")
@@ -196,14 +223,14 @@ def chat(
 
 
 @runs_app.command("list")
-def list_runs(limit: int = 20) -> None:
-    engine = ExecutionEngine()
+def list_runs(limit: int = 20, config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config.")) -> None:
+    engine = _build_engine(config)
     typer.echo(dumps_json(engine.list_runs(limit=limit), indent=2))
 
 
 @runs_app.command("show")
-def show_run(run_id: str) -> None:
-    engine = ExecutionEngine()
+def show_run(run_id: str, config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config.")) -> None:
+    engine = _build_engine(config)
     payload = engine.get_run(run_id)
     if payload is None:
         raise typer.Exit(code=1)
@@ -215,9 +242,10 @@ def create_session(
     spec_path: Path,
     input: str = typer.Option("{}", help="JSON input payload"),
     run_immediately: bool = typer.Option(True, help="Run the loop immediately after creating the session."),
+    config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
     payload = json.loads(input)
-    engine = ExecutionEngine()
+    engine = _build_engine(config)
     session = engine.create_session(str(spec_path), payload, trigger="manual")
     if run_immediately:
         state = engine.resume_session(session["id"], trigger="manual")
@@ -237,8 +265,9 @@ def resume_session(
         "--approve-dangerous",
         help="Approve a paused dangerous step before resuming execution.",
     ),
+    config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
-    engine = ExecutionEngine()
+    engine = _build_engine(config)
     state = engine.resume_session(
         session_id,
         trigger=trigger,
@@ -250,14 +279,14 @@ def resume_session(
 
 
 @sessions_app.command("list")
-def list_sessions(limit: int = 20) -> None:
-    engine = ExecutionEngine()
+def list_sessions(limit: int = 20, config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config.")) -> None:
+    engine = _build_engine(config)
     typer.echo(dumps_json(engine.list_sessions(limit=limit), indent=2))
 
 
 @sessions_app.command("show")
-def show_session(session_id: str) -> None:
-    engine = ExecutionEngine()
+def show_session(session_id: str, config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config.")) -> None:
+    engine = _build_engine(config)
     payload = engine.get_session(session_id)
     if payload is None:
         raise typer.Exit(code=1)
