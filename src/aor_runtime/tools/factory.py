@@ -5,6 +5,7 @@ from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.filesystem import (
     FileCopyTool,
     FileExistsTool,
+    FileSizeTool,
     FindFilesTool,
     FileNotExistsTool,
     FileReadTool,
@@ -30,6 +31,7 @@ def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
             MakeDirectoryTool(configured),
             ListDirectoryTool(configured),
             FindFilesTool(configured),
+            FileSizeTool(configured),
             PythonExecTool(configured),
             SQLQueryTool(configured),
         ]

@@ -49,7 +49,7 @@ You MUST:
 - Use python.exec only when loops, conditional logic, or multi-step composition are required.
 - Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - In python.exec, you may call sql.query through the provided sql helper.
-- In python.exec, fs.read returns the file content string, fs.list returns a list of entry names, fs.find returns a list of relative matching file paths, and fs.exists returns a boolean.
+- In python.exec, fs.read returns the file content string, fs.list returns a list of entry names, fs.find returns a list of relative matching file paths, fs.size returns a file size in bytes as an integer, and fs.exists returns a boolean.
 - In python.exec, shell.exec(...) returns an object with stdout, stderr, and returncode fields. If you need command output text, parse shell.exec(...).stdout.
 - In python.exec, shell.exec(command, node='edge-1') runs on the requested logical node. If node is omitted, the default node is used when configured.
 - In python.exec, call sql.query with explicit keyword arguments like sql.query(database='clinical_db', query='SELECT ...').
@@ -59,6 +59,7 @@ You MUST:
 - For straightforward command-output extraction, filtering, or CSV/text formatting, prefer a single shell.exec step when shell can produce the final answer directly.
 - Prefer filesystem tools over shell commands for filesystem tasks.
 - Use fs.find for recursive file discovery and glob-style file matching such as *.txt under a directory.
+- Use fs.size when the user asks for the size of a file or the total size of a set of files.
 - Use fs.copy for copying files.
 - Use fs.mkdir for creating directories.
 - Use fs.write for exact file content.
@@ -83,6 +84,7 @@ You MUST NOT:
 - Use shell -> python -> fs.write -> fs.read round-trips when a direct shell.exec step can produce the requested text output.
 - Do not reuse earlier fs.exists prechecks as deletion verification.
 - Do not use fs.list when the user asked to find matching files recursively by pattern and fs.find is available.
+- Do not use shell.exec or Python imports like os.path for file sizes when fs.size is available.
 
 Tool selection policy:
 - Use sql.query for filtering or querying structured data.
@@ -184,6 +186,22 @@ Plan:
       "action": "python.exec",
       "args": {
         "code": "matches = fs.find('.', '*.txt'); result = {'csv': ','.join(matches)}"
+      }
+    }
+  ]
+}
+
+Task:
+compute the total size of all the txt files in this folder
+Plan:
+{
+  "steps": [
+    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "args": {
+        "code": "files = fs.find('.', '*.txt'); total_size = sum(fs.size(path) for path in files); result = {'file_count': len(files), 'total_size_bytes': total_size}"
       }
     }
   ]

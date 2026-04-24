@@ -47,3 +47,41 @@ def test_fs_find_final_output_lists_matches(tmp_path: Path) -> None:
     output = summarize_final_output("find all txt files", [log])
 
     assert output["content"] == "nested/child.txt\nroot.txt"
+
+
+def test_fs_size_returns_exact_size_bytes(tmp_path: Path) -> None:
+    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+    tools = build_tool_registry(settings)
+    target = tmp_path / "note.txt"
+    target.write_text("hello")
+
+    result = tools.invoke("fs.size", {"path": "note.txt"})
+
+    assert result["size_bytes"] == 5
+
+
+def test_validator_checks_fs_size_against_filesystem(tmp_path: Path) -> None:
+    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+    tools = build_tool_registry(settings)
+    validator = RuntimeValidator(settings)
+    target = tmp_path / "note.txt"
+    target.write_text("hello")
+    step = ExecutionStep(id=1, action="fs.size", args={"path": "note.txt"})
+    log = StepLog(step=step, result=tools.invoke("fs.size", {"path": "note.txt"}), success=True)
+
+    validation, checks = validator.validate([log], goal="compute file size")
+
+    assert validation.success is True
+    assert checks[0]["detail"] == "file size matches filesystem"
+
+
+def test_fs_size_final_output_is_size_bytes(tmp_path: Path) -> None:
+    log = StepLog(
+        step=ExecutionStep(id=1, action="fs.size", args={"path": "note.txt"}),
+        result={"path": str(tmp_path / "note.txt"), "size_bytes": 5},
+        success=True,
+    )
+
+    output = summarize_final_output("compute file size", [log])
+
+    assert output["content"] == "5"

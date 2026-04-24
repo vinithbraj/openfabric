@@ -228,6 +228,35 @@ def test_planner_accepts_recursive_file_search_plan_with_fs_find(tmp_path: Path)
     assert "Use fs.find for recursive file discovery" in llm.last_system_prompt
 
 
+def test_planner_accepts_total_file_size_plan_with_fs_size(tmp_path: Path) -> None:
+    planner, llm = _planner(
+        tmp_path,
+        {
+            "steps": [
+                {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}},
+                {
+                    "id": 2,
+                    "action": "python.exec",
+                    "args": {
+                        "code": "files = fs.find('.', '*.txt'); total_size = sum(fs.size(path) for path in files); result = {'file_count': len(files), 'total_size_bytes': total_size}"
+                    },
+                },
+            ]
+        },
+    )
+
+    plan = planner.build_plan(
+        goal="compute the total size of all the txt files in this folder",
+        planner=_planner_config(),
+        allowed_tools=["fs.find", "fs.size", "python.exec"],
+        input_payload={"task": "compute the total size of all the txt files in this folder"},
+    )
+
+    assert [step.action for step in plan.steps] == ["fs.find", "python.exec"]
+    assert llm.last_system_prompt is not None
+    assert "Use fs.size when the user asks for the size of a file" in llm.last_system_prompt
+
+
 def test_planner_accepts_shell_plan_with_allowed_node(tmp_path: Path) -> None:
     planner, _ = _planner_with_settings(
         tmp_path,

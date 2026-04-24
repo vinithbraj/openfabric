@@ -14,6 +14,7 @@ DEFAULT_TOOLS = [
     "fs.mkdir",
     "fs.list",
     "fs.find",
+    "fs.size",
     "shell.exec",
     "python.exec",
     "sql.query",

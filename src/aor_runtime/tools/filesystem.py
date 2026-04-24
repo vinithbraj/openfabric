@@ -87,6 +87,15 @@ def fs_find(settings: Settings, path: str, pattern: str) -> dict[str, Any]:
     return {"path": str(resolved), "pattern": normalized_pattern, "matches": matches}
 
 
+def fs_size(settings: Settings, path: str) -> dict[str, Any]:
+    resolved = resolve_path(settings, path)
+    if not resolved.exists():
+        raise ToolExecutionError(f"File does not exist: {resolved}")
+    if not resolved.is_file():
+        raise ToolExecutionError(f"Path is not a file: {resolved}")
+    return {"path": str(resolved), "size_bytes": resolved.stat().st_size}
+
+
 class FileExistsTool(BaseTool):
     class ToolArgs(ToolArgsModel):
         path: str
@@ -280,3 +289,25 @@ class FindFilesTool(BaseTool):
 
     def run(self, arguments: ToolArgs) -> ToolResult:
         return self.ToolResult.model_validate(fs_find(self.settings, arguments.path, arguments.pattern))
+
+
+class FileSizeTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+
+    class ToolResult(ToolResultModel):
+        path: str
+        size_bytes: int
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
+        self.spec = ToolSpec(
+            name="fs.size",
+            description="Return the exact size of a file in bytes.",
+            arguments_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        )
+
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_size(self.settings, arguments.path))

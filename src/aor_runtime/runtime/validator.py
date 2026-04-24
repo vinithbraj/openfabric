@@ -6,7 +6,7 @@ from pathlib import Path
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import StepLog, ValidationResult
 from aor_runtime.core.utils import extract_json_object
-from aor_runtime.tools.filesystem import fs_exists, fs_find, fs_list, fs_read, resolve_path
+from aor_runtime.tools.filesystem import fs_exists, fs_find, fs_list, fs_read, fs_size, resolve_path
 from aor_runtime.tools.sql import resolve_sql_databases
 
 
@@ -110,6 +110,15 @@ class RuntimeValidator:
                     "name": f"step_{step.id}_{step.action}",
                     "success": actual == observed,
                     "detail": "file search matches filesystem" if actual == observed else "file search mismatch",
+                }
+
+            if step.action == "fs.size":
+                actual = int(fs_size(self.settings, str(step.args["path"]))["size_bytes"])
+                observed = int(item.result.get("size_bytes", -1))
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": actual == observed,
+                    "detail": "file size matches filesystem" if actual == observed else "file size mismatch",
                 }
 
             if step.action == "shell.exec":
