@@ -18,6 +18,7 @@ class FakeLLM:
         self.raw_responses = raw_responses
         self.system_prompts: list[str] = []
         self.user_prompts: list[str] = []
+        self.models: list[str | None] = []
         self.last_system_prompt: str | None = None
         self.last_user_prompt: str | None = None
 
@@ -36,6 +37,7 @@ class FakeLLM:
             raise AssertionError("LLM called more times than expected")
         self.system_prompts.append(system_prompt)
         self.user_prompts.append(user_prompt)
+        self.models.append(model)
         self.last_system_prompt = system_prompt
         self.last_user_prompt = user_prompt
         return self.raw_responses[len(self.user_prompts) - 1]
@@ -114,6 +116,7 @@ def test_simple_goal_uses_direct_planning_only(tmp_path: Path) -> None:
     assert planner.last_high_level_plan is None
     assert planner.last_llm_calls == 1
     assert llm.call_count == 1
+    assert llm.models == [None]
 
 
 def test_complex_goal_uses_decomposition_and_refinement(tmp_path: Path) -> None:
@@ -151,7 +154,28 @@ def test_complex_goal_uses_decomposition_and_refinement(tmp_path: Path) -> None:
     assert planner.last_high_level_plan == ["find matching txt files", "format the list as csv"]
     assert planner.last_llm_calls == 2
     assert llm.call_count == 2
+    assert llm.models == [None, None]
     assert json.loads(llm.user_prompts[1])["high_level_plan"] == ["find matching txt files", "format the list as csv"]
+
+
+def test_explicit_planner_model_override_is_forwarded_to_both_llm_stages(tmp_path: Path) -> None:
+    planner, llm = _planner(
+        tmp_path,
+        [
+            {"tasks": ["query patients", "return the count"]},
+            {"steps": [{"id": 1, "action": "sql.query", "args": {"database": "dicom", "query": "SELECT COUNT(*) AS count FROM patient"}}]},
+        ],
+    )
+
+    plan = planner.build_plan(
+        goal="Query the number of patients in dicom and then return the count",
+        planner=PlannerConfig(model="custom-model", temperature=0.0),
+        allowed_tools=["sql.query"],
+        input_payload={"task": "Query the number of patients in dicom and then return the count"},
+    )
+
+    assert isinstance(plan, ExecutionPlan)
+    assert llm.models == ["custom-model", "custom-model"]
 
 
 def test_empty_high_level_plan_fails(tmp_path: Path) -> None:

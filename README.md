@@ -32,13 +32,16 @@ The LLM is used only to create the execution plan and optional retry plans. Exec
    pip install -e .
    ```
 
+   This install includes the PostgreSQL driver used by `sql.query` for
+   `postgresql+psycopg://...` database URLs.
+
 2. Create the local app config:
 
    ```bash
-   cp config.example.yaml config.yaml
+   edit config.yaml
    ```
 
-   Edit `config.yaml` with your LLM and optional SQL settings. The runtime auto-loads `config.yaml` from the current working directory, or you can pass `--config /path/to/config.yaml`.
+   `config.yaml` is the tracked app config. Edit it with your LLM and optional SQL settings. The runtime auto-loads `config.yaml` from the current working directory, or you can pass `--config /path/to/config.yaml`.
 
 3. Start the API:
 
@@ -62,11 +65,12 @@ The LLM is used only to create the execution plan and optional retry plans. Exec
 
 Application-level settings now live in `config.yaml`, not `.env.example`.
 
-- `config.example.yaml` is the tracked template
-- `config.yaml` is your local, untracked config
+- `config.yaml` is the tracked app config
 - use `--config` on CLI commands if you want to point at a different file
 
 The runtime spec continues to own agent behavior, tools, and node routing. The app config owns process settings such as LLM, SQL, retry, and server defaults.
+
+By default, planner and decomposer model selection also comes from `config.yaml -> llm.default_model`. Set `planner.model` in a runtime spec only when you intentionally want that spec to override the app default.
 
 ## Gateway Agent
 

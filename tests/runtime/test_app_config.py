@@ -68,7 +68,7 @@ def test_get_settings_auto_discovers_config_yaml(tmp_path: Path, monkeypatch) ->
 def test_get_settings_missing_config_raises_helpful_error(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(FileNotFoundError, match="Copy config.example.yaml to config.yaml or pass --config"):
+    with pytest.raises(FileNotFoundError, match="Create config.yaml or pass --config"):
         get_settings()
 
 

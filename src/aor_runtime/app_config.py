@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field, model_validator
 
 
 APP_CONFIG_FILENAME = "config.yaml"
-APP_CONFIG_EXAMPLE_FILENAME = "config.example.yaml"
 APP_CONFIG_PATH_ENV = "AOR_APP_CONFIG_PATH"
 
 
@@ -102,8 +101,8 @@ class AppConfig(BaseModel):
 
 def _config_error_message(path: Path | None = None) -> str:
     if path is not None:
-        return f"App config not found at {path}. Copy {APP_CONFIG_EXAMPLE_FILENAME} to {APP_CONFIG_FILENAME} or pass --config."
-    return f"App config not found. Copy {APP_CONFIG_EXAMPLE_FILENAME} to {APP_CONFIG_FILENAME} or pass --config."
+        return f"App config not found at {path}. Create {APP_CONFIG_FILENAME} or pass --config."
+    return f"App config not found. Create {APP_CONFIG_FILENAME} or pass --config."
 
 
 def resolve_app_config_path(config_path: str | Path | None = None, cwd: str | Path | None = None) -> Path:

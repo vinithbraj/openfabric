@@ -3,7 +3,6 @@ name: general_purpose_assistant
 description: Deterministic local assistant with explicit planning, tool execution, and validation.
 
 planner:
-  model: qwen-coder
   prompt: ../prompts/planner_system.txt
   decomposer_prompt: ../prompts/decomposer_system.txt
   temperature: 0.0

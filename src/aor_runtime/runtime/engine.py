@@ -14,6 +14,7 @@ from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.compiler import GraphCompiler
 from aor_runtime.runtime.dataflow import resolve_execution_step
 from aor_runtime.runtime.decomposer import is_complex_goal
+from aor_runtime.runtime.error_normalization import normalize_planner_error, normalize_runtime_failure
 from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
 from aor_runtime.runtime.planner import TaskPlanner, summarize_plan, summarize_planner_raw_output
 from aor_runtime.runtime.sessions import SessionManager
@@ -256,9 +257,17 @@ class ExecutionEngine:
             planner_error_type = str(self.planner.last_error_type or type(exc).__name__)
             planner_error_stage = str(self.planner.last_error_stage or planning_mode)
             raw_output_preview = summarize_planner_raw_output(self.planner.last_raw_output)
+            normalized_error = normalize_planner_error(
+                error_type=planner_error_type,
+                detail=str(exc),
+                llm_base_url=self.settings.llm_base_url,
+            )
+            final_error = normalized_error.message if normalized_error is not None else str(exc)
             final_output_metadata = {"goal": state.get("goal", ""), "planner_error_type": planner_error_type}
             if raw_output_preview is not None:
                 final_output_metadata["planner_raw_output_preview"] = raw_output_preview
+            if normalized_error is not None:
+                final_output_metadata.update(normalized_error.as_metadata())
             state.update(
                 {
                     "current_node": "planner",
@@ -273,12 +282,12 @@ class ExecutionEngine:
                     "high_level_plan": None,
                     "step_outputs": {},
                     "plan_summary": None,
-                    "error": str(exc),
-                    "final_output": {"content": str(exc), "artifacts": [], "metadata": final_output_metadata},
+                    "error": final_error,
+                    "final_output": {"content": final_error, "artifacts": [], "metadata": final_output_metadata},
                 }
             )
             failure_payload = {
-                "error": str(exc),
+                "error": final_error,
                 "error_type": planner_error_type,
                 "stage": planner_error_stage,
                 "planning_mode": str(self.planner.last_planning_mode or planning_mode),
@@ -286,6 +295,8 @@ class ExecutionEngine:
             }
             if raw_output_preview is not None:
                 failure_payload["raw_output_preview"] = raw_output_preview
+            if normalized_error is not None:
+                failure_payload.update(normalized_error.as_metadata())
             self.store.append_event(
                 session_id=session.id,
                 node_name="planner",
@@ -473,7 +484,17 @@ class ExecutionEngine:
         self._configure_runtime_for_compiled(compiled)
         retries = int(state.get("retries", 0))
         should_retry = retries < min(compiled.runtime.max_retries, self.settings.max_plan_retries)
-        failure_context = {"reason": reason, "error": detail, **extra_context}
+        step_payload = extra_context.get("step")
+        normalized_error = normalize_runtime_failure(
+            reason=reason,
+            detail=detail,
+            step=step_payload if isinstance(step_payload, dict) else None,
+            settings=self.settings,
+        )
+        final_detail = normalized_error.message if normalized_error is not None else detail
+        failure_context = {"reason": reason, "error": final_detail, **extra_context}
+        if normalized_error is not None:
+            failure_context.update(normalized_error.as_metadata())
 
         self.store.append_event(
             session_id=session.id,
@@ -490,7 +511,7 @@ class ExecutionEngine:
                     "status": "retrying",
                     "retries": retries + 1,
                     "failure_context": failure_context,
-                    "error": detail,
+                    "error": final_detail,
                     "awaiting_confirmation": False,
                     "confirmation_kind": None,
                     "confirmation_step": None,
@@ -512,7 +533,7 @@ class ExecutionEngine:
                     "status": "failed",
                     "done": True,
                     "failure_context": failure_context,
-                    "error": detail,
+                    "error": final_detail,
                     "awaiting_confirmation": False,
                     "confirmation_kind": None,
                     "confirmation_step": None,
@@ -522,9 +543,13 @@ class ExecutionEngine:
                     "step_outputs": {},
                     "plan_summary": None,
                     "final_output": {
-                        "content": detail,
+                        "content": final_detail,
                         "artifacts": list((state.get("final_output") or {}).get("artifacts", [])),
-                        "metadata": {"goal": state.get("goal", ""), "failure_reason": reason},
+                        "metadata": {
+                            "goal": state.get("goal", ""),
+                            "failure_reason": reason,
+                            **(normalized_error.as_metadata() if normalized_error is not None else {}),
+                        },
                     },
                 }
             )

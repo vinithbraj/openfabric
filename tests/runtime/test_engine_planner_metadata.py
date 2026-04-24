@@ -160,6 +160,197 @@ def test_decomposition_failure_logs_decompose_stage(tmp_path: Path, monkeypatch)
     assert session.state["metrics"]["llm_calls"] == 1
 
 
+def test_planner_connection_failure_is_normalized_to_llm_error(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Count patients in dicom")
+
+    def failing_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["sql_preference"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_llm_calls = 1
+        engine.planner.last_error_stage = "direct"
+        engine.planner.last_raw_output = None
+        engine.planner.last_error_type = "APIConnectionError"
+        raise RuntimeError("Connection error.")
+
+    monkeypatch.setattr(engine.planner, "build_plan", failing_build_plan)
+
+    engine._run_planner(session)
+
+    assert session.state["final_output"]["content"] == "LLM connection error."
+    metadata = session.state["final_output"]["metadata"]
+    assert metadata["planner_error_type"] == "APIConnectionError"
+    assert metadata["error_source"] == "llm"
+    assert metadata["error_kind"] == "connection"
+    assert metadata["error_target"] == engine.settings.llm_base_url
+    assert metadata["error_detail"] == "Connection error."
+    events = engine.store.get_events(session.id)
+    planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
+    assert planner_failed["payload"]["error"] == "LLM connection error."
+    assert planner_failed["payload"]["error_source"] == "llm"
+    assert planner_failed["payload"]["error_kind"] == "connection"
+
+
+def test_planner_timeout_failure_is_normalized_to_llm_timeout(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Count patients in dicom after checking connectivity")
+
+    def failing_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["sql_preference"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_llm_calls = 2
+        engine.planner.last_error_stage = "refine"
+        engine.planner.last_raw_output = None
+        engine.planner.last_error_type = "APITimeoutError"
+        raise RuntimeError("Request timed out.")
+
+    monkeypatch.setattr(engine.planner, "build_plan", failing_build_plan)
+
+    engine._run_planner(session)
+
+    assert session.state["final_output"]["content"] == "LLM timeout error."
+    metadata = session.state["final_output"]["metadata"]
+    assert metadata["error_source"] == "llm"
+    assert metadata["error_kind"] == "timeout"
+
+
+def test_terminal_sql_auth_failure_is_normalized_and_redacted(tmp_path: Path) -> None:
+    settings = Settings(
+        workspace_root=tmp_path,
+        run_store_path=tmp_path / "runtime.db",
+        sql_databases={"dicom": "postgresql+psycopg://admin:admin@localhost:5432/dicom"},
+        sql_default_database="dicom",
+    )
+    engine = ExecutionEngine(settings)
+    session = _session(engine, "Count patients in dicom")
+    session.state["retries"] = 2
+
+    engine._handle_retry_or_failure(
+        session,
+        node_name="executor",
+        reason="tool_execution_failed",
+        detail="(psycopg.OperationalError) postgresql+psycopg://admin:admin@localhost:5432/dicom fe_sendauth: no password supplied",
+        extra_context={
+            "step": {"id": 1, "action": "sql.query", "args": {"database": "dicom", "query": "SELECT COUNT(*) FROM patient"}},
+            "history": [],
+        },
+    )
+
+    assert session.state["final_output"]["content"] == "Database authentication error for 'dicom'."
+    metadata = session.state["final_output"]["metadata"]
+    assert metadata["error_source"] == "sql"
+    assert metadata["error_kind"] == "authentication"
+    assert metadata["error_target"] == "dicom"
+    assert "***:***@" in metadata["error_detail"]
+    assert "admin:admin@" not in metadata["error_detail"]
+    events = engine.store.get_events(session.id)
+    executor_failed = next(event for event in events if event["event_type"] == "executor.failed")
+    assert executor_failed["payload"]["error"] == "Database authentication error for 'dicom'."
+    assert executor_failed["payload"]["error_source"] == "sql"
+
+
+def test_terminal_sql_connection_failure_is_normalized(tmp_path: Path) -> None:
+    settings = Settings(
+        workspace_root=tmp_path,
+        run_store_path=tmp_path / "runtime.db",
+        sql_databases={"dicom": "postgresql+psycopg://admin:admin@localhost:5432/dicom"},
+        sql_default_database="dicom",
+    )
+    engine = ExecutionEngine(settings)
+    session = _session(engine, "Count patients in dicom")
+    session.state["retries"] = 2
+
+    engine._handle_retry_or_failure(
+        session,
+        node_name="executor",
+        reason="tool_execution_failed",
+        detail="(psycopg.OperationalError) connection refused",
+        extra_context={
+            "step": {"id": 1, "action": "sql.query", "args": {"database": "dicom", "query": "SELECT COUNT(*) FROM patient"}},
+            "history": [],
+        },
+    )
+
+    assert session.state["final_output"]["content"] == "Database connection error for 'dicom'."
+    metadata = session.state["final_output"]["metadata"]
+    assert metadata["error_source"] == "sql"
+    assert metadata["error_kind"] == "connection"
+
+
+def test_terminal_gateway_request_failure_is_normalized(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Using shell, list files")
+    session.state["retries"] = 2
+
+    engine._handle_retry_or_failure(
+        session,
+        node_name="executor",
+        reason="tool_execution_failed",
+        detail="Gateway request failed: HTTPConnectionPool(host='127.0.0.1', port=8787): Max retries exceeded with url: /exec (Caused by NewConnectionError('connection refused'))",
+        extra_context={
+            "step": {"id": 1, "action": "shell.exec", "args": {"node": "local", "command": "ls"}},
+            "history": [],
+        },
+    )
+
+    assert session.state["final_output"]["content"] == "Gateway connection error for node 'local'."
+    metadata = session.state["final_output"]["metadata"]
+    assert metadata["error_source"] == "gateway"
+    assert metadata["error_kind"] == "connection"
+    assert metadata["error_target"] == "local"
+
+
+def test_terminal_gateway_response_failure_is_normalized(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Using shell, list files")
+    session.state["retries"] = 2
+
+    engine._handle_retry_or_failure(
+        session,
+        node_name="executor",
+        reason="tool_execution_failed",
+        detail="Gateway response validation failed: 1 validation error for GatewayExecResult",
+        extra_context={
+            "step": {"id": 1, "action": "shell.exec", "args": {"node": "local", "command": "ls"}},
+            "history": [],
+        },
+    )
+
+    assert session.state["final_output"]["content"] == "Gateway response error for node 'local'."
+    metadata = session.state["final_output"]["metadata"]
+    assert metadata["error_source"] == "gateway"
+    assert metadata["error_kind"] == "response"
+
+
+def test_unclassified_sql_error_message_is_preserved(tmp_path: Path) -> None:
+    settings = Settings(
+        workspace_root=tmp_path,
+        run_store_path=tmp_path / "runtime.db",
+        sql_databases={"dicom": "postgresql+psycopg://admin:admin@localhost:5432/dicom"},
+        sql_default_database="dicom",
+    )
+    engine = ExecutionEngine(settings)
+    session = _session(engine, "Count patients in dicom")
+    session.state["retries"] = 2
+
+    engine._handle_retry_or_failure(
+        session,
+        node_name="executor",
+        reason="tool_execution_failed",
+        detail="Unsafe query",
+        extra_context={
+            "step": {"id": 1, "action": "sql.query", "args": {"database": "dicom", "query": "DELETE FROM patient"}},
+            "history": [],
+        },
+    )
+
+    assert session.state["final_output"]["content"] == "Unsafe query"
+    metadata = session.state["final_output"]["metadata"]
+    assert "error_source" not in metadata
+
+
 def test_retry_and_terminal_failure_clear_policies_used(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
 
