@@ -14,4 +14,5 @@ class GraphCompiler:
             planner=spec.planner,
             runtime=spec.runtime,
             tools=tools,
+            nodes=spec.nodes,
         )

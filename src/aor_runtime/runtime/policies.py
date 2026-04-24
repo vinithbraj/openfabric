@@ -124,7 +124,11 @@ PYTHON_COMPOSITION_PHRASES = {
 }
 
 
-def select_policies(goal: str, allowed_tools: list[str], schema: dict[str, Any] | None = None) -> list[PlanningPolicy]:
+def select_policies(
+    goal: str,
+    allowed_tools: list[str],
+    schema: dict[str, Any] | None = None,
+) -> list[PlanningPolicy]:
     selected_names: list[str] = []
     goal_text = str(goal or "").lower()
     goal_tokens = _tokenize(goal_text)

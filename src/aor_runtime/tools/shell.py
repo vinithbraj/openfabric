@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import re
-import subprocess
-from pathlib import Path
 from typing import Any
 
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
+from aor_runtime.tools.gateway import execute_gateway_command, resolve_execution_node
 from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
 
 
@@ -20,7 +19,7 @@ HIGH_RISK_PATTERNS = [
 ]
 
 
-def run_shell(settings: Settings, command: str, cwd: str = "", timeout: int = 60) -> dict[str, Any]:
+def run_shell(settings: Settings, command: str, node: str = "") -> dict[str, Any]:
     trimmed = command.strip()
     if not trimmed:
         raise ToolExecutionError("Empty command.")
@@ -30,41 +29,28 @@ def run_shell(settings: Settings, command: str, cwd: str = "", timeout: int = 60
             if re.search(pattern, trimmed):
                 raise ToolExecutionError("Blocked high-risk shell command by policy.")
 
-    if not cwd:
-        resolved_cwd = settings.workspace_root
-    else:
-        candidate = Path(cwd).expanduser()
-        resolved_cwd = candidate.resolve() if candidate.is_absolute() else (settings.workspace_root / candidate).resolve()
-
-    completed = subprocess.run(
-        ["bash", "-lc", trimmed],
-        cwd=resolved_cwd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    resolved_node = resolve_execution_node(settings, node)
+    completed = execute_gateway_command(settings, node=resolved_node, command=trimmed)
     result = {
         "command": trimmed,
-        "cwd": str(resolved_cwd),
+        "node": resolved_node,
         "stdout": completed.stdout,
         "stderr": completed.stderr,
-        "returncode": completed.returncode,
+        "returncode": completed.exit_code,
     }
-    if completed.returncode != 0:
-        raise ToolExecutionError(completed.stderr.strip() or f"Command exited with {completed.returncode}")
+    if completed.exit_code != 0:
+        raise ToolExecutionError(completed.stderr.strip() or f"Command exited with {completed.exit_code}")
     return result
 
 
 class ShellExecTool(BaseTool):
     class ToolArgs(ToolArgsModel):
         command: str
-        cwd: str = ""
-        timeout: int = 60
+        node: str = ""
 
     class ToolResult(ToolResultModel):
         command: str
-        cwd: str
+        node: str
         stdout: str
         stderr: str
         returncode: int
@@ -75,19 +61,16 @@ class ShellExecTool(BaseTool):
         self.result_model = self.ToolResult
         self.spec = ToolSpec(
             name="shell.exec",
-            description="Execute a shell command on the local machine.",
+            description="Execute a shell command on a logical node.",
             arguments_schema={
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
-                    "cwd": {"type": "string"},
-                    "timeout": {"type": "integer"},
+                    "node": {"type": "string"},
                 },
                 "required": ["command"],
             },
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
-        return self.ToolResult.model_validate(
-            run_shell(self.settings, arguments.command, arguments.cwd, arguments.timeout)
-        )
+        return self.ToolResult.model_validate(run_shell(self.settings, arguments.command, arguments.node))

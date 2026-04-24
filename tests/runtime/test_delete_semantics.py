@@ -8,6 +8,7 @@ from aor_runtime.runtime.engine import ExecutionEngine
 from aor_runtime.runtime.executor import PlanExecutor
 from aor_runtime.runtime.validator import RuntimeValidator
 from aor_runtime.tools.factory import build_tool_registry
+from aor_runtime.tools.gateway import GatewayExecResult
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -15,7 +16,12 @@ SPEC_PATH = REPO_ROOT / "examples" / "general_purpose_assistant.yaml"
 
 
 def _engine(tmp_path: Path) -> ExecutionEngine:
-    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+    settings = Settings(
+        workspace_root=tmp_path,
+        run_store_path=tmp_path / "runtime.db",
+        available_nodes_raw="local",
+        default_node="local",
+    )
     return ExecutionEngine(settings)
 
 
@@ -104,6 +110,11 @@ def test_delete_flow_with_fs_not_exists_completes_without_retry(tmp_path: Path, 
     target.write_text("delete me")
     session = _session(engine, "remove clear.txt")
 
+    def fake_execute_gateway_command(settings, *, node: str, command: str):
+        if command == "rm clear.txt":
+            target.unlink()
+        return GatewayExecResult(stdout="", stderr="", exit_code=0)
+
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["filesystem_preference", "efficiency"]
         return ExecutionPlan.model_validate(
@@ -117,6 +128,7 @@ def test_delete_flow_with_fs_not_exists_completes_without_retry(tmp_path: Path, 
         )
 
     monkeypatch.setattr(engine.planner, "build_plan", fake_build_plan)
+    monkeypatch.setattr("aor_runtime.tools.shell.execute_gateway_command", fake_execute_gateway_command)
 
     paused = engine.resume_session(session.id, trigger="manual")
     assert paused["awaiting_confirmation"] is True

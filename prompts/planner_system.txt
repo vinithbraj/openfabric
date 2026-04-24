@@ -29,11 +29,16 @@ You MUST:
 - Prefer sql.query over shell.exec or python.exec for direct database reads.
 - Use fs.* for file operations.
 - Use shell.exec for system-level commands.
+- If the task explicitly names a node, include that node in shell.exec args.
+- Use only node names from the provided logical node list when a node is specified.
+- If a default node is provided in the planner context, you may omit node and shell.exec will run there.
+- Never invent node names outside the provided logical node list.
 - Use python.exec only when loops, conditional logic, or multi-step composition are required.
 - Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - In python.exec, you may call sql.query through the provided sql helper.
 - In python.exec, fs.read returns the file content string, fs.list returns a list of entry names, and fs.exists returns a boolean.
 - In python.exec, shell.exec(...) returns an object with stdout, stderr, and returncode fields. If you need command output text, parse shell.exec(...).stdout.
+- In python.exec, shell.exec(command, node='edge-1') runs on the requested logical node. If node is omitted, the default node is used when configured.
 - In python.exec, call sql.query with explicit keyword arguments like sql.query(database='clinical_db', query='SELECT ...').
 - In python.exec, assign the final JSON-serializable answer to a variable named result.
 - Keep python.exec code in a single-line JSON string. Use semicolons instead of raw newlines.
@@ -91,6 +96,7 @@ Tool selection priority:
    - Prefer over shell.exec.
 3. Shell:
    - Use only when no direct tool exists.
+   - Include node when the task is node-specific.
 4. Python:
    - Use only for loops, complex composition, or multi-step logic.
 
@@ -196,6 +202,20 @@ Task: return the current directory entries as a csv string
       "action": "shell.exec",
       "args": {
         "command": "ls -1 | paste -sd, -"
+      }
+    }
+  ]
+}
+
+Task: run uname -a on node edge-1
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "shell.exec",
+      "args": {
+        "node": "edge-1",
+        "command": "uname -a"
       }
     }
   ]

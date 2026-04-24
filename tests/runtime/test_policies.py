@@ -94,8 +94,16 @@ def test_select_policies_respects_allowed_tools() -> None:
     assert names == ["efficiency"]
 
 
+def test_select_policies_keeps_remote_shell_goal_simple() -> None:
+    policies = select_policies("Run uptime on node edge-1", ["shell.exec", "python.exec"])
+    names = [policy.name for policy in policies]
+
+    assert names == ["efficiency"]
+
+
 def test_render_policy_text_includes_names_descriptions_and_rules() -> None:
-    text = render_policy_text(DEFAULT_POLICIES[:2])
+    selected = [policy for policy in DEFAULT_POLICIES if policy.name in {"sql_preference", "filesystem_preference"}]
+    text = render_policy_text(selected)
 
     assert "sql_preference: Prefer SQL for structured data queries" in text
     assert "- Use sql.query for filtering, aggregation, joins" in text

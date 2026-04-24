@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from aor_runtime.core.contracts import PlannerConfig, RuntimePolicy
 
@@ -26,6 +26,7 @@ class RuntimeSpec(BaseModel):
     planner: PlannerConfig = Field(default_factory=PlannerConfig)
     runtime: RuntimePolicy = Field(default_factory=RuntimePolicy)
     tools: list[str] = Field(default_factory=lambda: list(DEFAULT_TOOLS))
+    nodes: "RuntimeNodesConfig" = Field(default_factory=lambda: RuntimeNodesConfig())
 
 
 class CompiledRuntimeSpec(BaseModel):
@@ -34,4 +35,35 @@ class CompiledRuntimeSpec(BaseModel):
     planner: PlannerConfig
     runtime: RuntimePolicy
     tools: list[str] = Field(default_factory=list)
+    nodes: "RuntimeNodesConfig" = Field(default_factory=lambda: RuntimeNodesConfig())
     graph: list[str] = Field(default_factory=lambda: ["planner", "executor", "validator", "finalize"])
+
+
+class RuntimeNodeEndpoint(BaseModel):
+    name: str
+    url: str
+
+
+class RuntimeNodesConfig(BaseModel):
+    default: str | None = None
+    endpoints: list[RuntimeNodeEndpoint] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_nodes(self) -> "RuntimeNodesConfig":
+        seen: set[str] = set()
+        normalized_default = str(self.default or "").strip()
+        self.default = normalized_default or None
+        for endpoint in self.endpoints:
+            endpoint.name = str(endpoint.name or "").strip()
+            endpoint.url = str(endpoint.url or "").strip()
+            if not endpoint.name:
+                raise ValueError("Node names must be non-empty.")
+            if not endpoint.url:
+                raise ValueError(f"Node URL must be non-empty for node {endpoint.name!r}.")
+            if endpoint.name in seen:
+                raise ValueError(f"Duplicate node name {endpoint.name!r}.")
+            seen.add(endpoint.name)
+        if self.default and self.endpoints and self.default not in seen:
+            available = ", ".join(sorted(seen))
+            raise ValueError(f"Default node must match one of the configured nodes. Available nodes: {available}.")
+        return self

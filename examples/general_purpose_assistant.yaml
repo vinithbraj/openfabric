@@ -10,6 +10,12 @@ planner:
 runtime:
   max_retries: 2
 
+nodes:
+  default: localhost
+  endpoints:
+    - name: localhost
+      url: http://127.0.0.1:8787/exec
+
 tools:
   - fs.exists
   - fs.not_exists

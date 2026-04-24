@@ -42,11 +42,16 @@ You MUST:
 - Prefer sql.query over shell.exec or python.exec for direct database reads.
 - Use fs.* for file operations.
 - Use shell.exec for system-level commands.
+- If the task explicitly names a node, include that node in shell.exec args.
+- Use only node names from the provided logical node list when a node is specified.
+- If a default node is provided in the planner context, you may omit node and shell.exec will run there.
+- Never invent node names outside the provided logical node list.
 - Use python.exec only when loops, conditional logic, or multi-step composition are required.
 - Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - In python.exec, you may call sql.query through the provided sql helper.
 - In python.exec, fs.read returns the file content string, fs.list returns a list of entry names, and fs.exists returns a boolean.
 - In python.exec, shell.exec(...) returns an object with stdout, stderr, and returncode fields. If you need command output text, parse shell.exec(...).stdout.
+- In python.exec, shell.exec(command, node='edge-1') runs on the requested logical node. If node is omitted, the default node is used when configured.
 - In python.exec, call sql.query with explicit keyword arguments like sql.query(database='clinical_db', query='SELECT ...').
 - In python.exec, assign the final JSON-serializable answer to a variable named result.
 - Keep python.exec code in a single-line JSON string and use semicolons instead of raw newlines.
@@ -104,6 +109,7 @@ Tool selection priority:
    - Prefer over shell.exec.
 3. Shell:
    - Use only when no direct tool exists.
+   - Include node when the task is node-specific.
 4. Python:
    - Use only for loops, complex composition, or multi-step logic.
 
@@ -231,6 +237,22 @@ Plan:
 }
 
 Task:
+run uname -a on node edge-1
+Plan:
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "shell.exec",
+      "args": {
+        "node": "edge-1",
+        "command": "uname -a"
+      }
+    }
+  ]
+}
+
+Task:
 delete notes.txt
 Plan:
 {
@@ -337,6 +359,12 @@ class TaskPlanner:
             "allowed_tools": self.tools.specs(allowed_tools),
             "failure_context": failure_context or {},
         }
+        available_nodes = self.settings.available_nodes
+        if "shell.exec" in allowed_tools:
+            planner_context["nodes"] = {"available": available_nodes}
+            default_node = self.settings.resolved_default_node()
+            if default_node:
+                planner_context["nodes"]["default"] = default_node
         if "sql.query" in allowed_tools:
             try:
                 schema_payload = prune_schema(get_schema(self.settings), goal, settings=self.settings).model_dump()
@@ -366,6 +394,7 @@ class TaskPlanner:
                     raise ValueError(f"Planner selected disallowed tool {step.action!r}.")
                 self.tools.validate_step(step.action, step.args)
             self._validate_explicit_database_targets(goal, plan)
+            self._validate_shell_targets(plan)
             validate_plan_efficiency(plan)
             return plan
         except Exception as exc:
@@ -396,6 +425,21 @@ class TaskPlanner:
             if normalized not in requested_names:
                 requested = ", ".join(sorted(requested_names))
                 raise ValueError(f"Planner changed the requested database target. Expected one of: {requested}.")
+
+    def _validate_shell_targets(self, plan: ExecutionPlan) -> None:
+        allowed_nodes = self.settings.available_nodes
+        default_node = str(self.settings.resolved_default_node() or "").strip()
+        for step in plan.steps:
+            if step.action != "shell.exec":
+                continue
+            node = str(step.args.get("node", "")).strip()
+            if node and node not in allowed_nodes:
+                allowed = ", ".join(allowed_nodes) or "<none configured>"
+                raise ValueError(f"Planner selected a disallowed node {node!r}. Available nodes: {allowed}.")
+            if not node and not default_node:
+                raise ValueError(
+                    "Planner must include an explicit node name for shell.exec steps when no default node is configured."
+                )
 
     def _apply_storage_shell_semantics(self, goal: str, plan: ExecutionPlan) -> None:
         intent = self._classify_storage_intent(goal)

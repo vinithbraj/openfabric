@@ -20,6 +20,7 @@ from aor_runtime.runtime.store import SQLiteRunStore
 from aor_runtime.runtime.validator import RuntimeValidator
 from aor_runtime.tools.factory import build_tool_registry
 from aor_runtime.tools.filesystem import resolve_path
+from aor_runtime.tools.gateway import resolve_execution_node
 
 
 TERMINAL_STATUSES = {"completed", "failed"}
@@ -28,13 +29,14 @@ DANGEROUS_SHELL_PATTERN = re.compile(r"(?:^|&&|\|\||;|\|)\s*(?:sudo\s+)?(?:rm|rm
 
 class ExecutionEngine:
     def __init__(self, settings: Settings | None = None) -> None:
-        self.settings = settings or get_settings()
+        self.base_settings = settings or get_settings()
+        self.settings = self.base_settings
         self.store = SQLiteRunStore(self.settings.run_store_path)
         self.session_manager = SessionManager(self.store)
         self.llm = LLMClient(self.settings)
         self.tool_registry = build_tool_registry(self.settings)
         self.compiler = GraphCompiler()
-        self.planner = TaskPlanner(llm=self.llm, tools=self.tool_registry)
+        self.planner = TaskPlanner(llm=self.llm, tools=self.tool_registry, settings=self.settings)
         self.executor = PlanExecutor(self.tool_registry)
         self.validator = RuntimeValidator(self.settings)
 
@@ -180,6 +182,7 @@ class ExecutionEngine:
     def _run_planner(self, session: AgentSession) -> None:
         state = session.state
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
+        self._configure_runtime_for_compiled(compiled)
         metrics = dict(state.get("metrics", {}))
         metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + 1
         state["metrics"] = metrics
@@ -263,6 +266,8 @@ class ExecutionEngine:
 
     def _run_executor_step(self, session: AgentSession, approved_dangerous_step_id: int | None = None) -> None:
         state = session.state
+        compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
+        self._configure_runtime_for_compiled(compiled)
         plan = ExecutionPlan.model_validate(state.get("plan", {}))
         step_index = int(state.get("current_step_index", 0))
         if step_index >= len(plan.steps):
@@ -363,6 +368,8 @@ class ExecutionEngine:
 
     def _run_validator(self, session: AgentSession) -> None:
         state = session.state
+        compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
+        self._configure_runtime_for_compiled(compiled)
         attempt_history = [self._step_log_from_dict(item) for item in state.get("attempt_history", [])]
         validation, checks = self.validator.validate(attempt_history, goal=str(state.get("goal", "")))
         payload = validation.model_dump()
@@ -414,6 +421,7 @@ class ExecutionEngine:
     ) -> None:
         state = session.state
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
+        self._configure_runtime_for_compiled(compiled)
         retries = int(state.get("retries", 0))
         should_retry = retries < min(compiled.runtime.max_retries, self.settings.max_plan_retries)
         failure_context = {"reason": reason, "error": detail, **extra_context}
@@ -515,6 +523,26 @@ class ExecutionEngine:
         session.history = list(session.state.get("history", session.history))
         self.session_manager.persist_session(session, node_name=node_name)
 
+    def _settings_for_compiled(self, compiled: CompiledRuntimeSpec) -> Settings:
+        payload = self.base_settings.model_dump()
+        endpoints = {endpoint.name: endpoint.url for endpoint in compiled.nodes.endpoints}
+        if endpoints:
+            payload["available_nodes_raw"] = ",".join(endpoints)
+            payload["gateway_endpoints"] = endpoints
+            payload["gateway_url"] = None
+            payload["default_node"] = compiled.nodes.default
+        return Settings.model_validate(payload)
+
+    def _configure_runtime_for_compiled(self, compiled: CompiledRuntimeSpec) -> None:
+        effective_settings = self._settings_for_compiled(compiled)
+        self.settings = effective_settings
+        self.llm.settings = effective_settings
+        self.tool_registry = build_tool_registry(effective_settings)
+        self.planner.settings = effective_settings
+        self.planner.tools = self.tool_registry
+        self.executor.tools = self.tool_registry
+        self.validator.settings = effective_settings
+
     @staticmethod
     def _step_log_from_dict(payload: dict[str, Any]):
         from aor_runtime.core.contracts import StepLog
@@ -597,7 +625,11 @@ class ExecutionEngine:
         if step.action == "shell.exec":
             command = str(args.get("command", "")).strip()
             if command and DANGEROUS_SHELL_PATTERN.search(command.lower()):
-                return f"Run potentially destructive shell command: {command}"
+                try:
+                    target = resolve_execution_node(self.settings, str(args.get("node", "")))
+                except Exception:  # noqa: BLE001
+                    return None
+                return f"Run potentially destructive shell command on {target}: {command}"
             return None
 
         return None

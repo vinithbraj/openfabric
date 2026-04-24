@@ -165,11 +165,14 @@ class _PythonShellFacade:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def exec(self, command: str, cwd: str = "", timeout: int = 60) -> _AttrDict:
+    def exec(self, command: str, node: str = "", timeout: int = 60, cwd: str = "") -> _AttrDict:
         if NETWORK_COMMAND_RE.search(command):
             raise ToolExecutionError("Network-oriented shell commands are not allowed inside python.exec.")
+        if str(cwd or "").strip():
+            raise ToolExecutionError("cwd is not supported for gateway-backed shell execution inside python.exec.")
         bounded_timeout = max(1, min(int(timeout), 5))
-        return _AttrDict(run_shell(self.settings, command, cwd=cwd, timeout=bounded_timeout))
+        del bounded_timeout  # The gateway transport timeout comes from runtime settings.
+        return _AttrDict(run_shell(self.settings, command, node=node))
 
 
 class _PythonSqlFacade:
@@ -213,7 +216,8 @@ class _SubprocessModule:
     ) -> _CompletedProcess:
         normalized_command = self._normalize_command(command, shell=shell)
         bounded_timeout = 5 if timeout is None else max(1, min(int(timeout), 5))
-        result = self._shell.exec(normalized_command, cwd=cwd, timeout=bounded_timeout)
+        del bounded_timeout
+        result = self._shell.exec(normalized_command, cwd=cwd)
         stdout_text = str(result.get("stdout", ""))
         stderr_text = str(result.get("stderr", ""))
         payload: dict[str, Any] = {

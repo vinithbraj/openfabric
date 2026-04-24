@@ -60,6 +60,28 @@ The LLM is used only to create the execution plan and optional retry plans. Exec
    aor chat examples/general_purpose_assistant.yaml
    ```
 
+## Gateway Agent
+
+For gateway-backed shell execution, a separate node-local agent scaffold lives in `gateway_agent/`.
+
+Use matching config on both sides:
+
+```bash
+export GATEWAY_NODE_NAME=localhost
+```
+
+The example runtime spec already includes:
+
+```yaml
+nodes:
+  default: localhost
+  endpoints:
+    - name: localhost
+      url: http://127.0.0.1:8787/exec
+```
+
+So once the agent is running, `examples/general_purpose_assistant.yaml` can use shell commands without extra `AOR_GATEWAY_URL` exports. See `gateway_agent/README.md` for install and run instructions.
+
 ## Project Layout
 
 - `src/aor_runtime/` core package
