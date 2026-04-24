@@ -201,6 +201,33 @@ def test_planner_uses_implicit_localhost_default_when_not_configured(tmp_path: P
     assert planner_context["nodes"]["default"] == "localhost"
 
 
+def test_planner_accepts_recursive_file_search_plan_with_fs_find(tmp_path: Path) -> None:
+    planner, llm = _planner(
+        tmp_path,
+        {
+            "steps": [
+                {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}},
+                {
+                    "id": 2,
+                    "action": "python.exec",
+                    "args": {"code": "matches = fs.find('.', '*.txt'); result = {'csv': ','.join(matches)}"},
+                },
+            ]
+        },
+    )
+
+    plan = planner.build_plan(
+        goal="find all *.txt files in this folder and provide list as csv",
+        planner=_planner_config(),
+        allowed_tools=["fs.find", "python.exec"],
+        input_payload={"task": "find all *.txt files in this folder and provide list as csv"},
+    )
+
+    assert [step.action for step in plan.steps] == ["fs.find", "python.exec"]
+    assert llm.last_system_prompt is not None
+    assert "Use fs.find for recursive file discovery" in llm.last_system_prompt
+
+
 def test_planner_accepts_shell_plan_with_allowed_node(tmp_path: Path) -> None:
     planner, _ = _planner_with_settings(
         tmp_path,

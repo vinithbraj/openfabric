@@ -36,7 +36,7 @@ You MUST:
 - Use python.exec only when loops, conditional logic, or multi-step composition are required.
 - Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - In python.exec, you may call sql.query through the provided sql helper.
-- In python.exec, fs.read returns the file content string, fs.list returns a list of entry names, and fs.exists returns a boolean.
+- In python.exec, fs.read returns the file content string, fs.list returns a list of entry names, fs.find returns a list of relative matching file paths, and fs.exists returns a boolean.
 - In python.exec, shell.exec(...) returns an object with stdout, stderr, and returncode fields. If you need command output text, parse shell.exec(...).stdout.
 - In python.exec, shell.exec(command, node='edge-1') runs on the requested logical node. If node is omitted, the default node is used when configured.
 - In python.exec, call sql.query with explicit keyword arguments like sql.query(database='clinical_db', query='SELECT ...').
@@ -45,6 +45,7 @@ You MUST:
 - Every args value must be valid JSON as written.
 - For straightforward command-output extraction, filtering, or CSV/text formatting, prefer a single shell.exec step when shell can produce the final answer directly.
 - Prefer filesystem tools over shell commands for filesystem tasks.
+- Use fs.find for recursive file discovery and glob-style file matching such as *.txt under a directory.
 - Use fs.copy for copying files.
 - Use fs.mkdir for creating directories.
 - Use fs.write for exact file content.
@@ -68,6 +69,7 @@ You MUST NOT:
 - Put expressions, string concatenation, comprehensions, or variable references in args outside a python.exec code string.
 - Use shell -> python -> fs.write -> fs.read round-trips when a direct shell.exec step can produce the requested text output.
 - Do not reuse earlier fs.exists prechecks as deletion verification.
+- Do not use fs.list when the user asked to find matching files recursively by pattern and fs.find is available.
 
 Tool selection policy:
 - Use sql.query for filtering or querying structured data.
@@ -139,12 +141,26 @@ Task: create nested/deep and write result.txt with exact content "hello"
 Task: how many txt files are in logs
 {
   "steps": [
-    {"id": 1, "action": "fs.exists", "args": {"path": "logs"}},
+    {"id": 1, "action": "fs.find", "args": {"path": "logs", "pattern": "*.txt"}},
     {
       "id": 2,
       "action": "python.exec",
       "args": {
-        "code": "files = fs.list('logs'); result = {'count': len([name for name in files if name.endswith('.txt')])}"
+        "code": "files = fs.find('logs', '*.txt'); result = {'count': len(files)}"
+      }
+    }
+  ]
+}
+
+Task: find all *.txt files in this folder and provide list as csv
+{
+  "steps": [
+    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "args": {
+        "code": "matches = fs.find('.', '*.txt'); result = {'csv': ','.join(matches)}"
       }
     }
   ]

@@ -74,6 +74,19 @@ def fs_list(settings: Settings, path: str) -> dict[str, Any]:
     return {"path": str(resolved), "entries": entries}
 
 
+def fs_find(settings: Settings, path: str, pattern: str) -> dict[str, Any]:
+    resolved = resolve_path(settings, path)
+    if not resolved.exists():
+        raise ToolExecutionError(f"Directory does not exist: {resolved}")
+    if not resolved.is_dir():
+        raise ToolExecutionError(f"Path is not a directory: {resolved}")
+    normalized_pattern = str(pattern or "").strip()
+    if not normalized_pattern:
+        raise ToolExecutionError("Pattern must be non-empty.")
+    matches = sorted(str(item.relative_to(resolved)) for item in resolved.rglob(normalized_pattern) if item.is_file())
+    return {"path": str(resolved), "pattern": normalized_pattern, "matches": matches}
+
+
 class FileExistsTool(BaseTool):
     class ToolArgs(ToolArgsModel):
         path: str
@@ -239,3 +252,31 @@ class ListDirectoryTool(BaseTool):
 
     def run(self, arguments: ToolArgs) -> ToolResult:
         return self.ToolResult.model_validate(fs_list(self.settings, arguments.path))
+
+
+class FindFilesTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+        pattern: str
+
+    class ToolResult(ToolResultModel):
+        path: str
+        pattern: str
+        matches: list[str]
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
+        self.spec = ToolSpec(
+            name="fs.find",
+            description="Recursively find files matching a glob pattern under a directory.",
+            arguments_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "pattern": {"type": "string"}},
+                "required": ["path", "pattern"],
+            },
+        )
+
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(fs_find(self.settings, arguments.path, arguments.pattern))

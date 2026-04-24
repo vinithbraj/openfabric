@@ -15,7 +15,7 @@ from pydantic import Field
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
 from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
-from aor_runtime.tools.filesystem import fs_copy, fs_exists, fs_list, fs_mkdir, fs_read, fs_write
+from aor_runtime.tools.filesystem import fs_copy, fs_exists, fs_find, fs_list, fs_mkdir, fs_read, fs_write
 from aor_runtime.tools.shell import run_shell
 from aor_runtime.tools.sql import sql_query
 
@@ -159,6 +159,9 @@ class _PythonFsFacade:
 
     def list(self, path: str) -> list[str]:
         return list(fs_list(self.settings, path)["entries"])
+
+    def find(self, path: str, pattern: str) -> list[str]:
+        return list(fs_find(self.settings, path, pattern)["matches"])
 
 
 class _PythonShellFacade:

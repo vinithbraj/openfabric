@@ -13,6 +13,7 @@ DEFAULT_TOOLS = [
     "fs.write",
     "fs.mkdir",
     "fs.list",
+    "fs.find",
     "shell.exec",
     "python.exec",
     "sql.query",

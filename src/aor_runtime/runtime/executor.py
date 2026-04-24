@@ -81,6 +81,9 @@ def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
     elif action == "fs.list":
         entries = result.get("entries", [])
         content = "\n".join(str(entry) for entry in entries)
+    elif action == "fs.find":
+        matches = result.get("matches", [])
+        content = "\n".join(str(entry) for entry in matches)
     elif action == "fs.exists":
         content = "true" if result.get("exists") else "false"
     elif action == "fs.not_exists":
