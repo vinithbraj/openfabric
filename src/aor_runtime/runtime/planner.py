@@ -50,9 +50,10 @@ You MUST:
 - Later steps that consume prior results must declare input aliases and reference previous outputs explicitly with structured refs like {"$ref": "alias"} or {"$ref": "alias", "path": "rows.0.name"}.
 - Refinement must preserve outputs from previous steps, use outputs in subsequent steps, avoid placeholder or hardcoded values, and maintain logical dataflow across steps.
 - Preserve full file paths exactly as provided in the goal or returned by tools.
-- When fs.find returns matches, pass those path strings forward exactly as returned. Do not strip directory prefixes, collapse to basenames, or rebuild alternate prefixes.
+- Never strip directory prefixes, collapse to basenames, manually reconstruct alternate prefixes, or convert absolute paths into relative paths.
+- When fs.find returns matches, keep those returned match strings unchanged unless a downstream fs.size, fs.read, or fs.copy operation needs a concrete path; in that case, join the returned fs.find.path root with the returned relative match.
 - Use sql.query for relational database questions when schema information is provided.
-- Use SQL for aggregation, grouping, counting, filtering large datasets, and joins whenever the database can express the operation directly.
+- Use SQL for aggregation, grouping, counting, filtering, joins, and histograms whenever the database can express the operation directly.
 - Prefer pushing computation into SQL whenever possible.
 - Only use databases, tables, and columns from the provided schema. Never hallucinate schema.
 - If schema information includes a database dialect, generate SQL that is valid for that dialect.
@@ -69,11 +70,14 @@ You MUST:
 - If a default node is provided in the planner context, you may omit node and shell.exec will run there.
 - Never invent node names outside the provided logical node list.
 - Use python.exec only when loops, conditional logic, or multi-step composition are required.
+- Do not use python.exec when sql.query or fs.* can solve the task directly.
 - Use python.exec once for simple composition, combine logic into a single block when possible, and use multiple python.exec steps only if necessary.
 - Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - Use python.exec for formatting, visualization preparation, or post-processing only after SQL has already reduced the dataset when possible.
 - In python.exec, code must be valid, minimal, and should only import json when an import is required.
 - In python.exec, do not use os, subprocess, system calls, or direct shell.exec(...) / sql.query(...) helper calls.
+- In python.exec, do not implement file listing, reading, writing, copying, or size calculation logic directly; use fs.* tools for filesystem work.
+- The only filesystem exception in python.exec is a thin loop that orchestrates repeated fs.copy calls for a dynamic discovered set when direct fs.* steps cannot express the loop on their own.
 - In python.exec, upstream data is passed through args.inputs and available in the sandbox as the inputs dict.
 - In python.exec, inputs[...] values are fully computed runtime results, not references, wrappers, or tool-response objects.
 - In python.exec, inputs[...] is the value itself, not an object containing the value, and it does not contain implicit nested structure.
@@ -88,11 +92,14 @@ You MUST:
 - In python.exec, assign the final JSON-serializable answer to a variable named result.
 - If the user asks to return, list, show, or provide data, the final step must surface that data and not only write it to a file.
 - Return exactly what the user asked for: count requests return a number only, CSV requests return a CSV string only, and JSON requests return a JSON object only.
+- Do not include extra text, file paths, acknowledgements, or wrapper objects in the final output unless the user explicitly asked for them.
+- Output keys must match the user's requested keys exactly, including spelling and case. Do not rename keys like studies to study_count and do not change CT to ct.
 - Keep python.exec code in a single-line JSON string and use semicolons instead of raw newlines.
 - Every args value must be valid JSON as written.
 - For straightforward command-output extraction, filtering, or CSV/text formatting, prefer a single shell.exec step when shell can produce the final answer directly.
 - Prefer filesystem tools over shell commands for filesystem tasks.
 - Use fs.find for recursive file discovery and glob-style file matching such as *.txt under a directory.
+- For top-level or non-recursive file matching, prefer fs.list plus minimal filtering or formatting instead of fs.find.
 - Use fs.size when the user asks for the size of a file or the total size of a set of files.
 - Use fs.copy for copying files.
 - Use fs.mkdir for creating directories.
@@ -119,6 +126,7 @@ You MUST NOT:
 - Put expressions, string concatenation, comprehensions, or variable references in args outside a python.exec code string.
 - Use shell -> python -> fs.write -> fs.read round-trips when a direct shell.exec step can produce the requested text output.
 - For python.exec inputs, assume wrapper objects or nested response objects where resolved values are already provided.
+- Reimplement recursive discovery, top-level listing, file copying, file reading, file writing, or file size operations in Python when fs.* tools already cover them.
 - Do not reuse earlier fs.exists prechecks as deletion verification.
 - Do not use fs.list when the user asked to find matching files recursively by pattern and fs.find is available.
 - Do not use shell.exec or Python imports like os.path for file sizes when fs.size is available.
@@ -157,6 +165,7 @@ Tool selection priority:
    - Use only for loops, complex composition, or multi-step logic.
 
 Optimization rules:
+- Be correct first, minimal second, and efficient third.
 - Use the minimal number of steps.
 - Avoid switching between domains unless necessary.
 - Combine operations when possible.
@@ -332,7 +341,7 @@ Plan:
       "input": ["patient_csv"],
       "args": {
         "path": "outputs/top_patients.csv",
-        "content": {"$ref": "patient_csv", "path": "csv"}
+        "content": {"$ref": "patient_csv"}
       }
     },
     {
@@ -340,6 +349,33 @@ Plan:
       "action": "fs.read",
       "args": {
         "path": "outputs/top_patients.csv"
+      }
+    }
+  ]
+}
+
+Task:
+count CT and MR series in dicom and return JSON with keys CT and MR
+Plan:
+{
+  "steps": [
+    {
+      "id": 1,
+      "action": "sql.query",
+      "output": "modality_rows",
+      "args": {
+        "database": "dicom",
+        "query": "SELECT SUM(CASE WHEN modality = 'CT' THEN 1 ELSE 0 END) AS \"CT\", SUM(CASE WHEN modality = 'MR' THEN 1 ELSE 0 END) AS \"MR\" FROM series"
+      }
+    },
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["modality_rows"],
+      "output": "modality_counts",
+      "args": {
+        "inputs": {"rows": {"$ref": "modality_rows", "path": "rows"}},
+        "code": "rows = inputs['rows']; result = rows[0] if rows else {'CT': 0, 'MR': 0}"
       }
     }
   ]
@@ -357,8 +393,11 @@ Plan:
       "input": ["txt_matches"],
       "output": "size_summary",
       "args": {
-        "inputs": {"files": {"$ref": "txt_matches", "path": "matches"}},
-        "code": "import json; total_size = sum(fs.size(f'inputs/{path}') for path in inputs['files']); result = {'summary_json': json.dumps({'file_count': len(inputs['files']), 'total_size_bytes': total_size})}"
+        "inputs": {
+          "find_root": {"$ref": "txt_matches", "path": "path"},
+          "matches": {"$ref": "txt_matches", "path": "matches"}
+        },
+        "code": "import json; root = inputs['find_root']; matches = inputs['matches']; total_size = sum(fs.size(f'{root}/{match}') for match in matches); result = json.dumps({'file_count': len(matches), 'total_size_bytes': total_size}, sort_keys=True)"
       }
     },
     {"id": 3, "action": "fs.mkdir", "args": {"path": "reports"}},
@@ -368,7 +407,7 @@ Plan:
       "input": ["size_summary"],
       "args": {
         "path": "reports/txt_summary.json",
-        "content": {"$ref": "size_summary", "path": "summary_json"}
+        "content": {"$ref": "size_summary"}
       }
     }
   ]
@@ -379,32 +418,54 @@ read line 2 from notes.txt
 Plan:
 {
   "steps": [
-    {"id": 1, "action": "fs.exists", "args": {"path": "notes.txt"}},
+    {"id": 1, "action": "fs.read", "args": {"path": "notes.txt"}, "output": "notes_text"},
     {
       "id": 2,
       "action": "python.exec",
+      "input": ["notes_text"],
       "args": {
-        "code": "lines = fs.read('notes.txt').splitlines(); result = {'value': lines[1]}"
+        "inputs": {"text": {"$ref": "notes_text", "path": "content"}},
+        "code": "lines = inputs['text'].splitlines(); result = lines[1] if len(lines) > 1 else ''"
       }
     }
   ]
 }
 
 Task:
-copy all txt files from A to B
+find all top-level *.txt files under reports and return them as csv
+Plan:
+{
+  "steps": [
+    {"id": 1, "action": "fs.list", "args": {"path": "reports"}, "output": "report_entries"},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["report_entries"],
+      "args": {
+        "inputs": {"entries": {"$ref": "report_entries", "path": "entries"}},
+        "code": "result = ','.join(name for name in inputs['entries'] if name.endswith('.txt'))"
+      }
+    }
+  ]
+}
+
+Task:
+copy all top-level txt files from A to B and return the copied filenames as csv
 Plan:
 {
   "steps": [
     {"id": 1, "action": "fs.exists", "args": {"path": "A"}},
     {"id": 2, "action": "fs.mkdir", "args": {"path": "B"}},
+    {"id": 3, "action": "fs.list", "args": {"path": "A"}, "output": "source_entries"},
     {
-      "id": 3,
+      "id": 4,
       "action": "python.exec",
+      "input": ["source_entries"],
       "args": {
-        "code": "files = fs.list('A'); copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in files if name.endswith('.txt')]; result = {'operation': 'bulk_copy', 'src_dir': 'A', 'dst_dir': 'B', 'copied_files': copied}"
+        "inputs": {"entries": {"$ref": "source_entries", "path": "entries"}},
+        "code": "copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in inputs['entries'] if name.endswith('.txt')]; result = ','.join(copied)"
       }
-    },
-    {"id": 4, "action": "fs.list", "args": {"path": "B"}}
+    }
   ]
 }
 

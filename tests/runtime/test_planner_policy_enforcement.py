@@ -839,12 +839,19 @@ def test_prompt_sources_include_execution_contract_rules() -> None:
         "If schema information includes a database dialect, generate SQL that is valid for that dialect.",
         "For PostgreSQL, do not use SQLite-only functions like strftime.",
         "Preserve full file paths exactly as provided in the goal or returned by tools.",
-        "When fs.find returns matches, pass those path strings forward exactly as returned.",
+        "When fs.find returns matches, keep those returned match strings unchanged unless a downstream fs.size, fs.read, or fs.copy operation needs a concrete path",
+        "Never strip directory prefixes, collapse to basenames, manually reconstruct alternate prefixes, or convert absolute paths into relative paths.",
         "If the user requests modifying SQL data or schema, do not generate a modifying sql.query plan.",
         "Return exactly what the user asked for: count requests return a number only, CSV requests return a CSV string only, and JSON requests return a JSON object only.",
+        "Do not include extra text, file paths, acknowledgements, or wrapper objects in the final output unless the user explicitly asked for them.",
+        "Output keys must match the user's requested keys exactly, including spelling and case.",
         "Every args value must be valid JSON as written.",
         "Prefer a direct shell.exec step for simple command-output formatting tasks.",
         "Use fs.not_exists to verify that a path is absent after deletion or cleanup.",
+        "Use SQL for aggregation, grouping, counting, filtering, joins, and histograms whenever the database can express the operation directly.",
+        "For top-level or non-recursive file matching, prefer fs.list plus minimal filtering or formatting instead of fs.find.",
+        "Do not use python.exec when sql.query or fs.* can solve the task directly.",
+        "Be correct first, minimal second, and efficient third.",
         "If a high_level_plan is provided in the planner context, refine it into executable steps",
         "If explicit_tool_intent is provided in the planner context, you MUST use those requested tools",
         "Every step that produces data for later use must declare an output alias.",
@@ -875,13 +882,45 @@ def test_prompt_sources_describe_resolved_python_input_shapes() -> None:
         "do not assume SQL result fields unless they were explicitly selected by the SQL query.",
         "downstream steps consume the python.exec output value directly",
         "If the user asks to return, list, show, or provide data, the final step must surface that data",
+        "do not implement file listing, reading, writing, copying, or size calculation logic directly; use fs.* tools for filesystem work.",
+        "The only filesystem exception in python.exec is a thin loop that orchestrates repeated fs.copy calls",
         "\"code\": \"result = ','.join(inputs['py_files'].splitlines())\"",
         "\"code\": \"rows = inputs['rows']; result = rows[0]['study_count'] if rows else 0\"",
+        "\"code\": \"copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in inputs['entries'] if name.endswith('.txt')]; result = ','.join(copied)\"",
     ]
 
     for snippet in required_snippets:
         assert snippet in DEFAULT_PLANNER_PROMPT
         assert snippet in file_prompt
+
+
+def test_prompt_sources_replace_weak_examples_with_path_and_scope_aware_ones() -> None:
+    file_prompt = (Path(__file__).resolve().parents[2] / "prompts" / "planner_system.txt").read_text()
+
+    required_snippets = [
+        "count CT and MR series in dicom and return JSON with keys CT and MR",
+        "find all top-level *.txt files under reports and return them as csv",
+        "copy all top-level txt files from A to B and return the copied filenames as csv",
+        "\"find_root\": {\"$ref\": \"txt_matches\", \"path\": \"path\"}",
+        "total_size = sum(fs.size(f'{root}/{match}') for match in matches)",
+        "\"content\": {\"$ref\": \"patient_csv\"}",
+        "\"code\": \"lines = inputs['text'].splitlines(); result = lines[1] if len(lines) > 1 else ''\"",
+    ]
+
+    forbidden_snippets = [
+        "f'inputs/{path}'",
+        "lines = fs.read('notes.txt').splitlines()",
+        "files = fs.list('A'); copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in files if name.endswith('.txt')]; result = {'operation': 'bulk_copy'",
+        "\"content\": {\"$ref\": \"patient_csv\", \"path\": \"csv\"}",
+    ]
+
+    for snippet in required_snippets:
+        assert snippet in DEFAULT_PLANNER_PROMPT
+        assert snippet in file_prompt
+
+    for snippet in forbidden_snippets:
+        assert snippet not in DEFAULT_PLANNER_PROMPT
+        assert snippet not in file_prompt
 
 
 def test_classify_plan_violations_marks_modifying_sql_as_hard() -> None:
