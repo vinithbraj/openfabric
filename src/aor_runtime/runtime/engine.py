@@ -20,6 +20,7 @@ from aor_runtime.runtime.decomposer import is_complex_goal
 from aor_runtime.runtime.error_normalization import normalize_planner_error, normalize_runtime_failure
 from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
 from aor_runtime.runtime.planner import TaskPlanner, summarize_plan, summarize_planner_raw_output
+from aor_runtime.runtime.policies import PlanContractViolation
 from aor_runtime.runtime.sessions import SessionManager
 from aor_runtime.runtime.state import RuntimeState
 from aor_runtime.runtime.store import SQLiteRunStore
@@ -34,6 +35,12 @@ DANGEROUS_SHELL_PATTERN = re.compile(r"(?:^|&&|\|\||;|\|)\s*(?:sudo\s+)?(?:rm|rm
 FAILURE_SUMMARY_MAX_STEPS = 3
 FAILURE_SUMMARY_MAX_BYTES = 4096
 FAILURE_SUMMARY_MAX_STRING = 240
+NON_RETRYABLE_FAILURE_MESSAGES = {
+    "Unsafe query",
+    "Only SELECT and WITH queries are allowed.",
+    "Multiple SQL statements are not allowed.",
+    "Empty SQL query.",
+}
 STARTUP_BANNER = r"""
    ___   ____  ____
   / _ | / __ \/ __/
@@ -159,6 +166,17 @@ def _truncate_failure_context_strings(value: Any) -> Any:
     if isinstance(value, str):
         return _truncate_string(value)
     return value
+
+
+def _is_non_retryable_failure(reason: str, detail: str, extra_context: dict[str, Any]) -> bool:
+    if str(extra_context.get("violation_tier") or "").strip().lower() == "hard":
+        return True
+    normalized = str(detail or "").strip()
+    if normalized in NON_RETRYABLE_FAILURE_MESSAGES:
+        return True
+    if reason == "planner_contract_failed":
+        return True
+    return False
 
 
 class ExecutionEngine:
@@ -412,6 +430,8 @@ class ExecutionEngine:
                 final_output_metadata["planner_raw_output_preview"] = raw_output_preview
             if normalized_error is not None:
                 final_output_metadata.update(normalized_error.as_metadata())
+            if isinstance(exc, PlanContractViolation):
+                final_output_metadata.update(exc.as_metadata())
             state.update(
                 {
                     "current_node": "planner",
@@ -450,6 +470,8 @@ class ExecutionEngine:
                 failure_payload["canonicalization_changed"] = bool(self.planner.last_plan_canonicalized)
             if normalized_error is not None:
                 failure_payload.update(normalized_error.as_metadata())
+            if isinstance(exc, PlanContractViolation):
+                failure_payload.update(exc.as_metadata())
             self.store.append_event(
                 session_id=session.id,
                 node_name="planner",
@@ -636,7 +658,8 @@ class ExecutionEngine:
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
         self._configure_runtime_for_compiled(compiled)
         retries = int(state.get("retries", 0))
-        should_retry = retries < min(compiled.runtime.max_retries, self.settings.max_plan_retries)
+        retryable = not _is_non_retryable_failure(reason, detail, extra_context)
+        should_retry = retryable and retries < min(compiled.runtime.max_retries, self.settings.max_plan_retries)
         step_payload = extra_context.get("step")
         normalized_error = normalize_runtime_failure(
             reason=reason,
@@ -668,6 +691,13 @@ class ExecutionEngine:
             ]
         if normalized_error is not None:
             failure_context.update(normalized_error.as_metadata())
+        failure_context["retryable"] = retryable
+        if "contract_violation" in extra_context:
+            failure_context["contract_violation"] = bool(extra_context.get("contract_violation"))
+        if extra_context.get("violation_tier"):
+            failure_context["violation_tier"] = extra_context.get("violation_tier")
+        if extra_context.get("violation_code"):
+            failure_context["violation_code"] = extra_context.get("violation_code")
         failure_context = _cap_failure_context_size(failure_context)
 
         self.store.append_event(
@@ -726,6 +756,7 @@ class ExecutionEngine:
                         "metadata": {
                             "goal": state.get("goal", ""),
                             "failure_reason": reason,
+                            "retryable": retryable,
                             **(normalized_error.as_metadata() if normalized_error is not None else {}),
                         },
                     },

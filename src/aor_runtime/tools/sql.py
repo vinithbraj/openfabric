@@ -37,7 +37,7 @@ def _coerce_value(value: Any) -> Any:
     return str(value)
 
 
-def _validate_safe_query(query: str) -> str:
+def validate_safe_query(query: str) -> str:
     normalized = str(query or "").strip()
     if not normalized:
         raise ToolExecutionError("Empty SQL query.")
@@ -48,6 +48,9 @@ def _validate_safe_query(query: str) -> str:
     if not READ_ONLY_SQL_RE.match(normalized):
         raise ToolExecutionError("Only SELECT and WITH queries are allowed.")
     return normalized.rstrip(";")
+
+
+_validate_safe_query = validate_safe_query
 
 
 class ColumnSchema(ToolResultModel):

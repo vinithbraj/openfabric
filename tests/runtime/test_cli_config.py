@@ -5,7 +5,9 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from aor_runtime import __version__
+from aor_runtime.api.app import create_app
 from aor_runtime import cli
+from aor_runtime.config import Settings
 
 
 runner = CliRunner()
@@ -55,6 +57,14 @@ def test_build_engine_prints_startup_banner(tmp_path: Path, capsys) -> None:
     assert "aor-runtime" in captured.err
     assert f"v{__version__}" in captured.err
     assert "___" in captured.err
+
+
+def test_api_app_uses_runtime_version(tmp_path: Path) -> None:
+    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+
+    app = create_app(settings)
+
+    assert app.version == __version__
 
 
 def test_serve_uses_yaml_host_port(monkeypatch, tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from aor_runtime import __version__
 from aor_runtime.app_config import APP_CONFIG_PATH_ENV
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.runtime.engine import ExecutionEngine
@@ -27,7 +28,7 @@ class ValidateRequest(BaseModel):
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    app = FastAPI(title="Agent Orchestration Runtime", version="0.1.0")
+    app = FastAPI(title="Agent Orchestration Runtime", version=__version__)
     configured_settings = settings or get_settings(config_path=os.getenv(APP_CONFIG_PATH_ENV) or None)
     engine = ExecutionEngine(configured_settings)
 

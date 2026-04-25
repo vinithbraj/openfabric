@@ -6,6 +6,7 @@ from pathlib import Path
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan
 from aor_runtime.runtime.engine import ExecutionEngine
+from aor_runtime.runtime.policies import PlanContractViolation
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -418,6 +419,64 @@ def test_unclassified_sql_error_message_is_preserved(tmp_path: Path) -> None:
     assert session.state["final_output"]["content"] == "Unsafe query"
     metadata = session.state["final_output"]["metadata"]
     assert "error_source" not in metadata
+
+
+def test_unsafe_query_failure_is_non_retryable(tmp_path: Path) -> None:
+    settings = Settings(
+        workspace_root=tmp_path,
+        run_store_path=tmp_path / "runtime.db",
+        sql_databases={"dicom": "postgresql+psycopg://admin:admin@localhost:5432/dicom"},
+        sql_default_database="dicom",
+    )
+    engine = ExecutionEngine(settings)
+    session = _session(engine, "Delete all patients in dicom")
+
+    engine._handle_retry_or_failure(
+        session,
+        node_name="executor",
+        reason="tool_execution_failed",
+        detail="Unsafe query",
+        extra_context={
+            "step": {"id": 1, "action": "sql.query", "args": {"database": "dicom", "query": "DELETE FROM patient"}},
+            "history": [],
+        },
+    )
+
+    assert session.state["status"] == "failed"
+    assert session.state["final_output"]["content"] == "Unsafe query"
+    assert session.state["failure_context"]["retryable"] is False
+    assert session.state["final_output"]["metadata"]["retryable"] is False
+
+
+def test_planner_contract_failure_metadata_is_preserved(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Delete all patients in dicom")
+
+    def failing_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["sql_preference"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_llm_calls = 1
+        engine.planner.last_error_stage = "direct"
+        raise PlanContractViolation(
+            "Unsafe query",
+            tier="hard",
+            code="unsafe_sql",
+            violations=[],
+        )
+
+    monkeypatch.setattr(engine.planner, "build_plan", failing_build_plan)
+
+    engine._run_planner(session)
+
+    metadata = session.state["final_output"]["metadata"]
+    assert metadata["contract_violation"] is True
+    assert metadata["violation_tier"] == "hard"
+    assert metadata["violation_code"] == "unsafe_sql"
+    events = engine.store.get_events(session.id)
+    planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
+    assert planner_failed["payload"]["contract_violation"] is True
+    assert planner_failed["payload"]["violation_tier"] == "hard"
 
 
 def test_retry_and_terminal_failure_clear_policies_used(tmp_path: Path) -> None:

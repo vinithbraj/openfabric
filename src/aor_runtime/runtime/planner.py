@@ -10,7 +10,13 @@ from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow
 from aor_runtime.runtime.decomposer import GoalDecomposer, is_complex_goal
 from aor_runtime.runtime.plan_canonicalizer import canonicalize_plan, coerce_plan_payload
-from aor_runtime.runtime.policies import render_policy_text, select_policies, validate_plan
+from aor_runtime.runtime.policies import (
+    PlanContractViolation,
+    classify_plan_violations,
+    render_policy_text,
+    select_policies,
+    validate_plan_contract,
+)
 from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.sql import get_schema, prune_schema, resolve_sql_databases
 
@@ -43,6 +49,8 @@ You MUST:
 - Every step that produces data for later use must declare an output alias.
 - Later steps that consume prior results must declare input aliases and reference previous outputs explicitly with structured refs like {"$ref": "alias"} or {"$ref": "alias", "path": "rows.0.name"}.
 - Refinement must preserve outputs from previous steps, use outputs in subsequent steps, avoid placeholder or hardcoded values, and maintain logical dataflow across steps.
+- Preserve full file paths exactly as provided in the goal or returned by tools.
+- When fs.find returns matches, pass those path strings forward exactly as returned. Do not strip directory prefixes, collapse to basenames, or rebuild alternate prefixes.
 - Use sql.query for relational database questions when schema information is provided.
 - Use SQL for aggregation, grouping, counting, filtering large datasets, and joins whenever the database can express the operation directly.
 - Prefer pushing computation into SQL whenever possible.
@@ -53,6 +61,7 @@ You MUST:
 - Never encode database selection inside the SQL text.
 - Prefer sql.query over shell.exec or python.exec for direct database reads.
 - Avoid pulling large datasets into python.exec for simple aggregation tasks that SQL can perform directly.
+- If the user requests modifying SQL data or schema, do not generate a modifying sql.query plan. Produce an explicit error outcome instead.
 - Use fs.* for file operations.
 - Use shell.exec for system-level commands.
 - If the task explicitly names a node, include that node in shell.exec args.
@@ -63,7 +72,8 @@ You MUST:
 - Use python.exec once for simple composition, combine logic into a single block when possible, and use multiple python.exec steps only if necessary.
 - Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
 - Use python.exec for formatting, visualization preparation, or post-processing only after SQL has already reduced the dataset when possible.
-- In python.exec, you may call sql.query through the provided sql helper.
+- In python.exec, code must be valid, minimal, and should only import json when an import is required.
+- In python.exec, do not use os, subprocess, system calls, or direct shell.exec(...) / sql.query(...) helper calls.
 - In python.exec, upstream data is passed through args.inputs and available in the sandbox as the inputs dict.
 - In python.exec, inputs[...] values are fully computed runtime results, not references, wrappers, or tool-response objects.
 - In python.exec, inputs[...] is the value itself, not an object containing the value, and it does not contain implicit nested structure.
@@ -75,11 +85,9 @@ You MUST:
 - In python.exec, always handle empty SQL result lists safely before indexing.
 - In python.exec, do not assume SQL result fields unless they were explicitly selected by the SQL query.
 - In python.exec, downstream steps consume the python.exec output value directly, so produce one clear output value rather than ambiguous nested containers.
-- In python.exec, shell.exec(...) called directly inside the sandbox returns an object with stdout, stderr, and returncode fields. If you need command output text from a direct helper call, parse shell.exec(...).stdout.
-- In python.exec, shell.exec(command, node='edge-1') runs on the requested logical node. If node is omitted, the default node is used when configured.
-- In python.exec, call sql.query with explicit keyword arguments like sql.query(database='clinical_db', query='SELECT ...').
 - In python.exec, assign the final JSON-serializable answer to a variable named result.
 - If the user asks to return, list, show, or provide data, the final step must surface that data and not only write it to a file.
+- Return exactly what the user asked for: count requests return a number only, CSV requests return a CSV string only, and JSON requests return a JSON object only.
 - Keep python.exec code in a single-line JSON string and use semicolons instead of raw newlines.
 - Every args value must be valid JSON as written.
 - For straightforward command-output extraction, filtering, or CSV/text formatting, prefer a single shell.exec step when shell can produce the final answer directly.
@@ -115,6 +123,7 @@ You MUST NOT:
 - Do not use fs.list when the user asked to find matching files recursively by pattern and fs.find is available.
 - Do not use shell.exec or Python imports like os.path for file sizes when fs.size is available.
 - Do not generate placeholder values like name1,name2,name3 when upstream data is available.
+- Do not generate modifying SQL such as INSERT, UPDATE, DELETE, CREATE, ALTER, GRANT, or REVOKE.
 
 Tool selection policy:
 - Use sql.query for filtering or querying structured data.
@@ -194,12 +203,15 @@ how many txt files are in logs
 Plan:
 {
   "steps": [
-    {"id": 1, "action": "fs.find", "args": {"path": "logs", "pattern": "*.txt"}},
+    {"id": 1, "action": "fs.find", "args": {"path": "logs", "pattern": "*.txt"}, "output": "txt_matches"},
     {
       "id": 2,
       "action": "python.exec",
+      "input": ["txt_matches"],
+      "output": "txt_count",
       "args": {
-        "code": "files = fs.find('logs', '*.txt'); result = {'count': len(files)}"
+        "inputs": {"matches": {"$ref": "txt_matches", "path": "matches"}},
+        "code": "result = len(inputs['matches'])"
       }
     }
   ]
@@ -218,7 +230,7 @@ Plan:
       "output": "csv_result",
       "args": {
         "inputs": {"matches": {"$ref": "txt_matches", "path": "matches"}},
-        "code": "result = {'csv': ','.join(inputs['matches'])}"
+        "code": "result = ','.join(inputs['matches'])"
       }
     }
   ]
@@ -237,7 +249,7 @@ Plan:
       "output": "csv_result",
       "args": {
         "inputs": {"py_files": {"$ref": "py_files", "path": "stdout"}},
-        "code": "result = {'csv': ','.join(inputs['py_files'].splitlines())}"
+        "code": "result = ','.join(inputs['py_files'].splitlines())"
       }
     }
   ]
@@ -256,7 +268,7 @@ Plan:
       "output": "size_summary",
       "args": {
         "inputs": {"files": {"$ref": "txt_matches", "path": "matches"}},
-        "code": "total_size = sum(fs.size(path) for path in inputs['files']); result = {'file_count': len(inputs['files']), 'total_size_bytes': total_size}"
+        "code": "result = {'file_count': len(inputs['files']), 'total_size_bytes': sum(fs.size(path) for path in inputs['files'])}"
       }
     }
   ]
@@ -283,7 +295,7 @@ Plan:
       "output": "study_count",
       "args": {
         "inputs": {"rows": {"$ref": "study_rows", "path": "rows"}},
-        "code": "rows = inputs['rows']; result = {'count': rows[0]['study_count'] if rows else 0}"
+        "code": "rows = inputs['rows']; result = rows[0]['study_count'] if rows else 0"
       }
     }
   ]
@@ -310,7 +322,7 @@ Plan:
       "output": "patient_csv",
       "args": {
         "inputs": {"rows": {"$ref": "patient_rows", "path": "rows"}},
-        "code": "result = {'csv': ','.join(row['name'] for row in inputs['rows'])}"
+        "code": "result = ','.join(row['name'] for row in inputs['rows'])"
       }
     },
     {"id": 3, "action": "fs.mkdir", "args": {"path": "outputs"}},
@@ -774,12 +786,22 @@ class TaskPlanner:
         self._apply_storage_shell_semantics(goal, plan)
         normalize_execution_plan_dataflow(plan)
         self.last_original_execution_plan = plan.model_dump()
-        canonicalized = canonicalize_plan(plan, goal, allowed_tools)
-        plan = canonicalized.plan
-        self.last_plan_repairs = list(canonicalized.repairs)
-        self.last_plan_canonicalized = canonicalized.changed
-        self.last_canonicalized_execution_plan = plan.model_dump() if canonicalized.changed else None
-        normalize_execution_plan_dataflow(plan)
+        initial_violations = classify_plan_violations(plan, goal=goal)
+        if initial_violations.hard:
+            raise PlanContractViolation.from_violations(initial_violations)
+
+        if initial_violations.soft:
+            canonicalized = canonicalize_plan(plan, goal, allowed_tools)
+            plan = canonicalized.plan
+            self.last_plan_repairs = list(canonicalized.repairs)
+            self.last_plan_canonicalized = canonicalized.changed
+            self.last_canonicalized_execution_plan = plan.model_dump() if canonicalized.changed else None
+            normalize_execution_plan_dataflow(plan)
+        else:
+            self.last_plan_repairs = []
+            self.last_plan_canonicalized = False
+            self.last_canonicalized_execution_plan = None
+
         for step in plan.steps:
             if step.action not in allowed_tools:
                 raise ValueError(f"Planner selected disallowed tool {step.action!r}.")
@@ -787,7 +809,7 @@ class TaskPlanner:
         self._validate_explicit_database_targets(goal, plan)
         self._validate_shell_targets(plan)
         self._validate_explicit_tool_intent(plan, explicit_tool_intent)
-        validate_plan(plan)
+        validate_plan_contract(plan, goal=goal)
         return plan
 
     def _validate_explicit_tool_intent(self, plan: ExecutionPlan, explicit_tool_intent: list[str]) -> None:

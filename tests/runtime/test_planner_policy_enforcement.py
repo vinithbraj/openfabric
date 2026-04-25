@@ -10,7 +10,12 @@ from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
 from aor_runtime.tools.sql import DatabaseSchema, SchemaInfo, TableSchema, ColumnSchema
 from aor_runtime.runtime.decomposer import DEFAULT_DECOMPOSER_PROMPT
 from aor_runtime.runtime.planner import DEFAULT_PLANNER_PROMPT, TaskPlanner
-from aor_runtime.runtime.policies import validate_plan_efficiency
+from aor_runtime.runtime.policies import (
+    PlanContractViolation,
+    classify_plan_violations,
+    validate_plan_contract,
+    validate_plan_efficiency,
+)
 from aor_runtime.tools.factory import build_tool_registry
 
 
@@ -824,7 +829,7 @@ def test_planner_tracks_raw_output_and_error_type_for_malformed_json(tmp_path: P
     assert '"content": "hello" + "world"' in planner.last_raw_output
 
 
-def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
+def test_prompt_sources_include_execution_contract_rules() -> None:
     file_prompt = (Path(__file__).resolve().parents[2] / "prompts" / "planner_system.txt").read_text()
     decomposer_file_prompt = (Path(__file__).resolve().parents[2] / "prompts" / "decomposer_system.txt").read_text()
 
@@ -833,7 +838,10 @@ def test_prompt_sources_include_shell_helper_and_json_literal_rules() -> None:
         "Never invent node names outside the provided logical node list.",
         "If schema information includes a database dialect, generate SQL that is valid for that dialect.",
         "For PostgreSQL, do not use SQLite-only functions like strftime.",
-        "shell.exec(...) called directly inside the sandbox returns an object with stdout, stderr, and returncode fields",
+        "Preserve full file paths exactly as provided in the goal or returned by tools.",
+        "When fs.find returns matches, pass those path strings forward exactly as returned.",
+        "If the user requests modifying SQL data or schema, do not generate a modifying sql.query plan.",
+        "Return exactly what the user asked for: count requests return a number only, CSV requests return a CSV string only, and JSON requests return a JSON object only.",
         "Every args value must be valid JSON as written.",
         "Prefer a direct shell.exec step for simple command-output formatting tasks.",
         "Use fs.not_exists to verify that a path is absent after deletion or cleanup.",
@@ -867,13 +875,138 @@ def test_prompt_sources_describe_resolved_python_input_shapes() -> None:
         "do not assume SQL result fields unless they were explicitly selected by the SQL query.",
         "downstream steps consume the python.exec output value directly",
         "If the user asks to return, list, show, or provide data, the final step must surface that data",
-        "\"code\": \"result = {'csv': ','.join(inputs['py_files'].splitlines())}\"",
-        "\"code\": \"rows = inputs['rows']; result = {'count': rows[0]['study_count'] if rows else 0}\"",
+        "\"code\": \"result = ','.join(inputs['py_files'].splitlines())\"",
+        "\"code\": \"rows = inputs['rows']; result = rows[0]['study_count'] if rows else 0\"",
     ]
 
     for snippet in required_snippets:
         assert snippet in DEFAULT_PLANNER_PROMPT
         assert snippet in file_prompt
+
+
+def test_classify_plan_violations_marks_modifying_sql_as_hard() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "sql.query",
+                    "args": {"database": "dicom", "query": "DELETE FROM patient"},
+                }
+            ]
+        }
+    )
+
+    violations = classify_plan_violations(plan, goal="Delete all patients from dicom")
+
+    assert [violation.code for violation in violations.hard] == ["unsafe_sql"]
+    assert violations.soft == []
+
+
+def test_classify_plan_violations_marks_forbidden_python_import_as_hard() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {"code": "import os; result = 1"},
+                }
+            ]
+        }
+    )
+
+    violations = classify_plan_violations(plan, goal="Return a number")
+
+    assert any(violation.code == "forbidden_python_import" for violation in violations.hard)
+
+
+def test_classify_plan_violations_marks_python_syntax_error_as_hard() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {"code": "result = ("},
+                }
+            ]
+        }
+    )
+
+    violations = classify_plan_violations(plan, goal="Return a number")
+
+    assert any(violation.code == "python_syntax_error" for violation in violations.hard)
+
+
+def test_validate_plan_contract_rejects_nested_input_wrapper_access() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {
+                        "inputs": {"rows": []},
+                        "code": "result = inputs['rows']['count']",
+                    },
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(PlanContractViolation, match="nested wrapper fields"):
+        validate_plan_contract(plan, goal="Return the count")
+
+
+def test_validate_plan_contract_flags_missing_result_assignment_as_soft() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {"code": "value = 1"},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(PlanContractViolation) as exc_info:
+        validate_plan_contract(plan, goal="Return the value")
+
+    assert exc_info.value.tier == "soft"
+    assert exc_info.value.code == "missing_result_assignment"
+
+
+def test_validate_plan_contract_flags_unguarded_sql_row_index_as_soft() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "sql.query",
+                    "args": {"database": "dicom", "query": "SELECT COUNT(*) AS patient_count FROM patient"},
+                    "output": "patient_rows",
+                },
+                {
+                    "id": 2,
+                    "action": "python.exec",
+                    "input": ["patient_rows"],
+                    "args": {
+                        "inputs": {"rows": {"$ref": "patient_rows", "path": "rows"}},
+                        "code": "rows = inputs['rows']; result = rows[0]['patient_count']",
+                    },
+                },
+            ]
+        }
+    )
+
+    with pytest.raises(PlanContractViolation) as exc_info:
+        validate_plan_contract(plan, goal="Return the patient count")
+
+    assert exc_info.value.tier == "soft"
+    assert exc_info.value.code == "unguarded_sql_rows"
 
 
 def test_planner_context_includes_database_dialect(tmp_path: Path, monkeypatch) -> None:

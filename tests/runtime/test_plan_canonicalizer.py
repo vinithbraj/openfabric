@@ -143,6 +143,21 @@ def test_canonicalizer_repairs_unique_relative_path_and_leaves_ambiguous_paths_a
     assert ambiguous_result.plan.steps[2].args["src"] == "egg_report.txt"
 
 
+def test_canonicalizer_preserves_unique_absolute_paths() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {"id": 1, "action": "fs.read", "args": {"path": "/tmp/data/nested/egg_report.txt"}, "output": "report_content"},
+                {"id": 2, "action": "fs.copy", "args": {"src": "egg_report.txt", "dst": "/tmp/archive/egg_report.txt"}},
+            ]
+        }
+    )
+
+    result = canonicalize_plan(plan, "Archive /tmp/data/nested/egg_report.txt", ["fs.read", "fs.copy"])
+
+    assert result.plan.steps[1].args["src"] == "/tmp/data/nested/egg_report.txt"
+
+
 def test_canonicalizer_appends_text_readback_and_marks_added_step() -> None:
     plan = ExecutionPlan.model_validate(
         {
