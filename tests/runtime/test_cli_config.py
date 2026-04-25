@@ -4,6 +4,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+import aor_runtime
 from aor_runtime import __version__
 from aor_runtime.api.app import create_app
 from aor_runtime import cli
@@ -65,6 +66,27 @@ def test_api_app_uses_runtime_version(tmp_path: Path) -> None:
     app = create_app(settings)
 
     assert app.version == __version__
+
+
+def test_get_runtime_version_includes_package_version_git_sha_and_dirty_suffix(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    (repo_root / ".git").mkdir(parents=True)
+
+    def fake_run_git_command(path: Path, args: list[str]) -> str:
+        assert path == repo_root
+        if args == ["rev-parse", "--short", "HEAD"]:
+            return "abc1234"
+        if args == ["status", "--short"]:
+            return " M src/aor_runtime/runtime/dataflow.py"
+        return ""
+
+    monkeypatch.setattr(aor_runtime, "_run_git_command", fake_run_git_command)
+    monkeypatch.setattr(aor_runtime.Path, "resolve", lambda self: repo_root / "src" / "aor_runtime" / "__init__.py")
+    aor_runtime.get_runtime_version.cache_clear()
+    try:
+        assert aor_runtime.get_runtime_version() == f"{aor_runtime.__package_version__}+abc1234.dirty"
+    finally:
+        aor_runtime.get_runtime_version.cache_clear()
 
 
 def test_serve_uses_yaml_host_port(monkeypatch, tmp_path: Path) -> None:

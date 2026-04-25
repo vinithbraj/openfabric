@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from typing import Any
 
 from aor_runtime.core.contracts import ExecutionPlan, ExecutionStep
@@ -74,11 +75,14 @@ def resolve_step_value(value: Any, step_outputs: dict[str, Any]) -> Any:
 
 
 def resolve_execution_step(step: ExecutionStep, step_outputs: dict[str, Any]) -> ExecutionStep:
+    resolved_args = resolve_step_value(step.args, step_outputs)
+    if step.action == "fs.write":
+        resolved_args = _normalize_fs_write_args(resolved_args)
     return ExecutionStep.model_validate(
         {
             "id": step.id,
             "action": step.action,
-            "args": resolve_step_value(step.args, step_outputs),
+            "args": resolved_args,
             "input": list(step.input),
             "output": step.output,
         }
@@ -153,6 +157,8 @@ def _normalize_python_inputs(step: ExecutionStep, output_producers: dict[str, st
 
 
 def _default_ref_path_for_action(action: str) -> str | None:
+    if action == "python.exec":
+        return "result"
     if action == "shell.exec":
         return "stdout"
     if action == "sql.query":
@@ -168,3 +174,50 @@ def _default_ref_path_for_action(action: str) -> str | None:
     if action in {"fs.exists", "fs.not_exists"}:
         return "exists"
     return None
+
+
+def _normalize_fs_write_args(args: dict[str, Any]) -> dict[str, Any]:
+    content = args.get("content")
+    if isinstance(content, str):
+        return args
+    normalized = dict(args)
+    normalized["content"] = _coerce_fs_write_content(content)
+    return normalized
+
+
+def _coerce_fs_write_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        if _looks_like_python_exec_result(value):
+            output = value.get("output")
+            if isinstance(output, str):
+                return output
+            return _coerce_fs_write_content(value.get("result"))
+        if _looks_like_shell_result(value):
+            return str(value.get("stdout") or "")
+        return _json_dumps_safe(value)
+    if isinstance(value, list):
+        return _json_dumps_safe(value)
+    return str(value)
+
+
+def _looks_like_python_exec_result(value: dict[str, Any]) -> bool:
+    return {"success", "result", "error"}.issubset(value.keys()) and "output" in value
+
+
+def _looks_like_shell_result(value: dict[str, Any]) -> bool:
+    return {"stdout", "stderr", "returncode"}.issubset(value.keys())
+
+
+def _json_dumps_safe(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return json.dumps(value, default=str, ensure_ascii=False, sort_keys=True)

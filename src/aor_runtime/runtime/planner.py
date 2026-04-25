@@ -110,6 +110,10 @@ You MUST:
 - For delete-like shell commands, verify removed paths with fs.not_exists after the shell step.
 - For folder or directory disk-usage questions, prefer du-based shell commands.
 - For filesystem or disk-capacity questions, prefer df-based shell commands.
+- For text-content search across many files, prefer shell.exec with a portable find + grep command rather than python.exec file IO or fs.read loops.
+- If the user specifies a file pattern such as *.txt or *.py, use find ROOT -type f -name "<pattern>" -exec grep -li -- "needle" {} + || true so the content search targets the requested files.
+- If the user asks to search all files and does not specify a pattern, search all regular files with find ROOT -type f -exec grep -li -- "needle" {} + || true rather than inventing a restrictive extension filter.
+- Use rg -l only as an optional faster variant when the shell environment is explicitly known to support rg; otherwise default to the portable find + grep form.
 
 You MUST NOT:
 - Output anything except the JSON ExecutionPlan object.
@@ -241,6 +245,82 @@ Plan:
       "args": {
         "inputs": {"matches": {"$ref": "txt_matches", "path": "matches"}},
         "code": "result = ','.join(inputs['matches'])"
+      }
+    }
+  ]
+}
+
+Task:
+find all *.txt files in this folder with the word vinith in their contents
+Plan:
+{
+  "steps": [
+    {"id": 1, "action": "shell.exec", "args": {"command": "find . -type f -name \"*.txt\" -exec grep -li -- \"vinith\" {} + || true"}, "output": "matching_files"},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["matching_files"],
+      "output": "csv_result",
+      "args": {
+        "inputs": {"matching_files": {"$ref": "matching_files", "path": "stdout"}},
+        "code": "result = ','.join(line for line in inputs['matching_files'].splitlines() if line)"
+      }
+    }
+  ]
+}
+
+Task:
+list all .py files with import in their contents
+Plan:
+{
+  "steps": [
+    {"id": 1, "action": "shell.exec", "args": {"command": "find . -type f -name \"*.py\" -exec grep -li -- \"import\" {} + || true"}, "output": "matching_files"},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["matching_files"],
+      "output": "csv_result",
+      "args": {
+        "inputs": {"matching_files": {"$ref": "matching_files", "path": "stdout"}},
+        "code": "result = ','.join(line for line in inputs['matching_files'].splitlines() if line)"
+      }
+    }
+  ]
+}
+
+Task:
+list all files with vinith in their contents
+Plan:
+{
+  "steps": [
+    {"id": 1, "action": "shell.exec", "args": {"command": "find . -type f -exec grep -li -- \"vinith\" {} + || true"}, "output": "matching_files"},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["matching_files"],
+      "output": "csv_result",
+      "args": {
+        "inputs": {"matching_files": {"$ref": "matching_files", "path": "stdout"}},
+        "code": "result = ','.join(line for line in inputs['matching_files'].splitlines() if line)"
+      }
+    }
+  ]
+}
+
+Task:
+if the shell environment is explicitly known to support rg, find all *.txt files in this folder with the word vinith in their contents
+Plan:
+{
+  "steps": [
+    {"id": 1, "action": "shell.exec", "args": {"command": "rg -l -i --glob \"*.txt\" \"vinith\" ."}, "output": "matching_files"},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["matching_files"],
+      "output": "csv_result",
+      "args": {
+        "inputs": {"matching_files": {"$ref": "matching_files", "path": "stdout"}},
+        "code": "result = ','.join(line for line in inputs['matching_files'].splitlines() if line)"
       }
     }
   ]
@@ -396,7 +476,7 @@ Plan:
           "study_rows": {"$ref": "study_rows", "path": "rows"},
           "series_rows": {"$ref": "series_rows", "path": "rows"}
         },
-        "code": "study_rows = inputs['study_rows']; series_rows = inputs['series_rows']; result = json.dumps({'studies': study_rows[0]['studies'] if study_rows else 0, 'series': series_rows[0]['series'] if series_rows else 0}, sort_keys=True)"
+        "code": "import json; study_rows = inputs['study_rows']; series_rows = inputs['series_rows']; result = json.dumps({'studies': study_rows[0]['studies'] if study_rows else 0, 'series': series_rows[0]['series'] if series_rows else 0}, sort_keys=True)"
       }
     },
     {"id": 4, "action": "fs.mkdir", "args": {"path": "reports"}},

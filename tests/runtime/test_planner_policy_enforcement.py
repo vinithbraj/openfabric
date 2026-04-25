@@ -848,6 +848,10 @@ def test_prompt_sources_include_execution_contract_rules() -> None:
         "Every args value must be valid JSON as written.",
         "Prefer a direct shell.exec step for simple command-output formatting tasks.",
         "Use fs.not_exists to verify that a path is absent after deletion or cleanup.",
+        "For text-content search across many files, prefer shell.exec with a portable find + grep command rather than python.exec file IO or fs.read loops.",
+        "If the user specifies a file pattern such as *.txt or *.py, use find ROOT -type f -name \"<pattern>\" -exec grep -li -- \"needle\" {} + || true so the content search targets the requested files.",
+        "If the user asks to search all files and does not specify a pattern, search all regular files with find ROOT -type f -exec grep -li -- \"needle\" {} + || true rather than inventing a restrictive extension filter.",
+        "Use rg -l only as an optional faster variant when the shell environment is explicitly known to support rg; otherwise default to the portable find + grep form.",
         "Use SQL for aggregation, grouping, counting, filtering, joins, and histograms whenever the database can express the operation directly.",
         "For top-level or non-recursive file matching, prefer fs.list plus minimal filtering or formatting instead of fs.find.",
         "Do not use python.exec when sql.query, fs.*, or shell.exec can solve the task directly.",
@@ -888,7 +892,7 @@ def test_prompt_sources_describe_resolved_python_input_shapes() -> None:
         "do not use os, subprocess, system calls, eval, exec, or direct fs.* / shell.exec(...) / sql.query(...) helper calls.",
         "\"code\": \"result = ','.join(inputs['py_files'].splitlines())\"",
         "\"code\": \"rows = inputs['rows']; result = rows[0]['study_count'] if rows else 0\"",
-        "\"code\": \"study_rows = inputs['study_rows']; series_rows = inputs['series_rows']; result = json.dumps({'studies': study_rows[0]['studies'] if study_rows else 0, 'series': series_rows[0]['series'] if series_rows else 0}, sort_keys=True)\"",
+        "\"code\": \"import json; study_rows = inputs['study_rows']; series_rows = inputs['series_rows']; result = json.dumps({'studies': study_rows[0]['studies'] if study_rows else 0, 'series': series_rows[0]['series'] if series_rows else 0}, sort_keys=True)\"",
     ]
 
     for snippet in required_snippets:
@@ -903,6 +907,10 @@ def test_prompt_sources_replace_weak_examples_with_path_and_scope_aware_ones() -
         "count CT and MR series in dicom and return JSON with keys CT and MR",
         "find all top-level *.txt files under reports and return them as csv",
         "count studies and series in clinical_db, write a JSON summary to reports/summary.json, and return it",
+        "find all *.txt files in this folder with the word vinith in their contents",
+        "list all .py files with import in their contents",
+        "list all files with vinith in their contents",
+        "if the shell environment is explicitly known to support rg, find all *.txt files in this folder with the word vinith in their contents",
         "\"content\": {\"$ref\": \"patient_csv\"}",
         "\"code\": \"lines = inputs['text'].splitlines(); result = lines[1] if len(lines) > 1 else ''\"",
         "Anti-patterns:",
@@ -918,11 +926,21 @@ def test_prompt_sources_replace_weak_examples_with_path_and_scope_aware_ones() -
         "result = {'file_count': len(inputs['files']), 'total_size_bytes': sum(fs.size(path) for path in inputs['files'])}",
         "copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in inputs['entries'] if name.endswith('.txt')]",
         "\"content\": {\"$ref\": \"patient_csv\", \"path\": \"csv\"}",
+        "open(f, 'r').read()",
     ]
 
     for snippet in required_snippets:
         assert snippet in DEFAULT_PLANNER_PROMPT
         assert snippet in file_prompt
+
+    assert 'find . -type f -exec grep -li -- "vinith" {} + || true' in DEFAULT_PLANNER_PROMPT
+    assert 'find . -type f -name "*.txt" -exec grep -li -- "vinith" {} + || true' in DEFAULT_PLANNER_PROMPT
+    assert 'find . -type f -name "*.py" -exec grep -li -- "import" {} + || true' in DEFAULT_PLANNER_PROMPT
+    assert 'rg -l -i --glob "*.txt" "vinith" .' in DEFAULT_PLANNER_PROMPT
+    assert 'find . -type f -exec grep -li -- \\"vinith\\" {} + || true' in file_prompt
+    assert 'find . -type f -name \\"*.txt\\" -exec grep -li -- \\"vinith\\" {} + || true' in file_prompt
+    assert 'find . -type f -name \\"*.py\\" -exec grep -li -- \\"import\\" {} + || true' in file_prompt
+    assert 'rg -l -i --glob \\"*.txt\\" \\"vinith\\" .' in file_prompt
 
     for snippet in forbidden_snippets:
         assert snippet not in DEFAULT_PLANNER_PROMPT
@@ -964,6 +982,24 @@ def test_classify_plan_violations_marks_forbidden_python_import_as_hard() -> Non
     violations = classify_plan_violations(plan, goal="Return a number")
 
     assert any(violation.code == "forbidden_python_import" for violation in violations.hard)
+
+
+def test_classify_plan_violations_marks_open_as_hard() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {"code": "result = open('notes.txt').read()"},
+                }
+            ]
+        }
+    )
+
+    violations = classify_plan_violations(plan, goal="Read notes.txt")
+
+    assert any(violation.code == "forbidden_python_name" for violation in violations.hard)
 
 
 def test_classify_plan_violations_marks_python_syntax_error_as_hard() -> None:

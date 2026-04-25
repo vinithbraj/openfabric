@@ -451,19 +451,40 @@ def _repair_write_content_from_inputs(
 ) -> tuple[dict[str, Any], list[str]]:
     if step.action != "fs.write":
         return args, []
+    path_value = args.get("path")
+    if not isinstance(path_value, str):
+        return args, []
+
+    content_value = args.get("content")
+    if is_step_reference(content_value):
+        output_alias = str(content_value["$ref"]).strip()
+        producer = next((item for item in prior_producers if item.output == output_alias), None)
+        if producer is None:
+            return args, []
+        content_path = _preferred_content_path_for_write(path_value, producer.action)
+        if content_path is None:
+            return args, []
+        current_path = str(content_value.get("path") or "").strip()
+        if current_path == content_path:
+            return args, []
+        repaired = deepcopy(args)
+        repaired["content"] = {"$ref": output_alias, "path": content_path}
+        label = current_path or "<default>"
+        return repaired, [f"write_content_ref:{path_value}:{label}->{content_path}"]
+
     if collect_step_references(args):
         return args, []
     if len(inputs) != 1:
         return args, []
-    path_value = args.get("path")
-    content_value = args.get("content")
-    if not isinstance(path_value, str) or not isinstance(content_value, str):
+    if not isinstance(content_value, str):
         return args, []
     output_alias = inputs[0]
     producer = next((item for item in prior_producers if item.output == output_alias), None)
     if producer is None:
         return args, []
     content_path = _preferred_content_path_for_write(path_value, producer.action)
+    if content_path is None:
+        return args, []
     repaired = deepcopy(args)
     repaired["content"] = {"$ref": output_alias, "path": content_path}
     return repaired, [f"write_content:{path_value}<-{output_alias}.{content_path}"]
@@ -527,17 +548,21 @@ def _literal_paths_for_args(args: dict[str, Any]) -> list[str]:
     return paths
 
 
-def _preferred_content_path_for_write(path_value: str, producer_action: str) -> str:
+def _preferred_content_path_for_write(path_value: str, producer_action: str) -> str | None:
     suffix = PurePosixPath(path_value).suffix.lower()
-    if suffix == ".json":
-        return "json"
-    if suffix == ".csv":
-        return "csv"
-    if suffix == ".md":
-        return "markdown"
     if producer_action == "fs.read":
         return "content"
-    return "content"
+    if producer_action == "shell.exec":
+        return "stdout"
+    if producer_action == "python.exec":
+        if suffix == ".json":
+            return "json"
+        if suffix == ".csv":
+            return "csv"
+        if suffix == ".md":
+            return "markdown"
+        return "value"
+    return None
 
 
 def _append_final_readback_if_needed(

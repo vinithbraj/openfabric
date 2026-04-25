@@ -205,6 +205,31 @@ def test_canonicalizer_repairs_write_content_from_single_upstream_alias() -> Non
     assert result.plan.steps[1].args["content"] == {"$ref": "json_summary", "path": "json"}
 
 
+def test_canonicalizer_repairs_existing_write_ref_to_python_exec_textual_path() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {"code": "result = {'studies': 10, 'series': 20}"},
+                    "output": "summary_json",
+                },
+                {
+                    "id": 2,
+                    "action": "fs.write",
+                    "input": ["summary_json"],
+                    "args": {"path": "reports/summary.json", "content": {"$ref": "summary_json"}},
+                },
+            ]
+        }
+    )
+
+    result = canonicalize_plan(plan, "Write and return the summary", ["python.exec", "fs.write", "fs.read"])
+
+    assert result.plan.steps[1].args["content"] == {"$ref": "summary_json", "path": "json"}
+
+
 def test_canonicalizer_rewrites_structured_fs_write_into_python_writer() -> None:
     plan = ExecutionPlan.model_validate(
         {
@@ -251,10 +276,9 @@ def test_canonicalizer_rewrites_structured_ref_write_and_appends_readback() -> N
     result = canonicalize_plan(plan, "Write reports/histogram.json and return it", ["python.exec", "fs.write", "fs.read"])
 
     assert [step.id for step in result.plan.steps] == [1, 2, 3]
-    assert result.plan.steps[1].action == "python.exec"
+    assert result.plan.steps[1].action == "fs.write"
     assert result.plan.steps[1].input == ["histogram_result"]
-    assert result.plan.steps[1].args["inputs"]["content"] == {"$ref": "histogram_result", "path": "histogram"}
-    assert result.plan.steps[1].args[CANONICALIZER_WRITE_PATH_ARG] == "reports/histogram.json"
+    assert result.plan.steps[1].args["content"] == {"$ref": "histogram_result", "path": "json"}
     assert result.plan.steps[2].action == "fs.read"
     assert result.plan.steps[2].args["path"] == "reports/histogram.json"
     assert result.plan.steps[2].args[CANONICALIZER_ADDED_ARG] is True
