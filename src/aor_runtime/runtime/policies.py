@@ -25,6 +25,7 @@ SQL_ALIAS_RE = re.compile(r"\bas\s+([a-zA-Z_][a-zA-Z0-9_]*)\b", re.IGNORECASE)
 PATH_ARG_KEYS = {"path", "src", "dst"}
 MAX_ALLOWED_STEPS = 12
 FORBIDDEN_IMPORT_MODULES = {"os", "subprocess"}
+ALLOWED_PYTHON_IMPORT_MODULES = {"json", "re"}
 FORBIDDEN_PYTHON_NAMES = {"__import__", "compile", "eval", "exec", "open"}
 FORBIDDEN_NAME_CALLS = {"system", "popen", "spawn", "fork", "execv", "execve", "execl", "execvp"}
 FORBIDDEN_ATTR_CALLS = {
@@ -429,15 +430,23 @@ def _classify_python_ast_hard_violations(tree: ast.AST) -> list[PlanViolation]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 module_name = str(alias.name or "").split(".", 1)[0]
-                if module_name != "json":
+                if module_name not in ALLOWED_PYTHON_IMPORT_MODULES:
                     violations.append(
-                        PlanViolation("hard", "forbidden_python_import", f"python.exec may only import json, not {module_name}.")
+                        PlanViolation(
+                            "hard",
+                            "forbidden_python_import",
+                            f"python.exec may only import json or re, not {module_name}.",
+                        )
                     )
         elif isinstance(node, ast.ImportFrom):
             module_name = str(node.module or "").split(".", 1)[0]
-            if module_name != "json":
+            if module_name not in ALLOWED_PYTHON_IMPORT_MODULES:
                 violations.append(
-                    PlanViolation("hard", "forbidden_python_import", f"python.exec may only import json, not {module_name}.")
+                    PlanViolation(
+                        "hard",
+                        "forbidden_python_import",
+                        f"python.exec may only import json or re, not {module_name}.",
+                    )
                 )
         elif isinstance(node, ast.Name) and node.id in FORBIDDEN_PYTHON_NAMES:
             violations.append(

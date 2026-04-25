@@ -53,7 +53,7 @@ You MUST:
 - Use python.exec for formatting, combining, visualization preparation, or post-processing only after upstream tool steps have already produced the needed data.
 - python.exec is a pure data transformation step: it must read from inputs[...], compute a transformed value, and assign the final value to result.
 - python.exec must never call tools and must never perform side effects.
-- In python.exec, code must be valid, minimal, and should only import json when an import is required.
+- In python.exec, code must be valid, minimal, and should only import json or re when an import is required.
 - In python.exec, do not use os, subprocess, system calls, eval, exec, or direct fs.* / shell.exec(...) / sql.query(...) helper calls.
 - In python.exec, all side-effecting work must appear as explicit non-Python tool steps in the plan.
 - In python.exec, upstream data is passed through args.inputs and available in the sandbox as the inputs dict.
@@ -75,6 +75,14 @@ You MUST:
 - Keep python.exec code in a single-line JSON string. Use semicolons instead of raw newlines.
 - Every args value must be valid JSON as written.
 - For straightforward command-output extraction, filtering, or CSV/text formatting, prefer a single shell.exec step when shell can produce the final answer directly.
+- For fetch-and-extract tasks such as curl/fetch page + extract section/value, treat extraction as a shell-first pattern and prefer a single shell.exec step when shell can return the final extracted text directly.
+- For web fetches in shell.exec, prefer curl -sL and prefer https:// for bare domains so redirects are followed and the fetched page is the canonical page.
+- For simple HTML/text extraction, do not generate shell.exec -> python.exec or shell.exec -> shell.exec plans when one shell.exec pipeline can fetch once and return the requested extracted text directly.
+- For simple HTML tag or section extraction such as <head>, <title>, or similar single-section extraction, use a single shell.exec pipeline and do not add python.exec unless shell cannot express the extraction cleanly.
+- Do not generate multiple shell.exec steps that fetch the same URL twice for a single extraction task.
+- For shell-based HTML/text extraction, prefer portable pipe-based commands and avoid process substitution like <(...).
+- Use python.exec with re only when upstream shell or other tools already produced the full input text and the extraction is too awkward to express cleanly in shell.
+- If python.exec uses re for extraction, result must be a plain string, list, dict, number, or boolean. Never assign a raw re.Match object to result; use match.group(0) if match else '' or similar.
 - Prefer filesystem tools over shell commands for filesystem tasks.
 - Use fs.find for recursive file discovery and glob-style file matching such as *.txt under a directory.
 - For top-level or non-recursive file matching, prefer fs.list plus minimal filtering or formatting instead of fs.find.
@@ -281,6 +289,44 @@ Task: if the shell environment is explicitly known to support rg, find all *.txt
       "args": {
         "inputs": {"matching_files": {"$ref": "matching_files", "path": "stdout"}},
         "code": "result = ','.join(line for line in inputs['matching_files'].splitlines() if line)"
+      }
+    }
+  ]
+}
+
+Task: curl google.com and extract <head>
+{
+  "steps": [
+    {"id": 1, "action": "shell.exec", "args": {"command": "curl -sL https://www.google.com | tr '\\n' ' ' | sed -n 's:.*\\(<head[^>]*>.*</head>\\).*:\\1:p'"}}
+  ]
+}
+
+Task: fetch a page and extract title text
+{
+  "steps": [
+    {"id": 1, "action": "shell.exec", "args": {"command": "curl -sL https://example.com | tr '\\n' ' ' | sed -n 's:.*<title[^>]*>\\([^<]*\\)</title>.*:\\1:p'"}}
+  ]
+}
+
+Task: curl example.com and extract <title>
+{
+  "steps": [
+    {"id": 1, "action": "shell.exec", "args": {"command": "curl -sL https://example.com | tr '\\n' ' ' | sed -n 's:.*\\(<title[^>]*>.*</title>\\).*:\\1:p'"}}
+  ]
+}
+
+Task: fetch a page, then extract a value with complex regex cleanup
+{
+  "steps": [
+    {"id": 1, "action": "shell.exec", "args": {"command": "curl -sL https://example.com"}, "output": "html_content"},
+    {
+      "id": 2,
+      "action": "python.exec",
+      "input": ["html_content"],
+      "output": "description_text",
+      "args": {
+        "inputs": {"html": {"$ref": "html_content", "path": "stdout"}},
+        "code": "import re; match = re.search(r'<meta[^>]+name=[\\\"\\']description[\\\"\\'][^>]+content=[\\\"\\']([^\\\"\\']+)[\\\"\\']', inputs['html'], re.IGNORECASE); result = match.group(1) if match else ''"
       }
     }
   ]

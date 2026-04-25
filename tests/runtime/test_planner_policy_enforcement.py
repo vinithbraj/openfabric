@@ -855,9 +855,18 @@ def test_prompt_sources_include_execution_contract_rules() -> None:
         "Use SQL for aggregation, grouping, counting, filtering, joins, and histograms whenever the database can express the operation directly.",
         "For top-level or non-recursive file matching, prefer fs.list plus minimal filtering or formatting instead of fs.find.",
         "Do not use python.exec when sql.query, fs.*, or shell.exec can solve the task directly.",
+        "In python.exec, code must be valid, minimal, and should only import json or re when an import is required.",
         "python.exec is a pure data transformation step: it must read from inputs[...], compute a transformed value, and assign the final value to result.",
         "python.exec must never call tools and must never perform side effects.",
         "all side-effecting work must appear as explicit non-Python tool steps in the plan.",
+        "For fetch-and-extract tasks such as curl/fetch page + extract section/value, treat extraction as a shell-first pattern and prefer a single shell.exec step when shell can return the final extracted text directly.",
+        "For web fetches in shell.exec, prefer curl -sL and prefer https:// for bare domains so redirects are followed and the fetched page is the canonical page.",
+        "For simple HTML/text extraction, do not generate shell.exec -> python.exec or shell.exec -> shell.exec plans when one shell.exec pipeline can fetch once and return the requested extracted text directly.",
+        "For simple HTML tag or section extraction such as <head>, <title>, or similar single-section extraction, use a single shell.exec pipeline and do not add python.exec unless shell cannot express the extraction cleanly.",
+        "Do not generate multiple shell.exec steps that fetch the same URL twice for a single extraction task.",
+        "For shell-based HTML/text extraction, prefer portable pipe-based commands and avoid process substitution like <(...).",
+        "Use python.exec with re only when upstream shell or other tools already produced the full input text and the extraction is too awkward to express cleanly in shell.",
+        "If python.exec uses re for extraction, result must be a plain string, list, dict, number, or boolean.",
         "Be correct first, minimal second, and efficient third.",
         "If a high_level_plan is provided in the planner context, refine it into executable steps",
         "If explicit_tool_intent is provided in the planner context, you MUST use those requested tools",
@@ -910,6 +919,10 @@ def test_prompt_sources_replace_weak_examples_with_path_and_scope_aware_ones() -
         "find all *.txt files in this folder with the word vinith in their contents",
         "list all .py files with import in their contents",
         "list all files with vinith in their contents",
+        "curl google.com and extract <head>",
+        "fetch a page and extract title text",
+        "curl example.com and extract <title>",
+        "fetch a page, then extract a value with complex regex cleanup",
         "if the shell environment is explicitly known to support rg, find all *.txt files in this folder with the word vinith in their contents",
         "\"content\": {\"$ref\": \"patient_csv\"}",
         "\"code\": \"lines = inputs['text'].splitlines(); result = lines[1] if len(lines) > 1 else ''\"",
@@ -937,14 +950,31 @@ def test_prompt_sources_replace_weak_examples_with_path_and_scope_aware_ones() -
     assert 'find . -type f -name "*.txt" -exec grep -li -- "vinith" {} + || true' in DEFAULT_PLANNER_PROMPT
     assert 'find . -type f -name "*.py" -exec grep -li -- "import" {} + || true' in DEFAULT_PLANNER_PROMPT
     assert 'rg -l -i --glob "*.txt" "vinith" .' in DEFAULT_PLANNER_PROMPT
+    assert "curl -sL https://www.google.com | tr " in DEFAULT_PLANNER_PROMPT
+    assert "sed -n 's:.*\\(<head[^>]*>.*</head>\\).*:\\1:p'" in DEFAULT_PLANNER_PROMPT
+    assert "curl -sL https://example.com | tr " in DEFAULT_PLANNER_PROMPT
+    assert "sed -n 's:.*<title[^>]*>\\([^<]*\\)</title>.*:\\1:p'" in DEFAULT_PLANNER_PROMPT
+    assert "sed -n 's:.*\\(<title[^>]*>.*</title>\\).*:\\1:p'" in DEFAULT_PLANNER_PROMPT
+    assert "import re; match = re.search" in DEFAULT_PLANNER_PROMPT
+    assert "result = match.group(1) if match else ''" in DEFAULT_PLANNER_PROMPT
     assert 'find . -type f -exec grep -li -- \\"vinith\\" {} + || true' in file_prompt
     assert 'find . -type f -name \\"*.txt\\" -exec grep -li -- \\"vinith\\" {} + || true' in file_prompt
     assert 'find . -type f -name \\"*.py\\" -exec grep -li -- \\"import\\" {} + || true' in file_prompt
     assert 'rg -l -i --glob \\"*.txt\\" \\"vinith\\" .' in file_prompt
+    assert "curl -sL https://www.google.com | tr " in file_prompt
+    assert "sed -n 's:.*\\\\(<head[^>]*>.*</head>\\\\).*:\\\\1:p'" in file_prompt
+    assert "curl -sL https://example.com | tr " in file_prompt
+    assert "sed -n 's:.*<title[^>]*>\\\\([^<]*\\\\)</title>.*:\\\\1:p'" in file_prompt
+    assert "sed -n 's:.*\\\\(<title[^>]*>.*</title>\\\\).*:\\\\1:p'" in file_prompt
+    assert "import re; match = re.search" in file_prompt
+    assert "result = match.group(1) if match else ''" in file_prompt
 
     for snippet in forbidden_snippets:
         assert snippet not in DEFAULT_PLANNER_PROMPT
         assert snippet not in file_prompt
+
+    assert "<(curl -s" not in DEFAULT_PLANNER_PROMPT
+    assert "<(curl -s" not in file_prompt
 
 
 def test_classify_plan_violations_marks_modifying_sql_as_hard() -> None:
@@ -982,6 +1012,24 @@ def test_classify_plan_violations_marks_forbidden_python_import_as_hard() -> Non
     violations = classify_plan_violations(plan, goal="Return a number")
 
     assert any(violation.code == "forbidden_python_import" for violation in violations.hard)
+
+
+def test_classify_plan_violations_allows_re_import() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "action": "python.exec",
+                    "args": {"code": "import re; result = bool(re.search('x', 'xyz'))"},
+                }
+            ]
+        }
+    )
+
+    violations = classify_plan_violations(plan, goal="Return whether x exists")
+
+    assert violations.hard == []
 
 
 def test_classify_plan_violations_marks_open_as_hard() -> None:
