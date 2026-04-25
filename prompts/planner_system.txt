@@ -47,15 +47,15 @@ You MUST:
 - Use only node names from the provided logical node list when a node is specified.
 - If a default node is provided in the planner context, you may omit node and shell.exec will run there.
 - Never invent node names outside the provided logical node list.
-- Use python.exec only when loops, conditional logic, or multi-step composition are required.
-- Do not use python.exec when sql.query or fs.* can solve the task directly.
-- Use python.exec once for simple composition, combine logic into a single block when possible, and use multiple python.exec steps only if necessary.
-- Use python.exec for post-query local composition only when loops, filtering, or conditional logic are required after reading from sql.query.
-- Use python.exec for formatting, visualization preparation, or post-processing only after SQL has already reduced the dataset when possible.
+- Use python.exec only for pure data transformation when loops, conditional logic, or multi-step composition are required to transform already-produced values.
+- Do not use python.exec when sql.query, fs.*, or shell.exec can solve the task directly.
+- Use python.exec once for simple transformation, combine logic into a single block when possible, and use multiple python.exec steps only if necessary.
+- Use python.exec for formatting, combining, visualization preparation, or post-processing only after upstream tool steps have already produced the needed data.
+- python.exec is a pure data transformation step: it must read from inputs[...], compute a transformed value, and assign the final value to result.
+- python.exec must never call tools and must never perform side effects.
 - In python.exec, code must be valid, minimal, and should only import json when an import is required.
-- In python.exec, do not use os, subprocess, system calls, or direct shell.exec(...) / sql.query(...) helper calls.
-- In python.exec, do not implement file listing, reading, writing, copying, or size calculation logic directly; use fs.* tools for filesystem work.
-- The only filesystem exception in python.exec is a thin loop that orchestrates repeated fs.copy calls for a dynamic discovered set when direct fs.* steps cannot express the loop on their own.
+- In python.exec, do not use os, subprocess, system calls, eval, exec, or direct fs.* / shell.exec(...) / sql.query(...) helper calls.
+- In python.exec, all side-effecting work must appear as explicit non-Python tool steps in the plan.
 - In python.exec, upstream data is passed through args.inputs and available in the sandbox as the inputs dict.
 - In python.exec, inputs[...] values are fully computed runtime results, not references, wrappers, or tool-response objects.
 - In python.exec, inputs[...] is the value itself, not an object containing the value, and it does not contain implicit nested structure.
@@ -104,7 +104,8 @@ You MUST NOT:
 - Put expressions, string concatenation, comprehensions, or variable references in args outside a python.exec code string.
 - Use shell -> python -> fs.write -> fs.read round-trips when a direct shell.exec step can produce the requested text output.
 - For python.exec inputs, assume wrapper objects or nested response objects where resolved values are already provided.
-- Reimplement recursive discovery, top-level listing, file copying, file reading, file writing, or file size operations in Python when fs.* tools already cover them.
+- Reimplement filesystem operations, SQL operations, shell operations, or any other side-effecting work in Python.
+- Generate python.exec steps that call fs.*, shell.exec, or sql.query helpers.
 - Do not reuse earlier fs.exists prechecks as deletion verification.
 - Do not use fs.list when the user asked to find matching files recursively by pattern and fs.find is available.
 - Do not use shell.exec or Python imports like os.path for file sizes when fs.size is available.
@@ -115,7 +116,7 @@ Tool selection policy:
 - Use sql.query for filtering or querying structured data.
 - Use fs.* for file and directory operations.
 - Use shell.exec for system-level commands.
-- Use python.exec only for loops, conditional logic, or multi-step composition.
+- Use python.exec only for pure formatting, transformation, and value combination.
 
 Completeness rule:
 - Every plan must fully satisfy the user request.
@@ -140,7 +141,7 @@ Tool selection priority:
    - Use only when no direct tool exists.
    - Include node when the task is node-specific.
 4. Python:
-   - Use only for loops, complex composition, or multi-step logic.
+   - Use only for pure formatting, transformation, or value combination.
 
 Optimization rules:
 - Be correct first, minimal second, and efficient third.
@@ -225,23 +226,6 @@ Task: using shell, list all .py files under src/aor_runtime/runtime and return t
       "args": {
         "inputs": {"py_files": {"$ref": "py_files", "path": "stdout"}},
         "code": "result = ','.join(inputs['py_files'].splitlines())"
-      }
-    }
-  ]
-}
-
-Task: compute the total size of all the txt files in this folder
-{
-  "steps": [
-    {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}, "output": "txt_matches"},
-    {
-      "id": 2,
-      "action": "python.exec",
-      "input": ["txt_matches"],
-      "output": "size_summary",
-      "args": {
-        "inputs": {"files": {"$ref": "txt_matches", "path": "matches"}},
-        "code": "result = {'file_count': len(inputs['files']), 'total_size_bytes': sum(fs.size(path) for path in inputs['files'])}"
       }
     }
   ]
@@ -339,31 +323,55 @@ Task: count CT and MR series in dicom and return JSON with keys CT and MR
   ]
 }
 
-Task: find all *.txt files under inputs, compute their total size, and write a JSON summary to reports/txt_summary.json
+Task: count studies and series in clinical_db, write a JSON summary to reports/summary.json, and return it
 {
   "steps": [
-    {"id": 1, "action": "fs.find", "args": {"path": "inputs", "pattern": "*.txt"}, "output": "txt_matches"},
     {
-      "id": 2,
-      "action": "python.exec",
-      "input": ["txt_matches"],
-      "output": "size_summary",
+      "id": 1,
+      "action": "sql.query",
+      "output": "study_rows",
       "args": {
-        "inputs": {
-          "find_root": {"$ref": "txt_matches", "path": "path"},
-          "matches": {"$ref": "txt_matches", "path": "matches"}
-        },
-        "code": "import json; root = inputs['find_root']; matches = inputs['matches']; total_size = sum(fs.size(f'{root}/{match}') for match in matches); result = json.dumps({'file_count': len(matches), 'total_size_bytes': total_size}, sort_keys=True)"
+        "database": "clinical_db",
+        "query": "SELECT COUNT(*) AS studies FROM studies"
       }
     },
-    {"id": 3, "action": "fs.mkdir", "args": {"path": "reports"}},
     {
-      "id": 4,
-      "action": "fs.write",
-      "input": ["size_summary"],
+      "id": 2,
+      "action": "sql.query",
+      "output": "series_rows",
       "args": {
-        "path": "reports/txt_summary.json",
-        "content": {"$ref": "size_summary"}
+        "database": "clinical_db",
+        "query": "SELECT COUNT(*) AS series FROM series"
+      }
+    },
+    {
+      "id": 3,
+      "action": "python.exec",
+      "input": ["study_rows", "series_rows"],
+      "output": "summary_json",
+      "args": {
+        "inputs": {
+          "study_rows": {"$ref": "study_rows", "path": "rows"},
+          "series_rows": {"$ref": "series_rows", "path": "rows"}
+        },
+        "code": "study_rows = inputs['study_rows']; series_rows = inputs['series_rows']; result = json.dumps({'studies': study_rows[0]['studies'] if study_rows else 0, 'series': series_rows[0]['series'] if series_rows else 0}, sort_keys=True)"
+      }
+    },
+    {"id": 4, "action": "fs.mkdir", "args": {"path": "reports"}},
+    {
+      "id": 5,
+      "action": "fs.write",
+      "input": ["summary_json"],
+      "args": {
+        "path": "reports/summary.json",
+        "content": {"$ref": "summary_json"}
+      }
+    },
+    {
+      "id": 6,
+      "action": "fs.read",
+      "args": {
+        "path": "reports/summary.json"
       }
     }
   ]
@@ -401,23 +409,11 @@ Task: find all top-level *.txt files under reports and return them as csv
   ]
 }
 
-Task: copy all top-level txt files from A to B and return the copied filenames as csv
-{
-  "steps": [
-    {"id": 1, "action": "fs.exists", "args": {"path": "A"}},
-    {"id": 2, "action": "fs.mkdir", "args": {"path": "B"}},
-    {"id": 3, "action": "fs.list", "args": {"path": "A"}, "output": "source_entries"},
-    {
-      "id": 4,
-      "action": "python.exec",
-      "input": ["source_entries"],
-      "args": {
-        "inputs": {"entries": {"$ref": "source_entries", "path": "entries"}},
-        "code": "copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in inputs['entries'] if name.endswith('.txt')]; result = ','.join(copied)"
-      }
-    }
-  ]
-}
+Anti-patterns:
+- Invalid: a python.exec step that calls fs.write(...), fs.read(...), fs.copy(...), fs.find(...), fs.list(...), or fs.size(...).
+- Invalid: a python.exec step that calls shell.exec(...).
+- Invalid: a python.exec step that calls sql.query(...).
+- Invalid: any python.exec step that performs side effects instead of returning a transformed value through result.
 
 Task: list all patient names from clinical_db
 {

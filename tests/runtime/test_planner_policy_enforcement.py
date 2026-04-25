@@ -850,7 +850,10 @@ def test_prompt_sources_include_execution_contract_rules() -> None:
         "Use fs.not_exists to verify that a path is absent after deletion or cleanup.",
         "Use SQL for aggregation, grouping, counting, filtering, joins, and histograms whenever the database can express the operation directly.",
         "For top-level or non-recursive file matching, prefer fs.list plus minimal filtering or formatting instead of fs.find.",
-        "Do not use python.exec when sql.query or fs.* can solve the task directly.",
+        "Do not use python.exec when sql.query, fs.*, or shell.exec can solve the task directly.",
+        "python.exec is a pure data transformation step: it must read from inputs[...], compute a transformed value, and assign the final value to result.",
+        "python.exec must never call tools and must never perform side effects.",
+        "all side-effecting work must appear as explicit non-Python tool steps in the plan.",
         "Be correct first, minimal second, and efficient third.",
         "If a high_level_plan is provided in the planner context, refine it into executable steps",
         "If explicit_tool_intent is provided in the planner context, you MUST use those requested tools",
@@ -882,11 +885,10 @@ def test_prompt_sources_describe_resolved_python_input_shapes() -> None:
         "do not assume SQL result fields unless they were explicitly selected by the SQL query.",
         "downstream steps consume the python.exec output value directly",
         "If the user asks to return, list, show, or provide data, the final step must surface that data",
-        "do not implement file listing, reading, writing, copying, or size calculation logic directly; use fs.* tools for filesystem work.",
-        "The only filesystem exception in python.exec is a thin loop that orchestrates repeated fs.copy calls",
+        "do not use os, subprocess, system calls, eval, exec, or direct fs.* / shell.exec(...) / sql.query(...) helper calls.",
         "\"code\": \"result = ','.join(inputs['py_files'].splitlines())\"",
         "\"code\": \"rows = inputs['rows']; result = rows[0]['study_count'] if rows else 0\"",
-        "\"code\": \"copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in inputs['entries'] if name.endswith('.txt')]; result = ','.join(copied)\"",
+        "\"code\": \"study_rows = inputs['study_rows']; series_rows = inputs['series_rows']; result = json.dumps({'studies': study_rows[0]['studies'] if study_rows else 0, 'series': series_rows[0]['series'] if series_rows else 0}, sort_keys=True)\"",
     ]
 
     for snippet in required_snippets:
@@ -900,17 +902,21 @@ def test_prompt_sources_replace_weak_examples_with_path_and_scope_aware_ones() -
     required_snippets = [
         "count CT and MR series in dicom and return JSON with keys CT and MR",
         "find all top-level *.txt files under reports and return them as csv",
-        "copy all top-level txt files from A to B and return the copied filenames as csv",
-        "\"find_root\": {\"$ref\": \"txt_matches\", \"path\": \"path\"}",
-        "total_size = sum(fs.size(f'{root}/{match}') for match in matches)",
+        "count studies and series in clinical_db, write a JSON summary to reports/summary.json, and return it",
         "\"content\": {\"$ref\": \"patient_csv\"}",
         "\"code\": \"lines = inputs['text'].splitlines(); result = lines[1] if len(lines) > 1 else ''\"",
+        "Anti-patterns:",
+        "Invalid: a python.exec step that calls fs.write(...), fs.read(...), fs.copy(...), fs.find(...), fs.list(...), or fs.size(...).",
+        "Invalid: a python.exec step that calls shell.exec(...).",
+        "Invalid: a python.exec step that calls sql.query(...).",
     ]
 
     forbidden_snippets = [
         "f'inputs/{path}'",
         "lines = fs.read('notes.txt').splitlines()",
-        "files = fs.list('A'); copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in files if name.endswith('.txt')]; result = {'operation': 'bulk_copy'",
+        "total_size = sum(fs.size(f'{root}/{match}') for match in matches)",
+        "result = {'file_count': len(inputs['files']), 'total_size_bytes': sum(fs.size(path) for path in inputs['files'])}",
+        "copied = []; [fs.copy(f'A/{name}', f'B/{name}') or copied.append(name) for name in inputs['entries'] if name.endswith('.txt')]",
         "\"content\": {\"$ref\": \"patient_csv\", \"path\": \"csv\"}",
     ]
 
