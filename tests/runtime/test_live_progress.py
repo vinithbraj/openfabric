@@ -70,6 +70,28 @@ def _write_shell_spec(tmp_path: Path) -> Path:
     return spec_path
 
 
+def _write_slurm_spec(tmp_path: Path) -> Path:
+    spec_path = tmp_path / "slurm.yaml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "name: slurm_progress",
+                "runtime:",
+                "  max_retries: 0",
+                "nodes:",
+                "  default: localhost",
+                "  endpoints:",
+                "    - name: localhost",
+                "      url: https://gateway.internal/exec",
+                "tools:",
+                "  - slurm.queue",
+            ]
+        )
+    )
+    return spec_path
+
+
 def _patch_shell_plan(engine: ExecutionEngine, monkeypatch) -> None:
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["efficiency"]
@@ -88,6 +110,32 @@ def _patch_shell_plan(engine: ExecutionEngine, monkeypatch) -> None:
                         "id": 1,
                         "action": "shell.exec",
                         "args": {"node": "localhost", "command": "printf 'hello\\n'; printf 'warn\\n' >&2"},
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(engine.planner, "build_plan", fake_build_plan)
+
+
+def _patch_slurm_plan(engine: ExecutionEngine, monkeypatch) -> None:
+    def fake_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["efficiency"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "deterministic_intent"
+        engine.planner.last_llm_calls = 0
+        engine.planner.last_error_stage = None
+        engine.planner.last_plan_repairs = []
+        engine.planner.last_plan_canonicalized = False
+        engine.planner.last_original_execution_plan = None
+        engine.planner.last_canonicalized_execution_plan = None
+        return ExecutionPlan.model_validate(
+            {
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "slurm.queue",
+                        "args": {"gateway_node": "localhost"},
                     }
                 ]
             }
@@ -136,3 +184,23 @@ def test_stream_shell_output_events_are_persisted_and_incremental(tmp_path: Path
     later_events = engine.store.get_events_after(session["id"], after_id=output_events[0]["id"])
     assert later_events
     assert all(int(event["id"]) > int(output_events[0]["id"]) for event in later_events)
+
+
+def test_stream_slurm_output_events_are_persisted_and_incremental(tmp_path: Path, monkeypatch) -> None:
+    engine = ExecutionEngine(_settings(tmp_path))
+    spec_path = _write_slurm_spec(tmp_path)
+    _patch_slurm_plan(engine, monkeypatch)
+    _patch_gateway_requests(monkeypatch)
+
+    session = engine.create_session(str(spec_path), {"task": "show slurm queue"}, trigger="manual", stream_shell_output=True)
+    state = engine.resume_session(session["id"], trigger="manual", stream_shell_output=True)
+
+    assert state["status"] == "completed"
+    events = engine.store.get_events(session["id"])
+    output_events = [event for event in events if event["event_type"] == "executor.step.output"]
+    started_event = next(event for event in events if event["event_type"] == "executor.step.started")
+    assert started_event["payload"]["command"] == "squeue -h -o '%i|%u|%T|%P|%j|%M|%D|%R'"
+    assert output_events
+    assert output_events[0]["payload"]["action"] == "slurm.queue"
+    assert output_events[0]["payload"]["channel"] == "stdout"
+    assert "hello" in output_events[0]["payload"]["text"]

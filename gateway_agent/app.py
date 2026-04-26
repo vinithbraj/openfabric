@@ -13,6 +13,7 @@ from gateway_agent.models import CapabilitiesResponse, CapabilityInfo, ExecReque
 
 
 LOGGER = logging.getLogger(__name__)
+TRACE_LOGGER = logging.getLogger("uvicorn.error")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -57,6 +58,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         try:
+            if runtime_settings.trace_commands:
+                TRACE_LOGGER.info("Gateway exec on %s: %s", runtime_settings.node_name, command)
             return execute_command(runtime_settings, command)
         except HTTPException:
             raise
@@ -81,6 +84,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         def event_stream():
             try:
+                if runtime_settings.trace_commands:
+                    TRACE_LOGGER.info("Gateway exec stream on %s: %s", runtime_settings.node_name, command)
                 for chunk in stream_command(runtime_settings, command):
                     yield f"event: {chunk.type}\ndata: {json.dumps(chunk.model_dump(), default=str)}\n\n"
             except Exception as exc:  # pragma: no cover - defensive server guard

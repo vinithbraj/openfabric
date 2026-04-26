@@ -149,6 +149,8 @@ def test_session_events_endpoint_and_stream(tmp_path: Path, monkeypatch) -> None
     assert events_response.status_code == 200
     events = events_response.json()
     assert any(event["event_type"] == "executor.step.output" for event in events)
+    started_event = next(event for event in events if event["event_type"] == "executor.step.started")
+    assert started_event["payload"]["command"] == "printf 'hello\\n'; printf 'warn\\n' >&2"
 
     second_event_id = events[1]["id"]
     filtered = client.get(f"/sessions/{session['id']}/events", params={"after_id": second_event_id})
@@ -206,6 +208,9 @@ def test_runs_stream_and_openai_compat_stream(tmp_path: Path, monkeypatch) -> No
 
     assert response.status_code == 200
     assert "Thinking..." in body
+    assert "Executing shell.exec on localhost:" in body
+    assert "printf" in body
+    assert "warn" in body
     assert "hello\\n" in body
     assert "[stderr] warn\\n" in body
     assert "data: [DONE]" in body

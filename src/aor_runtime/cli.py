@@ -132,7 +132,12 @@ def _render_progress_event(event: dict[str, Any]) -> None:
         return
     if event_type == "executor.step.started":
         step = dict(payload.get("step") or {})
-        typer.echo(f"Executing: {step.get('action', 'step')}")
+        node = str(payload.get("node") or "").strip()
+        command = str(payload.get("command") or "").strip()
+        suffix = f" on {node}" if node else ""
+        typer.echo(f"Executing: {step.get('action', 'step')}{suffix}")
+        if command:
+            typer.echo(f"Command: {command}")
         return
     if event_type == "executor.step.output":
         text = str(payload.get("text") or "")

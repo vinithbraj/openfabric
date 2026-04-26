@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import os
 import re
 import sys
 import time
@@ -20,6 +21,7 @@ from aor_runtime.runtime.engine import ExecutionEngine
 from aor_runtime.runtime.eval_fixtures import rebuild_eval_workspace, render_case_prompt, render_template
 from aor_runtime.runtime.failure_classifier import classify_failure, generate_prompt_suggestions
 from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
+from aor_runtime.tools.slurm import SLURM_FIXTURE_DIR_ENV
 from aor_runtime.core.contracts import ExecutionPlan
 
 
@@ -333,6 +335,7 @@ def main() -> None:
     packs = load_capability_eval_packs(PACKS_DIR)
     ensure_unique_case_ids(packs)
     fixtures = rebuild_eval_workspace(WORKSPACE)
+    os.environ[SLURM_FIXTURE_DIR_ENV] = str(fixtures.variables.get("slurm_fixture_dir", ""))
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     settings_payload = fixtures.settings_payload()
     render_values = {

@@ -96,3 +96,6 @@ class ShellExecTool(BaseTool):
 
     def stream(self, arguments: ToolArgs) -> Iterator[dict[str, Any]]:
         return stream_shell(self.settings, arguments.command, arguments.node)
+
+    def preview_command(self, arguments: ToolArgs) -> str:
+        return str(arguments.command).strip()

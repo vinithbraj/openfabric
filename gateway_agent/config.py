@@ -12,6 +12,9 @@ class Settings(BaseModel):
     bind_host: str = Field(default_factory=lambda: os.getenv("GATEWAY_BIND_HOST", "127.0.0.1"))
     bind_port: int = Field(default_factory=lambda: int(os.getenv("GATEWAY_BIND_PORT", "8787")))
     exec_timeout_seconds: float = Field(default_factory=lambda: float(os.getenv("GATEWAY_EXEC_TIMEOUT_SECONDS", "30")))
+    trace_commands: bool = Field(
+        default_factory=lambda: os.getenv("GATEWAY_TRACE_COMMANDS", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
     workdir: Path | None = Field(
         default_factory=lambda: Path(os.getenv("GATEWAY_WORKDIR")).expanduser() if os.getenv("GATEWAY_WORKDIR") else None
     )

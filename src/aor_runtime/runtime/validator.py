@@ -9,6 +9,16 @@ from aor_runtime.core.utils import extract_json_object
 from aor_runtime.tools.filesystem import fs_exists, fs_find, fs_glob, fs_list, fs_read, fs_size, resolve_path
 from aor_runtime.tools.runtime_return import runtime_return
 from aor_runtime.tools.search_content import fs_search_content
+from aor_runtime.tools.slurm import (
+    slurm_accounting,
+    slurm_job_detail,
+    slurm_metrics,
+    slurm_node_detail,
+    slurm_nodes,
+    slurm_partitions,
+    slurm_queue,
+    slurm_slurmdbd_health,
+)
 from aor_runtime.tools.sql import resolve_sql_databases
 
 
@@ -162,6 +172,102 @@ class RuntimeValidator:
                     "name": f"step_{step.id}_{step.action}",
                     "success": actual == observed,
                     "detail": "file size matches filesystem" if actual == observed else "file size mismatch",
+                }
+
+            if step.action == "slurm.queue":
+                actual_result = slurm_queue(
+                    self.settings,
+                    user=step.args.get("user"),
+                    state=step.args.get("state"),
+                    partition=step.args.get("partition"),
+                    limit=step.args.get("limit"),
+                )
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm queue matches expected fixture output" if success else "slurm queue mismatch",
+                }
+
+            if step.action == "slurm.job_detail":
+                actual_result = slurm_job_detail(self.settings, job_id=str(step.args["job_id"]))
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm job detail matches expected fixture output" if success else "slurm job detail mismatch",
+                }
+
+            if step.action == "slurm.nodes":
+                actual_result = slurm_nodes(
+                    self.settings,
+                    node=step.args.get("node"),
+                    partition=step.args.get("partition"),
+                    state=step.args.get("state"),
+                )
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm nodes match expected fixture output" if success else "slurm nodes mismatch",
+                }
+
+            if step.action == "slurm.node_detail":
+                actual_result = slurm_node_detail(self.settings, node=str(step.args["node"]))
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm node detail matches expected fixture output" if success else "slurm node detail mismatch",
+                }
+
+            if step.action == "slurm.partitions":
+                actual_result = slurm_partitions(self.settings, partition=step.args.get("partition"))
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm partitions match expected fixture output" if success else "slurm partitions mismatch",
+                }
+
+            if step.action == "slurm.accounting":
+                actual_result = slurm_accounting(
+                    self.settings,
+                    user=step.args.get("user"),
+                    state=step.args.get("state"),
+                    partition=step.args.get("partition"),
+                    start=step.args.get("start"),
+                    end=step.args.get("end"),
+                    limit=step.args.get("limit"),
+                )
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm accounting matches expected fixture output" if success else "slurm accounting mismatch",
+                }
+
+            if step.action == "slurm.metrics":
+                actual_result = slurm_metrics(
+                    self.settings,
+                    metric_group=str(step.args.get("metric_group", "cluster_summary")),
+                    start=step.args.get("start"),
+                    end=step.args.get("end"),
+                )
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm metrics match expected fixture output" if success else "slurm metrics mismatch",
+                }
+
+            if step.action == "slurm.slurmdbd_health":
+                actual_result = slurm_slurmdbd_health(self.settings)
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm accounting health matches expected fixture output" if success else "slurm accounting health mismatch",
                 }
 
             if step.action == "shell.exec":

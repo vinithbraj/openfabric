@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -133,3 +134,39 @@ def test_exec_stream_reports_timeout_completion(tmp_path: Path) -> None:
     assert "timed out" in body
     assert "event: completed" in body
     assert '"exit_code": 124' in body
+
+
+def test_exec_traces_command_only_when_enabled(tmp_path: Path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    client = _client(tmp_path, trace_commands=True)
+
+    response = client.post("/exec", json={"node": "localhost", "command": "printf 'hello'"})
+
+    assert response.status_code == 200
+    assert "Gateway exec on localhost: printf 'hello'" in caplog.text
+
+
+def test_exec_does_not_trace_command_by_default(tmp_path: Path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    client = _client(tmp_path)
+
+    response = client.post("/exec", json={"node": "localhost", "command": "printf 'hello'"})
+
+    assert response.status_code == 200
+    assert "Gateway exec on localhost: printf 'hello'" not in caplog.text
+
+
+def test_exec_stream_traces_command_only_when_enabled(tmp_path: Path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    client = _client(tmp_path, trace_commands=True)
+
+    with client.stream(
+        "POST",
+        "/exec/stream",
+        json={"node": "localhost", "command": "printf 'hello\\n'"},
+    ) as response:
+        body = response.read().decode()
+
+    assert response.status_code == 200
+    assert "event: completed" in body
+    assert "Gateway exec stream on localhost: printf 'hello\\n'" in caplog.text

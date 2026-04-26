@@ -179,6 +179,14 @@ def _default_ref_path_for_action(action: str) -> str | None:
         return "size_bytes"
     if action in {"fs.exists", "fs.not_exists"}:
         return "exists"
+    if action in {"slurm.queue", "slurm.accounting"}:
+        return "jobs"
+    if action == "slurm.nodes":
+        return "nodes"
+    if action == "slurm.partitions":
+        return "partitions"
+    if action in {"slurm.job_detail", "slurm.node_detail"}:
+        return "fields"
     return None
 
 

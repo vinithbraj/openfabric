@@ -19,6 +19,25 @@ class PlanExecutor:
     def __init__(self, tools: ToolRegistry) -> None:
         self.tools = tools
 
+    def describe_step(self, step: PlanStep) -> dict[str, Any]:
+        preview: dict[str, Any] = {}
+        node = str(step.args.get("node") or step.args.get("gateway_node") or "").strip()
+        if node:
+            preview["node"] = node
+        command = str(step.args.get("command") or "").strip()
+        if command:
+            preview["command"] = command
+            return preview
+
+        tool = self.tools.get(step.action)
+        preview_method = getattr(tool, "preview_command", None)
+        if callable(preview_method):
+            validated_args = tool.args_model.model_validate(step.args)
+            described = str(preview_method(validated_args) or "").strip()
+            if described:
+                preview["command"] = described
+        return preview
+
     def execute_step(
         self,
         step: PlanStep,
@@ -29,8 +48,8 @@ class PlanExecutor:
         started = datetime.now(timezone.utc).isoformat()
         try:
             resolved_step = resolve_execution_step(step, step_outputs or {})
-            if resolved_step.action == "shell.exec" and event_sink is not None:
-                output = self._invoke_streaming_shell(resolved_step, event_sink)
+            if event_sink is not None and self._supports_streaming(resolved_step.action):
+                output = self._invoke_streaming_tool(resolved_step, event_sink)
             else:
                 output = self.tools.invoke(resolved_step.action, resolved_step.args)
             finished = datetime.now(timezone.utc).isoformat()
@@ -58,7 +77,11 @@ class PlanExecutor:
                 finished_at=finished,
             )
 
-    def _invoke_streaming_shell(self, step: PlanStep, event_sink: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    def _supports_streaming(self, action: str) -> bool:
+        tool = self.tools.get(action)
+        return callable(getattr(tool, "stream", None))
+
+    def _invoke_streaming_tool(self, step: PlanStep, event_sink: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         tool = self.tools.get(step.action)
         validated_args = tool.args_model.model_validate(step.args)
         stream_method = getattr(tool, "stream", None)
@@ -68,8 +91,9 @@ class PlanExecutor:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         returncode: int | None = None
-        resolved_node = str(step.args.get("node", ""))
+        resolved_node = str(step.args.get("node") or step.args.get("gateway_node") or "")
         resolved_command = str(step.args.get("command", ""))
+        stream_metadata: dict[str, Any] = {}
 
         for chunk in stream_method(validated_args):
             chunk_type = str(chunk.get("type") or "")
@@ -96,17 +120,31 @@ class PlanExecutor:
                 returncode = int(chunk.get("exit_code") or 0)
                 resolved_node = str(chunk.get("node") or resolved_node)
                 resolved_command = str(chunk.get("command") or resolved_command)
+                stream_metadata = dict(chunk)
                 continue
             if chunk_type == "error":
-                message = str(chunk.get("text") or "Streaming shell execution failed.")
+                message = str(chunk.get("text") or f"Streaming {step.action} execution failed.")
                 raise ToolExecutionError(message)
+
+        build_stream_result = getattr(tool, "build_stream_result", None)
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
+        finalized_returncode = int(returncode or 0)
+        if callable(build_stream_result):
+            return build_stream_result(
+                validated_args,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=finalized_returncode,
+                metadata=stream_metadata,
+            )
 
         result = {
             "command": resolved_command,
             "node": resolved_node,
-            "stdout": "".join(stdout_chunks),
-            "stderr": "".join(stderr_chunks),
-            "returncode": int(returncode or 0),
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": finalized_returncode,
         }
         if result["returncode"] != 0:
             raise ToolExecutionError(result["stderr"].strip() or f"Command exited with {result['returncode']}")

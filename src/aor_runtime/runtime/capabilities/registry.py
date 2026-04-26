@@ -7,6 +7,7 @@ from aor_runtime.runtime.capabilities.compound import CompoundCapabilityPack
 from aor_runtime.runtime.capabilities.fetch import FetchCapabilityPack
 from aor_runtime.runtime.capabilities.filesystem import FilesystemCapabilityPack
 from aor_runtime.runtime.capabilities.shell import ShellCapabilityPack
+from aor_runtime.runtime.capabilities.slurm import SlurmCapabilityPack
 from aor_runtime.runtime.capabilities.sql import SqlCapabilityPack
 from aor_runtime.runtime.capabilities.text_transform import TextTransformCapabilityPack
 from aor_runtime.runtime.intents import IntentResult
@@ -44,6 +45,7 @@ def build_default_capability_registry() -> CapabilityRegistry:
     registry.register(FilesystemCapabilityPack())
     registry.register(TextTransformCapabilityPack())
     registry.register(SqlCapabilityPack())
+    registry.register(SlurmCapabilityPack())
     registry.register(ShellCapabilityPack())
     registry.register(FetchCapabilityPack())
     return registry

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import getpass
 import shutil
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +116,10 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
     for name, content in FETCH_FIXTURES.items():
         _write(fetch_dir / name, content)
 
+    slurm_dir = workspace / "slurm"
+    for name, content in _slurm_fixture_files().items():
+        _write(slurm_dir / name, content)
+
     sql_path = workspace / "book_club.db"
     db = sqlite3.connect(sql_path)
     try:
@@ -168,6 +174,11 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
             "fetch_example": (fetch_dir / "example.html").resolve().as_uri(),
             "fetch_story": (fetch_dir / "story.html").resolve().as_uri(),
             "fetch_museum": (fetch_dir / "museum.html").resolve().as_uri(),
+            "slurm_fixture_dir": str(slurm_dir),
+            "current_user": getpass.getuser(),
+            "slurm_today_date": datetime.now().strftime("%Y-%m-%d"),
+            "slurm_yesterday_date": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "slurm_last_week_date": (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d"),
         }
     )
 
@@ -217,3 +228,54 @@ def _render_value(value: Any, variables: dict[str, str]) -> Any:
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+
+
+def _slurm_fixture_files() -> dict[str, str]:
+    current_user = getpass.getuser()
+    now = datetime.now().replace(microsecond=0)
+    yesterday = now - timedelta(days=1)
+    last_week = now - timedelta(days=6)
+
+    squeue_lines = [
+        f"12345|{current_user}|RUNNING|gpu|train-gpu|01:20:00|2|None",
+        "12346|alice|PENDING|cpu|align|00:00:00|1|Resources",
+        f"12347|{current_user}|PENDING|gpu|prep|00:00:00|1|Priority",
+        "12348|carla|RUNNING|debug|notebook|00:10:00|1|None",
+    ]
+    sinfo_nodes_lines = [
+        "slurm-worker-agatha|idle|gpu|64|256000|gpu:a100:4",
+        "slurm-worker-bravo|alloc|gpu|64|256000|gpu:a100:4",
+        "slurm-worker-charlie|mix|cpu|32|128000|(null)",
+        "slurm-worker-delta|down|cpu|32|128000|(null)",
+        "slurm-worker-echo|drain|cpu|32|128000|gpu:v100:1",
+    ]
+    sinfo_partition_lines = [
+        "gpu|up|7-00:00:00|2|up|0/64/64/128|gpu:a100:8",
+        "cpu|up|7-00:00:00|3|up|16/48/0/64|(null)",
+        "debug|up|1-00:00:00|1|up|4/28/0/32|(null)",
+    ]
+    sacct_lines = [
+        f"12340|{current_user}|COMPLETED|gpu|train-gpu|01:00:00|8|32G|{yesterday.strftime('%Y-%m-%dT08:00:00')}|{yesterday.strftime('%Y-%m-%dT08:10:00')}|{yesterday.strftime('%Y-%m-%dT09:10:00')}|0:0",
+        f"12341|alice|FAILED|cpu|align|00:20:00|4|8G|{yesterday.strftime('%Y-%m-%dT10:00:00')}|{yesterday.strftime('%Y-%m-%dT10:05:00')}|{yesterday.strftime('%Y-%m-%dT10:25:00')}|1:0",
+        f"12342|bob|CANCELLED|gpu|prep|00:00:30|1|4G|{now.strftime('%Y-%m-%dT07:30:00')}|{now.strftime('%Y-%m-%dT07:31:00')}|{now.strftime('%Y-%m-%dT07:31:30')}|0:15",
+        f"12343|{current_user}|COMPLETED|debug|report|00:05:00|1|1G|{last_week.strftime('%Y-%m-%dT06:00:00')}|{last_week.strftime('%Y-%m-%dT06:01:00')}|{last_week.strftime('%Y-%m-%dT06:06:00')}|0:0",
+    ]
+    job_detail = (
+        f"JobId=12345 JobName=train-gpu UserId={current_user}(1000) GroupId=ml(1000) "
+        "Partition=gpu JobState=RUNNING NumNodes=2 Reason=None"
+    )
+    node_detail = (
+        "NodeName=slurm-worker-agatha Arch=x86_64 CoresPerSocket=32 CPUAlloc=0 CPUEfctv=64 "
+        "CPUTot=64 NodeAddr=slurm-worker-agatha Gres=gpu:a100:4 State=IDLE"
+    )
+
+    return {
+        "squeue.txt": "\n".join(squeue_lines) + "\n",
+        "sinfo_nodes.txt": "\n".join(sinfo_nodes_lines) + "\n",
+        "sinfo_partitions.txt": "\n".join(sinfo_partition_lines) + "\n",
+        "sacct.txt": "\n".join(sacct_lines) + "\n",
+        "scontrol_job_12345.txt": job_detail + "\n",
+        "scontrol_node_slurm-worker-agatha.txt": node_detail + "\n",
+        "sacctmgr_show_cluster.txt": "clusterA|controlhost\n",
+        "sacct_probe.txt": "12340\n12341\n",
+    }

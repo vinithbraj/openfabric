@@ -33,6 +33,7 @@ pip install -r gateway_agent/requirements.txt
 - `GATEWAY_BIND_HOST` bind host. Default: `127.0.0.1`
 - `GATEWAY_BIND_PORT` bind port. Default: `8787`
 - `GATEWAY_EXEC_TIMEOUT_SECONDS` per-command timeout. Default: `30`
+- `GATEWAY_TRACE_COMMANDS` log each requested command on the gateway server. Default: `0`
 - `GATEWAY_WORKDIR` optional working directory for command execution
 
 ## Run
@@ -48,6 +49,19 @@ uvicorn gateway_agent.app:app --host "${GATEWAY_BIND_HOST}" --port "${GATEWAY_BI
 Or use the helper script:
 
 ```bash
+./gateway_agent/startup.sh
+```
+
+To make the gateway print each requested command on the server side:
+
+```bash
+./gateway_agent/startup.sh --trace-commands
+```
+
+or:
+
+```bash
+export GATEWAY_TRACE_COMMANDS=1
 ./gateway_agent/startup.sh
 ```
 

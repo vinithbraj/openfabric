@@ -225,6 +225,7 @@ def test_chat_progress_streams_shell_output(monkeypatch, tmp_path: Path) -> None
     assert result.exit_code == 0
     assert "Thinking..." in result.stdout
     assert "Executing: shell.exec" in result.stdout
+    assert "Command: printf 'hello\\n'; printf 'warn\\n' >&2" in result.stdout
     assert "hello" in result.stdout
     assert "Finished: completed" in result.stdout
 

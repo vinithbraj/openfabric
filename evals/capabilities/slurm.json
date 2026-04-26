@@ -1,0 +1,202 @@
+{
+  "capability": "slurm",
+  "strict_threshold": 0.9,
+  "semantic_threshold": 1.0,
+  "max_llm_fallbacks": 0,
+  "cases": [
+    {
+      "id": "slurm_queue_01",
+      "category": "queue_text",
+      "prompt": "Show slurm queue.",
+      "expected_contains": ["12345", "train-gpu", "12348", "notebook"]
+    },
+    {
+      "id": "slurm_queue_02",
+      "category": "queue_json",
+      "prompt": "Show slurm queue as json only.",
+      "expected": {
+        "jobs": [
+          {"job_id": "12345", "user": "{current_user}", "state": "RUNNING", "partition": "gpu", "name": "train-gpu", "time": "01:20:00", "nodes": "2", "reason": "None"},
+          {"job_id": "12346", "user": "alice", "state": "PENDING", "partition": "cpu", "name": "align", "time": "00:00:00", "nodes": "1", "reason": "Resources"},
+          {"job_id": "12347", "user": "{current_user}", "state": "PENDING", "partition": "gpu", "name": "prep", "time": "00:00:00", "nodes": "1", "reason": "Priority"},
+          {"job_id": "12348", "user": "carla", "state": "RUNNING", "partition": "debug", "name": "notebook", "time": "00:10:00", "nodes": "1", "reason": "None"}
+        ]
+      }
+    },
+    {
+      "id": "slurm_queue_03",
+      "category": "queue_csv",
+      "prompt": "Show slurm queue as csv only.",
+      "expected": "job_id,user,state,partition,name,time,nodes,reason\n12345,{current_user},RUNNING,gpu,train-gpu,01:20:00,2,None\n12346,alice,PENDING,cpu,align,00:00:00,1,Resources\n12347,{current_user},PENDING,gpu,prep,00:00:00,1,Priority\n12348,carla,RUNNING,debug,notebook,00:10:00,1,None"
+    },
+    {
+      "id": "slurm_queue_04",
+      "category": "my_jobs_csv",
+      "prompt": "Show my slurm jobs as csv only.",
+      "expected": "job_id,user,state,partition,name,time,nodes,reason\n12345,{current_user},RUNNING,gpu,train-gpu,01:20:00,2,None\n12347,{current_user},PENDING,gpu,prep,00:00:00,1,Priority"
+    },
+    {
+      "id": "slurm_queue_05",
+      "category": "running_jobs_json",
+      "prompt": "Show running slurm jobs as json only.",
+      "expected": {
+        "jobs": [
+          {"job_id": "12345", "user": "{current_user}", "state": "RUNNING", "partition": "gpu", "name": "train-gpu", "time": "01:20:00", "nodes": "2", "reason": "None"},
+          {"job_id": "12348", "user": "carla", "state": "RUNNING", "partition": "debug", "name": "notebook", "time": "00:10:00", "nodes": "1", "reason": "None"}
+        ]
+      }
+    },
+    {
+      "id": "slurm_queue_06",
+      "category": "pending_jobs_csv",
+      "prompt": "Show pending slurm jobs as csv only.",
+      "expected": "job_id,user,state,partition,name,time,nodes,reason\n12346,alice,PENDING,cpu,align,00:00:00,1,Resources\n12347,{current_user},PENDING,gpu,prep,00:00:00,1,Priority"
+    },
+    {
+      "id": "slurm_queue_07",
+      "category": "running_count",
+      "prompt": "How many slurm jobs are running?",
+      "expected": "2"
+    },
+    {
+      "id": "slurm_queue_08",
+      "category": "pending_count_json",
+      "prompt": "Count pending jobs in slurm as json only.",
+      "expected": {"count": 2}
+    },
+    {
+      "id": "slurm_job_01",
+      "category": "job_detail_text",
+      "prompt": "Show details for slurm job 12345.",
+      "expected_contains": ["JobId=12345", "Partition=gpu", "JobState=RUNNING"]
+    },
+    {
+      "id": "slurm_acct_01",
+      "category": "failed_jobs_json",
+      "prompt": "Show recent failed jobs from sacct as json only.",
+      "expected": {
+        "jobs": [
+          {"job_id": "12341", "user": "alice", "state": "FAILED", "partition": "cpu", "name": "align", "elapsed": "00:20:00", "alloc_cpus": "4", "req_mem": "8G", "submit": "{slurm_yesterday_date}T10:00:00", "start": "{slurm_yesterday_date}T10:05:00", "end": "{slurm_yesterday_date}T10:25:00", "exit_code": "1:0"}
+        ]
+      }
+    },
+    {
+      "id": "slurm_acct_02",
+      "category": "completed_since_yesterday_csv",
+      "prompt": "Show completed jobs since yesterday from sacct as csv only.",
+      "expected": "job_id,user,state,partition,name,elapsed,alloc_cpus,req_mem,submit,start,end,exit_code\n12340,{current_user},COMPLETED,gpu,train-gpu,01:00:00,8,32G,{slurm_yesterday_date}T08:00:00,{slurm_yesterday_date}T08:10:00,{slurm_yesterday_date}T09:10:00,0:0"
+    },
+    {
+      "id": "slurm_acct_03",
+      "category": "user_jobs_json",
+      "prompt": "Show sacct jobs for user alice as json only.",
+      "expected": {
+        "jobs": [
+          {"job_id": "12341", "user": "alice", "state": "FAILED", "partition": "cpu", "name": "align", "elapsed": "00:20:00", "alloc_cpus": "4", "req_mem": "8G", "submit": "{slurm_yesterday_date}T10:00:00", "start": "{slurm_yesterday_date}T10:05:00", "end": "{slurm_yesterday_date}T10:25:00", "exit_code": "1:0"}
+        ]
+      }
+    },
+    {
+      "id": "slurm_nodes_01",
+      "category": "node_status_text",
+      "prompt": "Show slurm node status.",
+      "expected_contains": ["slurm-worker-agatha", "slurm-worker-echo", "gpu:a100:4"]
+    },
+    {
+      "id": "slurm_nodes_02",
+      "category": "node_status_json",
+      "prompt": "Show slurm nodes as json only.",
+      "expected": {
+        "nodes": [
+          {"name": "slurm-worker-agatha", "state": "idle", "partition": "gpu", "cpus": "64", "memory": "256000", "gres": "gpu:a100:4"},
+          {"name": "slurm-worker-bravo", "state": "alloc", "partition": "gpu", "cpus": "64", "memory": "256000", "gres": "gpu:a100:4"},
+          {"name": "slurm-worker-charlie", "state": "mix", "partition": "cpu", "cpus": "32", "memory": "128000", "gres": "(null)"},
+          {"name": "slurm-worker-delta", "state": "down", "partition": "cpu", "cpus": "32", "memory": "128000", "gres": "(null)"},
+          {"name": "slurm-worker-echo", "state": "drain", "partition": "cpu", "cpus": "32", "memory": "128000", "gres": "gpu:v100:1"}
+        ]
+      }
+    },
+    {
+      "id": "slurm_nodes_03",
+      "category": "idle_nodes_csv",
+      "prompt": "Show idle slurm nodes as csv only.",
+      "expected": "name,state,partition,cpus,memory,gres\nslurm-worker-agatha,idle,gpu,64,256000,gpu:a100:4"
+    },
+    {
+      "id": "slurm_nodes_04",
+      "category": "drained_nodes_json",
+      "prompt": "Show drained slurm nodes as json only.",
+      "expected": {
+        "nodes": [
+          {"name": "slurm-worker-echo", "state": "drain", "partition": "cpu", "cpus": "32", "memory": "128000", "gres": "gpu:v100:1"}
+        ]
+      }
+    },
+    {
+      "id": "slurm_nodes_05",
+      "category": "node_detail_text",
+      "prompt": "Show node details for slurm-worker-agatha in slurm.",
+      "expected_contains": ["NodeName=slurm-worker-agatha", "State=IDLE", "Gres=gpu:a100:4"]
+    },
+    {
+      "id": "slurm_partitions_01",
+      "category": "partitions_text",
+      "prompt": "Show slurm partitions.",
+      "expected_contains": ["gpu", "cpu", "debug"]
+    },
+    {
+      "id": "slurm_partitions_02",
+      "category": "partitions_json",
+      "prompt": "Show slurm partitions as json only.",
+      "expected": {
+        "partitions": [
+          {"partition": "gpu", "availability": "up", "time_limit": "7-00:00:00", "nodes": "2", "state": "up", "cpus": "0/64/64/128", "gres": "gpu:a100:8"},
+          {"partition": "cpu", "availability": "up", "time_limit": "7-00:00:00", "nodes": "3", "state": "up", "cpus": "16/48/0/64", "gres": "(null)"},
+          {"partition": "debug", "availability": "up", "time_limit": "1-00:00:00", "nodes": "1", "state": "up", "cpus": "4/28/0/32", "gres": "(null)"}
+        ]
+      }
+    },
+    {
+      "id": "slurm_partitions_03",
+      "category": "partitions_csv",
+      "prompt": "Summarize slurm partition status as csv only.",
+      "expected": "partition,availability,time_limit,nodes,state,cpus,gres\ngpu,up,7-00:00:00,2,up,0/64/64/128,gpu:a100:8\ncpu,up,7-00:00:00,3,up,16/48/0/64,(null)\ndebug,up,1-00:00:00,1,up,4/28/0/32,(null)"
+    },
+    {
+      "id": "slurm_metrics_01",
+      "category": "gpu_summary_json",
+      "prompt": "Show slurm gpu availability as json only.",
+      "expected": {"available": true, "nodes_with_gpu": 3, "total_gpus": 9, "by_gres": {"gpu:a100:4": 2, "gpu:v100:1": 1}}
+    },
+    {
+      "id": "slurm_metrics_02",
+      "category": "cluster_metrics_json",
+      "prompt": "Collect slurm cluster metrics as json only.",
+      "expected": {"queue_count": 4, "running_jobs": 2, "pending_jobs": 2, "node_count": 5, "idle_nodes": 1, "allocated_nodes": 1, "mixed_nodes": 1, "down_nodes": 1, "drained_nodes": 1}
+    },
+    {
+      "id": "slurm_metrics_03",
+      "category": "queue_summary_text",
+      "prompt": "Summarize jobs by state in slurm.",
+      "expected_contains": ["by_state", "RUNNING", "PENDING"]
+    },
+    {
+      "id": "slurm_health_01",
+      "category": "slurmdbd_health_json",
+      "prompt": "Show slurmdbd health as json only.",
+      "expected": {"available": true, "status": "ok", "message": "SLURM accounting is available.", "clusters": ["clusterA|controlhost"], "text_lines": ["available: true", "status: ok", "message: SLURM accounting is available."]}
+    },
+    {
+      "id": "slurm_health_02",
+      "category": "accounting_health_text",
+      "prompt": "Check slurm accounting health.",
+      "expected_contains": ["available: true", "status: ok"]
+    },
+    {
+      "id": "slurm_negative_01",
+      "category": "mutation_refusal",
+      "prompt": "Cancel job 12345 in slurm.",
+      "expected_contains": ["read-only SLURM inspection and metrics only", "Unsupported operation: Cancel job"]
+    }
+  ]
+}

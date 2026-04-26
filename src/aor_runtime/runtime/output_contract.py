@@ -22,10 +22,14 @@ def normalize_output(value: Any, contract: OutputContract) -> Any:
         return count_value
 
     if contract.mode == "csv":
+        if contract.json_shape == "rows":
+            return _coerce_rows(value)
         values = _coerce_sequence(value, path_style=contract.path_style)
         return values
 
     if contract.mode == "text":
+        if contract.json_shape == "rows":
+            return _coerce_rows(value)
         if isinstance(value, str):
             if contract.path_style is None:
                 return value
@@ -53,10 +57,14 @@ def render_output(value: Any, contract: OutputContract) -> str:
             return str(value["count"])
         return str(value)
     if contract.mode == "csv":
+        if contract.json_shape == "rows":
+            return _rows_to_csv(_coerce_rows(value))
         if isinstance(value, str):
             return value.strip()
         return ",".join(str(item) for item in _coerce_sequence(value, path_style=contract.path_style))
     if contract.mode == "text":
+        if contract.json_shape == "rows":
+            return _rows_to_text(_coerce_rows(value))
         if isinstance(value, str):
             return value.strip()
         if isinstance(value, list):
@@ -101,6 +109,10 @@ def _coerce_rows(value: Any) -> list[Any]:
         return value
     if isinstance(value, dict) and "rows" in value and isinstance(value["rows"], list):
         return value["rows"]
+    if isinstance(value, dict):
+        for key in ("jobs", "nodes", "partitions"):
+            if key in value and isinstance(value[key], list):
+                return value[key]
     return [value]
 
 
@@ -124,6 +136,9 @@ def _coerce_count(value: Any) -> int:
             return len(_coerce_sequence(value["matches"]))
         if "rows" in value and isinstance(value["rows"], list):
             return len(value["rows"])
+        for key in ("jobs", "nodes", "partitions"):
+            if key in value and isinstance(value[key], list):
+                return len(value[key])
         return len(value)
     if isinstance(value, (list, tuple, set)):
         return len(value)
@@ -147,6 +162,11 @@ def _coerce_sequence(value: Any, *, path_style: str | None = None) -> list[str]:
         return _coerce_sequence(value["matches"], path_style=path_style)
     elif isinstance(value, dict) and "rows" in value:
         return _coerce_sequence(value["rows"], path_style=path_style)
+    elif isinstance(value, dict):
+        for key in ("jobs", "nodes", "partitions"):
+            if key in value and isinstance(value[key], list):
+                return _coerce_sequence(value[key], path_style=path_style)
+        items = [str(value)]
     elif value is None:
         items = []
     else:
@@ -172,6 +192,44 @@ def _is_single_column_rows(value: list[Any]) -> bool:
         return False
     first_key = next(iter(value[0]))
     return all(next(iter(item)) == first_key for item in value)
+
+
+def _rows_to_csv(rows: list[Any]) -> str:
+    if not rows:
+        return ""
+    normalized_rows = [row for row in rows if isinstance(row, dict)]
+    if not normalized_rows:
+        return ",".join(str(item) for item in rows)
+    headers = list(normalized_rows[0].keys())
+    if len(headers) == 1:
+        header = headers[0]
+        return ",".join(str(row.get(header, "")) for row in normalized_rows)
+    lines = [",".join(headers)]
+    for row in normalized_rows:
+        lines.append(",".join(str(row.get(header, "")) for header in headers))
+    return "\n".join(lines)
+
+
+def _rows_to_text(rows: list[Any]) -> str:
+    if not rows:
+        return ""
+    normalized_rows = [row for row in rows if isinstance(row, dict)]
+    if not normalized_rows:
+        return "\n".join(str(item) for item in rows)
+    headers = list(normalized_rows[0].keys())
+    if len(headers) == 1:
+        header = headers[0]
+        return "\n".join(str(row.get(header, "")) for row in normalized_rows)
+    widths = {
+        header: max(len(str(header)), *(len(str(row.get(header, ""))) for row in normalized_rows))
+        for header in headers
+    }
+    header_line = " | ".join(str(header).ljust(widths[header]) for header in headers)
+    separator = "-+-".join("-" * widths[header] for header in headers)
+    lines = [header_line, separator]
+    for row in normalized_rows:
+        lines.append(" | ".join(str(row.get(header, "")).ljust(widths[header]) for header in headers))
+    return "\n".join(lines)
 
 
 def _looks_like_json_value(value: str) -> bool:

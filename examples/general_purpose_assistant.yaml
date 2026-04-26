@@ -28,6 +28,14 @@ tools:
   - fs.find
   - fs.search_content
   - fs.size
+  - slurm.queue
+  - slurm.job_detail
+  - slurm.nodes
+  - slurm.node_detail
+  - slurm.partitions
+  - slurm.accounting
+  - slurm.metrics
+  - slurm.slurmdbd_health
   - shell.exec
   - python.exec
   - sql.query

@@ -87,7 +87,14 @@ def _event_text_for_openai(event: dict[str, Any]) -> tuple[str | None, str | Non
         return "Plan ready.\n", None
     if event_type == "executor.step.started":
         step = dict(payload.get("step") or {})
-        return f"Executing {step.get('action', 'step')}...\n", None
+        node = str(payload.get("node") or "").strip()
+        command = str(payload.get("command") or "").strip()
+        line = f"Executing {step.get('action', 'step')}"
+        if node:
+            line = f"{line} on {node}"
+        if command:
+            line = f"{line}: {command}"
+        return f"{line}...\n", None
     if event_type == "executor.step.output":
         channel = str(payload.get("channel") or "")
         text = str(payload.get("text") or "")

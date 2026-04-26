@@ -555,11 +555,12 @@ class ExecutionEngine:
             return
 
         self._clear_confirmation_state(state)
+        step_preview = self.executor.describe_step(resolved_step)
         self.store.append_event(
             session_id=session.id,
             node_name="executor",
             event_type="executor.step.started",
-            payload={"step": resolved_step.model_dump(), "step_index": step_index},
+            payload={"step": resolved_step.model_dump(), "step_index": step_index, **step_preview},
         )
         stream_shell_output = bool(state.get("stream_shell_output", False))
 
@@ -574,7 +575,7 @@ class ExecutionEngine:
                     "action": str(payload.get("action") or resolved_step.action),
                     "channel": str(payload.get("channel") or ""),
                     "text": str(payload.get("text") or ""),
-                    "node": str(payload.get("node") or resolved_step.args.get("node", "")),
+                    "node": str(payload.get("node") or resolved_step.args.get("node") or resolved_step.args.get("gateway_node") or ""),
                     "command": str(payload.get("command") or resolved_step.args.get("command", "")),
                 },
             )
