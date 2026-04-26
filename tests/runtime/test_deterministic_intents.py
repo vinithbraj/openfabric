@@ -212,15 +212,27 @@ def test_compile_list_files_csv_plan_uses_fs_glob_and_runtime_return() -> None:
     assert plan.steps[1].args["mode"] == "csv"
 
 
-def test_compile_search_contents_plan_uses_shell_and_runtime_return() -> None:
+def test_compile_search_contents_plan_uses_search_content_and_runtime_return() -> None:
     settings = _planner_settings(Path("/tmp"))
     plan = compile_intent_to_plan(
         SearchFileContentsIntent(path="/tmp/docs", needle="cinnamon", output_mode="text"),
-        ["shell.exec"],
+        ["fs.search_content"],
         settings,
     )
-    assert [step.action for step in plan.steps] == ["shell.exec", "runtime.return"]
-    assert "grep -li" in plan.steps[0].args["command"]
+    assert [step.action for step in plan.steps] == ["fs.search_content", "runtime.return"]
+    assert plan.steps[0].args["needle"] == "cinnamon"
+    assert plan.steps[1].args["value"]["path"] == "matches"
+
+
+def test_compile_search_contents_json_output_remains_matches_wrapper() -> None:
+    settings = _planner_settings(Path("/tmp"))
+    plan = compile_intent_to_plan(
+        SearchFileContentsIntent(path="/tmp/docs", needle="cinnamon", output_mode="json"),
+        ["fs.search_content"],
+        settings,
+    )
+    assert [step.action for step in plan.steps] == ["fs.search_content", "runtime.return"]
+    assert plan.steps[1].args["output_contract"]["json_shape"] == "matches"
 
 
 def test_compile_sql_count_intent_uses_explicit_database() -> None:
@@ -250,6 +262,34 @@ def test_compile_write_text_plan_reads_back_when_requested() -> None:
     settings = _planner_settings(Path("/tmp"))
     plan = compile_intent_to_plan(WriteTextIntent(path="welcome.txt", content="hello", return_content=True), ["fs.write", "fs.read"], settings)
     assert [step.action for step in plan.steps] == ["fs.write", "fs.read", "runtime.return"]
+
+
+def test_explicit_shell_prompt_still_builds_shell_exec_plan(tmp_path: Path) -> None:
+    planner, llm = _planner(tmp_path)
+    plan = planner.build_plan(
+        goal="Using shell, print alpha then beta on separate lines and return as csv",
+        planner=PlannerConfig(temperature=0.0),
+        allowed_tools=["shell.exec", "fs.search_content", "python.exec"],
+        input_payload={"task": "Using shell, print alpha then beta on separate lines and return as csv"},
+    )
+    assert isinstance(plan, ExecutionPlan)
+    assert [step.action for step in plan.steps] == ["shell.exec", "runtime.return"]
+    assert planner.last_llm_calls == 0
+    assert llm.call_count == 0
+
+
+def test_search_prompt_prefers_fs_search_content_even_when_shell_is_available(tmp_path: Path) -> None:
+    planner, llm = _planner(tmp_path)
+    plan = planner.build_plan(
+        goal="Find txt files containing cinnamon under /tmp/pantry and return the matching filenames as json only.",
+        planner=PlannerConfig(temperature=0.0),
+        allowed_tools=["fs.search_content", "shell.exec", "python.exec"],
+        input_payload={"task": "Find txt files containing cinnamon under /tmp/pantry and return the matching filenames as json only."},
+    )
+    assert isinstance(plan, ExecutionPlan)
+    assert [step.action for step in plan.steps] == ["fs.search_content", "runtime.return"]
+    assert planner.last_llm_calls == 0
+    assert llm.call_count == 0
 
 
 def test_planner_uses_zero_llm_calls_for_deterministic_prompt(tmp_path: Path) -> None:

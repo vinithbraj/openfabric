@@ -95,6 +95,9 @@ def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
     elif action == "fs.find":
         matches = result.get("matches", [])
         content = _shape_sequence_content(list(matches), output_mode, key="matches")
+    elif action == "fs.search_content":
+        matches = result.get("matches", [])
+        content = _shape_sequence_content(list(matches), output_mode, key="matches")
     elif action == "fs.size":
         content = str(result.get("size_bytes", ""))
     elif action == "fs.exists":

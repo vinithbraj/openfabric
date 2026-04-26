@@ -115,24 +115,30 @@ def compile_intent_to_plan(intent: Any, allowed_tools: list[str], settings: Sett
         )
 
     if isinstance(intent, SearchFileContentsIntent):
-        _require_tools(allowed_tools, "shell.exec")
-        command = _content_search_command(
-            root=intent.path,
-            needle=intent.needle,
-            pattern=intent.pattern,
-            recursive=intent.recursive,
-            path_style=intent.path_style,
-        )
+        _require_tools(allowed_tools, "fs.search_content")
         return ExecutionPlan.model_validate(
             {
                 "steps": [
-                    {"id": 1, "action": "shell.exec", "args": {"command": command}, "output": "search_results"},
+                    {
+                        "id": 1,
+                        "action": "fs.search_content",
+                        "args": {
+                            "path": intent.path,
+                            "needle": intent.needle,
+                            "pattern": intent.pattern or "*",
+                            "recursive": intent.recursive,
+                            "file_only": True,
+                            "case_insensitive": False,
+                            "path_style": intent.path_style,
+                        },
+                        "output": "search_results",
+                    },
                     {
                         "id": 2,
                         "action": INTERNAL_RETURN_ACTION,
                         "input": ["search_results"],
                         "args": {
-                            "value": {"$ref": "search_results", "path": "stdout"},
+                            "value": {"$ref": "search_results", "path": "matches"},
                             "mode": intent.output_mode,
                             "output_contract": build_output_contract(
                                 mode=intent.output_mode,
@@ -681,32 +687,6 @@ def _file_discovery_step(
         },
         "file_matches",
     )
-
-
-def _content_search_command(*, root: str, needle: str, pattern: str | None, recursive: bool, path_style: str) -> str:
-    quoted_root = shlex.quote(root)
-    quoted_needle = shlex.quote(needle)
-    if path_style == "absolute":
-        parts = [f"find {quoted_root}"]
-        if not recursive:
-            parts.append("-maxdepth 1")
-        parts.append("-type f")
-        if pattern:
-            parts.append(f"-name {shlex.quote(pattern)}")
-        parts.append(f"-exec grep -li -- {quoted_needle} {{}} + | sort || true")
-        return " ".join(parts)
-
-    parts = [f"cd {quoted_root} && find ."]
-    if not recursive:
-        parts.append("-maxdepth 1")
-    parts.append("-type f")
-    if pattern:
-        parts.append(f"-name {shlex.quote(pattern)}")
-    formatter = "sed 's#^\\./##'"
-    if path_style == "name":
-        formatter += " | awk -F/ '{print $NF}'"
-    parts.append(f"-exec grep -li -- {quoted_needle} {{}} + | {formatter} | sort || true")
-    return " ".join(parts)
 
 
 def _require_tools(allowed_tools: list[str], *required: str) -> None:

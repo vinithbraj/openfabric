@@ -15,6 +15,7 @@ DEFAULT_TOOLS = [
     "fs.list",
     "fs.glob",
     "fs.find",
+    "fs.search_content",
     "fs.size",
     "shell.exec",
     "python.exec",

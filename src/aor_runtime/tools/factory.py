@@ -16,6 +16,7 @@ from aor_runtime.tools.filesystem import (
 )
 from aor_runtime.tools.python_exec import PythonExecTool
 from aor_runtime.tools.runtime_return import RuntimeReturnTool
+from aor_runtime.tools.search_content import SearchContentTool
 from aor_runtime.tools.shell import ShellExecTool
 from aor_runtime.tools.sql import SQLQueryTool
 
@@ -34,6 +35,7 @@ def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
             ListDirectoryTool(configured),
             GlobFilesTool(configured),
             FindFilesTool(configured),
+            SearchContentTool(configured),
             FileSizeTool(configured),
             PythonExecTool(configured),
             SQLQueryTool(configured),

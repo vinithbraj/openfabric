@@ -8,6 +8,7 @@ from aor_runtime.core.contracts import StepLog, ValidationResult
 from aor_runtime.core.utils import extract_json_object
 from aor_runtime.tools.filesystem import fs_exists, fs_find, fs_glob, fs_list, fs_read, fs_size, resolve_path
 from aor_runtime.tools.runtime_return import runtime_return
+from aor_runtime.tools.search_content import fs_search_content
 from aor_runtime.tools.sql import resolve_sql_databases
 
 
@@ -129,6 +130,29 @@ class RuntimeValidator:
                     "name": f"step_{step.id}_{step.action}",
                     "success": actual_matches == observed_matches,
                     "detail": "glob matches filesystem" if actual_matches == observed_matches else "glob mismatch",
+                }
+
+            if step.action == "fs.search_content":
+                actual_result = fs_search_content(
+                    self.settings,
+                    str(step.args["path"]),
+                    str(step.args["needle"]),
+                    pattern=str(step.args.get("pattern", "*")),
+                    recursive=bool(step.args.get("recursive", True)),
+                    file_only=bool(step.args.get("file_only", True)),
+                    case_insensitive=bool(step.args.get("case_insensitive", False)),
+                    path_style=str(step.args.get("path_style", "relative")),
+                    max_matches=step.args.get("max_matches"),
+                )
+                actual_matches = list(actual_result["matches"])
+                observed_matches = [str(entry) for entry in item.result.get("matches", [])]
+                actual_entries = list(actual_result["entries"])
+                observed_entries = list(item.result.get("entries", []))
+                success = actual_matches == observed_matches and actual_entries == observed_entries
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "search content matches filesystem" if success else "search content mismatch",
                 }
 
             if step.action == "fs.size":

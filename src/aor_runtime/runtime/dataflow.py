@@ -167,6 +167,8 @@ def _default_ref_path_for_action(action: str) -> str | None:
         return "rows"
     if action == "fs.glob":
         return "matches"
+    if action == "fs.search_content":
+        return "matches"
     if action == "fs.find":
         return "matches"
     if action == "fs.list":
