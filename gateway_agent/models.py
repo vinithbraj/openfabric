@@ -17,3 +17,14 @@ class ExecResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     node: str
+
+
+class CapabilityInfo(BaseModel):
+    name: str
+    description: str
+
+
+class CapabilitiesResponse(BaseModel):
+    node: str
+    version: str
+    capabilities: list[CapabilityInfo]

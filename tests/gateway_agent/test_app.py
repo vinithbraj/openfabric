@@ -28,6 +28,25 @@ def test_healthz_returns_configured_node(tmp_path: Path) -> None:
     assert response.json() == {"status": "ok", "node": "localhost"}
 
 
+def test_capabilities_returns_agent_version_and_capability_list(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    response = client.get("/capabilities")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "node": "localhost",
+        "version": "0.2.0",
+        "capabilities": [
+            {"name": "healthz", "description": "Report agent health and the configured logical node."},
+            {
+                "name": "exec",
+                "description": "Execute a local shell command when the request node matches the configured node.",
+            },
+        ],
+    }
+
+
 def test_exec_runs_command_successfully(tmp_path: Path) -> None:
     client = _client(tmp_path)
 

@@ -11,13 +11,17 @@ import uvicorn
 from aor_runtime.app_config import APP_CONFIG_PATH_ENV
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.utils import dumps_json
+from aor_runtime.dsl.loader import load_runtime_spec
 from aor_runtime.runtime.engine import ExecutionEngine
+from aor_runtime.runtime.capabilities.registry import build_default_capability_registry
 
 app = typer.Typer(help="Agent Orchestration Runtime CLI")
 runs_app = typer.Typer(help="Inspect persisted runs")
 sessions_app = typer.Typer(help="Manage long-running agent sessions")
 app.add_typer(runs_app, name="runs")
 app.add_typer(sessions_app, name="sessions")
+
+CHAT_COMMANDS = ("/exit", "/quit", "/history", "/last", "/new", "/clear", "/capabilities")
 
 
 def _is_dry_run_preview(payload: dict[str, Any]) -> bool:
@@ -85,6 +89,40 @@ def _final_answer_from_state(state: dict[str, Any]) -> str:
 
 def _reset_chat_history(session_history: list[dict[str, str]]) -> None:
     session_history.clear()
+
+
+def _session_history_window(session_history: list[dict[str, str]], max_history: int) -> list[dict[str, str]]:
+    if max_history <= 0 or not session_history:
+        return []
+    return session_history[-max_history:]
+
+
+def _chat_commands_banner() -> str:
+    return f"Commands: {', '.join(CHAT_COMMANDS)}"
+
+
+def _chat_capabilities_payload(spec_path: Path) -> dict[str, Any]:
+    spec = load_runtime_spec(spec_path)
+    registry = build_default_capability_registry()
+    return {
+        "runtime_spec": {
+            "name": spec.name,
+            "description": spec.description,
+            "path": str(spec_path),
+            "version": spec.version,
+            "tools": list(spec.tools),
+            "default_node": spec.nodes.default,
+            "nodes": [endpoint.name for endpoint in spec.nodes.endpoints],
+        },
+        "capability_packs": [
+            {
+                "name": pack.name,
+                "intent_types": [intent_type.__name__ for intent_type in pack.intent_types],
+            }
+            for pack in registry.packs
+        ],
+        "chat_commands": list(CHAT_COMMANDS),
+    }
 
 
 def _build_engine(config_path: Path | None = None) -> ExecutionEngine:
@@ -168,14 +206,14 @@ def serve(
 def chat(
     spec_path: Path,
     system_note: str = typer.Option("", help="Optional operator note injected into each turn."),
-    max_history: int = typer.Option(8, help="Number of prior turns to include in session context."),
+    max_history: int = typer.Option(0, help="Number of prior turns to include in session context."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
     engine = _build_engine(config)
     session_history: list[dict[str, str]] = []
 
     typer.echo(f"Interactive session started for {spec_path}. Type /exit to quit.")
-    typer.echo("Commands: /exit, /quit, /history, /last, /new, /clear")
+    typer.echo(_chat_commands_banner())
 
     while True:
         prompt = typer.prompt("\nYou").strip()
@@ -201,14 +239,18 @@ def chat(
             _reset_chat_history(session_history)
             typer.echo("\033[2J\033[H", nl=False)
             typer.echo(f"Interactive session started for {spec_path}. Type /exit to quit.")
-            typer.echo("Commands: /exit, /quit, /history, /last, /new, /clear")
+            typer.echo(_chat_commands_banner())
+            continue
+        if prompt == "/capabilities":
+            typer.echo(dumps_json(_chat_capabilities_payload(spec_path), indent=2))
             continue
 
         payload: dict[str, Any] = {"task": prompt}
         if system_note.strip():
             payload["system_note"] = system_note.strip()
-        if session_history:
-            payload["session_history"] = session_history[-max_history:]
+        history_window = _session_history_window(session_history, max_history)
+        if history_window:
+            payload["session_history"] = history_window
 
         state = engine.run_spec(str(spec_path), payload)
         state = _resolve_dangerous_confirmation(engine, state, trigger="manual")

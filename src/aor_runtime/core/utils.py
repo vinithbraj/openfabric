@@ -9,6 +9,7 @@ from typing import Any
 
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL)
 CODE_KEY_RE = re.compile(r'"code"\s*:\s*"')
+VALID_JSON_ESCAPE_CHARS = {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}
 
 
 def ensure_jsonable(value: Any) -> Any:
@@ -43,26 +44,41 @@ def extract_json_object(text: str) -> Any:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        repaired = _escape_multiline_code_strings(cleaned)
-        if repaired != cleaned:
+        for candidate in _repair_json_candidates(cleaned):
             try:
-                return json.loads(repaired)
+                return json.loads(candidate)
             except json.JSONDecodeError:
                 pass
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start != -1 and end != -1 and end > start:
             snippet = cleaned[start : end + 1]
-            try:
-                return json.loads(snippet)
-            except json.JSONDecodeError:
-                repaired_snippet = _escape_multiline_code_strings(snippet)
-                return json.loads(repaired_snippet)
+            for candidate in _repair_json_candidates(snippet, include_original=True):
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
         start = cleaned.find("[")
         end = cleaned.rfind("]")
         if start != -1 and end != -1 and end > start:
-            return json.loads(cleaned[start : end + 1])
+            snippet = cleaned[start : end + 1]
+            for candidate in _repair_json_candidates(snippet, include_original=True):
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
         raise
+
+
+def _repair_json_candidates(text: str, *, include_original: bool = False) -> list[str]:
+    candidates: list[str] = [text] if include_original else []
+    multiline_fixed = _escape_multiline_code_strings(text)
+    invalid_escape_fixed = _repair_invalid_json_string_escapes(text)
+    combined_fixed = _repair_invalid_json_string_escapes(multiline_fixed)
+    for candidate in (multiline_fixed, invalid_escape_fixed, combined_fixed):
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
 
 
 def _escape_multiline_code_strings(text: str) -> str:
@@ -97,6 +113,45 @@ def _escape_multiline_code_strings(text: str) -> str:
                 chars.append(ch)
                 escaped = False
             index += 1
+    return "".join(chars)
+
+
+def _repair_invalid_json_string_escapes(text: str) -> str:
+    chars: list[str] = []
+    in_string = False
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if not in_string:
+            chars.append(ch)
+            if ch == '"':
+                in_string = True
+            index += 1
+            continue
+
+        if ch == '"':
+            chars.append(ch)
+            in_string = False
+            index += 1
+            continue
+
+        if ch == "\\":
+            if index + 1 >= len(text):
+                chars.append(ch)
+                index += 1
+                continue
+            next_char = text[index + 1]
+            if next_char in VALID_JSON_ESCAPE_CHARS:
+                chars.append(ch)
+                chars.append(next_char)
+            else:
+                chars.append(next_char)
+            index += 2
+            continue
+
+        chars.append(ch)
+        index += 1
+
     return "".join(chars)
 
 

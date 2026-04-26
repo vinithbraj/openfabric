@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -982,10 +983,47 @@ class TaskPlanner:
             temperature=planner.temperature,
         )
         self.last_raw_output = raw_output
-        payload = extract_json_object(raw_output)
+        try:
+            payload = extract_json_object(raw_output)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raw_output = self._retry_execution_plan_json(
+                system_prompt=system_prompt,
+                planner=planner,
+                parse_error=exc,
+                raw_output=raw_output,
+            )
+            self.last_raw_output = raw_output
+            payload = extract_json_object(raw_output)
         if not isinstance(payload, dict):
             raise ValueError("Expected JSON object response from model")
         return ExecutionPlan.model_validate(coerce_plan_payload(payload))
+
+    def _retry_execution_plan_json(
+        self,
+        *,
+        system_prompt: str,
+        planner: PlannerConfig,
+        parse_error: Exception,
+        raw_output: str,
+    ) -> str:
+        repair_context = {
+            "task": "repair_execution_plan_json",
+            "error": str(parse_error),
+            "instructions": [
+                "Return the same execution plan as a single valid JSON object.",
+                "Do not change the plan semantics unless required to make the JSON valid.",
+                "Fix invalid escaping, quoting, or JSON structure.",
+                "Output JSON only.",
+            ],
+            "invalid_output": raw_output,
+        }
+        self.last_llm_calls += 1
+        return self.llm.complete(
+            system_prompt=system_prompt,
+            user_prompt=dumps_json(repair_context, indent=2),
+            model=planner.model,
+            temperature=planner.temperature,
+        )
 
     def _build_planner_context(
         self,

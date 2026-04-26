@@ -2,7 +2,7 @@
 
 `gateway_agent/` is a standalone node-local execution service for OpenFabric shell commands.
 
-This v1 agent:
+This v2 agent:
 - runs on one host
 - executes commands locally on that host
 - only accepts requests whose `node` matches its configured logical node name
@@ -10,6 +10,7 @@ This v1 agent:
 ## API
 
 - `GET /healthz` -> `{ "status": "ok", "node": "<configured node>" }`
+- `GET /capabilities` -> `{ "node": "<configured node>", "version": "0.2.0", "capabilities": [...] }`
 - `POST /exec` with `{ "node": str, "command": str }`
 - `POST /exec` returns `{ "stdout": str, "stderr": str, "exit_code": int }`
 

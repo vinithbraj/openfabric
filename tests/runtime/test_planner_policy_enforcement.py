@@ -814,7 +814,7 @@ def test_planner_tracks_raw_output_and_error_type_for_malformed_json(tmp_path: P
       ]
     }
     """
-    planner, _ = _planner(tmp_path, raw_response)
+    planner, llm = _planner(tmp_path, [raw_response, raw_response])
 
     with pytest.raises(ValueError, match="Expecting ',' delimiter"):
         planner.build_plan(
@@ -827,6 +827,76 @@ def test_planner_tracks_raw_output_and_error_type_for_malformed_json(tmp_path: P
     assert planner.last_error_type == "JSONDecodeError"
     assert planner.last_raw_output is not None
     assert '"content": "hello" + "world"' in planner.last_raw_output
+    assert llm.call_count == 2
+
+
+def test_planner_repairs_invalid_json_escape_without_retry(tmp_path: Path) -> None:
+    raw_response = """
+    {
+      "steps": [
+        {
+          "id": 1,
+          "action": "sql.query",
+          "args": {
+            "database": "dicom",
+            "query": "SELECT patient_id, name, dob FROM patient WHERE dob <= CURRENT_DATE - INTERVAL \\'45 years\\' ORDER BY dob"
+          }
+        }
+      ]
+    }
+    """
+    planner, llm = _planner(tmp_path, raw_response)
+
+    plan = planner.build_plan(
+        goal="List all patients above 45 years of age in dicom",
+        planner=_planner_config(),
+        allowed_tools=["sql.query"],
+        input_payload={"task": "List all patients above 45 years of age in dicom"},
+    )
+
+    assert isinstance(plan, ExecutionPlan)
+    assert plan.steps[0].args["query"] == (
+        "SELECT patient_id, name, dob FROM patient WHERE dob <= CURRENT_DATE - INTERVAL '45 years' ORDER BY dob"
+    )
+    assert llm.call_count == 1
+
+
+def test_planner_retries_once_when_json_parse_still_fails(tmp_path: Path) -> None:
+    raw_response = """
+    {
+      "steps": [
+        {
+          "id": 1,
+          "action": "sql.query",
+          "args": {
+            "database": "dicom",
+            "query": "SELECT COUNT(*) AS patient_count FROM patient",
+          }
+        }
+      ]
+    }
+    """
+    corrected_response = {
+        "steps": [
+            {
+                "id": 1,
+                "action": "sql.query",
+                "args": {"database": "dicom", "query": "SELECT COUNT(*) AS patient_count FROM patient"},
+            }
+        ]
+    }
+    planner, llm = _planner(tmp_path, [raw_response, corrected_response])
+
+    plan = planner.build_plan(
+        goal="Count patients in dicom",
+        planner=_planner_config(),
+        allowed_tools=["sql.query"],
+        input_payload={"task": "Count patients in dicom"},
+    )
+
+    assert isinstance(plan, ExecutionPlan)
+    assert plan.steps[0].args["query"] == "SELECT COUNT(*) AS patient_count FROM patient"
+    assert llm.call_count == 2
 
 
 def test_prompt_sources_include_execution_contract_rules() -> None:
