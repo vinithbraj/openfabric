@@ -7,10 +7,10 @@ from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ExecutionPlan, HighLevelPlan, PlannerConfig
 from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
+from aor_runtime.runtime.capabilities.registry import build_default_capability_registry
+from aor_runtime.runtime.capabilities.base import ClassificationContext, CompileContext
 from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow
 from aor_runtime.runtime.decomposer import GoalDecomposer, is_complex_goal
-from aor_runtime.runtime.intent_classifier import classify_compound_intent, classify_single_intent
-from aor_runtime.runtime.intent_compiler import compile_intent_to_plan
 from aor_runtime.runtime.plan_canonicalizer import canonicalize_plan, coerce_plan_payload
 from aor_runtime.runtime.policies import (
     PlanContractViolation,
@@ -779,10 +779,18 @@ def extract_explicit_tool_intent(goal: str, allowed_tools: list[str]) -> list[st
 
 
 class TaskPlanner:
-    def __init__(self, *, llm: LLMClient, tools: ToolRegistry, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        llm: LLMClient,
+        tools: ToolRegistry,
+        settings: Settings | None = None,
+        capability_registry: Any | None = None,
+    ) -> None:
         self.llm = llm
         self.tools = tools
         self.settings = settings or get_settings()
+        self.capability_registry = capability_registry or build_default_capability_registry()
         self.decomposer = GoalDecomposer(llm=llm)
         self.last_policies_used: list[str] = []
         self.last_high_level_plan: list[str] | None = None
@@ -813,14 +821,23 @@ class TaskPlanner:
         self.last_policies_used = [policy.name for policy in policies]
 
         try:
-            deterministic_match = classify_compound_intent(goal, schema_payload=schema_payload)
-            if not deterministic_match.matched:
-                deterministic_match = classify_single_intent(goal, schema_payload=schema_payload)
+            deterministic_match = self.capability_registry.classify(
+                goal,
+                ClassificationContext(
+                    schema_payload=schema_payload,
+                    allowed_tools=allowed_tools,
+                    settings=self.settings,
+                    input_payload=input_payload,
+                ),
+            )
             if deterministic_match.matched:
                 try:
                     self.last_planning_mode = "deterministic_intent"
                     self.last_policies_used = [*self.last_policies_used, "deterministic_intent"]
-                    plan = compile_intent_to_plan(deterministic_match.intent, allowed_tools, self.settings)
+                    plan = self.capability_registry.compile(
+                        deterministic_match.intent,
+                        CompileContext(allowed_tools=allowed_tools, settings=self.settings),
+                    )
                     finalized_plan = self._finalize_plan(
                         goal,
                         plan,
