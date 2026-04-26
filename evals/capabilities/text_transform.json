@@ -1,0 +1,18 @@
+{
+  "capability": "text_transform",
+  "strict_threshold": 1.0,
+  "semantic_threshold": 1.0,
+  "max_llm_fallbacks": 0,
+  "cases": [
+    {"id": "text_transform_01", "category": "uppercase", "prompt": "Read line 1 from {notes_transform}, convert it to uppercase, and return it.", "expected": "QUIET LIBRARY"},
+    {"id": "text_transform_02", "category": "lowercase", "prompt": "Read line 2 from {notes_transform}, convert it to lowercase, and return it.", "expected": "loud voice"},
+    {"id": "text_transform_03", "category": "titlecase", "prompt": "Read line 3 from {notes_transform}, convert it to title case, and return it.", "expected": "Mixed Case Words"},
+    {"id": "text_transform_04", "category": "uppercase", "prompt": "Read line 4 from {notes_transform} and uppercase it.", "expected": "ALPHA BETA"},
+    {"id": "text_transform_05", "category": "uppercase_csv", "prompt": "List name from members in book_club_db, convert them to uppercase csv, and return the result only.", "expected": "ALICE,BOB,CARLA"},
+    {"id": "text_transform_06", "category": "uppercase_csv", "prompt": "List city from members in book_club_db, convert them to uppercase csv, and return the result only.", "expected": "PORTLAND,SEATTLE,PORTLAND"},
+    {"id": "text_transform_07", "category": "csv", "prompt": "List top-level txt files in {files_alpha} as csv.", "expected": "a.txt,b.txt"},
+    {"id": "text_transform_08", "category": "json", "prompt": "List top-level txt files in {files_beta} as json only.", "expected": {"matches": ["first.txt", "second.txt"]}},
+    {"id": "text_transform_09", "category": "newline_text", "prompt": "List top-level txt files in {files_gamma} as plain text.", "expected": "blue.txt\nred.txt"},
+    {"id": "text_transform_10", "category": "uppercase_save_return", "prompt": "Read line 3 from {notes_transform}, convert it to uppercase, save it to {outputs_dir}/transform_line.txt, and return the saved file.", "expected": "MIXED CASE WORDS"}
+  ]
+}

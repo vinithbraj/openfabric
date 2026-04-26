@@ -1,0 +1,23 @@
+{
+  "capability": "sql",
+  "strict_threshold": 0.95,
+  "semantic_threshold": 1.0,
+  "max_llm_fallbacks": 0,
+  "cases": [
+    {"id": "sql_count_01", "category": "count", "prompt": "Count members in book_club_db and return the count only.", "expected": "3"},
+    {"id": "sql_count_02", "category": "count", "prompt": "Count books in book_club_db and return the count only.", "expected": "2"},
+    {"id": "sql_count_03", "category": "count", "prompt": "Count members from book_club_db and return the count only.", "expected": "3"},
+    {"id": "sql_count_04", "category": "count", "prompt": "Count books from book_club_db and return the count only.", "expected": "2"},
+    {"id": "sql_select_01", "category": "select_csv", "prompt": "List name from members in book_club_db as csv.", "expected": "Alice,Bob,Carla"},
+    {"id": "sql_select_02", "category": "select_csv", "prompt": "Show city from members in book_club_db as csv.", "expected": "Portland,Seattle,Portland"},
+    {"id": "sql_select_03", "category": "select_csv", "prompt": "Select title from books in book_club_db as csv.", "expected": "North Window,Evening Train"},
+    {"id": "sql_json_01", "category": "select_json", "prompt": "List name from members in book_club_db as json only.", "expected": {"rows": [{"name": "Alice"}, {"name": "Bob"}, {"name": "Carla"}]}},
+    {"id": "sql_json_02", "category": "select_json", "prompt": "Show city from members in book_club_db as json only.", "expected": {"rows": [{"city": "Portland"}, {"city": "Seattle"}, {"city": "Portland"}]}},
+    {"id": "sql_json_03", "category": "select_json", "prompt": "Select title from books in book_club_db as json only.", "expected": {"rows": [{"title": "North Window"}, {"title": "Evening Train"}]}},
+    {"id": "sql_compound_01", "category": "uppercase_csv_save_return", "prompt": "List name from members in book_club_db, convert them to uppercase csv, save the result to {outputs_dir}/sql_names_01.csv, and return the file contents.", "expected": "ALICE,BOB,CARLA"},
+    {"id": "sql_compound_02", "category": "uppercase_csv_save_return", "prompt": "List name from members in book_club_db, convert them to uppercase csv, save the result to {outputs_dir}/sql_names_02.csv, and return the file contents.", "expected": "ALICE,BOB,CARLA"},
+    {"id": "sql_compound_03", "category": "uppercase_csv_save_return", "prompt": "List city from members in book_club_db, convert them to uppercase csv, save the result to {outputs_dir}/sql_cities_01.csv, and return the file contents.", "expected": "PORTLAND,SEATTLE,PORTLAND"},
+    {"id": "sql_compound_04", "category": "uppercase_csv_save_return", "prompt": "List title from books in book_club_db, convert them to uppercase csv, save the result to {outputs_dir}/sql_titles_01.csv, and return the file contents.", "expected": "NORTH WINDOW,EVENING TRAIN"},
+    {"id": "sql_compound_05", "category": "uppercase_csv_save_return", "prompt": "List name from members in book_club_db, convert them to uppercase csv, save the result to {outputs_dir}/sql_names_03.csv, and return the file contents.", "expected": "ALICE,BOB,CARLA"}
+  ]
+}
