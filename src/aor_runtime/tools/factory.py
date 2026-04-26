@@ -8,12 +8,14 @@ from aor_runtime.tools.filesystem import (
     FileSizeTool,
     FindFilesTool,
     FileNotExistsTool,
+    GlobFilesTool,
     FileReadTool,
     FileWriteTool,
     ListDirectoryTool,
     MakeDirectoryTool,
 )
 from aor_runtime.tools.python_exec import PythonExecTool
+from aor_runtime.tools.runtime_return import RuntimeReturnTool
 from aor_runtime.tools.shell import ShellExecTool
 from aor_runtime.tools.sql import SQLQueryTool
 
@@ -30,9 +32,11 @@ def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
             FileWriteTool(configured),
             MakeDirectoryTool(configured),
             ListDirectoryTool(configured),
+            GlobFilesTool(configured),
             FindFilesTool(configured),
             FileSizeTool(configured),
             PythonExecTool(configured),
             SQLQueryTool(configured),
+            RuntimeReturnTool(),
         ]
     )

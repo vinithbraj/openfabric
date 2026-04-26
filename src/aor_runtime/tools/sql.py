@@ -124,7 +124,7 @@ def resolve_database_selection(settings: Settings, requested_database: str | Non
         return only_name, databases[only_name]
 
     default_name = resolve_default_database(settings, databases)
-    if default_name and len(databases) == 1:
+    if default_name:
         return default_name, databases[default_name]
     raise ToolExecutionError("Database selection is required when multiple SQL databases are configured.")
 

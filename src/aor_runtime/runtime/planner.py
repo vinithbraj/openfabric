@@ -9,6 +9,8 @@ from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow
 from aor_runtime.runtime.decomposer import GoalDecomposer, is_complex_goal
+from aor_runtime.runtime.intent_classifier import classify_compound_intent, classify_single_intent
+from aor_runtime.runtime.intent_compiler import compile_intent_to_plan
 from aor_runtime.runtime.plan_canonicalizer import canonicalize_plan, coerce_plan_payload
 from aor_runtime.runtime.policies import (
     PlanContractViolation,
@@ -19,6 +21,9 @@ from aor_runtime.runtime.policies import (
 )
 from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.sql import get_schema, prune_schema, resolve_sql_databases
+
+
+INTERNAL_ALLOWED_TOOLS = {"runtime.return"}
 
 
 DEFAULT_PLANNER_PROMPT = """You are the planner for a deterministic local agent runtime.
@@ -806,9 +811,38 @@ class TaskPlanner:
         policies = select_policies(goal, allowed_tools, schema_payload)
         explicit_tool_intent = extract_explicit_tool_intent(goal, allowed_tools)
         self.last_policies_used = [policy.name for policy in policies]
-        self.last_planning_mode = "hierarchical" if is_complex_goal(goal) else "direct"
 
         try:
+            deterministic_match = classify_compound_intent(goal, schema_payload=schema_payload)
+            if not deterministic_match.matched:
+                deterministic_match = classify_single_intent(goal, schema_payload=schema_payload)
+            if deterministic_match.matched:
+                try:
+                    self.last_planning_mode = "deterministic_intent"
+                    self.last_policies_used = [*self.last_policies_used, "deterministic_intent"]
+                    plan = compile_intent_to_plan(deterministic_match.intent, allowed_tools, self.settings)
+                    finalized_plan = self._finalize_plan(
+                        goal,
+                        plan,
+                        allowed_tools,
+                        explicit_tool_intent,
+                        allow_internal_tools=INTERNAL_ALLOWED_TOOLS,
+                        canonicalize_soft_violations=False,
+                    )
+                    self.last_llm_calls = 0
+                    self.last_high_level_plan = None
+                    self.last_plan_repairs = []
+                    self.last_plan_canonicalized = False
+                    self.last_canonicalized_execution_plan = None
+                    self.last_error_stage = None
+                    return finalized_plan
+                except ValueError as exc:
+                    if "Deterministic intent requires unavailable tools:" not in str(exc):
+                        raise
+                    self.last_policies_used = [name for name in self.last_policies_used if name != "deterministic_intent"]
+                    self.last_planning_mode = "direct"
+
+            self.last_planning_mode = "hierarchical" if is_complex_goal(goal) else "direct"
             if self.last_planning_mode == "hierarchical":
                 high_level_plan = self._decompose_goal(
                     goal=goal,
@@ -970,12 +1004,23 @@ class TaskPlanner:
             planner_context["schema"] = schema_payload
         return planner_context
 
-    def _finalize_plan(self, goal: str, plan: ExecutionPlan, allowed_tools: list[str], explicit_tool_intent: list[str]) -> ExecutionPlan:
+    def _finalize_plan(
+        self,
+        goal: str,
+        plan: ExecutionPlan,
+        allowed_tools: list[str],
+        explicit_tool_intent: list[str],
+        *,
+        allow_internal_tools: set[str] | None = None,
+        canonicalize_soft_violations: bool = True,
+    ) -> ExecutionPlan:
         self._apply_storage_shell_semantics(goal, plan)
         normalize_execution_plan_dataflow(plan)
         self.last_original_execution_plan = plan.model_dump()
         initial_violations = classify_plan_violations(plan, goal=goal)
         if initial_violations.hard:
+            raise PlanContractViolation.from_violations(initial_violations)
+        if initial_violations.soft and not canonicalize_soft_violations:
             raise PlanContractViolation.from_violations(initial_violations)
 
         if initial_violations.soft:
@@ -990,8 +1035,10 @@ class TaskPlanner:
             self.last_plan_canonicalized = False
             self.last_canonicalized_execution_plan = None
 
+        permitted_actions = set(allowed_tools)
+        permitted_actions.update(allow_internal_tools or set())
         for step in plan.steps:
-            if step.action not in allowed_tools:
+            if step.action not in permitted_actions:
                 raise ValueError(f"Planner selected disallowed tool {step.action!r}.")
             self.tools.validate_step(step.action, step.args)
         self._validate_explicit_database_targets(goal, plan)

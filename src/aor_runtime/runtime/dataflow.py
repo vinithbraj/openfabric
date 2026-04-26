@@ -157,12 +157,16 @@ def _normalize_python_inputs(step: ExecutionStep, output_producers: dict[str, st
 
 
 def _default_ref_path_for_action(action: str) -> str | None:
+    if action == "runtime.return":
+        return "value"
     if action == "python.exec":
         return "result"
     if action == "shell.exec":
         return "stdout"
     if action == "sql.query":
         return "rows"
+    if action == "fs.glob":
+        return "matches"
     if action == "fs.find":
         return "matches"
     if action == "fs.list":
@@ -195,6 +199,11 @@ def _coerce_fs_write_content(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, dict):
+        if _looks_like_runtime_return_result(value):
+            output = value.get("output")
+            if isinstance(output, str):
+                return output
+            return _coerce_fs_write_content(value.get("value"))
         if _looks_like_python_exec_result(value):
             output = value.get("output")
             if isinstance(output, str):
@@ -210,6 +219,10 @@ def _coerce_fs_write_content(value: Any) -> str:
 
 def _looks_like_python_exec_result(value: dict[str, Any]) -> bool:
     return {"success", "result", "error"}.issubset(value.keys()) and "output" in value
+
+
+def _looks_like_runtime_return_result(value: dict[str, Any]) -> bool:
+    return "output" in value and "value" in value and len(value.keys()) == 2
 
 
 def _looks_like_shell_result(value: dict[str, Any]) -> bool:

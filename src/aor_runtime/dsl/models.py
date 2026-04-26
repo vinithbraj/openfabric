@@ -13,6 +13,7 @@ DEFAULT_TOOLS = [
     "fs.write",
     "fs.mkdir",
     "fs.list",
+    "fs.glob",
     "fs.find",
     "fs.size",
     "shell.exec",

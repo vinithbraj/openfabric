@@ -103,6 +103,13 @@ def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
         content = "true" if not result.get("exists") else "false"
     elif action == "python.exec":
         content = _shape_python_result(result, output_mode)
+    elif action == "runtime.return":
+        rendered = result.get("output")
+        if isinstance(rendered, str):
+            content = rendered
+        else:
+            value = result.get("value")
+            content = _shape_text_like_content(str(value or ""), output_mode)
     elif action == "sql.query":
         content = _shape_sql_result(result, output_mode)
     elif action == "shell.exec":

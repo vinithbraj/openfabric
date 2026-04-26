@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,66 @@ def fs_list(settings: Settings, path: str) -> dict[str, Any]:
         raise ToolExecutionError(f"Path is not a directory: {resolved}")
     entries = sorted(item.name for item in resolved.iterdir())
     return {"path": str(resolved), "entries": entries}
+
+
+def fs_glob(
+    settings: Settings,
+    path: str,
+    pattern: str = "*",
+    recursive: bool = False,
+    file_only: bool = True,
+    dir_only: bool = False,
+    path_style: str = "relative",
+) -> dict[str, Any]:
+    resolved = resolve_path(settings, path)
+    if not resolved.exists():
+        raise ToolExecutionError(f"Directory does not exist: {resolved}")
+    if not resolved.is_dir():
+        raise ToolExecutionError(f"Path is not a directory: {resolved}")
+    normalized_pattern = str(pattern or "*").strip() or "*"
+    if file_only and dir_only:
+        raise ToolExecutionError("fs.glob cannot set both file_only and dir_only to true.")
+    if path_style not in {"name", "relative", "absolute"}:
+        raise ToolExecutionError("fs.glob path_style must be one of: name, relative, absolute.")
+
+    root = resolved.resolve()
+    iterator = root.rglob("*") if recursive else root.iterdir()
+    entries: list[dict[str, Any]] = []
+    for item in iterator:
+        try:
+            item.resolve().relative_to(root)
+        except ValueError as exc:
+            raise ToolExecutionError(f"fs.glob discovered a path outside the requested root: {item}") from exc
+        is_file = item.is_file()
+        is_dir = item.is_dir()
+        if file_only and not is_file:
+            continue
+        if dir_only and not is_dir:
+            continue
+        if not file_only and not dir_only and not (is_file or is_dir):
+            continue
+        if not _glob_matches(item=item, root=root, pattern=normalized_pattern):
+            continue
+        relative_path = str(item.relative_to(resolved))
+        entries.append(
+            {
+                "name": item.name,
+                "path": str(item),
+                "relative_path": relative_path,
+                "is_file": is_file,
+                "is_dir": is_dir,
+            }
+        )
+    entries.sort(key=lambda item: str(item["relative_path"]))
+    matches = [_format_glob_match(item, path_style=path_style) for item in entries]
+    return {
+        "path": str(resolved),
+        "pattern": normalized_pattern,
+        "recursive": bool(recursive),
+        "path_style": path_style,
+        "matches": matches,
+        "entries": entries,
+    }
 
 
 def fs_find(settings: Settings, path: str, pattern: str) -> dict[str, Any]:
@@ -261,6 +322,75 @@ class ListDirectoryTool(BaseTool):
 
     def run(self, arguments: ToolArgs) -> ToolResult:
         return self.ToolResult.model_validate(fs_list(self.settings, arguments.path))
+
+
+class GlobFilesTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+        pattern: str = "*"
+        recursive: bool = False
+        file_only: bool = True
+        dir_only: bool = False
+        path_style: str = "relative"
+
+    class ToolResult(ToolResultModel):
+        path: str
+        pattern: str
+        recursive: bool
+        path_style: str
+        matches: list[str]
+        entries: list[dict[str, Any]]
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
+        self.spec = ToolSpec(
+            name="fs.glob",
+            description="Find matching files or directories under a root with optional non-recursive semantics.",
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "pattern": {"type": "string"},
+                    "recursive": {"type": "boolean"},
+                    "file_only": {"type": "boolean"},
+                    "dir_only": {"type": "boolean"},
+                    "path_style": {"type": "string", "enum": ["name", "relative", "absolute"]},
+                },
+                "required": ["path"],
+            },
+        )
+
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(
+            fs_glob(
+                self.settings,
+                arguments.path,
+                pattern=arguments.pattern,
+                recursive=arguments.recursive,
+                file_only=arguments.file_only,
+                dir_only=arguments.dir_only,
+                path_style=arguments.path_style,
+            )
+        )
+
+
+def _glob_matches(*, item: Path, root: Path, pattern: str) -> bool:
+    relative_path = str(item.relative_to(root))
+    if "/" in pattern or "\\" in pattern:
+        normalized_relative = relative_path.replace("\\", "/")
+        normalized_pattern = pattern.replace("\\", "/")
+        return fnmatch(normalized_relative, normalized_pattern)
+    return fnmatch(item.name, pattern)
+
+
+def _format_glob_match(entry: dict[str, Any], *, path_style: str) -> str:
+    if path_style == "name":
+        return str(entry["name"])
+    if path_style == "absolute":
+        return str(entry["path"])
+    return str(entry["relative_path"])
 
 
 class FindFilesTool(BaseTool):

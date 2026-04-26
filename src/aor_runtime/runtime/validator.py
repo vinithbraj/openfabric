@@ -6,7 +6,8 @@ from pathlib import Path
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import StepLog, ValidationResult
 from aor_runtime.core.utils import extract_json_object
-from aor_runtime.tools.filesystem import fs_exists, fs_find, fs_list, fs_read, fs_size, resolve_path
+from aor_runtime.tools.filesystem import fs_exists, fs_find, fs_glob, fs_list, fs_read, fs_size, resolve_path
+from aor_runtime.tools.runtime_return import runtime_return
 from aor_runtime.tools.sql import resolve_sql_databases
 
 
@@ -112,6 +113,24 @@ class RuntimeValidator:
                     "detail": "file search matches filesystem" if actual == observed else "file search mismatch",
                 }
 
+            if step.action == "fs.glob":
+                actual_result = fs_glob(
+                    self.settings,
+                    str(step.args["path"]),
+                    pattern=str(step.args.get("pattern", "*")),
+                    recursive=bool(step.args.get("recursive", False)),
+                    file_only=bool(step.args.get("file_only", True)),
+                    dir_only=bool(step.args.get("dir_only", False)),
+                    path_style=str(step.args.get("path_style", "relative")),
+                )
+                actual_matches = list(actual_result["matches"])
+                observed_matches = [str(entry) for entry in item.result.get("matches", [])]
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": actual_matches == observed_matches,
+                    "detail": "glob matches filesystem" if actual_matches == observed_matches else "glob mismatch",
+                }
+
             if step.action == "fs.size":
                 actual = int(fs_size(self.settings, str(step.args["path"]))["size_bytes"])
                 observed = int(item.result.get("size_bytes", -1))
@@ -186,6 +205,20 @@ class RuntimeValidator:
                     if manifest_check is not None:
                         return {"name": f"step_{step.id}_{step.action}", "success": manifest_check[0], "detail": manifest_check[1]}
                 return {"name": f"step_{step.id}_{step.action}", "success": True, "detail": "python.exec returned structured result"}
+
+            if step.action == "runtime.return":
+                expected = runtime_return(
+                    step.args.get("value"),
+                    str(step.args.get("mode", "text")),
+                    step.args.get("output_contract"),
+                )
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": expected["output"] == item.result.get("output"),
+                    "detail": "runtime.return output matches mode shaping"
+                    if expected["output"] == item.result.get("output")
+                    else "runtime.return output mismatch",
+                }
         except Exception as exc:  # noqa: BLE001
             return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": str(exc)}
 
