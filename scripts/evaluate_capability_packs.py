@@ -18,6 +18,9 @@ from aor_runtime.runtime.capabilities.eval import (
 )
 from aor_runtime.runtime.engine import ExecutionEngine
 from aor_runtime.runtime.eval_fixtures import rebuild_eval_workspace, render_case_prompt, render_template
+from aor_runtime.runtime.failure_classifier import classify_failure, generate_prompt_suggestions
+from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
+from aor_runtime.core.contracts import ExecutionPlan
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +76,50 @@ def _matches_exact_expected(content: str, expected: Any) -> bool:
     return content == str(expected)
 
 
+def _evaluate_prompt_suggestion_case(
+    case: CapabilityEvalCase,
+    render_values: dict[str, Any],
+) -> dict[str, Any]:
+    setup = render_values["render_expected"](case.setup or {})
+    prompt = str(render_values["render_prompt"](case.prompt))
+    metadata = dict(setup.get("metadata") or {})
+    plan_payload = setup.get("plan")
+    plan = ExecutionPlan.model_validate(plan_payload) if isinstance(plan_payload, dict) else None
+    error_detail = str(setup.get("error_detail") or "").strip()
+    error = RuntimeError(error_detail) if error_detail else None
+    failure_type = str(setup.get("force_error_type") or classify_failure(prompt, error=error, plan=plan, metadata=metadata))
+    suggestion_result = generate_prompt_suggestions(
+        prompt,
+        failure_type,
+        context=dict(setup.get("context") or {}),
+    )
+    base_message = str(setup.get("base_message") or suggestion_result.message)
+    content = append_prompt_suggestions(base_message, suggestion_result)
+    return {
+        "content": content,
+        "llm_calls": 0,
+        "failure_type": failure_type,
+        "suggestion_count": len(suggestion_result.suggestions),
+    }
+
+
+def _check_setup_expectations(
+    setup: dict[str, Any],
+    *,
+    failure_type: str | None,
+    suggestion_count: int | None,
+) -> tuple[bool, str | None]:
+    expected_failure_type = str(setup.get("expected_failure_type") or "").strip()
+    if expected_failure_type and expected_failure_type != str(failure_type or ""):
+        return False, "failure_type_mismatch"
+
+    minimum_suggestions = int(setup.get("min_suggestion_count") or 0)
+    if minimum_suggestions and int(suggestion_count or 0) < minimum_suggestions:
+        return False, "suggestion_count_mismatch"
+
+    return True, None
+
+
 def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], render_values: dict[str, Any]) -> tuple[CapabilityEvalResult, list[dict[str, Any]]]:
     strict_pass = 0
     semantic_pass = 0
@@ -86,6 +133,67 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
         expected = render_values["render_expected"](case.expected) if case.expected is not None else None
         expected_contains = render_values["render_expected"](case.expected_contains) if case.expected_contains is not None else None
         expected_regex = render_values["render_expected"](case.expected_regex) if case.expected_regex is not None else None
+        setup = render_values["render_expected"](case.setup or {})
+
+        if str(setup.get("evaluation_mode") or "") == "suggestion_only":
+            started = time.monotonic()
+            synthetic_result = _evaluate_prompt_suggestion_case(case, render_values)
+            elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+            content = str(synthetic_result["content"])
+            llm_calls = int(synthetic_result["llm_calls"])
+            semantic = _matches_expected(case, content, expected, expected_contains, expected_regex)
+            metadata_ok, metadata_reason = _check_setup_expectations(
+                setup,
+                failure_type=str(synthetic_result.get("failure_type") or ""),
+                suggestion_count=int(synthetic_result.get("suggestion_count") or 0),
+            )
+            strict = semantic and llm_calls == int(case.expect_llm_calls or 0) and metadata_ok
+            if semantic:
+                semantic_pass += 1
+            if strict:
+                strict_pass += 1
+
+            failure_category: str | None = None
+            if not semantic:
+                failure_category = "incorrect_output"
+            elif llm_calls != int(case.expect_llm_calls or 0):
+                failure_category = "llm_calls_mismatch"
+            elif not metadata_ok:
+                failure_category = str(metadata_reason)
+
+            if failure_category is not None:
+                failures.append(
+                    {
+                        "capability": pack.capability,
+                        "case_id": case.id,
+                        "category": case.category,
+                        "reason": failure_category,
+                        "prompt": prompt,
+                        "expected": expected,
+                        "expected_contains": expected_contains,
+                        "expected_regex": expected_regex,
+                        "content": content,
+                        "llm_calls": llm_calls,
+                        "latency_ms": elapsed_ms,
+                    }
+                )
+
+            case_results.append(
+                {
+                    "case_id": case.id,
+                    "category": case.category,
+                    "prompt": prompt,
+                    "strict_pass": strict,
+                    "semantic_pass": semantic,
+                    "failure_category": failure_category,
+                    "llm_calls": llm_calls,
+                    "latency_ms": elapsed_ms,
+                    "content": content,
+                    "failure_type": synthetic_result.get("failure_type"),
+                    "suggestion_count": synthetic_result.get("suggestion_count"),
+                }
+            )
+            continue
 
         queue: mp.Queue = mp.Queue()
         started = time.monotonic()
@@ -150,11 +258,17 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
         state = dict(payload["state"])
         content = str(dict(state.get("final_output", {})).get("content", ""))
         llm_calls = int(dict(state.get("metrics", {})).get("llm_calls", 0))
+        final_output_metadata = dict(dict(state.get("final_output", {})).get("metadata", {}))
+        metadata_ok, metadata_reason = _check_setup_expectations(
+            setup,
+            failure_type=str(final_output_metadata.get("failure_type") or ""),
+            suggestion_count=int(final_output_metadata.get("suggestion_count") or 0),
+        )
         if llm_calls > 0:
             llm_fallbacks += 1
 
         semantic = _matches_expected(case, content, expected, expected_contains, expected_regex)
-        strict = semantic and llm_calls == int(case.expect_llm_calls or 0)
+        strict = semantic and llm_calls == int(case.expect_llm_calls or 0) and metadata_ok
 
         if semantic:
             semantic_pass += 1
@@ -166,6 +280,8 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
             failure_category = "incorrect_output"
         elif llm_calls != int(case.expect_llm_calls or 0):
             failure_category = "llm_calls_mismatch"
+        elif not metadata_ok:
+            failure_category = str(metadata_reason)
 
         if failure_category is not None:
             failures.append(
@@ -195,6 +311,8 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
                 "llm_calls": llm_calls,
                 "latency_ms": elapsed_ms,
                 "content": content,
+                "failure_type": final_output_metadata.get("failure_type"),
+                "suggestion_count": final_output_metadata.get("suggestion_count"),
             }
         )
 

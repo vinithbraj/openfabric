@@ -19,8 +19,10 @@ from aor_runtime.runtime.dataflow import resolve_execution_step
 from aor_runtime.runtime.decomposer import is_complex_goal
 from aor_runtime.runtime.error_normalization import normalize_planner_error, normalize_runtime_failure
 from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
+from aor_runtime.runtime.failure_classifier import classify_failure, generate_prompt_suggestions
 from aor_runtime.runtime.planner import TaskPlanner, summarize_plan, summarize_planner_raw_output
 from aor_runtime.runtime.policies import PlanContractViolation
+from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
 from aor_runtime.runtime.sessions import SessionManager
 from aor_runtime.runtime.state import RuntimeState
 from aor_runtime.runtime.store import SQLiteRunStore
@@ -51,6 +53,15 @@ STARTUP_BANNER = r"""
 
 def render_startup_banner() -> str:
     return f"{STARTUP_BANNER}\naor-runtime v{__version__}"
+
+
+def _safe_execution_plan(plan_data: Any) -> ExecutionPlan | None:
+    if not isinstance(plan_data, dict) or not plan_data:
+        return None
+    try:
+        return ExecutionPlan.model_validate(plan_data)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def summarize_failure_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -438,6 +449,13 @@ class ExecutionEngine:
                 final_output_metadata.update(normalized_error.as_metadata())
             if isinstance(exc, PlanContractViolation):
                 final_output_metadata.update(exc.as_metadata())
+            suggestion_content, suggestion_metadata = self._failure_output_with_suggestions(
+                goal=goal,
+                message=final_error,
+                metadata=final_output_metadata,
+                error=exc,
+                plan=_safe_execution_plan(self.planner.last_canonicalized_execution_plan),
+            )
             state.update(
                 {
                     "current_node": "planner",
@@ -455,7 +473,7 @@ class ExecutionEngine:
                     "plan_canonicalized": False,
                     "plan_repairs": [],
                     "error": final_error,
-                    "final_output": {"content": final_error, "artifacts": [], "metadata": final_output_metadata},
+                    "final_output": {"content": suggestion_content, "artifacts": [], "metadata": suggestion_metadata},
                 }
             )
             failure_payload = {
@@ -781,7 +799,7 @@ class ExecutionEngine:
                     "plan_canonicalized": False,
                     "plan_repairs": [],
                     "final_output": {
-                        "content": final_detail,
+                        "content": "",
                         "artifacts": list((state.get("final_output") or {}).get("artifacts", [])),
                         "metadata": {
                             "goal": state.get("goal", ""),
@@ -792,6 +810,21 @@ class ExecutionEngine:
                     },
                 }
             )
+            final_output = dict(state.get("final_output") or {})
+            plan = _safe_execution_plan(state.get("plan", {}))
+            suggestion_content, suggestion_metadata = self._failure_output_with_suggestions(
+                goal=str(state.get("goal", "")),
+                message=final_detail,
+                metadata={
+                    **dict(final_output.get("metadata") or {}),
+                    **({"reason": reason} if reason else {}),
+                },
+                error=RuntimeError(final_detail),
+                plan=plan,
+            )
+            final_output["content"] = suggestion_content
+            final_output["metadata"] = suggestion_metadata
+            state["final_output"] = final_output
         self._persist(session, node_name=node_name)
 
     def _finalize_session(self, session: AgentSession) -> None:
@@ -812,6 +845,7 @@ class ExecutionEngine:
                 "artifacts": list(final_output.get("artifacts", [])),
                 "metadata": dict(final_output.get("metadata", {})),
             }
+        final_output = self._decorate_final_output(state, final_output, status=status, metrics=metrics)
         self.store.append_event(
             session_id=session.id,
             node_name="finalize",
@@ -838,6 +872,86 @@ class ExecutionEngine:
             payload={"status": status, "final_output": final_output, "metrics": metrics},
         )
         self._persist(session, node_name="finalize")
+
+    def _decorate_final_output(
+        self,
+        state: RuntimeState,
+        final_output: dict[str, Any],
+        *,
+        status: str,
+        metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = dict(final_output.get("metadata") or {})
+        content = str(final_output.get("content") or "")
+        goal = str(state.get("goal", ""))
+
+        if status == "failed" and "failure_type" not in metadata:
+            failure_context = dict(state.get("failure_context") or {})
+            failure_message = str(state.get("error") or content or "Task failed.")
+            plan = _safe_execution_plan(state.get("plan", {}))
+            suggestion_content, suggestion_metadata = self._failure_output_with_suggestions(
+                goal=goal,
+                message=failure_message,
+                metadata={**metadata, **failure_context},
+                error=RuntimeError(failure_message),
+                plan=plan,
+            )
+            return {
+                "content": suggestion_content,
+                "artifacts": list(final_output.get("artifacts", [])),
+                "metadata": suggestion_metadata,
+            }
+
+        if status == "completed" and int(metrics.get("llm_calls", 0)) > 0 and "prompt_suggestions" not in metadata:
+            suggestion_result = generate_prompt_suggestions(
+                goal,
+                classify_failure(
+                    goal,
+                    metadata={**metadata, "status": status, "llm_calls": int(metrics.get("llm_calls", 0))},
+                ),
+                context=self._prompt_suggestion_context(state, metadata),
+            )
+            metadata.update(suggestion_result.metadata_payload())
+            return {
+                "content": content,
+                "artifacts": list(final_output.get("artifacts", [])),
+                "metadata": metadata,
+            }
+
+        return {
+            "content": content,
+            "artifacts": list(final_output.get("artifacts", [])),
+            "metadata": metadata,
+        }
+
+    def _failure_output_with_suggestions(
+        self,
+        *,
+        goal: str,
+        message: str,
+        metadata: dict[str, Any],
+        error: Exception | None = None,
+        plan: ExecutionPlan | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        suggestion_result = generate_prompt_suggestions(
+            goal,
+            classify_failure(goal, error=error, plan=plan, metadata=metadata),
+            context=self._prompt_suggestion_context(None, metadata),
+        )
+        enriched_metadata = dict(metadata)
+        enriched_metadata.update(suggestion_result.metadata_payload())
+        return append_prompt_suggestions(message, suggestion_result), enriched_metadata
+
+    def _prompt_suggestion_context(self, state: RuntimeState | None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "workspace_root": str(self.settings.workspace_root),
+            "outputs_dir": str(self.settings.workspace_root / "outputs"),
+        }
+        if state is not None and state.get("goal"):
+            context["goal"] = str(state.get("goal"))
+        if metadata:
+            context.update(dict(metadata))
+        return context
 
     def _persist(self, session: AgentSession, *, node_name: str) -> None:
         self._touch_state(session.state)

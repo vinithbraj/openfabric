@@ -1,0 +1,130 @@
+{
+  "capability": "prompt_suggestions",
+  "strict_threshold": 0.9,
+  "semantic_threshold": 1.0,
+  "max_llm_fallbacks": 0,
+  "cases": [
+    {
+      "id": "prompt_suggestions_01",
+      "category": "ambiguous_file_reference",
+      "prompt": "Read the meeting notes and return line 2.",
+      "expected_contains": ["Suggested prompts:", "meeting_notes.txt"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "ambiguous_file_reference",
+        "min_suggestion_count": 2,
+        "context": {"workspace_root": "/tmp/work"}
+      }
+    },
+    {
+      "id": "prompt_suggestions_02",
+      "category": "missing_file_path",
+      "prompt": "Count top-level .txt files and return the count only.",
+      "expected_contains": ["Suggested prompts:", "/tmp/work"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "missing_file_path",
+        "min_suggestion_count": 2,
+        "context": {"workspace_root": "/tmp/work"}
+      }
+    },
+    {
+      "id": "prompt_suggestions_03",
+      "category": "missing_file_path",
+      "prompt": "Find .txt files containing \"cinnamon\" and return matching filenames.",
+      "expected_contains": ["Suggested prompts:", "cinnamon", "/tmp/work"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "missing_file_path",
+        "min_suggestion_count": 2,
+        "context": {"workspace_root": "/tmp/work"}
+      }
+    },
+    {
+      "id": "prompt_suggestions_04",
+      "category": "ambiguous_database",
+      "prompt": "List all studies and save to studies.txt.",
+      "expected_contains": ["Suggested prompts:", "database", "CSV"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "ambiguous_database",
+        "min_suggestion_count": 2,
+        "metadata": {"error_source": "sql"}
+      }
+    },
+    {
+      "id": "prompt_suggestions_05",
+      "category": "ambiguous_database",
+      "prompt": "Count rows in patients and make it a report.",
+      "expected_contains": ["Suggested prompts:", "patients", "database"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "ambiguous_database",
+        "min_suggestion_count": 2,
+        "metadata": {"error_source": "sql"}
+      }
+    },
+    {
+      "id": "prompt_suggestions_06",
+      "category": "unsupported_mutating_operation",
+      "prompt": "scancel 12345",
+      "expected_contains": ["Suggested prompts:", "SLURM"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "unsupported_mutating_operation",
+        "min_suggestion_count": 2
+      }
+    },
+    {
+      "id": "prompt_suggestions_07",
+      "category": "unsupported_output_shape",
+      "prompt": "List txt files in /tmp/work and make it nice.",
+      "expected_contains": ["Suggested prompts:", "CSV only", "JSON"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "unsupported_output_shape",
+        "min_suggestion_count": 2
+      }
+    },
+    {
+      "id": "prompt_suggestions_08",
+      "category": "tool_unavailable",
+      "prompt": "Run pdftotext on report.pdf and return the text.",
+      "expected_contains": ["Suggested prompts:", "installed", "filesystem"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "tool_unavailable",
+        "min_suggestion_count": 2,
+        "error_detail": "pdftotext: command not found",
+        "metadata": {"reason": "tool_execution_failed", "failed_step": "shell.exec"},
+        "context": {"workspace_root": "/tmp/work"}
+      }
+    },
+    {
+      "id": "prompt_suggestions_09",
+      "category": "unsupported_compound_task",
+      "prompt": "List top-level .txt files in /tmp/work and then save them to /tmp/out/files.csv and return it.",
+      "expected_contains": ["Suggested prompts:", "First list top-level .txt files", "Then write that result"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "unsupported_compound_task",
+        "min_suggestion_count": 2,
+        "metadata": {"reason": "validation_failed"},
+        "context": {"workspace_root": "/tmp/work", "outputs_dir": "/tmp/out"}
+      }
+    },
+    {
+      "id": "prompt_suggestions_10",
+      "category": "llm_fallback_used",
+      "prompt": "List all studies and save to studies.txt.",
+      "expected_contains": ["deterministic form", "database", "result.csv"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "expected_failure_type": "llm_fallback_used",
+        "min_suggestion_count": 2,
+        "metadata": {"status": "completed", "llm_calls": 1},
+        "context": {"outputs_dir": "/tmp/work/outputs"}
+      }
+    }
+  ]
+}

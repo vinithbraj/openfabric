@@ -248,13 +248,15 @@ def test_planner_connection_failure_is_normalized_to_llm_error(tmp_path: Path, m
 
     engine._run_planner(session)
 
-    assert session.state["final_output"]["content"] == "LLM connection error."
+    assert session.state["final_output"]["content"].startswith("LLM connection error.")
+    assert "Suggested prompts:" in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["planner_error_type"] == "APIConnectionError"
     assert metadata["error_source"] == "llm"
     assert metadata["error_kind"] == "connection"
     assert metadata["error_target"] == engine.settings.llm_base_url
     assert metadata["error_detail"] == "Connection error."
+    assert metadata["suggestion_count"] >= 1
     events = engine.store.get_events(session.id)
     planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
     assert planner_failed["payload"]["error"] == "LLM connection error."
@@ -280,10 +282,12 @@ def test_planner_timeout_failure_is_normalized_to_llm_timeout(tmp_path: Path, mo
 
     engine._run_planner(session)
 
-    assert session.state["final_output"]["content"] == "LLM timeout error."
+    assert session.state["final_output"]["content"].startswith("LLM timeout error.")
+    assert "Suggested prompts:" in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "llm"
     assert metadata["error_kind"] == "timeout"
+    assert metadata["suggestion_count"] >= 1
 
 
 def test_terminal_sql_auth_failure_is_normalized_and_redacted(tmp_path: Path) -> None:
@@ -308,13 +312,15 @@ def test_terminal_sql_auth_failure_is_normalized_and_redacted(tmp_path: Path) ->
         },
     )
 
-    assert session.state["final_output"]["content"] == "Database authentication error for 'dicom'."
+    assert session.state["final_output"]["content"].startswith("Database authentication error for 'dicom'.")
+    assert "Suggested prompts:" in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "sql"
     assert metadata["error_kind"] == "authentication"
     assert metadata["error_target"] == "dicom"
     assert "***:***@" in metadata["error_detail"]
     assert "admin:admin@" not in metadata["error_detail"]
+    assert metadata["failure_type"] == "execution_failure"
     events = engine.store.get_events(session.id)
     executor_failed = next(event for event in events if event["event_type"] == "executor.failed")
     assert executor_failed["payload"]["error"] == "Database authentication error for 'dicom'."
@@ -343,7 +349,8 @@ def test_terminal_sql_connection_failure_is_normalized(tmp_path: Path) -> None:
         },
     )
 
-    assert session.state["final_output"]["content"] == "Database connection error for 'dicom'."
+    assert session.state["final_output"]["content"].startswith("Database connection error for 'dicom'.")
+    assert "Suggested prompts:" in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "sql"
     assert metadata["error_kind"] == "connection"
@@ -365,7 +372,8 @@ def test_terminal_gateway_request_failure_is_normalized(tmp_path: Path) -> None:
         },
     )
 
-    assert session.state["final_output"]["content"] == "Gateway connection error for node 'local'."
+    assert session.state["final_output"]["content"].startswith("Gateway connection error for node 'local'.")
+    assert "Suggested prompts:" in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "gateway"
     assert metadata["error_kind"] == "connection"
@@ -388,7 +396,8 @@ def test_terminal_gateway_response_failure_is_normalized(tmp_path: Path) -> None
         },
     )
 
-    assert session.state["final_output"]["content"] == "Gateway response error for node 'local'."
+    assert session.state["final_output"]["content"].startswith("Gateway response error for node 'local'.")
+    assert "Suggested prompts:" in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "gateway"
     assert metadata["error_kind"] == "response"
@@ -416,9 +425,11 @@ def test_unclassified_sql_error_message_is_preserved(tmp_path: Path) -> None:
         },
     )
 
-    assert session.state["final_output"]["content"] == "Unsafe query"
+    assert session.state["final_output"]["content"].startswith("Unsafe query")
+    assert "Suggested prompts:" in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert "error_source" not in metadata
+    assert metadata["failure_type"] == "execution_failure"
 
 
 def test_unsafe_query_failure_is_non_retryable(tmp_path: Path) -> None:
@@ -443,9 +454,11 @@ def test_unsafe_query_failure_is_non_retryable(tmp_path: Path) -> None:
     )
 
     assert session.state["status"] == "failed"
-    assert session.state["final_output"]["content"] == "Unsafe query"
+    assert session.state["final_output"]["content"].startswith("Unsafe query")
+    assert "Suggested prompts:" in session.state["final_output"]["content"]
     assert session.state["failure_context"]["retryable"] is False
     assert session.state["final_output"]["metadata"]["retryable"] is False
+    assert session.state["final_output"]["metadata"]["failure_type"] == "unsupported_mutating_operation"
 
 
 def test_planner_contract_failure_metadata_is_preserved(tmp_path: Path, monkeypatch) -> None:
@@ -473,6 +486,7 @@ def test_planner_contract_failure_metadata_is_preserved(tmp_path: Path, monkeypa
     assert metadata["contract_violation"] is True
     assert metadata["violation_tier"] == "hard"
     assert metadata["violation_code"] == "unsafe_sql"
+    assert metadata["suggestion_count"] >= 1
     events = engine.store.get_events(session.id)
     planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
     assert planner_failed["payload"]["contract_violation"] is True

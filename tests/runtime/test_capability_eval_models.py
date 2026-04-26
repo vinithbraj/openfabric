@@ -52,7 +52,15 @@ def test_missing_required_id_or_prompt_fails() -> None:
 
 def test_json_eval_files_load_successfully() -> None:
     packs = load_capability_eval_packs(PACKS_DIR)
-    assert [pack.capability for pack in packs] == ["compound", "fetch", "filesystem", "shell", "sql", "text_transform"]
+    assert [pack.capability for pack in packs] == [
+        "compound",
+        "fetch",
+        "filesystem",
+        "prompt_suggestions",
+        "shell",
+        "sql",
+        "text_transform",
+    ]
     assert all(pack.cases for pack in packs)
 
 

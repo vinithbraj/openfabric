@@ -101,6 +101,24 @@ def _patch_shell_plan(engine, monkeypatch) -> None:
     monkeypatch.setattr(engine.planner, "build_plan", fake_build_plan)
 
 
+def _patch_planner_failure(engine, monkeypatch) -> None:
+    def failing_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["filesystem_preference"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_llm_calls = 0
+        engine.planner.last_error_stage = "direct"
+        engine.planner.last_plan_repairs = []
+        engine.planner.last_plan_canonicalized = False
+        engine.planner.last_original_execution_plan = None
+        engine.planner.last_canonicalized_execution_plan = None
+        engine.planner.last_error_type = "RuntimeError"
+        engine.planner.last_raw_output = None
+        raise RuntimeError("planner boom")
+
+    monkeypatch.setattr(engine.planner, "build_plan", failing_build_plan)
+
+
 def _patch_gateway_requests(monkeypatch) -> None:
     def fake_post(url, json, timeout, stream=False):
         if stream:
@@ -191,3 +209,54 @@ def test_runs_stream_and_openai_compat_stream(tmp_path: Path, monkeypatch) -> No
     assert "hello\\n" in body
     assert "[stderr] warn\\n" in body
     assert "data: [DONE]" in body
+
+
+def test_failed_run_and_openai_surfaces_include_prompt_suggestions(tmp_path: Path, monkeypatch) -> None:
+    spec_path = _write_shell_spec(tmp_path)
+    app = create_app(_settings(tmp_path, spec_path))
+    engine = app.state.engine
+    _patch_planner_failure(engine, monkeypatch)
+    client = TestClient(app)
+
+    run_response = client.post(
+        "/runs",
+        json={"spec_path": str(spec_path), "input": {"task": "Read the meeting notes and return line 2."}},
+    )
+    assert run_response.status_code == 200
+    run_payload = run_response.json()
+    assert "Suggested prompts:" in run_payload["final_output"]["content"]
+    assert "meeting_notes.txt" in run_payload["final_output"]["content"]
+    assert run_payload["final_output"]["metadata"]["failure_type"] == "ambiguous_file_reference"
+    assert run_payload["final_output"]["metadata"]["suggestion_count"] >= 1
+
+    session_response = client.get(f"/sessions/{run_payload['session_id']}")
+    assert session_response.status_code == 200
+    session_payload = session_response.json()
+    assert session_payload["latest_snapshot"]["final_output"]["metadata"]["failure_type"] == "ambiguous_file_reference"
+
+    completion = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "openfabric-agent",
+            "messages": [{"role": "user", "content": "Read the meeting notes and return line 2."}],
+            "stream": False,
+        },
+    )
+    assert completion.status_code == 200
+    assert "Suggested prompts:" in completion.json()["choices"][0]["message"]["content"]
+    assert "meeting_notes.txt" in completion.json()["choices"][0]["message"]["content"]
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "openfabric-agent",
+            "messages": [{"role": "user", "content": "Read the meeting notes and return line 2."}],
+            "stream": True,
+        },
+    ) as response:
+        body = response.read().decode()
+
+    assert response.status_code == 200
+    assert "Suggested prompts:" in body
+    assert "meeting_notes.txt" in body

@@ -227,3 +227,47 @@ def test_chat_progress_streams_shell_output(monkeypatch, tmp_path: Path) -> None
     assert "Executing: shell.exec" in result.stdout
     assert "hello" in result.stdout
     assert "Finished: completed" in result.stdout
+
+
+def test_chat_failure_prints_prompt_suggestions(monkeypatch, tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "name: chat_failure",
+                "runtime:",
+                "  max_retries: 0",
+                "tools:",
+                "  - fs.read",
+            ]
+        )
+    )
+    engine = ExecutionEngine(Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db"))
+
+    def failing_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["filesystem_preference"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_llm_calls = 0
+        engine.planner.last_error_stage = "direct"
+        engine.planner.last_plan_repairs = []
+        engine.planner.last_plan_canonicalized = False
+        engine.planner.last_original_execution_plan = None
+        engine.planner.last_canonicalized_execution_plan = None
+        engine.planner.last_error_type = "RuntimeError"
+        engine.planner.last_raw_output = None
+        raise RuntimeError("planner boom")
+
+    monkeypatch.setattr(engine.planner, "build_plan", failing_build_plan)
+    monkeypatch.setattr(cli, "_build_engine", lambda config_path=None: engine)
+
+    result = runner.invoke(
+        cli.app,
+        ["chat", str(spec_path)],
+        input="Read the meeting notes and return line 2.\n/exit\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Suggested prompts:" in result.stdout
+    assert "meeting_notes.txt" in result.stdout

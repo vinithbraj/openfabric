@@ -1,0 +1,608 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+
+from aor_runtime.core.contracts import ExecutionPlan
+from aor_runtime.runtime.prompt_suggestions import PromptSuggestion, PromptSuggestionResult
+from aor_runtime.runtime.text_extract import extract_quoted_content
+
+
+AMBIGUOUS_FILE_REFERENCE_RE = re.compile(
+    r"\b(?:the\s+file|the\s+meeting\s+notes|the\s+report|the\s+notes|the\s+document)\b",
+    re.IGNORECASE,
+)
+FILE_OPERATION_RE = re.compile(
+    r"\b(?:read|open|list|count|search|find|show|return|read line|scan)\b",
+    re.IGNORECASE,
+)
+FILE_NOUN_RE = re.compile(r"\b(?:file|files|folder|directory|line|lines|\.txt|\.md|\*\.txt|\*\.md)\b", re.IGNORECASE)
+VAGUE_OUTPUT_RE = re.compile(r"\b(?:make it nice|format beautifully|format nicely|beautify|pretty format)\b", re.IGNORECASE)
+MUTATING_OPERATION_RE = re.compile(
+    r"\b(?:scancel|scontrol\s+update|drain|resume|delete|remove|kill|shutdown|poweroff|reboot)\b",
+    re.IGNORECASE,
+)
+COMPOUND_HINT_RE = re.compile(r"\b(?:then|and then|after that|save .* return|write .* return)\b", re.IGNORECASE)
+PATH_PREPOSITION_RE = re.compile(r"\b(?:in|under|from|inside|within|at|to)\s+([^\s,;:]+)", re.IGNORECASE)
+BARE_FILE_RE = re.compile(r"\b(?!\*\.)[\w.-]+\.[A-Za-z0-9]{1,8}\b")
+ABSOLUTE_PATH_RE = re.compile(r"(?:\.\.?/|~/|/|[A-Za-z]:\\)[^\s,;:]+")
+DATABASE_HINT_RE = re.compile(r"\b(?:database|table|sql|query|rows|select|from)\b", re.IGNORECASE)
+DATABASE_NAME_RE = re.compile(r"\b(?:database\s+([A-Za-z_][\w-]*)|in\s+([A-Za-z_][\w-]*_db|dicom))\b", re.IGNORECASE)
+TABLE_NAME_RE = re.compile(r"\b(?:from|in)\s+([A-Za-z_][\w-]*)\b", re.IGNORECASE)
+COMMAND_NOT_FOUND_RE = re.compile(
+    r"(?:command not found|not installed|tool not found|executable file not found|no such file or directory)",
+    re.IGNORECASE,
+)
+GENERIC_PATH_TOKENS = {
+    "the",
+    "this",
+    "that",
+    "file",
+    "files",
+    "folder",
+    "directory",
+    "report",
+    "notes",
+    "meeting",
+    "database",
+    "table",
+    "json",
+    "csv",
+    "text",
+}
+
+
+def classify_failure(
+    goal: str,
+    error: Exception | None = None,
+    plan: ExecutionPlan | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    text = str(goal or "").strip()
+    lowered_goal = text.lower()
+    metadata_payload = dict(metadata or {})
+    detail = _metadata_text(metadata_payload)
+    error_text = str(error) if error is not None else ""
+    lowered_error = error_text.lower()
+    lowered_detail = detail.lower()
+
+    if bool(metadata_payload.get("llm_calls")) and str(metadata_payload.get("status") or "").lower() == "completed":
+        return "llm_fallback_used"
+
+    if MUTATING_OPERATION_RE.search(text):
+        return "unsupported_mutating_operation"
+
+    if VAGUE_OUTPUT_RE.search(text):
+        return "unsupported_output_shape"
+
+    if AMBIGUOUS_FILE_REFERENCE_RE.search(text) and not _has_explicit_path(text):
+        return "ambiguous_file_reference"
+
+    if _looks_like_file_task(text) and not _has_explicit_path(text):
+        return "missing_file_path"
+
+    if _looks_like_sql_task(text, plan=plan, metadata=metadata_payload) and not _has_explicit_database(text):
+        return "ambiguous_database"
+
+    if COMMAND_NOT_FOUND_RE.search(lowered_error) or COMMAND_NOT_FOUND_RE.search(lowered_detail):
+        return "tool_unavailable"
+
+    error_kind = str(metadata_payload.get("error_kind") or "").strip().lower()
+    reason = str(metadata_payload.get("reason") or "").strip().lower()
+    failed_step = str(metadata_payload.get("failed_step") or "").strip().lower()
+
+    if (reason == "validation_failed" or "validation failed" in lowered_error or "validation failed" in lowered_detail) and (
+        COMPOUND_HINT_RE.search(text) or _plan_has_multi_step_actions(plan)
+    ):
+        return "unsupported_compound_task"
+
+    if reason == "validation_failed" or "validation failed" in lowered_error or "validation failed" in lowered_detail:
+        return "validation_failure"
+
+    if error_kind == "configuration" and failed_step == "shell.exec":
+        return "tool_unavailable"
+
+    if reason == "tool_execution_failed" or failed_step or error_kind:
+        return "execution_failure"
+
+    return "unknown"
+
+
+def generate_prompt_suggestions(goal: str, error_type: str, context: dict[str, Any] | None = None) -> PromptSuggestionResult:
+    context_payload = dict(context or {})
+    workspace_root = _workspace_root(context_payload)
+    outputs_dir = _outputs_dir(context_payload)
+    error_detail = str(context_payload.get("error_detail") or context_payload.get("error") or "").strip()
+
+    if error_type == "ambiguous_file_reference":
+        filename = _infer_named_file(goal)
+        search_term = _infer_search_term(goal) or "agenda"
+        suggestions = [
+            PromptSuggestion(
+                title="Use an explicit file path",
+                suggested_prompt=f"Read line 2 from {workspace_root / filename} and return only the line.",
+                reason="The request names a file conceptually but does not provide a concrete path.",
+            ),
+            PromptSuggestion(
+                title="Find the file first",
+                suggested_prompt=f"Find files named {filename} under {workspace_root}.",
+                reason="A discovery step can identify the exact file path before reading it.",
+            ),
+            PromptSuggestion(
+                title="Search by content",
+                suggested_prompt=f"Search {workspace_root} for files containing '{search_term}' and return matching filenames.",
+                reason="If the file name is uncertain, searching by content is more precise.",
+            ),
+        ]
+        return PromptSuggestionResult(
+            error_type="ambiguous_file_reference",
+            message="I could not determine which file you meant.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "missing_file_path":
+        extension = ".md" if ".md" in goal.lower() or "markdown" in goal.lower() else ".txt"
+        suggestions = [
+            PromptSuggestion(
+                title="Provide a concrete folder",
+                suggested_prompt=f"Count top-level {extension} files in {workspace_root} and return the count only.",
+                reason="File tasks are deterministic when the target folder is explicit.",
+            ),
+            PromptSuggestion(
+                title="Use a recursive list form",
+                suggested_prompt=f"List {extension} files under {workspace_root} recursively as JSON.",
+                reason="Recursive file prompts work best when both the folder and output shape are explicit.",
+            ),
+        ]
+        needle = _infer_search_term(goal)
+        if needle:
+            suggestions.append(
+                PromptSuggestion(
+                    title="Search by content with an explicit root",
+                    suggested_prompt=f"Find {extension} files containing '{needle}' under {workspace_root} and return matching filenames.",
+                    reason="Adding a search root makes content search deterministic.",
+                )
+            )
+        return PromptSuggestionResult(
+            error_type="missing_file_path",
+            message="I need an explicit file or folder path for that request.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "ambiguous_database":
+        table = _infer_table_name(goal) or "patients"
+        database = _infer_database_name(goal) or ("dicom" if table in {"patient", "patients", "study", "studies"} else "clinical_db")
+        column = _infer_column_name(goal, table)
+        suggestions = [
+            PromptSuggestion(
+                title="Make the database explicit",
+                suggested_prompt=f"Count rows in {table} from database {database} and return the count only.",
+                reason="SQL tasks are deterministic when the database and table are named directly.",
+            ),
+            PromptSuggestion(
+                title="Ask for one column as CSV",
+                suggested_prompt=f"Query {column} from {table} in {database} as CSV.",
+                reason="Explicit columns and output formats reduce planner ambiguity.",
+            ),
+            PromptSuggestion(
+                title="Ask for JSON rows",
+                suggested_prompt=f"Query {column} from {table} in {database} as JSON with rows.",
+                reason="Structured row output is supported when the query shape is explicit.",
+            ),
+        ]
+        return PromptSuggestionResult(
+            error_type="ambiguous_database",
+            message="I could not determine the exact database query shape you wanted.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "unsupported_compound_task":
+        suggestions = [
+            PromptSuggestion(
+                title="Split the task into the first supported step",
+                suggested_prompt=f"First list top-level .txt files in {workspace_root} as CSV.",
+                reason="Breaking the workflow into smaller deterministic prompts avoids unsupported multi-step phrasing.",
+            ),
+            PromptSuggestion(
+                title="Then save the intermediate result",
+                suggested_prompt=f"Then write that result to {outputs_dir / 'files.csv'} and return the file contents.",
+                reason="Save-and-return flows are more reliable when expressed as a follow-up prompt.",
+            ),
+        ]
+        return PromptSuggestionResult(
+            error_type="unsupported_compound_task",
+            message="That request combines steps in a way the deterministic path does not handle well yet.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "unsupported_mutating_operation":
+        suggestions = [
+            PromptSuggestion(
+                title="Use a non-mutating status request",
+                suggested_prompt="Show running SLURM jobs.",
+                reason="Inspection prompts are safer and supported before admin-style mutations.",
+            ),
+            PromptSuggestion(
+                title="Inspect node state",
+                suggested_prompt="Show SLURM node status as JSON.",
+                reason="Status queries can usually answer the underlying operational question without mutation.",
+            ),
+            PromptSuggestion(
+                title="Summarize queue health",
+                suggested_prompt="Summarize pending jobs by partition.",
+                reason="Queue summaries are deterministic and avoid administrative side effects.",
+            ),
+        ]
+        return PromptSuggestionResult(
+            error_type="unsupported_mutating_operation",
+            message="I can suggest a safer non-mutating form for that request.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "unsupported_output_shape":
+        suggestions = [
+            PromptSuggestion(
+                title="Request CSV directly",
+                suggested_prompt="Return the result as CSV only.",
+                reason="The runtime supports a fixed set of deterministic output shapes.",
+            ),
+            PromptSuggestion(
+                title="Request JSON directly",
+                suggested_prompt="Return the result as JSON with matches.",
+                reason="JSON output is reliable when the expected wrapper shape is explicit.",
+            ),
+            PromptSuggestion(
+                title="Request a count directly",
+                suggested_prompt="Return the count only.",
+                reason="Count-only requests remove formatting ambiguity.",
+            ),
+        ]
+        return PromptSuggestionResult(
+            error_type="unsupported_output_shape",
+            message="I could not determine the output shape you wanted.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "tool_unavailable":
+        suggestions = [
+            PromptSuggestion(
+                title="Prefer a native filesystem search",
+                suggested_prompt=f"Use filesystem search instead of shell: find .txt files containing cinnamon under {workspace_root}.",
+                reason="A native filesystem tool avoids dependence on missing shell utilities.",
+            ),
+            PromptSuggestion(
+                title="Check installation first",
+                suggested_prompt="Check whether the required tool is installed and retry.",
+                reason="If the task depends on a missing binary, installation or a different tool path is required.",
+            ),
+        ]
+        if error_detail:
+            suggestions.append(
+                PromptSuggestion(
+                    title="Ask for an explicit shell fallback only if needed",
+                    suggested_prompt="Using shell, run a command that is available on this machine and return stdout only.",
+                    reason=f"The previous attempt appears to depend on an unavailable tool: {error_detail}",
+                )
+            )
+        return PromptSuggestionResult(
+            error_type="tool_unavailable",
+            message="A required tool or binary appears to be unavailable.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "llm_fallback_used":
+        suggestions = _llm_fallback_suggestions(goal, workspace_root, outputs_dir)
+        return PromptSuggestionResult(
+            error_type="llm_fallback_used",
+            message="This request worked, but it fell back to LLM planning instead of using a deterministic form.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "validation_failure":
+        suggestions = [
+            PromptSuggestion(
+                title="Make the request more explicit",
+                suggested_prompt=f"List .txt files under {workspace_root} recursively as JSON.",
+                reason="Validation failures are often caused by under-specified tool or output expectations.",
+            ),
+            PromptSuggestion(
+                title="Specify output mode directly",
+                suggested_prompt="Return the result as CSV only.",
+                reason="Explicit output modes reduce plan/validation ambiguity.",
+            ),
+        ]
+        return PromptSuggestionResult(
+            error_type="validation_failure",
+            message="The request needs a more explicit supported form.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "execution_failure":
+        suggestions = [
+            PromptSuggestion(
+                title="Reduce the request to one explicit step",
+                suggested_prompt=f"List top-level .txt files in {workspace_root} as text.",
+                reason="Execution failures are easier to diagnose when the task is narrowed to a single supported action.",
+            ),
+            PromptSuggestion(
+                title="Ask for a concrete format",
+                suggested_prompt="Return the result as JSON with matches.",
+                reason="Structured output makes retries and verification more predictable.",
+            ),
+        ]
+        return PromptSuggestionResult(
+            error_type="execution_failure",
+            message="The request executed unsuccessfully in its current form.",
+            suggestions=suggestions,
+        )
+
+    suggestions = [
+        PromptSuggestion(
+            title="Add explicit inputs",
+            suggested_prompt=f"Read line 2 from {workspace_root / 'meeting_notes.txt'} and return only the line.",
+            reason="Concrete file paths and output constraints improve determinism.",
+        ),
+        PromptSuggestion(
+            title="Make structured data explicit",
+            suggested_prompt="Count rows in patients from database dicom and return the count only.",
+            reason="Database tasks work best when the database, table, and output shape are named directly.",
+        ),
+    ]
+    return PromptSuggestionResult(
+        error_type="unknown",
+        message="I could not confidently rewrite that request, but these supported forms are close.",
+        suggestions=suggestions,
+    )
+
+
+def _looks_like_file_task(goal: str) -> bool:
+    return bool(FILE_OPERATION_RE.search(goal) and FILE_NOUN_RE.search(goal))
+
+
+def _has_explicit_path(goal: str) -> bool:
+    if ABSOLUTE_PATH_RE.search(goal) or BARE_FILE_RE.search(goal):
+        return True
+    for match in PATH_PREPOSITION_RE.finditer(goal):
+        candidate = _clean_token(match.group(1))
+        if not candidate:
+            continue
+        if candidate.lower() in GENERIC_PATH_TOKENS:
+            continue
+        if candidate.startswith("*."):
+            continue
+        if "/" in candidate or "\\" in candidate or candidate.startswith(".") or "." in candidate:
+            return True
+        if re.fullmatch(r"[A-Za-z0-9_.-]+", candidate):
+            return True
+    return False
+
+
+def _looks_like_sql_task(goal: str, *, plan: ExecutionPlan | None, metadata: dict[str, Any]) -> bool:
+    if plan is not None and any(step.action == "sql.query" for step in plan.steps):
+        return True
+    if str(metadata.get("error_source") or "").strip().lower() == "sql":
+        return True
+    if str(metadata.get("failed_step") or "").strip().lower() == "sql.query":
+        return True
+    lowered = goal.lower()
+    if DATABASE_HINT_RE.search(goal):
+        return True
+    return any(token in lowered for token in ("patient", "patients", "study", "studies", "dicom"))
+
+
+def _has_explicit_database(goal: str) -> bool:
+    return DATABASE_NAME_RE.search(goal) is not None
+
+
+def _plan_has_multi_step_actions(plan: ExecutionPlan | None) -> bool:
+    return plan is not None and len(plan.steps) > 1
+
+
+def _metadata_text(metadata: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("error_source", "error_kind", "error_target", "error_detail", "reason", "failed_step"):
+        value = metadata.get(key)
+        if value:
+            parts.append(str(value))
+    return " ".join(parts)
+
+
+def _workspace_root(context: dict[str, Any]) -> Path:
+    value = str(context.get("workspace_root") or "/tmp/work").strip() or "/tmp/work"
+    return Path(value)
+
+
+def _outputs_dir(context: dict[str, Any]) -> Path:
+    value = str(context.get("outputs_dir") or (_workspace_root(context) / "outputs")).strip()
+    return Path(value)
+
+
+def _infer_named_file(goal: str) -> str:
+    lowered = goal.lower()
+    if "meeting notes" in lowered:
+        return "meeting_notes.txt"
+    if "report" in lowered:
+        return "report.txt"
+    if "notes" in lowered:
+        return "notes.txt"
+    if "studies" in lowered:
+        return "studies.txt"
+    match = BARE_FILE_RE.search(goal)
+    if match is not None:
+        return match.group(0)
+    return "meeting_notes.txt"
+
+
+def _infer_search_term(goal: str) -> str | None:
+    quoted = extract_quoted_content(goal)
+    if quoted:
+        return quoted
+    lowered = goal.lower()
+    for token in ("agenda", "cinnamon", "garden", "meeting", "report", "study"):
+        if token in lowered:
+            return token
+    return None
+
+
+def _infer_table_name(goal: str) -> str | None:
+    lowered = goal.lower()
+    if "studies" in lowered or "study" in lowered:
+        return "study"
+    if "patients" in lowered or "patient" in lowered:
+        return "patients"
+    match = TABLE_NAME_RE.search(goal)
+    if match is not None:
+        candidate = _clean_token(match.group(1))
+        if candidate and candidate.lower() not in {"database", "table", "json", "csv"}:
+            return candidate
+    return None
+
+
+def _infer_database_name(goal: str) -> str | None:
+    match = DATABASE_NAME_RE.search(goal)
+    if match is None:
+        return None
+    for group in match.groups():
+        candidate = _clean_token(group or "")
+        if candidate:
+            return candidate
+    return None
+
+
+def _infer_column_name(goal: str, table: str) -> str:
+    lowered = goal.lower()
+    if "name" in lowered:
+        return "name"
+    if table == "study":
+        return "StudyInstanceUID"
+    if table in {"patient", "patients"}:
+        return "PatientName"
+    return "name"
+
+
+def _llm_fallback_suggestions(goal: str, workspace_root: Path, outputs_dir: Path) -> list[PromptSuggestion]:
+    lowered = goal.lower()
+    if _looks_like_sql_task(goal, plan=None, metadata={}):
+        table = _infer_table_name(goal) or "patients"
+        database = _infer_database_name(goal) or ("dicom" if table == "study" else "clinical_db")
+        column = _infer_column_name(goal, table)
+        return [
+            PromptSuggestion(
+                title="Use an explicit SQL count form",
+                suggested_prompt=f"Count rows in {table} from database {database} and return the count only.",
+                reason="Naming the database and table keeps the task on the deterministic SQL path.",
+            ),
+            PromptSuggestion(
+                title="Use an explicit SQL select form",
+                suggested_prompt=f"Query {column} from {table} in {database} as CSV.",
+                reason="Explicit column and output mode requests map cleanly to the SQL capability.",
+            ),
+            PromptSuggestion(
+                title="Save the SQL output deterministically",
+                suggested_prompt=f"Query {column} from {table} in {database} as CSV, save the result to {outputs_dir / 'result.csv'}, and return the file contents.",
+                reason="Explicit save-and-return wording avoids planner-only formatting paths.",
+            ),
+        ]
+
+    if "shell" in lowered or "command" in lowered or "printf" in lowered:
+        return [
+            PromptSuggestion(
+                title="Make the shell intent explicit",
+                suggested_prompt="Using shell, print alpha and beta on separate lines and return CSV.",
+                reason="Explicit shell wording keeps the task on the deterministic shell capability.",
+            ),
+            PromptSuggestion(
+                title="Ask for stdout only",
+                suggested_prompt="Using shell, run `hostname` and return stdout only.",
+                reason="Explicit shell output requests are less ambiguous than generic command prompts.",
+            ),
+        ]
+
+    if any(token in lowered for token in ("write", "save", "create")):
+        quoted = extract_quoted_content(goal) or "hello"
+        return [
+            PromptSuggestion(
+                title="Use exact quoted content",
+                suggested_prompt=f"Write the exact text '{quoted}' to {outputs_dir / 'result.txt'} and return it.",
+                reason="Quoted write-and-return prompts map cleanly to deterministic filesystem intents.",
+            ),
+            PromptSuggestion(
+                title="Separate save from other work",
+                suggested_prompt=f"Save '{quoted}' to {outputs_dir / 'result.txt'} and return the saved file contents only.",
+                reason="Explicit save-and-return phrasing avoids planner-only output shaping.",
+            ),
+        ]
+
+    if _looks_like_file_task(goal):
+        needle = _infer_search_term(goal)
+        if "line" in lowered:
+            filename = _infer_named_file(goal)
+            return [
+                PromptSuggestion(
+                    title="Use an explicit file path",
+                    suggested_prompt=f"Read line 2 from {workspace_root / filename} and return only the line.",
+                    reason="Explicit file paths keep read requests on the deterministic filesystem path.",
+                ),
+                PromptSuggestion(
+                    title="Find the file before reading",
+                    suggested_prompt=f"Find files named {filename} under {workspace_root}.",
+                    reason="When the file name is conceptual, a discovery step is more reliable.",
+                ),
+            ]
+        if "count" in lowered:
+            return [
+                PromptSuggestion(
+                    title="Use an explicit folder and extension",
+                    suggested_prompt=f"Count top-level .txt files in {workspace_root} and return the count only.",
+                    reason="Explicit folder and output wording maps directly to deterministic file counting.",
+                ),
+                PromptSuggestion(
+                    title="Use a recursive file count form",
+                    suggested_prompt=f"Count .txt files under {workspace_root} recursively and return the count only.",
+                    reason="Recursive count prompts are supported when the search root is explicit.",
+                ),
+            ]
+        if "search" in lowered or "find" in lowered:
+            term = needle or "cinnamon"
+            return [
+                PromptSuggestion(
+                    title="Use explicit content-search wording",
+                    suggested_prompt=f"Find .txt files containing '{term}' under {workspace_root} and return matching filenames.",
+                    reason="Explicit path, pattern, and output wording keep file search deterministic.",
+                ),
+                PromptSuggestion(
+                    title="Ask for JSON matches directly",
+                    suggested_prompt=f"Find .txt files containing '{term}' under {workspace_root} and return them as JSON only.",
+                    reason="Structured output removes ambiguity from search-result formatting.",
+                ),
+            ]
+        return [
+            PromptSuggestion(
+                title="Use an explicit list form",
+                suggested_prompt=f"List top-level .txt files in {workspace_root} as CSV.",
+                reason="Explicit list prompts are more likely to match the deterministic filesystem capability.",
+            ),
+            PromptSuggestion(
+                title="Use explicit JSON output",
+                suggested_prompt=f"List .txt files under {workspace_root} recursively as JSON.",
+                reason="Adding both the folder and output mode avoids planner fallback.",
+            ),
+        ]
+
+    return [
+        PromptSuggestion(
+            title="Make the request concrete",
+            suggested_prompt=f"List .txt files under {workspace_root} recursively as JSON.",
+            reason="Explicit paths and output modes help the runtime stay deterministic.",
+        ),
+        PromptSuggestion(
+            title="Use an explicit SQL form when querying data",
+            suggested_prompt="Count rows in patients from database dicom and return the count only.",
+            reason="Explicit database phrasing avoids ambiguous natural-language query requests.",
+        ),
+    ]
+
+
+def _clean_token(value: str) -> str:
+    return str(value or "").strip().strip("\"'()[]{}")
