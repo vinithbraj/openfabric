@@ -196,6 +196,30 @@ class SQLiteRunStore:
             for row in rows
         ]
 
+    def get_events_after(self, session_id: str, after_id: int | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM events WHERE run_id = ?"
+        params: list[Any] = [session_id]
+        if after_id is not None:
+            query += " AND id > ?"
+            params.append(int(after_id))
+        query += " ORDER BY id ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "session_id": row["run_id"],
+                "node_name": row["node_name"],
+                "event_type": row["event_type"],
+                "payload": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     # Backward-compatible helpers for older run-centric callers.
     def get_run(self, run_id: str) -> AgentSession | None:
         return self.get_session(run_id)

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
+import uuid
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from aor_runtime import __version__
@@ -27,10 +31,115 @@ class ValidateRequest(BaseModel):
     spec_path: str
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: Any
+
+
+class ChatCompletionsRequest(BaseModel):
+    model: str
+    messages: list[ChatMessage] = Field(default_factory=list)
+    stream: bool = False
+
+
+def _format_sse(event_name: str, payload: dict[str, Any] | list[Any] | str) -> str:
+    if isinstance(payload, str):
+        encoded = payload
+    else:
+        encoded = json_dumps(payload)
+    return f"event: {event_name}\ndata: {encoded}\n\n"
+
+
+def json_dumps(payload: Any) -> str:
+    import json
+
+    return json.dumps(payload, default=str)
+
+
+def _start_background(target):
+    outcome: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            outcome["result"] = target()
+        except Exception as exc:  # noqa: BLE001
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
+def _latest_session_status(engine: ExecutionEngine, session_id: str) -> tuple[str | None, dict[str, Any] | None]:
+    payload = engine.get_session(session_id)
+    if payload is None:
+        return None, None
+    session = payload.get("session") or {}
+    return str(session.get("status") or ""), payload
+
+
+def _event_text_for_openai(event: dict[str, Any]) -> tuple[str | None, str | None]:
+    event_type = str(event.get("event_type") or "")
+    payload = dict(event.get("payload") or {})
+    if event_type == "planner.started":
+        return "Thinking...\n", None
+    if event_type == "planner.completed":
+        return "Plan ready.\n", None
+    if event_type == "executor.step.started":
+        step = dict(payload.get("step") or {})
+        return f"Executing {step.get('action', 'step')}...\n", None
+    if event_type == "executor.step.output":
+        channel = str(payload.get("channel") or "")
+        text = str(payload.get("text") or "")
+        if channel == "stderr":
+            return f"[stderr] {text}", text
+        return text, text
+    if event_type == "validator.started":
+        return "Validating...\n", None
+    if event_type == "validator.completed":
+        result = dict(payload.get("result") or {})
+        return ("Validation passed.\n" if bool(result.get("success")) else "Validation failed.\n"), None
+    if event_type.endswith(".failed"):
+        error = str(payload.get("error") or "Task failed.")
+        phase = event_type.split(".", 1)[0]
+        return f"Failed during {phase}: {error}\n", None
+    return None, None
+
+
+def _messages_to_task(messages: list[ChatMessage]) -> str:
+    for message in reversed(messages):
+        text = _message_content_to_text(message.content)
+        if message.role == "user" and text:
+            return text
+    for message in reversed(messages):
+        text = _message_content_to_text(message.content)
+        if text:
+            return text
+    return ""
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and str(item.get("type") or "") == "text":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(part for part in parts if part).strip()
+    return str(content or "").strip()
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Agent Orchestration Runtime", version=__version__)
     configured_settings = settings or get_settings(config_path=os.getenv(APP_CONFIG_PATH_ENV) or None)
     engine = ExecutionEngine(configured_settings)
+    app.state.engine = engine
+    app.state.settings = configured_settings
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -47,6 +156,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not run_immediately:
             return session
         return engine.resume_session(session["id"], trigger="manual")
+
+    @app.get("/sessions/{session_id}/events")
+    def get_session_events(session_id: str, after_id: int | None = None) -> list[dict[str, Any]]:
+        payload = engine.get_session(session_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return engine.store.get_events_after(session_id, after_id=after_id)
+
+    @app.get("/sessions/{session_id}/events/stream")
+    def stream_session_events(session_id: str, after_id: int | None = None) -> StreamingResponse:
+        payload = engine.get_session(session_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        def event_stream():
+            cursor = after_id
+            while True:
+                emitted = False
+                for event in engine.store.get_events_after(session_id, after_id=cursor):
+                    emitted = True
+                    cursor = int(event["id"])
+                    yield _format_sse(str(event["event_type"]), event)
+                    if str(event.get("event_type") or "") == "finalize.completed":
+                        return
+                status, _ = _latest_session_status(engine, session_id)
+                if status in {"completed", "failed"} and not emitted:
+                    return
+                time.sleep(0.05)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.post("/sessions/{session_id}/trigger")
     def trigger_session(session_id: str, request: SessionTriggerRequest) -> dict[str, Any]:
@@ -88,6 +227,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         final_state = engine.run_spec(request.spec_path, request.input)
         return final_state
 
+    @app.post("/runs/stream")
+    def create_run_stream(request: RunRequest) -> StreamingResponse:
+        session = engine.create_session(
+            request.spec_path,
+            request.input,
+            trigger="manual",
+            stream_shell_output=True,
+        )
+        session_id = str(session["id"])
+        worker, outcome = _start_background(
+            lambda: engine.resume_session(session_id, trigger="manual", stream_shell_output=True)
+        )
+
+        def event_stream():
+            cursor: int | None = None
+            while True:
+                emitted = False
+                for event in engine.store.get_events_after(session_id, after_id=cursor):
+                    emitted = True
+                    cursor = int(event["id"])
+                    yield _format_sse(str(event["event_type"]), event)
+                    if str(event.get("event_type") or "") == "finalize.completed":
+                        worker.join(timeout=0)
+                        return
+                if not worker.is_alive():
+                    if "error" in outcome:
+                        payload = {"error": str(outcome["error"])}
+                        yield _format_sse("stream.error", payload)
+                    status, _ = _latest_session_status(engine, session_id)
+                    if status in {"completed", "failed"} and not emitted:
+                        return
+                time.sleep(0.05)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
     @app.get("/runs")
     def list_runs(limit: int = 50) -> list[dict[str, Any]]:
         return engine.list_runs(limit=limit)
@@ -98,5 +272,121 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if payload is None:
             raise HTTPException(status_code=404, detail="Run not found")
         return payload
+
+    @app.get("/v1/models")
+    def openai_models() -> dict[str, Any]:
+        if not configured_settings.openai_compat_enabled:
+            raise HTTPException(status_code=404, detail="OpenAI compatibility is disabled.")
+        created = int(time.time())
+        model_name = configured_settings.openai_compat_model_name
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": model_name,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": "openfabric",
+                }
+            ],
+        }
+
+    @app.post("/v1/chat/completions")
+    def openai_chat_completions(request: ChatCompletionsRequest):
+        if not configured_settings.openai_compat_enabled:
+            raise HTTPException(status_code=404, detail="OpenAI compatibility is disabled.")
+        if request.model != configured_settings.openai_compat_model_name:
+            raise HTTPException(status_code=400, detail=f"Unknown model: {request.model}")
+
+        spec_path = configured_settings.resolve_openai_compat_spec_path()
+        task = _messages_to_task(request.messages)
+        if not task:
+            raise HTTPException(status_code=400, detail="At least one message with content is required.")
+
+        if not request.stream:
+            final_state = engine.run_spec(str(spec_path), {"task": task})
+            content = str((final_state.get("final_output") or {}).get("content") or "")
+            created = int(time.time())
+            response_id = f"chatcmpl-{uuid.uuid4().hex}"
+            return {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+
+        session = engine.create_session(
+            str(spec_path),
+            {"task": task},
+            trigger="manual",
+            stream_shell_output=True,
+        )
+        session_id = str(session["id"])
+        worker, outcome = _start_background(
+            lambda: engine.resume_session(session_id, trigger="manual", stream_shell_output=True)
+        )
+        created = int(time.time())
+        response_id = f"chatcmpl-{session_id}"
+
+        def chunk(delta: dict[str, Any], *, finish_reason: str | None = None) -> str:
+            payload = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": request.model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+            }
+            return f"data: {json_dumps(payload)}\n\n"
+
+        def event_stream():
+            cursor: int | None = None
+            visible_output: list[str] = []
+            yield chunk({"role": "assistant"})
+            while True:
+                emitted = False
+                for event in engine.store.get_events_after(session_id, after_id=cursor):
+                    emitted = True
+                    cursor = int(event["id"])
+                    text, visible = _event_text_for_openai(event)
+                    if visible:
+                        visible_output.append(visible)
+                    if text:
+                        yield chunk({"content": text})
+                    if str(event.get("event_type") or "") == "finalize.completed":
+                        payload = engine.get_session(session_id) or {}
+                        latest = dict(payload.get("latest_snapshot") or {})
+                        final_output = dict(latest.get("final_output") or {})
+                        final_content = str(final_output.get("content") or "")
+                        if final_content.strip() and final_content.strip() != "".join(visible_output).strip():
+                            yield chunk({"content": final_content})
+                        yield chunk({}, finish_reason="stop")
+                        yield "data: [DONE]\n\n"
+                        worker.join(timeout=0)
+                        return
+                if not worker.is_alive():
+                    if "error" in outcome:
+                        yield chunk({"content": f"Failed: {outcome['error']}"}, finish_reason="stop")
+                        yield "data: [DONE]\n\n"
+                        return
+                    status, payload = _latest_session_status(engine, session_id)
+                    if status in {"completed", "failed"} and not emitted:
+                        latest = dict((payload or {}).get("latest_snapshot") or {})
+                        final_output = dict(latest.get("final_output") or {})
+                        final_content = str(final_output.get("content") or "")
+                        if final_content.strip() and final_content.strip() != "".join(visible_output).strip():
+                            yield chunk({"content": final_content})
+                        yield chunk({}, finish_reason="stop")
+                        yield "data: [DONE]\n\n"
+                        return
+                time.sleep(0.05)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     return app

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,11 +19,20 @@ class PlanExecutor:
     def __init__(self, tools: ToolRegistry) -> None:
         self.tools = tools
 
-    def execute_step(self, step: PlanStep, *, step_outputs: dict[str, Any] | None = None) -> StepLog:
+    def execute_step(
+        self,
+        step: PlanStep,
+        *,
+        step_outputs: dict[str, Any] | None = None,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+    ) -> StepLog:
         started = datetime.now(timezone.utc).isoformat()
         try:
             resolved_step = resolve_execution_step(step, step_outputs or {})
-            output = self.tools.invoke(resolved_step.action, resolved_step.args)
+            if resolved_step.action == "shell.exec" and event_sink is not None:
+                output = self._invoke_streaming_shell(resolved_step, event_sink)
+            else:
+                output = self.tools.invoke(resolved_step.action, resolved_step.args)
             finished = datetime.now(timezone.utc).isoformat()
             if resolved_step.action == "python.exec" and not bool(output.get("success", False)):
                 raise ToolExecutionError(str(output.get("error") or "python.exec failed."))
@@ -47,6 +57,60 @@ class PlanExecutor:
                 started_at=started,
                 finished_at=finished,
             )
+
+    def _invoke_streaming_shell(self, step: PlanStep, event_sink: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        tool = self.tools.get(step.action)
+        validated_args = tool.args_model.model_validate(step.args)
+        stream_method = getattr(tool, "stream", None)
+        if stream_method is None:
+            return tool.invoke(step.args)
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        returncode: int | None = None
+        resolved_node = str(step.args.get("node", ""))
+        resolved_command = str(step.args.get("command", ""))
+
+        for chunk in stream_method(validated_args):
+            chunk_type = str(chunk.get("type") or "")
+            if chunk_type in {"stdout", "stderr"}:
+                text = str(chunk.get("text") or "")
+                if not text:
+                    continue
+                if chunk_type == "stdout":
+                    stdout_chunks.append(text)
+                else:
+                    stderr_chunks.append(text)
+                event_sink(
+                    {
+                        "step_id": step.id,
+                        "action": step.action,
+                        "channel": chunk_type,
+                        "text": text,
+                        "node": str(chunk.get("node") or resolved_node),
+                        "command": str(chunk.get("command") or resolved_command),
+                    }
+                )
+                continue
+            if chunk_type == "completed":
+                returncode = int(chunk.get("exit_code") or 0)
+                resolved_node = str(chunk.get("node") or resolved_node)
+                resolved_command = str(chunk.get("command") or resolved_command)
+                continue
+            if chunk_type == "error":
+                message = str(chunk.get("text") or "Streaming shell execution failed.")
+                raise ToolExecutionError(message)
+
+        result = {
+            "command": resolved_command,
+            "node": resolved_node,
+            "stdout": "".join(stdout_chunks),
+            "stderr": "".join(stderr_chunks),
+            "returncode": int(returncode or 0),
+        }
+        if result["returncode"] != 0:
+            raise ToolExecutionError(result["stderr"].strip() or f"Command exited with {result['returncode']}")
+        return result
 
     def execute(self, plan: ExecutionPlan) -> tuple[list[StepLog], dict[str, Any] | None]:
         history: list[StepLog] = []

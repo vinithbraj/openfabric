@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
-from aor_runtime.tools.gateway import execute_gateway_command, resolve_execution_node
+from aor_runtime.tools.gateway import execute_gateway_command, resolve_execution_node, stream_gateway_command
 from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
 
 
@@ -43,6 +44,24 @@ def run_shell(settings: Settings, command: str, node: str = "") -> dict[str, Any
     return result
 
 
+def stream_shell(settings: Settings, command: str, node: str = "") -> Iterator[dict[str, Any]]:
+    trimmed = command.strip()
+    if not trimmed:
+        raise ToolExecutionError("Empty command.")
+
+    if not settings.allow_destructive_shell:
+        for pattern in HIGH_RISK_PATTERNS:
+            if re.search(pattern, trimmed):
+                raise ToolExecutionError("Blocked high-risk shell command by policy.")
+
+    resolved_node = resolve_execution_node(settings, node)
+    for chunk in stream_gateway_command(settings, node=resolved_node, command=trimmed):
+        payload = chunk.model_dump()
+        payload["node"] = resolved_node
+        payload["command"] = trimmed
+        yield payload
+
+
 class ShellExecTool(BaseTool):
     class ToolArgs(ToolArgsModel):
         command: str
@@ -74,3 +93,6 @@ class ShellExecTool(BaseTool):
 
     def run(self, arguments: ToolArgs) -> ToolResult:
         return self.ToolResult.model_validate(run_shell(self.settings, arguments.command, arguments.node))
+
+    def stream(self, arguments: ToolArgs) -> Iterator[dict[str, Any]]:
+        return stream_shell(self.settings, arguments.command, arguments.node)

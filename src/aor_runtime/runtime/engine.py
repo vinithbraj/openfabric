@@ -207,6 +207,7 @@ class ExecutionEngine:
         input_payload: dict[str, Any],
         trigger: str = "manual",
         dry_run: bool = False,
+        stream_shell_output: bool = False,
     ) -> dict[str, Any]:
         spec = load_runtime_spec(spec_path)
         compiled = self.compiler.compile(spec)
@@ -224,6 +225,7 @@ class ExecutionEngine:
         session.state["confirmation_step"] = None
         session.state["confirmation_message"] = None
         session.state["policies_used"] = []
+        session.state["stream_shell_output"] = bool(stream_shell_output)
         self.store.append_event(
             session_id=session.id,
             node_name="session",
@@ -239,6 +241,7 @@ class ExecutionEngine:
         trigger: str = "manual",
         max_cycles: int | None = None,
         approve_dangerous: bool = False,
+        stream_shell_output: bool = False,
     ) -> dict[str, Any]:
         session = self._get_required_session(session_id)
         if self._is_done(session.state):
@@ -257,6 +260,7 @@ class ExecutionEngine:
             session.state["dry_run"] = False
         session.current_trigger = trigger
         session.state["trigger"] = trigger
+        session.state["stream_shell_output"] = bool(session.state.get("stream_shell_output", False) or stream_shell_output)
         self._touch_state(session.state)
         self.store.append_event(
             session_id=session.id,
@@ -301,12 +305,14 @@ class ExecutionEngine:
         trigger: str = "manual",
         max_cycles: int | None = None,
         approve_dangerous: bool = False,
+        stream_shell_output: bool = False,
     ) -> dict[str, Any]:
         return self.resume_session(
             session_id,
             trigger=trigger,
             max_cycles=max_cycles,
             approve_dangerous=approve_dangerous,
+            stream_shell_output=stream_shell_output,
         )
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
@@ -537,7 +543,25 @@ class ExecutionEngine:
             event_type="executor.step.started",
             payload={"step": resolved_step.model_dump(), "step_index": step_index},
         )
-        log = self.executor.execute_step(resolved_step)
+        stream_shell_output = bool(state.get("stream_shell_output", False))
+
+        def emit_step_output(payload: dict[str, Any]) -> None:
+            self.store.append_event(
+                session_id=session.id,
+                node_name="executor",
+                event_type="executor.step.output",
+                payload={
+                    "step_id": int(payload.get("step_id") or resolved_step.id),
+                    "step_index": step_index,
+                    "action": str(payload.get("action") or resolved_step.action),
+                    "channel": str(payload.get("channel") or ""),
+                    "text": str(payload.get("text") or ""),
+                    "node": str(payload.get("node") or resolved_step.args.get("node", "")),
+                    "command": str(payload.get("command") or resolved_step.args.get("command", "")),
+                },
+            )
+
+        log = self.executor.execute_step(resolved_step, event_sink=emit_step_output if stream_shell_output else None)
         log_payload = log.model_dump()
 
         history = list(state.get("history", []))
@@ -606,6 +630,12 @@ class ExecutionEngine:
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
         self._configure_runtime_for_compiled(compiled)
         attempt_history = [self._step_log_from_dict(item) for item in state.get("attempt_history", [])]
+        self.store.append_event(
+            session_id=session.id,
+            node_name="validator",
+            event_type="validator.started",
+            payload={"attempt_history_length": len(attempt_history), "goal": str(state.get("goal", ""))},
+        )
         validation, checks = self.validator.validate(attempt_history, goal=str(state.get("goal", "")))
         payload = validation.model_dump()
         self.store.append_event(
@@ -782,6 +812,12 @@ class ExecutionEngine:
                 "artifacts": list(final_output.get("artifacts", [])),
                 "metadata": dict(final_output.get("metadata", {})),
             }
+        self.store.append_event(
+            session_id=session.id,
+            node_name="finalize",
+            event_type="finalize.started",
+            payload={"status": status},
+        )
         state.update(
             {
                 "current_node": "finalize",

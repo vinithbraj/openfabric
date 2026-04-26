@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,7 @@ def _resolve_dangerous_confirmation(
     trigger: str,
     max_cycles: int | None = None,
     approve_dangerous: bool = False,
+    stream_shell_output: bool = False,
 ) -> dict[str, Any]:
     auto_approve = approve_dangerous
     while _is_dangerous_confirmation_pause(state):
@@ -58,6 +61,7 @@ def _resolve_dangerous_confirmation(
             trigger=trigger,
             max_cycles=max_cycles,
             approve_dangerous=True,
+            stream_shell_output=stream_shell_output,
         )
         auto_approve = False
     return state
@@ -99,6 +103,111 @@ def _session_history_window(session_history: list[dict[str, str]], max_history: 
 
 def _chat_commands_banner() -> str:
     return f"Commands: {', '.join(CHAT_COMMANDS)}"
+
+
+def _start_background(target):
+    outcome: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            outcome["result"] = target()
+        except Exception as exc:  # noqa: BLE001
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
+def _render_progress_event(event: dict[str, Any]) -> None:
+    event_type = str(event.get("event_type") or "")
+    payload = dict(event.get("payload") or {})
+    if event_type == "planner.started":
+        typer.echo("Thinking...")
+        return
+    if event_type == "planner.completed":
+        execution_plan = dict(payload.get("execution_plan") or {})
+        steps = list(execution_plan.get("steps") or [])
+        typer.echo(f"Plan ready: {len(steps)} step{'s' if len(steps) != 1 else ''}")
+        return
+    if event_type == "executor.step.started":
+        step = dict(payload.get("step") or {})
+        typer.echo(f"Executing: {step.get('action', 'step')}")
+        return
+    if event_type == "executor.step.output":
+        text = str(payload.get("text") or "")
+        if not text:
+            return
+        if str(payload.get("channel") or "") == "stderr":
+            typer.echo(text, nl=False, err=True)
+        else:
+            typer.echo(text, nl=False)
+        return
+    if event_type == "executor.step.completed":
+        step = dict(payload.get("step") or {})
+        typer.echo(f"Completed: {step.get('action', 'step')}")
+        return
+    if event_type == "validator.started":
+        typer.echo("Validating...")
+        return
+    if event_type == "validator.completed":
+        result = dict(payload.get("result") or {})
+        typer.echo("Validation passed" if bool(result.get("success")) else "Validation failed")
+        return
+    if event_type.endswith(".failed"):
+        phase = event_type.split(".", 1)[0]
+        typer.echo(f"Failed during {phase}: {payload.get('error', 'Task failed.')}")
+        return
+    if event_type == "finalize.completed":
+        typer.echo(f"Finished: {payload.get('status', 'completed')}")
+
+
+def _drain_progress_events(engine: ExecutionEngine, session_id: str, after_id: int | None) -> int | None:
+    cursor = after_id
+    for event in engine.store.get_events_after(session_id, after_id=after_id):
+        _render_progress_event(event)
+        cursor = int(event["id"])
+    return cursor
+
+
+def _run_session_with_progress(
+    engine: ExecutionEngine,
+    session_id: str,
+    *,
+    trigger: str,
+    max_cycles: int | None = None,
+    approve_dangerous: bool = False,
+) -> dict[str, Any]:
+    worker, outcome = _start_background(
+        lambda: engine.resume_session(
+            session_id,
+            trigger=trigger,
+            max_cycles=max_cycles,
+            approve_dangerous=approve_dangerous,
+            stream_shell_output=True,
+        )
+    )
+    cursor: int | None = None
+    while worker.is_alive():
+        cursor = _drain_progress_events(engine, session_id, cursor)
+        time.sleep(0.05)
+    worker.join()
+    cursor = _drain_progress_events(engine, session_id, cursor)
+    if "error" in outcome:
+        raise outcome["error"]
+    state = dict(outcome.get("result") or {})
+    if _is_dangerous_confirmation_pause(state):
+        typer.echo(dumps_json(_dangerous_confirmation_preview(state), indent=2))
+        if not approve_dangerous and not typer.confirm("Continue with dangerous operation?", default=False):
+            return state
+        return _run_session_with_progress(
+            engine,
+            session_id,
+            trigger=trigger,
+            max_cycles=max_cycles,
+            approve_dangerous=True,
+        )
+    return state
 
 
 def _chat_capabilities_payload(spec_path: Path) -> dict[str, Any]:
@@ -149,19 +258,28 @@ def run(
     spec_path: Path,
     input: str = typer.Option("{}", help="JSON input payload"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview the plan and confirm before execution."),
+    progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
     payload = json.loads(input)
     engine = _build_engine(config)
-    state = engine.run_spec(str(spec_path), payload, dry_run=dry_run)
+    if progress:
+        session = engine.create_session(str(spec_path), payload, trigger="manual", dry_run=dry_run, stream_shell_output=True)
+        state = _run_session_with_progress(engine, str(session["id"]), trigger="manual")
+    else:
+        state = engine.run_spec(str(spec_path), payload, dry_run=dry_run)
     if dry_run and _is_dry_run_preview(state):
         typer.echo(dumps_json(state, indent=2))
         if typer.confirm("Run this plan?", default=False):
-            resumed = engine.resume_session(str(state["session_id"]), trigger="manual")
-            resumed = _resolve_dangerous_confirmation(engine, resumed, trigger="manual")
+            if progress:
+                resumed = _run_session_with_progress(engine, str(state["session_id"]), trigger="manual")
+            else:
+                resumed = engine.resume_session(str(state["session_id"]), trigger="manual")
+                resumed = _resolve_dangerous_confirmation(engine, resumed, trigger="manual")
             typer.echo(dumps_json(resumed, indent=2))
         return
-    state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
+    if not progress:
+        state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
     typer.echo(dumps_json(state, indent=2))
 
 
@@ -175,16 +293,26 @@ def resume(
         "--approve-dangerous",
         help="Approve a paused dangerous step before resuming execution.",
     ),
+    progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
     engine = _build_engine(config)
-    state = engine.resume_session(
-        session_id,
-        trigger=trigger,
-        max_cycles=max_cycles,
-        approve_dangerous=approve_dangerous,
-    )
-    state = _resolve_dangerous_confirmation(engine, state, trigger=trigger, max_cycles=max_cycles)
+    if progress:
+        state = _run_session_with_progress(
+            engine,
+            session_id,
+            trigger=trigger,
+            max_cycles=max_cycles,
+            approve_dangerous=approve_dangerous,
+        )
+    else:
+        state = engine.resume_session(
+            session_id,
+            trigger=trigger,
+            max_cycles=max_cycles,
+            approve_dangerous=approve_dangerous,
+        )
+        state = _resolve_dangerous_confirmation(engine, state, trigger=trigger, max_cycles=max_cycles)
     typer.echo(dumps_json(state, indent=2))
 
 
@@ -207,6 +335,7 @@ def chat(
     spec_path: Path,
     system_note: str = typer.Option("", help="Optional operator note injected into each turn."),
     max_history: int = typer.Option(0, help="Number of prior turns to include in session context."),
+    progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
     engine = _build_engine(config)
@@ -252,8 +381,12 @@ def chat(
         if history_window:
             payload["session_history"] = history_window
 
-        state = engine.run_spec(str(spec_path), payload)
-        state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
+        if progress:
+            session = engine.create_session(str(spec_path), payload, trigger="manual", stream_shell_output=True)
+            state = _run_session_with_progress(engine, str(session["id"]), trigger="manual")
+        else:
+            state = engine.run_spec(str(spec_path), payload)
+            state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
         answer = _final_answer_from_state(state)
         run_id = state.get("run_id", "")
 
@@ -284,14 +417,18 @@ def create_session(
     spec_path: Path,
     input: str = typer.Option("{}", help="JSON input payload"),
     run_immediately: bool = typer.Option(True, help="Run the loop immediately after creating the session."),
+    progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
     payload = json.loads(input)
     engine = _build_engine(config)
-    session = engine.create_session(str(spec_path), payload, trigger="manual")
+    session = engine.create_session(str(spec_path), payload, trigger="manual", stream_shell_output=progress)
     if run_immediately:
-        state = engine.resume_session(session["id"], trigger="manual")
-        state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
+        if progress:
+            state = _run_session_with_progress(engine, str(session["id"]), trigger="manual")
+        else:
+            state = engine.resume_session(session["id"], trigger="manual")
+            state = _resolve_dangerous_confirmation(engine, state, trigger="manual")
         typer.echo(dumps_json(state, indent=2))
         return
     typer.echo(dumps_json(session, indent=2))
@@ -307,16 +444,26 @@ def resume_session(
         "--approve-dangerous",
         help="Approve a paused dangerous step before resuming execution.",
     ),
+    progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
     engine = _build_engine(config)
-    state = engine.resume_session(
-        session_id,
-        trigger=trigger,
-        max_cycles=max_cycles,
-        approve_dangerous=approve_dangerous,
-    )
-    state = _resolve_dangerous_confirmation(engine, state, trigger=trigger, max_cycles=max_cycles)
+    if progress:
+        state = _run_session_with_progress(
+            engine,
+            session_id,
+            trigger=trigger,
+            max_cycles=max_cycles,
+            approve_dangerous=approve_dangerous,
+        )
+    else:
+        state = engine.resume_session(
+            session_id,
+            trigger=trigger,
+            max_cycles=max_cycles,
+            approve_dangerous=approve_dangerous,
+        )
+        state = _resolve_dangerous_confirmation(engine, state, trigger=trigger, max_cycles=max_cycles)
     typer.echo(dumps_json(state, indent=2))
 
 

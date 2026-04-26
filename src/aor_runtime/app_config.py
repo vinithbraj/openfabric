@@ -49,11 +49,16 @@ class LLMConfig(BaseModel):
 class RuntimeAppConfig(BaseModel):
     allow_destructive_shell: bool = False
     max_plan_retries: int = 2
+    openai_compat_enabled: bool = True
+    openai_compat_model_name: str = "general-purpose-assistant"
+    openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"
 
     @model_validator(mode="after")
     def validate_runtime(self) -> "RuntimeAppConfig":
         if self.max_plan_retries < 0:
             raise ValueError("runtime.max_plan_retries must be zero or greater.")
+        self.openai_compat_model_name = str(self.openai_compat_model_name or "").strip() or "general-purpose-assistant"
+        self.openai_compat_spec_path = str(self.openai_compat_spec_path or "").strip() or "examples/general_purpose_assistant.yaml"
         return self
 
 

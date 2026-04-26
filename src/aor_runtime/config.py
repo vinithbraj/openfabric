@@ -33,6 +33,9 @@ class Settings(BaseModel):
     llm_timeout_seconds: float = 120.0
     allow_destructive_shell: bool = False
     max_plan_retries: int = 2
+    openai_compat_enabled: bool = True
+    openai_compat_model_name: str = "general-purpose-assistant"
+    openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"
 
     @property
     def available_nodes(self) -> list[str]:
@@ -84,6 +87,13 @@ class Settings(BaseModel):
             raise ValueError(f"Gateway URL is not configured for node: {resolved_node}.")
         return gateway_url
 
+    def resolve_openai_compat_spec_path(self) -> Path:
+        raw_path = str(self.openai_compat_spec_path or "").strip()
+        candidate = Path(raw_path).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        return (self.workspace_root / candidate).resolve()
+
     @model_validator(mode="after")
     def validate_default_node(self) -> "Settings":
         if self.server_port <= 0 or self.server_port > 65535:
@@ -123,6 +133,8 @@ class Settings(BaseModel):
             raise ValueError("sql_timeout_seconds must be greater than zero.")
         if self.max_plan_retries < 0:
             raise ValueError("max_plan_retries must be zero or greater.")
+        self.openai_compat_model_name = str(self.openai_compat_model_name or "").strip() or "general-purpose-assistant"
+        self.openai_compat_spec_path = str(self.openai_compat_spec_path or "").strip() or "examples/general_purpose_assistant.yaml"
         normalized_endpoints: dict[str, str] = {}
         for raw_node, raw_url in dict(self.gateway_endpoints or {}).items():
             node = str(raw_node or "").strip()
@@ -162,6 +174,9 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         sql_default_database=app_config.sql.default_database,
         sql_row_limit=app_config.sql.row_limit,
         sql_timeout_seconds=app_config.sql.timeout_seconds,
+        openai_compat_enabled=app_config.runtime.openai_compat_enabled,
+        openai_compat_model_name=app_config.runtime.openai_compat_model_name,
+        openai_compat_spec_path=app_config.runtime.openai_compat_spec_path,
     )
     settings.run_store_path.parent.mkdir(parents=True, exist_ok=True)
     return settings

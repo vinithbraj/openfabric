@@ -36,12 +36,16 @@ def test_capabilities_returns_agent_version_and_capability_list(tmp_path: Path) 
     assert response.status_code == 200
     assert response.json() == {
         "node": "localhost",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "capabilities": [
             {"name": "healthz", "description": "Report agent health and the configured logical node."},
             {
                 "name": "exec",
                 "description": "Execute a local shell command when the request node matches the configured node.",
+            },
+            {
+                "name": "exec_stream",
+                "description": "Execute a local shell command and stream stdout/stderr when the request node matches the configured node.",
             },
         ],
     }
@@ -93,3 +97,39 @@ def test_exec_times_out_with_exit_code_124(tmp_path: Path) -> None:
     assert payload["stdout"] == ""
     assert payload["exit_code"] == 124
     assert "timed out" in payload["stderr"]
+
+
+def test_exec_stream_emits_stdout_stderr_and_completion(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    with client.stream(
+        "POST",
+        "/exec/stream",
+        json={"node": "localhost", "command": "printf 'hello\\n'; printf 'oops\\n' >&2"},
+    ) as response:
+        body = response.read().decode()
+
+    assert response.status_code == 200
+    assert "event: stdout" in body
+    assert "event: stderr" in body
+    assert "event: completed" in body
+    assert "hello\\n" in body
+    assert "oops\\n" in body
+    assert '"exit_code": 0' in body
+
+
+def test_exec_stream_reports_timeout_completion(tmp_path: Path) -> None:
+    client = _client(tmp_path, exec_timeout_seconds=0.01)
+
+    with client.stream(
+        "POST",
+        "/exec/stream",
+        json={"node": "localhost", "command": "sleep 0.1"},
+    ) as response:
+        body = response.read().decode()
+
+    assert response.status_code == 200
+    assert "event: stderr" in body
+    assert "timed out" in body
+    assert "event: completed" in body
+    assert '"exit_code": 124' in body

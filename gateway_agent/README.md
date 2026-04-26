@@ -10,9 +10,11 @@ This v2 agent:
 ## API
 
 - `GET /healthz` -> `{ "status": "ok", "node": "<configured node>" }`
-- `GET /capabilities` -> `{ "node": "<configured node>", "version": "0.2.0", "capabilities": [...] }`
+- `GET /capabilities` -> `{ "node": "<configured node>", "version": "0.3.0", "capabilities": [...] }`
 - `POST /exec` with `{ "node": str, "command": str }`
+- `POST /exec/stream` with `{ "node": str, "command": str }`
 - `POST /exec` returns `{ "stdout": str, "stderr": str, "exit_code": int }`
+- `POST /exec/stream` returns `text/event-stream` with `stdout`, `stderr`, and `completed` events
 
 Command failures return `200` with a non-zero `exit_code`. Request validation problems return `4xx`.
 

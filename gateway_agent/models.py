@@ -28,3 +28,9 @@ class CapabilitiesResponse(BaseModel):
     node: str
     version: str
     capabilities: list[CapabilityInfo]
+
+
+class ExecStreamEvent(BaseModel):
+    type: str
+    text: str = ""
+    exit_code: int | None = None
