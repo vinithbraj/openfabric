@@ -158,10 +158,18 @@ class Settings(BaseModel):
 def _cached_settings(config_path: str, cwd: str) -> Settings:
     app_config, resolved_config_path = load_app_config(config_path=config_path or None, cwd=cwd or None)
     workspace_root = Path(cwd).resolve()
+    run_store_path = workspace_root / "artifacts" / "runtime.db"
+    if app_config.runtime.run_store_path:
+        configured_run_store_path = Path(app_config.runtime.run_store_path).expanduser()
+        run_store_path = (
+            configured_run_store_path
+            if configured_run_store_path.is_absolute()
+            else workspace_root / configured_run_store_path
+        )
     settings = Settings(
         workspace_root=workspace_root,
         prompts_root=workspace_root / "prompts",
-        run_store_path=workspace_root / "artifacts" / "runtime.db",
+        run_store_path=run_store_path,
         app_config_path=resolved_config_path,
         server_host=app_config.server.host,
         server_port=app_config.server.port,

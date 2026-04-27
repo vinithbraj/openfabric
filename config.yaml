@@ -2,7 +2,7 @@ server:
   host: 127.0.0.1
   port: 8011
 llm:
-  base_url: http://127.0.0.1:8000/v1
+  base_url: http://192.168.100.25:8000/v1
   api_key: local
   default_model: stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ
   default_temperature: 0.1
@@ -10,10 +10,11 @@ llm:
 runtime:
   allow_destructive_shell: false
   max_plan_retries: 2
+  run_store_path: .aor/runtime.db
 sql:
   database_url: null
   databases:
-    dicom: postgresql+psycopg://admin:admin@localhost:5432/dicom
+    dicom: postgresql+psycopg://airflow:airflow@10.44.102.204:9501/CANONICAL_v1
   default_database: dicom
   row_limit: 500
   timeout_seconds: 10

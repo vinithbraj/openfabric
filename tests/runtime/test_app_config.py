@@ -22,6 +22,7 @@ llm:
 runtime:
   allow_destructive_shell: true
   max_plan_retries: 5
+  run_store_path: .aor/test-runtime.db
 sql:
   database_url: null
   databases:
@@ -60,6 +61,7 @@ def test_get_settings_auto_discovers_config_yaml(tmp_path: Path, monkeypatch) ->
     assert settings.default_model == "model-x"
     assert settings.allow_destructive_shell is True
     assert settings.max_plan_retries == 5
+    assert settings.run_store_path == tmp_path / ".aor" / "test-runtime.db"
     assert settings.sql_default_database == "analytics_db"
     assert settings.sql_row_limit == 123
     assert settings.sql_timeout_seconds == 17
