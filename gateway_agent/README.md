@@ -10,7 +10,7 @@ This v2 agent:
 ## API
 
 - `GET /healthz` -> `{ "status": "ok", "node": "<configured node>" }`
-- `GET /capabilities` -> `{ "node": "<configured node>", "version": "0.3.0", "capabilities": [...] }`
+- `GET /capabilities` -> `{ "node": "<configured node>", "version": "0.4.0", "capabilities": [...] }`
 - `POST /exec` with `{ "node": str, "command": str }`
 - `POST /exec/stream` with `{ "node": str, "command": str }`
 - `POST /exec` returns `{ "stdout": str, "stderr": str, "exit_code": int }`

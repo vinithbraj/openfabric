@@ -58,6 +58,7 @@ def test_json_eval_files_load_successfully() -> None:
         "filesystem",
         "prompt_suggestions",
         "shell",
+        "shell_llm_intent",
         "slurm",
         "slurm_llm_intent",
         "sql",

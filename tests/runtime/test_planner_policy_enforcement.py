@@ -385,36 +385,19 @@ def test_planner_accepts_recursive_file_search_plan_with_fs_find(tmp_path: Path)
     assert "Use fs.find for recursive file discovery" in llm.system_prompts[-1]
 
 
-def test_planner_accepts_total_file_size_plan_with_fs_size(tmp_path: Path) -> None:
-    planner, llm = _planner(
-        tmp_path,
-        {
-            "steps": [
-                {"id": 1, "action": "fs.find", "args": {"path": ".", "pattern": "*.txt"}, "output": "txt_matches"},
-                {
-                    "id": 2,
-                    "action": "python.exec",
-                    "input": ["txt_matches"],
-                    "output": "size_summary",
-                    "args": {
-                        "inputs": {"files": {"$ref": "txt_matches", "path": "matches"}},
-                        "code": "total_size = sum(fs.size(path) for path in inputs['files']); result = {'file_count': len(inputs['files']), 'total_size_bytes': total_size}"
-                    },
-                },
-            ]
-        },
-    )
+def test_planner_uses_deterministic_fs_aggregate_for_total_file_size_prompt(tmp_path: Path) -> None:
+    planner, llm = _planner(tmp_path, {"steps": []})
 
     plan = planner.build_plan(
-        goal="compute the total size of all the txt files in this folder",
+        goal="calculate total file size of all .mp4 files in /tmp/example",
         planner=_planner_config(),
-        allowed_tools=["fs.find", "fs.size", "python.exec"],
-        input_payload={"task": "compute the total size of all the txt files in this folder"},
+        allowed_tools=["fs.aggregate", "fs.find", "fs.size", "python.exec"],
+        input_payload={"task": "calculate total file size of all .mp4 files in /tmp/example"},
     )
 
-    assert [step.action for step in plan.steps] == ["fs.find", "python.exec"]
-    assert llm.last_system_prompt is not None
-    assert "Use fs.size when the user asks for the size of a file" in llm.last_system_prompt
+    assert [step.action for step in plan.steps] == ["fs.aggregate", "runtime.return"]
+    assert planner.last_llm_calls == 0
+    assert llm.call_count == 0
 
 
 def test_planner_accepts_shell_plan_with_allowed_node(tmp_path: Path) -> None:

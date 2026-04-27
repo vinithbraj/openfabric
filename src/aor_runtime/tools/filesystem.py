@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
@@ -155,6 +155,99 @@ def fs_size(settings: Settings, path: str) -> dict[str, Any]:
     if not resolved.is_file():
         raise ToolExecutionError(f"Path is not a file: {resolved}")
     return {"path": str(resolved), "size_bytes": resolved.stat().st_size}
+
+
+def fs_aggregate(
+    settings: Settings,
+    path: str,
+    pattern: str = "*",
+    recursive: bool = True,
+    file_only: bool = True,
+    include_matches: bool = True,
+    path_style: Literal["name", "relative", "absolute"] = "relative",
+    size_unit: Literal["bytes", "kb", "mb", "gb", "auto"] = "auto",
+    aggregate: Literal["total_size", "count", "count_and_total_size"] = "total_size",
+) -> dict[str, Any]:
+    resolved = resolve_path(settings, path)
+    if not resolved.exists():
+        raise ToolExecutionError(f"Directory does not exist: {resolved}")
+    if not resolved.is_dir():
+        raise ToolExecutionError(f"Path is not a directory: {resolved}")
+    normalized_pattern = str(pattern or "*").strip() or "*"
+    if path_style not in {"name", "relative", "absolute"}:
+        raise ToolExecutionError("fs.aggregate path_style must be one of: name, relative, absolute.")
+
+    root = resolved.resolve()
+    iterator = root.rglob("*") if recursive else root.iterdir()
+    matches: list[dict[str, Any]] = []
+    total_size_bytes = 0
+    file_count = 0
+
+    for item in iterator:
+        try:
+            resolved_item = item.resolve()
+            resolved_item.relative_to(root)
+        except ValueError:
+            # Symlinks inside the requested root may point elsewhere. Keep the
+            # root boundary strict, but skip those entries instead of failing
+            # the whole aggregate request.
+            continue
+        if file_only and not item.is_file():
+            continue
+        if not file_only and not (item.is_file() or item.is_dir()):
+            continue
+        if not _glob_matches(item=item, root=root, pattern=normalized_pattern):
+            continue
+        if not item.is_file():
+            continue
+        try:
+            size_bytes = item.stat().st_size
+        except OSError:
+            continue
+        relative_path = str(item.relative_to(root))
+        file_count += 1
+        total_size_bytes += size_bytes
+        if include_matches:
+            matches.append(
+                {
+                    "name": item.name,
+                    "path": str(item),
+                    "relative_path": relative_path,
+                    "size_bytes": size_bytes,
+                    "display_path": _format_glob_match(
+                        {"name": item.name, "path": str(item), "relative_path": relative_path},
+                        path_style=path_style,
+                    ),
+                }
+            )
+
+    if include_matches:
+        matches.sort(key=lambda item: str(item["relative_path"]))
+
+    display_size = _format_aggregate_size(total_size_bytes, size_unit)
+    summary_text = _format_aggregate_summary(file_count, total_size_bytes, aggregate=aggregate, size_unit=size_unit, display_size=display_size)
+    rendered_matches = []
+    if include_matches:
+        rendered_matches = [
+            {
+                "name": str(item["name"]),
+                "path": str(item["path"]),
+                "relative_path": str(item["relative_path"]),
+                "size_bytes": int(item["size_bytes"]),
+            }
+            for item in matches
+        ]
+
+    return {
+        "path": str(resolved),
+        "pattern": normalized_pattern,
+        "recursive": bool(recursive),
+        "file_count": int(file_count),
+        "total_size_bytes": int(total_size_bytes),
+        "matches": rendered_matches,
+        "summary_text": summary_text,
+        "display_size": display_size,
+    }
 
 
 class FileExistsTool(BaseTool):
@@ -393,6 +486,43 @@ def _format_glob_match(entry: dict[str, Any], *, path_style: str) -> str:
     return str(entry["relative_path"])
 
 
+def _format_aggregate_summary(
+    file_count: int,
+    total_size_bytes: int,
+    *,
+    aggregate: Literal["total_size", "count", "count_and_total_size"],
+    size_unit: Literal["bytes", "kb", "mb", "gb", "auto"],
+    display_size: str,
+) -> str:
+    label = "file" if file_count == 1 else "files"
+    if aggregate == "count":
+        return f"{file_count} {label}"
+    if size_unit == "bytes":
+        return f"{file_count} {label}, {total_size_bytes} bytes"
+    return f"{file_count} {label}, {display_size}"
+
+
+def _format_aggregate_size(total_size_bytes: int, size_unit: Literal["bytes", "kb", "mb", "gb", "auto"]) -> str:
+    if size_unit == "bytes" or total_size_bytes < 1024 and size_unit == "auto":
+        return f"{total_size_bytes} bytes"
+
+    units = {
+        "kb": 1024,
+        "mb": 1024**2,
+        "gb": 1024**3,
+    }
+    if size_unit == "auto":
+        if total_size_bytes >= 1024**3:
+            size_unit = "gb"
+        elif total_size_bytes >= 1024**2:
+            size_unit = "mb"
+        else:
+            size_unit = "kb"
+    divisor = units[str(size_unit)]
+    scaled = total_size_bytes / divisor
+    return f"{scaled:.1f} {str(size_unit).upper()} ({total_size_bytes} bytes)"
+
+
 class FindFilesTool(BaseTool):
     class ToolArgs(ToolArgsModel):
         path: str
@@ -441,3 +571,69 @@ class FileSizeTool(BaseTool):
 
     def run(self, arguments: ToolArgs) -> ToolResult:
         return self.ToolResult.model_validate(fs_size(self.settings, arguments.path))
+
+
+class FileAggregateTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        path: str
+        pattern: str = "*"
+        recursive: bool = True
+        file_only: bool = True
+        include_matches: bool = True
+        path_style: Literal["name", "relative", "absolute"] = "relative"
+        size_unit: Literal["bytes", "kb", "mb", "gb", "auto"] = "auto"
+        aggregate: Literal["total_size", "count", "count_and_total_size"] = "total_size"
+
+    class AggregateMatch(ToolResultModel):
+        name: str
+        path: str
+        relative_path: str
+        size_bytes: int
+
+    class ToolResult(ToolResultModel):
+        path: str
+        pattern: str
+        recursive: bool
+        file_count: int
+        total_size_bytes: int
+        matches: list[AggregateMatch]
+        summary_text: str
+        display_size: str
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
+        self.spec = ToolSpec(
+            name="fs.aggregate",
+            description="Aggregate matching files under a directory for deterministic counts and total size.",
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "pattern": {"type": "string"},
+                    "recursive": {"type": "boolean"},
+                    "file_only": {"type": "boolean"},
+                    "include_matches": {"type": "boolean"},
+                    "path_style": {"type": "string", "enum": ["name", "relative", "absolute"]},
+                    "size_unit": {"type": "string", "enum": ["bytes", "kb", "mb", "gb", "auto"]},
+                    "aggregate": {"type": "string", "enum": ["total_size", "count", "count_and_total_size"]},
+                },
+                "required": ["path"],
+            },
+        )
+
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(
+            fs_aggregate(
+                self.settings,
+                arguments.path,
+                pattern=arguments.pattern,
+                recursive=arguments.recursive,
+                file_only=arguments.file_only,
+                include_matches=arguments.include_matches,
+                path_style=arguments.path_style,
+                size_unit=arguments.size_unit,
+                aggregate=arguments.aggregate,
+            )
+        )

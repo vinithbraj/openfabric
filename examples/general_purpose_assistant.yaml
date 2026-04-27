@@ -28,6 +28,7 @@ tools:
   - fs.find
   - fs.search_content
   - fs.size
+  - fs.aggregate
   - slurm.queue
   - slurm.job_detail
   - slurm.nodes

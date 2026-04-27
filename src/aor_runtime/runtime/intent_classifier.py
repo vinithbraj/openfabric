@@ -8,6 +8,7 @@ from aor_runtime.runtime.file_query import normalize_file_query
 from aor_runtime.runtime.intents import (
     CompoundIntent,
     CountFilesIntent,
+    FileAggregateIntent,
     FetchExtractIntent,
     IntentResult,
     ListFilesIntent,
@@ -200,6 +201,13 @@ SQL_SELECT_RE = re.compile(
     r"\b(?:list|show|return|query|get|select)\s+(?:top\s+(?P<top>\d+)\s+)?(?P<columns>[a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*)\s+from\s+(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)(?:\s+in\s+(?P<database>[a-zA-Z_][a-zA-Z0-9_]*))?(?:\s+order\s+by\s+(?P<order_by>[a-zA-Z_][a-zA-Z0-9_]*))?(?:\s+limit\s+(?P<limit>\d+))?",
     re.IGNORECASE,
 )
+AGGREGATE_TRIGGER_RE = re.compile(
+    r"\b(?:total\s+file\s+size|total\s+size|sum(?:\s+the)?\s+size|how\s+much\s+space|disk\s+space\s+used\s+by|size\s+of\s+all|total\s+bytes|count\s+and\s+total\s+size)\b",
+    re.IGNORECASE,
+)
+AGGREGATE_COUNT_AND_SIZE_RE = re.compile(r"\bcount\s+and\s+total\s+size\b", re.IGNORECASE)
+AGGREGATE_COUNT_ONLY_RE = re.compile(r"\b(?:count\s+only|number\s+only)\b", re.IGNORECASE)
+SIZE_UNIT_RE = re.compile(r"\b(bytes|kb|mb|gb)\b", re.IGNORECASE)
 OUTPUT_JSON_RE = re.compile(r"\bjson\b", re.IGNORECASE)
 OUTPUT_CSV_RE = re.compile(r"\bcsv\b|comma\s+separated", re.IGNORECASE)
 OUTPUT_COUNT_RE = re.compile(r"\bcount\s+only\b|\bnumber\s+only\b", re.IGNORECASE)
@@ -242,6 +250,7 @@ def classify_single_intent(goal: str, *, schema_payload: dict[str, Any] | None =
         return IntentResult(matched=False, reason="empty_goal")
     for classifier in (
         _classify_read_file_line,
+        _classify_file_aggregate,
         _classify_count_files,
         _classify_list_files,
         _classify_search_file_contents,
@@ -366,12 +375,38 @@ def _classify_count_files(goal: str) -> IntentResult:
     return _classify_count_files_by_path_hint(goal)
 
 
+def _classify_file_aggregate(goal: str) -> IntentResult:
+    if AGGREGATE_TRIGGER_RE.search(goal) is None:
+        return IntentResult(matched=False, reason="file_aggregate_no_match")
+    path = _extract_first_path_candidate(goal)
+    if not _looks_like_path_candidate(path):
+        return IntentResult(matched=False, reason="file_aggregate_missing_path")
+    if not _contains_file_phrase(goal) and _extract_glob_pattern(goal) is None:
+        return IntentResult(matched=False, reason="file_aggregate_missing_file_phrase")
+
+    query = normalize_file_query(goal, explicit_path=path)
+    pattern = _extract_glob_pattern(goal) or query.pattern
+    aggregate = _infer_file_aggregate_mode(goal)
+    return IntentResult(
+        matched=True,
+        intent=FileAggregateIntent(
+            path=path,
+            pattern=pattern,
+            recursive=query.recursive,
+            file_only=True,
+            aggregate=aggregate,
+            output_mode=_infer_file_aggregate_output_mode(goal, aggregate),
+            size_unit=_infer_file_aggregate_size_unit(goal),
+        ),
+    )
+
+
 def _classify_list_files(goal: str) -> IntentResult:
     match = LIST_FILES_RE.search(goal)
     if match is not None:
         path = _clean_path(match.group("path"))
         body = str(match.group("body") or "")
-        if _looks_like_path_candidate(path) and "file" in body.lower():
+        if _looks_like_path_candidate(path) and "file" in body.lower() and not _looks_like_content_diagnostic_body(body):
             query = normalize_file_query(goal, explicit_path=path)
             output_mode = _infer_output_mode(goal)
             return IntentResult(
@@ -748,18 +783,43 @@ def _extract_glob_pattern(body: str | None) -> str | None:
         return None
     if re.search(r"\btext\s+files?\b", text):
         return "*.txt"
+    stopwords = {
+        "all",
+        "direct",
+        "directly",
+        "file",
+        "files",
+        "folder",
+        "folders",
+        "immediate",
+        "matching",
+        "nested",
+        "non",
+        "not",
+        "only",
+        "recursive",
+        "recursively",
+        "size",
+        "text",
+        "the",
+        "top",
+        "total",
+    }
     for pattern in (
         re.compile(r"\*(\.[a-z0-9]+)\b", re.IGNORECASE),
         re.compile(r"\.(?P<ext>[a-z0-9]+)\s+files?\b", re.IGNORECASE),
-        re.compile(r"\b(?P<ext>[a-z0-9]+)\s+files?\b", re.IGNORECASE),
         re.compile(r"\bfiles?\s+ending\s+in\s+(?P<ext>[a-z0-9]+)\b", re.IGNORECASE),
         re.compile(r"\bfiles?\s+with\s+(?P<ext>[a-z0-9]+)\s+extension\b", re.IGNORECASE),
+        re.compile(r"\b(?P<ext>[a-z0-9]{2,8})\s+files?\b", re.IGNORECASE),
     ):
         match = pattern.search(text)
         if match is None:
             continue
         extension = match.groupdict().get("ext")
         if extension:
+            extension = extension.lower()
+            if extension in stopwords:
+                continue
             return f"*.{extension.lower()}"
         if match.group(0).startswith("*."):
             return match.group(0).lower()
@@ -768,7 +828,25 @@ def _extract_glob_pattern(body: str | None) -> str | None:
 
 def _contains_file_phrase(text: str) -> bool:
     normalized = str(text or "").lower()
-    return any(token in normalized for token in ("file", "files", "filename", "filenames"))
+    scrubbed = PATH_CANDIDATE_RE.sub(" ", normalized)
+    return re.search(r"\b(?:file|files|filename|filenames)\b", scrubbed) is not None
+
+
+def _looks_like_content_diagnostic_body(text: str) -> bool:
+    normalized = str(text or "").lower()
+    return any(
+        token in normalized
+        for token in (
+            "containing",
+            "contents include",
+            "contents contain",
+            "matching lines",
+            "line containing",
+            "lines containing",
+            "mentioning",
+            "mentions",
+        )
+    )
 
 
 def _infer_output_mode(goal: str) -> str:
@@ -777,6 +855,27 @@ def _infer_output_mode(goal: str) -> str:
     if OUTPUT_CSV_RE.search(goal):
         return "csv"
     return "text"
+
+
+def _infer_file_aggregate_output_mode(goal: str, aggregate: str) -> str:
+    if OUTPUT_JSON_RE.search(goal):
+        return "json"
+    if aggregate == "count" and AGGREGATE_COUNT_ONLY_RE.search(goal):
+        return "count"
+    return "text"
+
+
+def _infer_file_aggregate_mode(goal: str) -> str:
+    if AGGREGATE_COUNT_AND_SIZE_RE.search(goal):
+        return "count_and_total_size"
+    return "total_size"
+
+
+def _infer_file_aggregate_size_unit(goal: str) -> str:
+    match = SIZE_UNIT_RE.search(goal)
+    if match is None:
+        return "auto"
+    return match.group(1).lower()
 
 
 def _infer_shell_output_mode(goal: str) -> str:

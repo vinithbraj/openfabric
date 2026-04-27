@@ -34,6 +34,16 @@ class SearchFileContentsIntent(BaseModel):
     output_mode: Literal["text", "csv", "json"] = "text"
 
 
+class FileAggregateIntent(BaseModel):
+    path: str
+    pattern: str = "*"
+    recursive: bool = True
+    file_only: bool = True
+    aggregate: Literal["total_size", "count", "count_and_total_size"] = "total_size"
+    output_mode: Literal["text", "json", "count"] = "text"
+    size_unit: Literal["bytes", "kb", "mb", "gb", "auto"] = "auto"
+
+
 class SqlCountIntent(BaseModel):
     database: str | None = None
     table: str

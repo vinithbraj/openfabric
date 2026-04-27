@@ -47,6 +47,16 @@ FILE_TREE = {
     "theta": {"lake.txt": "lake\n", "river.txt": "river\n", "ignore.md": "ignore\n", "nested/ocean.txt": "ocean\n"},
     "iota": {"bread.txt": "bread\n", "soup.txt": "soup\n", "ignore.md": "ignore\n", "nested/tea.txt": "tea\n"},
     "kappa": {"alpha.txt": "alpha\n", "beta.txt": "beta\n", "ignore.md": "ignore\n", "nested/gamma.txt": "gamma\n"},
+    "lambda": {
+        "clip1.mp4": "aaaa",
+        "clip2.mp4": "bb",
+        "notes.txt": "ignore\n",
+        "nested/clip3.mp4": "hello",
+    },
+    "mu": {
+        "readme.txt": "no mp4 files here\n",
+        "nested/story.md": "still no video\n",
+    },
 }
 
 SEARCH_TREE = {
@@ -121,8 +131,7 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
     for name, content in _slurm_fixture_files().items():
         _write(slurm_dir / name, content)
 
-    slurm_llm_intent_path = workspace / "slurm_llm_intent_responses.json"
-    _write(slurm_llm_intent_path, json.dumps(_slurm_llm_intent_fixture_payload(), indent=2) + "\n")
+    llm_intent_path = workspace / "llm_intent_responses.json"
 
     sql_path = workspace / "book_club.db"
     db = sqlite3.connect(sql_path)
@@ -159,6 +168,7 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
     }
     variables.update(_path_variables("notes", notes_dir, NOTES_CONTENT))
     variables.update(_directory_variables("files", files_dir, FILE_TREE))
+    variables["files_lambda_tilde"] = _tilde_path(files_dir / "lambda")
     variables.update(
         {
             "search_pantry": str(search_dir / "pantry"),
@@ -179,13 +189,15 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
             "fetch_story": (fetch_dir / "story.html").resolve().as_uri(),
             "fetch_museum": (fetch_dir / "museum.html").resolve().as_uri(),
             "slurm_fixture_dir": str(slurm_dir),
-            "slurm_llm_intent_fixture_path": str(slurm_llm_intent_path),
+            "llm_intent_fixture_path": str(llm_intent_path),
+            "slurm_llm_intent_fixture_path": str(llm_intent_path),
             "current_user": getpass.getuser(),
             "slurm_today_date": datetime.now().strftime("%Y-%m-%d"),
             "slurm_yesterday_date": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
             "slurm_last_week_date": (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d"),
         }
     )
+    _write(llm_intent_path, json.dumps(_llm_intent_fixture_payload(variables), indent=2) + "\n")
 
     return EvalFixturePayload(
         workspace_root=str(workspace),
@@ -218,6 +230,15 @@ def _path_variables(prefix: str, root: Path, files: dict[str, str]) -> dict[str,
 
 def _directory_variables(prefix: str, root: Path, directories: dict[str, Any]) -> dict[str, str]:
     return {f"{prefix}_{name}": str(root / name) for name in directories}
+
+
+def _tilde_path(path: Path) -> str:
+    resolved = path.resolve()
+    home = Path.home().resolve()
+    try:
+        return "~/" + str(resolved.relative_to(home))
+    except ValueError:
+        return str(resolved)
 
 
 def _render_value(value: Any, variables: dict[str, str]) -> Any:
@@ -286,8 +307,14 @@ def _slurm_fixture_files() -> dict[str, str]:
     }
 
 
-def _slurm_llm_intent_fixture_payload() -> dict[str, dict[str, str]]:
+def _llm_intent_fixture_payload(variables: dict[str, str]) -> dict[str, dict[str, str]]:
     current_user = getpass.getuser()
+    shell_aggregate_prompt = f"using shell, how much space do mp4s take under {variables['files_lambda']}"
+    shell_content_files_prompt = f"with shell, show files containing cinnamon under {variables['search_pantry']} as json"
+    shell_content_lines_prompt = (
+        f"with shell, show matching lines containing cinnamon under {variables['search_pantry']} as json"
+    )
+    shell_fetch_prompt = f"fetch the title of {variables['fetch_example']} using shell"
     return {
         "slurm": {
             "Is the cluster busy right now?": json.dumps(
@@ -380,5 +407,119 @@ def _slurm_llm_intent_fixture_payload() -> dict[str, dict[str, str]]:
                     "reason": "The user requested a mutating SLURM operation.",
                 }
             ),
-        }
+        },
+        "shell": {
+            "check uptime": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "ShellInspectionIntent",
+                    "confidence": 0.93,
+                    "arguments": {"kind": "uptime", "output_mode": "text"},
+                    "reason": "The user wants a read-only uptime summary.",
+                }
+            ),
+            "show disk usage": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "ShellInspectionIntent",
+                    "confidence": 0.92,
+                    "arguments": {"kind": "disk_usage", "output_mode": "text"},
+                    "reason": "The user wants a disk usage summary.",
+                }
+            ),
+            "show memory usage": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "ShellInspectionIntent",
+                    "confidence": 0.91,
+                    "arguments": {"kind": "memory_summary", "output_mode": "text"},
+                    "reason": "The user wants a memory usage summary.",
+                }
+            ),
+            "show top processes": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "ShellInspectionIntent",
+                    "confidence": 0.9,
+                    "arguments": {"kind": "process_summary", "limit": 10, "output_mode": "text"},
+                    "reason": "The user wants a short process summary.",
+                }
+            ),
+            "show network summary": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "ShellInspectionIntent",
+                    "confidence": 0.9,
+                    "arguments": {"kind": "network_summary", "output_mode": "text"},
+                    "reason": "The user wants an interface and address summary.",
+                }
+            ),
+            "show listening ports": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "ShellInspectionIntent",
+                    "confidence": 0.9,
+                    "arguments": {"kind": "listening_ports", "output_mode": "text"},
+                    "reason": "The user wants currently listening ports.",
+                }
+            ),
+            shell_aggregate_prompt: json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "FileAggregateIntent",
+                    "confidence": 0.9,
+                    "arguments": {
+                        "path": variables["files_lambda"],
+                        "pattern": "*.mp4",
+                        "recursive": True,
+                        "file_only": True,
+                        "aggregate": "total_size",
+                        "output_mode": "text",
+                        "size_unit": "auto",
+                    },
+                    "reason": "The user is asking for a safe filesystem aggregate.",
+                }
+            ),
+            shell_content_files_prompt: json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "FileContentDiagnosticIntent",
+                    "confidence": 0.88,
+                    "arguments": {
+                        "path": variables["search_pantry"],
+                        "needle": "cinnamon",
+                        "pattern": "*",
+                        "recursive": True,
+                        "result_kind": "files",
+                        "output_mode": "json",
+                    },
+                    "reason": "The user wants matching files for a content search.",
+                }
+            ),
+            shell_content_lines_prompt: json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "FileContentDiagnosticIntent",
+                    "confidence": 0.89,
+                    "arguments": {
+                        "path": variables["search_pantry"],
+                        "needle": "cinnamon",
+                        "pattern": "*",
+                        "recursive": True,
+                        "result_kind": "lines",
+                        "output_mode": "json",
+                    },
+                    "reason": "The user wants matching lines from a content search.",
+                }
+            ),
+            shell_fetch_prompt: json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "FetchExtractIntent",
+                    "confidence": 0.92,
+                    "arguments": {"url": variables["fetch_example"], "extract": "title", "output_mode": "text"},
+                    "reason": "The user wants a fetch-and-extract title operation.",
+                }
+            ),
+        },
     }

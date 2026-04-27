@@ -362,7 +362,9 @@ def main() -> None:
     fixtures = rebuild_eval_workspace(WORKSPACE)
     os.environ["AOR_ENABLE_LLM_INTENT_EXTRACTION"] = "1"
     os.environ[SLURM_FIXTURE_DIR_ENV] = str(fixtures.variables.get("slurm_fixture_dir", ""))
-    os.environ[LLM_INTENT_FIXTURE_PATH_ENV] = str(fixtures.variables.get("slurm_llm_intent_fixture_path", ""))
+    os.environ[LLM_INTENT_FIXTURE_PATH_ENV] = str(
+        fixtures.variables.get("llm_intent_fixture_path", fixtures.variables.get("slurm_llm_intent_fixture_path", ""))
+    )
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     settings_payload = fixtures.settings_payload()
     render_values = {

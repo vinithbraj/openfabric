@@ -10,6 +10,7 @@ from aor_runtime.runtime.output_contract import build_output_contract
 from aor_runtime.runtime.intents import (
     CompoundIntent,
     CountFilesIntent,
+    FileAggregateIntent,
     FetchExtractIntent,
     ListFilesIntent,
     ReadFileLineIntent,
@@ -77,6 +78,52 @@ def compile_intent_to_plan(intent: Any, allowed_tools: list[str], settings: Sett
                             "value": {"$ref": output, "path": "matches"},
                             "mode": "count",
                             "output_contract": build_output_contract(mode="count"),
+                        },
+                    },
+                ]
+            }
+        )
+
+    if isinstance(intent, FileAggregateIntent):
+        _require_tools(allowed_tools, "fs.aggregate")
+        include_matches = intent.output_mode == "json"
+        if intent.output_mode == "json":
+            value: Any = {
+                "file_count": {"$ref": "file_aggregate", "path": "file_count"},
+                "matches": {"$ref": "file_aggregate", "path": "matches"},
+            }
+            if intent.aggregate != "count":
+                value["total_size_bytes"] = {"$ref": "file_aggregate", "path": "total_size_bytes"}
+        elif intent.output_mode == "count" and intent.aggregate == "count":
+            value = {"$ref": "file_aggregate", "path": "file_count"}
+        else:
+            value = {"$ref": "file_aggregate", "path": "summary_text"}
+        return ExecutionPlan.model_validate(
+            {
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "fs.aggregate",
+                        "args": {
+                            "path": intent.path,
+                            "pattern": intent.pattern,
+                            "recursive": intent.recursive,
+                            "file_only": intent.file_only,
+                            "include_matches": include_matches,
+                            "path_style": "relative",
+                            "size_unit": intent.size_unit,
+                            "aggregate": intent.aggregate,
+                        },
+                        "output": "file_aggregate",
+                    },
+                    {
+                        "id": 2,
+                        "action": INTERNAL_RETURN_ACTION,
+                        "input": ["file_aggregate"],
+                        "args": {
+                            "value": value,
+                            "mode": intent.output_mode,
+                            "output_contract": build_output_contract(mode=intent.output_mode),
                         },
                     },
                 ]

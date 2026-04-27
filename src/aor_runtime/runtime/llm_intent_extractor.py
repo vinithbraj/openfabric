@@ -15,8 +15,27 @@ from aor_runtime.llm.client import LLMClient
 
 
 LLM_INTENT_FIXTURE_PATH_ENV = "AOR_LLM_INTENT_FIXTURE_PATH"
-DISALLOWED_PAYLOAD_KEYS = {"steps", "action", "command", "tool", "tool_name", "execution_plan", "gateway_command"}
-DISALLOWED_STRING_RE = r"\b(?:shell\.exec|python\.exec|runtime\.return|slurm\.[a-z_]+|squeue|sacct|sinfo|scontrol|sbatch|scancel|ExecutionPlan)\b"
+DISALLOWED_PAYLOAD_KEYS = {
+    "steps",
+    "action",
+    "command",
+    "tool",
+    "tool_name",
+    "execution_plan",
+    "gateway_command",
+    "argv",
+    "shell",
+    "bash",
+    "exec",
+    "code",
+}
+DISALLOWED_STRING_RE = (
+    r"\b(?:shell\.exec|python\.exec|runtime\.return|slurm\.[a-z_]+|squeue|sacct|sinfo|scontrol|sbatch|scancel|ExecutionPlan)\b"
+    r"|(?:^|\b)(?:bash|sh)\s+-c\b"
+    r"|\bcurl\s+-[A-Za-z]"
+    r"|\bwget\b"
+    r"|\bgateway\s+(?:command|exec)\b"
+)
 
 
 class LLMIntentExtractionResult(BaseModel):

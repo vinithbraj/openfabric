@@ -16,6 +16,7 @@ TOOL_OUTPUT_MAP: dict[str, tuple[str, ...]] = {
     "fs.find": ("matches",),
     "fs.list": ("entries",),
     "fs.size": ("size_bytes",),
+    "fs.aggregate": ("file_count", "total_size_bytes", "matches", "summary_text", "display_size"),
     "fs.exists": ("exists",),
     "fs.not_exists": ("exists",),
     "shell.exec": ("stdout",),

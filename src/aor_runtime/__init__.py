@@ -8,7 +8,7 @@ from pathlib import Path
 
 __all__ = ["__package_version__", "__version__", "get_runtime_version"]
 
-__package_version__ = "0.3.0"
+__package_version__ = "0.4.0"
 
 
 @lru_cache(maxsize=1)

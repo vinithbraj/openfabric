@@ -3,6 +3,7 @@ from __future__ import annotations
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.filesystem import (
+    FileAggregateTool,
     FileCopyTool,
     FileExistsTool,
     FileSizeTool,
@@ -47,6 +48,7 @@ def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
             FindFilesTool(configured),
             SearchContentTool(configured),
             FileSizeTool(configured),
+            FileAggregateTool(configured),
             SlurmQueueTool(configured),
             SlurmJobDetailTool(configured),
             SlurmNodesTool(configured),

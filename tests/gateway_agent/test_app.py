@@ -37,7 +37,7 @@ def test_capabilities_returns_agent_version_and_capability_list(tmp_path: Path) 
     assert response.status_code == 200
     assert response.json() == {
         "node": "localhost",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "capabilities": [
             {"name": "healthz", "description": "Report agent health and the configured logical node."},
             {

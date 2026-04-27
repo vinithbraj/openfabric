@@ -109,6 +109,34 @@ def test_rejects_tool_call_like_output(tmp_path: Path) -> None:
     assert result.error == "unsafe_arguments"
 
 
+def test_rejects_argv_like_output(tmp_path: Path) -> None:
+    llm = FakeLLM(
+        [
+            '{"matched": true, "intent_type": "SlurmMetricsIntent", "confidence": 0.91, "arguments": {"metric_group": "cluster_summary", "argv": ["squeue", "-h"]}, "reason": "unsafe"}'
+        ]
+    )
+    extractor = LLMIntentExtractor(llm=llm, settings=_settings(tmp_path))
+
+    result = extractor.extract_intent("Is the cluster busy right now?", "slurm", [SlurmMetricsIntent])
+
+    assert result.matched is False
+    assert result.error == "unsafe_arguments"
+
+
+def test_rejects_shell_exec_string_output(tmp_path: Path) -> None:
+    llm = FakeLLM(
+        [
+            '{"matched": true, "intent_type": "SlurmMetricsIntent", "confidence": 0.91, "arguments": {"metric_group": "shell.exec"}, "reason": "unsafe"}'
+        ]
+    )
+    extractor = LLMIntentExtractor(llm=llm, settings=_settings(tmp_path))
+
+    result = extractor.extract_intent("Is the cluster busy right now?", "slurm", [SlurmMetricsIntent])
+
+    assert result.matched is False
+    assert result.error == "unsafe_arguments"
+
+
 def test_rejects_execution_plan_like_output(tmp_path: Path) -> None:
     llm = FakeLLM(
         [

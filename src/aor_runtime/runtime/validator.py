@@ -6,7 +6,7 @@ from pathlib import Path
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import StepLog, ValidationResult
 from aor_runtime.core.utils import extract_json_object
-from aor_runtime.tools.filesystem import fs_exists, fs_find, fs_glob, fs_list, fs_read, fs_size, resolve_path
+from aor_runtime.tools.filesystem import fs_aggregate, fs_exists, fs_find, fs_glob, fs_list, fs_read, fs_size, resolve_path
 from aor_runtime.tools.runtime_return import runtime_return
 from aor_runtime.tools.search_content import fs_search_content
 from aor_runtime.tools.slurm import (
@@ -172,6 +172,25 @@ class RuntimeValidator:
                     "name": f"step_{step.id}_{step.action}",
                     "success": actual == observed,
                     "detail": "file size matches filesystem" if actual == observed else "file size mismatch",
+                }
+
+            if step.action == "fs.aggregate":
+                actual_result = fs_aggregate(
+                    self.settings,
+                    str(step.args["path"]),
+                    pattern=str(step.args.get("pattern", "*")),
+                    recursive=bool(step.args.get("recursive", True)),
+                    file_only=bool(step.args.get("file_only", True)),
+                    include_matches=bool(step.args.get("include_matches", True)),
+                    path_style=str(step.args.get("path_style", "relative")),
+                    size_unit=str(step.args.get("size_unit", "auto")),
+                    aggregate=str(step.args.get("aggregate", "total_size")),
+                )
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "file aggregate matches filesystem" if success else "file aggregate mismatch",
                 }
 
             if step.action == "slurm.queue":

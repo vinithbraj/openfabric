@@ -74,6 +74,21 @@ def test_tool_unavailable_error_produces_tool_unavailable_suggestions() -> None:
     assert any("filesystem search" in suggestion.reason.lower() or "installed" in suggestion.suggested_prompt.lower() for suggestion in result.suggestions)
 
 
+def test_file_aggregate_failure_produces_relevant_suggestions() -> None:
+    goal = "calculate total file size of all .mp4 files in /home/vinith/Desktop/Workspace"
+    error_type = classify_failure(
+        goal,
+        error=RuntimeError("python.exec must not call shell.exec()."),
+        metadata={"error_kind": "contract", "reason": "planning_failed"},
+    )
+    result = generate_prompt_suggestions(goal, error_type, context={"workspace_root": "/home/vinith/Desktop/Workspace"})
+
+    assert error_type == "file_aggregate_not_matched"
+    assert result.error_type == "file_aggregate_not_matched"
+    assert any(".mp4" in suggestion.suggested_prompt for suggestion in result.suggestions)
+    assert any("total file size" in suggestion.suggested_prompt.lower() or "total size" in suggestion.suggested_prompt.lower() for suggestion in result.suggestions)
+
+
 def test_llm_fallback_used_produces_deterministic_rewrite_suggestions() -> None:
     goal = "List all studies and save to studies.txt."
     error_type = classify_failure(goal, metadata={"status": "completed", "llm_calls": 1})

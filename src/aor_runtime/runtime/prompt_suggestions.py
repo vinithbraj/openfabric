@@ -13,6 +13,7 @@ PromptSuggestionErrorType = Literal[
     "unsupported_mutating_operation",
     "unsupported_output_shape",
     "tool_unavailable",
+    "file_aggregate_not_matched",
     "validation_failure",
     "execution_failure",
     "llm_fallback_used",

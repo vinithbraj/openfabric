@@ -18,6 +18,14 @@ FILE_OPERATION_RE = re.compile(
     re.IGNORECASE,
 )
 FILE_NOUN_RE = re.compile(r"\b(?:file|files|folder|directory|line|lines|\.txt|\.md|\*\.txt|\*\.md)\b", re.IGNORECASE)
+FILE_AGGREGATE_RE = re.compile(
+    r"\b(?:total\s+file\s+size|total\s+size|sum(?:\s+the)?\s+size|how\s+much\s+space|disk\s+space\s+used\s+by|size\s+of\s+all|total\s+bytes|count\s+and\s+total\s+size)\b",
+    re.IGNORECASE,
+)
+FILE_AGGREGATE_FAILURE_RE = re.compile(
+    r"(?:python\.exec\s+must\s+not\s+call|tool-call contract|fs\.size|shell\.exec)",
+    re.IGNORECASE,
+)
 VAGUE_OUTPUT_RE = re.compile(r"\b(?:make it nice|format beautifully|format nicely|beautify|pretty format)\b", re.IGNORECASE)
 MUTATING_OPERATION_RE = re.compile(
     r"\b(?:scancel|scontrol\s+update|drain|resume|delete|remove|kill|shutdown|poweroff|reboot)\b",
@@ -79,8 +87,16 @@ def classify_failure(
     if AMBIGUOUS_FILE_REFERENCE_RE.search(text) and not _has_explicit_path(text):
         return "ambiguous_file_reference"
 
+    if FILE_AGGREGATE_RE.search(text) and not _has_explicit_path(text):
+        return "missing_file_path"
+
     if _looks_like_file_task(text) and not _has_explicit_path(text):
         return "missing_file_path"
+
+    if FILE_AGGREGATE_RE.search(text) and (
+        FILE_AGGREGATE_FAILURE_RE.search(lowered_error) or FILE_AGGREGATE_FAILURE_RE.search(lowered_detail)
+    ):
+        return "file_aggregate_not_matched"
 
     if _looks_like_sql_task(text, plan=plan, metadata=metadata_payload) and not _has_explicit_database(text):
         return "ambiguous_database"
@@ -143,6 +159,30 @@ def generate_prompt_suggestions(goal: str, error_type: str, context: dict[str, A
 
     if error_type == "missing_file_path":
         extension = ".md" if ".md" in goal.lower() or "markdown" in goal.lower() else ".txt"
+        if FILE_AGGREGATE_RE.search(goal):
+            aggregate_extension = _infer_aggregate_extension(goal) or ".mp4"
+            suggestions = [
+                PromptSuggestion(
+                    title="Return bytes only",
+                    suggested_prompt=f"Calculate total file size of *{aggregate_extension} files under {workspace_root} and return bytes only.",
+                    reason="Aggregate file-size prompts need an explicit root path to stay deterministic.",
+                ),
+                PromptSuggestion(
+                    title="Ask for a JSON summary",
+                    suggested_prompt=f"Count and total size of {aggregate_extension} files under {workspace_root} as JSON.",
+                    reason="A structured JSON form makes file-count and size aggregation explicit.",
+                ),
+                PromptSuggestion(
+                    title="Restrict to the top level",
+                    suggested_prompt=f"Total size of top-level {aggregate_extension} files in {workspace_root}.",
+                    reason="If you only want direct children, say so explicitly to avoid recursive matching.",
+                ),
+            ]
+            return PromptSuggestionResult(
+                error_type="missing_file_path",
+                message="I need an explicit folder path for that file-size aggregation request.",
+                suggestions=suggestions,
+            )
         suggestions = [
             PromptSuggestion(
                 title="Provide a concrete folder",
@@ -167,6 +207,31 @@ def generate_prompt_suggestions(goal: str, error_type: str, context: dict[str, A
         return PromptSuggestionResult(
             error_type="missing_file_path",
             message="I need an explicit file or folder path for that request.",
+            suggestions=suggestions,
+        )
+
+    if error_type == "file_aggregate_not_matched":
+        aggregate_extension = _infer_aggregate_extension(goal) or ".mp4"
+        suggestions = [
+            PromptSuggestion(
+                title="Return bytes only",
+                suggested_prompt=f"Calculate total file size of *{aggregate_extension} files under {workspace_root} and return bytes only.",
+                reason="That request is closest to the deterministic filesystem aggregate path.",
+            ),
+            PromptSuggestion(
+                title="Ask for JSON count and size",
+                suggested_prompt=f"Count and total size of {aggregate_extension} files under {workspace_root} as JSON.",
+                reason="A structured summary avoids planner ambiguity around aggregation and formatting.",
+            ),
+            PromptSuggestion(
+                title="Limit matching to the top level",
+                suggested_prompt=f"Total size of top-level {aggregate_extension} files in {workspace_root}.",
+                reason="Top-level wording keeps non-recursive aggregation deterministic.",
+            ),
+        ]
+        return PromptSuggestionResult(
+            error_type="file_aggregate_not_matched",
+            message="I could not map that file-size aggregation request to a supported deterministic form.",
             suggestions=suggestions,
         )
 
@@ -358,6 +423,21 @@ def generate_prompt_suggestions(goal: str, error_type: str, context: dict[str, A
 
 def _looks_like_file_task(goal: str) -> bool:
     return bool(FILE_OPERATION_RE.search(goal) and FILE_NOUN_RE.search(goal))
+
+
+def _infer_aggregate_extension(goal: str) -> str | None:
+    match = re.search(r"\*\.(?P<ext>[A-Za-z0-9]+)\b", goal)
+    if match is not None:
+        return f".{match.group('ext').lower()}"
+    match = re.search(r"\.(?P<ext>[A-Za-z0-9]+)\s+files?\b", goal, re.IGNORECASE)
+    if match is not None:
+        return f".{match.group('ext').lower()}"
+    match = re.search(r"\b(?P<ext>[A-Za-z0-9]{2,8})\s+files?\b", goal, re.IGNORECASE)
+    if match is not None:
+        ext = match.group("ext").lower()
+        if ext not in {"all", "file", "files", "total", "size", "top", "level"}:
+            return f".{ext}"
+    return None
 
 
 def _has_explicit_path(goal: str) -> bool:

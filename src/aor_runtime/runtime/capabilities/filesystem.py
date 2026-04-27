@@ -7,6 +7,7 @@ from aor_runtime.runtime.intent_classifier import classify_single_intent
 from aor_runtime.runtime.intent_compiler import compile_intent_to_plan
 from aor_runtime.runtime.intents import (
     CountFilesIntent,
+    FileAggregateIntent,
     IntentResult,
     ListFilesIntent,
     ReadFileLineIntent,
@@ -20,6 +21,7 @@ class FilesystemCapabilityPack(CapabilityPack):
     name = "filesystem"
     intent_types = (
         ReadFileLineIntent,
+        FileAggregateIntent,
         CountFilesIntent,
         ListFilesIntent,
         SearchFileContentsIntent,
