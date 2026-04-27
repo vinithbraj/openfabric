@@ -169,6 +169,49 @@ def test_successful_planner_run_logs_canonicalization_trace(tmp_path: Path, monk
     assert planner_completed["payload"]["original_execution_plan"]["steps"][0]["output"] == "rows"
 
 
+def test_successful_planner_run_persists_llm_intent_metadata(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path)
+    session = _session(engine, "Is the cluster busy right now?")
+
+    def fake_build_plan(**kwargs):
+        engine.planner.last_policies_used = ["efficiency", "llm_intent_extractor"]
+        engine.planner.last_high_level_plan = None
+        engine.planner.last_planning_mode = "llm_intent_extractor"
+        engine.planner.last_llm_calls = 1
+        engine.planner.last_llm_intent_calls = 1
+        engine.planner.last_raw_planner_llm_calls = 0
+        engine.planner.last_llm_intent_type = "SlurmMetricsIntent"
+        engine.planner.last_llm_intent_confidence = 0.86
+        engine.planner.last_llm_intent_reason = "Broad cluster summary."
+        engine.planner.last_capability_name = "slurm"
+        engine.planner.last_error_stage = None
+        return ExecutionPlan.model_validate(
+            {
+                "steps": [
+                    {"id": 1, "action": "slurm.metrics", "args": {"metric_group": "cluster_summary"}},
+                    {"id": 2, "action": "runtime.return", "args": {"value": {"queue_count": 4}, "mode": "json"}},
+                ]
+            }
+        )
+
+    monkeypatch.setattr(engine.planner, "build_plan", fake_build_plan)
+
+    engine._run_planner(session)
+
+    assert session.state["metrics"]["llm_calls"] == 1
+    assert session.state["metrics"]["llm_intent_calls"] == 1
+    assert session.state["metrics"]["raw_planner_llm_calls"] == 0
+    assert session.state["planning_metadata"]["planning_mode"] == "llm_intent_extractor"
+    assert session.state["planning_metadata"]["llm_intent_type"] == "SlurmMetricsIntent"
+    events = engine.store.get_events(session.id)
+    planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
+    assert planner_completed["payload"]["planning_mode"] == "llm_intent_extractor"
+    assert planner_completed["payload"]["capability"] == "slurm"
+    assert planner_completed["payload"]["llm_intent_type"] == "SlurmMetricsIntent"
+    assert planner_completed["payload"]["llm_intent_calls"] == 1
+    assert planner_completed["payload"]["raw_planner_llm_calls"] == 0
+
+
 def test_planner_failure_clears_stale_policies_used_and_logs_stage(tmp_path: Path, monkeypatch) -> None:
     engine = _engine(tmp_path)
     session = _session(engine, "Find all txt files in this folder and provide list as csv")

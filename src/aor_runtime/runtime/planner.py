@@ -9,9 +9,10 @@ from aor_runtime.core.contracts import ExecutionPlan, HighLevelPlan, PlannerConf
 from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.capabilities.registry import build_default_capability_registry
-from aor_runtime.runtime.capabilities.base import ClassificationContext, CompileContext
+from aor_runtime.runtime.capabilities.base import ClassificationContext, CompileContext, CompiledIntentPlan
 from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow
 from aor_runtime.runtime.decomposer import GoalDecomposer, is_complex_goal
+from aor_runtime.runtime.llm_intent_extractor import LLMIntentExtractor
 from aor_runtime.runtime.plan_canonicalizer import canonicalize_plan, coerce_plan_payload
 from aor_runtime.runtime.policies import (
     PlanContractViolation,
@@ -793,10 +794,17 @@ class TaskPlanner:
         self.settings = settings or get_settings()
         self.capability_registry = capability_registry or build_default_capability_registry()
         self.decomposer = GoalDecomposer(llm=llm)
+        self.llm_intent_extractor = LLMIntentExtractor(llm=llm, settings=settings)
         self.last_policies_used: list[str] = []
         self.last_high_level_plan: list[str] | None = None
         self.last_planning_mode: str = "direct"
         self.last_llm_calls: int = 0
+        self.last_llm_intent_calls: int = 0
+        self.last_raw_planner_llm_calls: int = 0
+        self.last_llm_intent_type: str | None = None
+        self.last_llm_intent_confidence: float | None = None
+        self.last_llm_intent_reason: str | None = None
+        self.last_capability_name: str | None = None
         self.last_error_stage: str | None = None
         self.last_raw_output: str | None = None
         self.last_error_type: str | None = None
@@ -822,23 +830,56 @@ class TaskPlanner:
         self.last_policies_used = [policy.name for policy in policies]
 
         try:
-            deterministic_match = self.capability_registry.classify(
-                goal,
-                ClassificationContext(
-                    schema_payload=schema_payload,
-                    allowed_tools=allowed_tools,
-                    settings=self.settings,
-                    input_payload=input_payload,
-                ),
+            classification_context = ClassificationContext(
+                schema_payload=schema_payload,
+                allowed_tools=allowed_tools,
+                settings=self.settings,
+                input_payload=input_payload,
             )
+            if self.settings.enable_llm_intent_extraction:
+                try:
+                    deterministic_match = self.capability_registry.classify(
+                        goal,
+                        classification_context,
+                        extractor=self.llm_intent_extractor,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument 'extractor'" not in str(exc):
+                        raise
+                    deterministic_match = self.capability_registry.classify(goal, classification_context)
+            else:
+                deterministic_match = self.capability_registry.classify(goal, classification_context)
             if deterministic_match.matched:
                 try:
-                    self.last_planning_mode = "deterministic_intent"
-                    self.last_policies_used = [*self.last_policies_used, "deterministic_intent"]
-                    plan = self.capability_registry.compile(
-                        deterministic_match.intent,
-                        CompileContext(allowed_tools=allowed_tools, settings=self.settings),
-                    )
+                    compile_context = CompileContext(allowed_tools=allowed_tools, settings=self.settings)
+                    if hasattr(self.capability_registry, "compile_result"):
+                        compiled_plan = self.capability_registry.compile_result(deterministic_match.intent, compile_context)
+                    else:
+                        compiled_plan = CompiledIntentPlan(plan=self.capability_registry.compile(deterministic_match.intent, compile_context))
+                    planning_mode = str(deterministic_match.metadata.get("planning_mode") or compiled_plan.planning_mode or "deterministic_intent")
+                    self.last_planning_mode = planning_mode
+                    self.last_policies_used = [*self.last_policies_used, planning_mode]
+                    self.last_capability_name = str(
+                        deterministic_match.metadata.get("capability")
+                        or compiled_plan.metadata.get("capability_pack")
+                        or ""
+                    ) or None
+                    self.last_llm_calls = int(deterministic_match.metadata.get("llm_calls") or 0)
+                    self.last_llm_intent_calls = int(deterministic_match.metadata.get("llm_intent_calls") or 0)
+                    self.last_raw_planner_llm_calls = int(deterministic_match.metadata.get("raw_planner_llm_calls") or 0)
+                    self.last_llm_intent_type = (
+                        str(
+                            deterministic_match.metadata.get("llm_intent_type")
+                            or compiled_plan.metadata.get("intent_type")
+                            or ""
+                        ).strip()
+                        if planning_mode == "llm_intent_extractor"
+                        else None
+                    ) or None
+                    confidence_value = deterministic_match.metadata.get("llm_intent_confidence")
+                    self.last_llm_intent_confidence = float(confidence_value) if confidence_value is not None else None
+                    self.last_llm_intent_reason = str(deterministic_match.metadata.get("llm_intent_reason") or "").strip() or None
+                    plan = compiled_plan.plan
                     finalized_plan = self._finalize_plan(
                         goal,
                         plan,
@@ -847,7 +888,6 @@ class TaskPlanner:
                         allow_internal_tools=INTERNAL_ALLOWED_TOOLS,
                         canonicalize_soft_violations=False,
                     )
-                    self.last_llm_calls = 0
                     self.last_high_level_plan = None
                     self.last_plan_repairs = []
                     self.last_plan_canonicalized = False
@@ -857,10 +897,22 @@ class TaskPlanner:
                 except ValueError as exc:
                     if "Deterministic intent requires unavailable tools:" not in str(exc):
                         raise
-                    self.last_policies_used = [name for name in self.last_policies_used if name != "deterministic_intent"]
+                    self.last_policies_used = [name for name in self.last_policies_used if name != self.last_planning_mode]
                     self.last_planning_mode = "direct"
+                    self.last_llm_calls = 0
+                    self.last_llm_intent_calls = 0
+                    self.last_raw_planner_llm_calls = 0
+                    self.last_llm_intent_type = None
+                    self.last_llm_intent_confidence = None
+                    self.last_llm_intent_reason = None
+                    self.last_capability_name = None
 
             self.last_planning_mode = "hierarchical" if is_complex_goal(goal) else "direct"
+            self.last_llm_intent_calls = 0
+            self.last_llm_intent_type = None
+            self.last_llm_intent_confidence = None
+            self.last_llm_intent_reason = None
+            self.last_capability_name = None
             if self.last_planning_mode == "hierarchical":
                 high_level_plan = self._decompose_goal(
                     goal=goal,
@@ -896,10 +948,13 @@ class TaskPlanner:
                     high_level_plan=None,
                     stage="direct",
                 )
+            self.last_raw_planner_llm_calls = self.last_llm_calls
             finalized_plan = self._finalize_plan(goal, plan, allowed_tools, explicit_tool_intent)
             self.last_error_stage = None
             return finalized_plan
         except Exception as exc:
+            if self.last_planning_mode in {"direct", "hierarchical"} and self.last_llm_intent_calls == 0:
+                self.last_raw_planner_llm_calls = self.last_llm_calls
             self.last_error_type = type(exc).__name__
             raise
 
@@ -908,6 +963,12 @@ class TaskPlanner:
         self.last_high_level_plan = None
         self.last_planning_mode = "direct"
         self.last_llm_calls = 0
+        self.last_llm_intent_calls = 0
+        self.last_raw_planner_llm_calls = 0
+        self.last_llm_intent_type = None
+        self.last_llm_intent_confidence = None
+        self.last_llm_intent_reason = None
+        self.last_capability_name = None
         self.last_error_stage = None
         self.last_raw_output = None
         self.last_error_type = None

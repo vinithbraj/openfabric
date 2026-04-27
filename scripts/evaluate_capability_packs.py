@@ -20,6 +20,7 @@ from aor_runtime.runtime.capabilities.eval import (
 from aor_runtime.runtime.engine import ExecutionEngine
 from aor_runtime.runtime.eval_fixtures import rebuild_eval_workspace, render_case_prompt, render_template
 from aor_runtime.runtime.failure_classifier import classify_failure, generate_prompt_suggestions
+from aor_runtime.runtime.llm_intent_extractor import LLM_INTENT_FIXTURE_PATH_ENV
 from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
 from aor_runtime.tools.slurm import SLURM_FIXTURE_DIR_ENV
 from aor_runtime.core.contracts import ExecutionPlan
@@ -126,6 +127,9 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
     strict_pass = 0
     semantic_pass = 0
     llm_fallbacks = 0
+    llm_intent_calls = 0
+    raw_planner_llm_calls = 0
+    deterministic_calls = 0
     failures: list[dict[str, Any]] = []
     case_results: list[dict[str, Any]] = []
 
@@ -259,8 +263,12 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
 
         state = dict(payload["state"])
         content = str(dict(state.get("final_output", {})).get("content", ""))
-        llm_calls = int(dict(state.get("metrics", {})).get("llm_calls", 0))
+        metrics = dict(state.get("metrics", {}))
+        llm_calls = int(metrics.get("llm_calls", 0))
+        case_llm_intent_calls = int(metrics.get("llm_intent_calls", 0))
+        case_raw_planner_llm_calls = int(metrics.get("raw_planner_llm_calls", 0))
         final_output_metadata = dict(dict(state.get("final_output", {})).get("metadata", {}))
+        planning_mode = str(final_output_metadata.get("planning_mode") or dict(state.get("planning_metadata") or {}).get("planning_mode") or "")
         metadata_ok, metadata_reason = _check_setup_expectations(
             setup,
             failure_type=str(final_output_metadata.get("failure_type") or ""),
@@ -268,9 +276,18 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
         )
         if llm_calls > 0:
             llm_fallbacks += 1
+        llm_intent_calls += case_llm_intent_calls
+        raw_planner_llm_calls += case_raw_planner_llm_calls
+        if planning_mode == "deterministic_intent":
+            deterministic_calls += 1
 
         semantic = _matches_expected(case, content, expected, expected_contains, expected_regex)
-        strict = semantic and llm_calls == int(case.expect_llm_calls or 0) and metadata_ok
+        strict = (
+            semantic
+            and llm_calls == int(case.expect_llm_calls or 0)
+            and metadata_ok
+            and int(setup.get("expected_raw_planner_llm_calls") or 0) == case_raw_planner_llm_calls
+        )
 
         if semantic:
             semantic_pass += 1
@@ -282,6 +299,8 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
             failure_category = "incorrect_output"
         elif llm_calls != int(case.expect_llm_calls or 0):
             failure_category = "llm_calls_mismatch"
+        elif int(setup.get("expected_raw_planner_llm_calls") or 0) != case_raw_planner_llm_calls:
+            failure_category = "raw_planner_llm_calls_mismatch"
         elif not metadata_ok:
             failure_category = str(metadata_reason)
 
@@ -311,6 +330,9 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
                 "semantic_pass": semantic,
                 "failure_category": failure_category,
                 "llm_calls": llm_calls,
+                "llm_intent_calls": case_llm_intent_calls,
+                "raw_planner_llm_calls": case_raw_planner_llm_calls,
+                "planning_mode": planning_mode,
                 "latency_ms": elapsed_ms,
                 "content": content,
                 "failure_type": final_output_metadata.get("failure_type"),
@@ -325,6 +347,9 @@ def _evaluate_pack(pack: CapabilityEvalPack, settings_payload: dict[str, Any], r
             strict_pass=strict_pass,
             semantic_pass=semantic_pass,
             llm_fallbacks=llm_fallbacks,
+            llm_intent_calls=llm_intent_calls,
+            raw_planner_llm_calls=raw_planner_llm_calls,
+            deterministic_calls=deterministic_calls,
             failures=failures,
         ),
         case_results,
@@ -335,7 +360,9 @@ def main() -> None:
     packs = load_capability_eval_packs(PACKS_DIR)
     ensure_unique_case_ids(packs)
     fixtures = rebuild_eval_workspace(WORKSPACE)
+    os.environ["AOR_ENABLE_LLM_INTENT_EXTRACTION"] = "1"
     os.environ[SLURM_FIXTURE_DIR_ENV] = str(fixtures.variables.get("slurm_fixture_dir", ""))
+    os.environ[LLM_INTENT_FIXTURE_PATH_ENV] = str(fixtures.variables.get("slurm_llm_intent_fixture_path", ""))
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     settings_payload = fixtures.settings_payload()
     render_values = {
@@ -348,6 +375,9 @@ def main() -> None:
     total_strict = 0
     total_semantic = 0
     total_fallbacks = 0
+    total_llm_intent_calls = 0
+    total_raw_planner_llm_calls = 0
+    total_deterministic_calls = 0
     threshold_failures: list[dict[str, Any]] = []
 
     for pack in packs:
@@ -376,6 +406,9 @@ def main() -> None:
         total_strict += result.strict_pass
         total_semantic += result.semantic_pass
         total_fallbacks += result.llm_fallbacks
+        total_llm_intent_calls += result.llm_intent_calls
+        total_raw_planner_llm_calls += result.raw_planner_llm_calls
+        total_deterministic_calls += result.deterministic_calls
         pack_reports.append(
             {
                 "capability": pack.capability,
@@ -399,6 +432,9 @@ def main() -> None:
             "strict_pass": total_strict,
             "semantic_pass": total_semantic,
             "llm_fallbacks": total_fallbacks,
+            "llm_intent_calls": total_llm_intent_calls,
+            "raw_planner_llm_calls": total_raw_planner_llm_calls,
+            "deterministic_calls": total_deterministic_calls,
         },
         "packs": pack_reports,
         "threshold_failures": threshold_failures,
@@ -411,13 +447,17 @@ def main() -> None:
             f"{pack_report['capability']}: "
             f"strict {summary['strict_pass']}/{summary['total']} "
             f"semantic {summary['semantic_pass']}/{summary['total']} "
-            f"fallbacks {summary['llm_fallbacks']}"
+            f"fallbacks {summary['llm_fallbacks']} "
+            f"llm_intent_calls {summary['llm_intent_calls']} "
+            f"raw_planner_llm_calls {summary['raw_planner_llm_calls']}"
         )
 
     print(
         f"total: strict {total_strict}/{total_cases} "
         f"semantic {total_semantic}/{total_cases} "
-        f"fallbacks {total_fallbacks}"
+        f"fallbacks {total_fallbacks} "
+        f"llm_intent_calls {total_llm_intent_calls} "
+        f"raw_planner_llm_calls {total_raw_planner_llm_calls}"
     )
 
     print("failures:")

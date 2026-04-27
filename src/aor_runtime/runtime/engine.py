@@ -379,6 +379,8 @@ class ExecutionEngine:
             )
             metrics = dict(state.get("metrics", {}))
             metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + int(self.planner.last_llm_calls)
+            metrics["llm_intent_calls"] = int(metrics.get("llm_intent_calls", 0)) + int(self.planner.last_llm_intent_calls)
+            metrics["raw_planner_llm_calls"] = int(metrics.get("raw_planner_llm_calls", 0)) + int(self.planner.last_raw_planner_llm_calls)
             state["metrics"] = metrics
             plan_summary = summarize_plan(plan)
             policies_used = list(self.planner.last_policies_used)
@@ -386,6 +388,16 @@ class ExecutionEngine:
             repair_trace = list(self.planner.last_plan_repairs)
             canonicalized = bool(self.planner.last_plan_canonicalized)
             original_execution_plan = self.planner.last_original_execution_plan if canonicalized else None
+            resolved_planning_mode = str(self.planner.last_planning_mode or planning_mode)
+            planning_metadata = {
+                "planning_mode": resolved_planning_mode,
+                "capability": self.planner.last_capability_name,
+                "llm_intent_type": self.planner.last_llm_intent_type,
+                "llm_intent_confidence": self.planner.last_llm_intent_confidence,
+                "llm_intent_reason": self.planner.last_llm_intent_reason,
+                "llm_intent_calls": int(self.planner.last_llm_intent_calls),
+                "raw_planner_llm_calls": int(self.planner.last_raw_planner_llm_calls),
+            }
             awaiting_confirmation = bool(state.get("dry_run"))
             state.update(
                 {
@@ -408,6 +420,7 @@ class ExecutionEngine:
                     "attempt": int(state.get("attempt", 0)) + 1,
                     "validation": None,
                     "validation_checks": [],
+                    "planning_metadata": planning_metadata,
                     "failure_context": None,
                     "error": None,
                 }
@@ -419,7 +432,7 @@ class ExecutionEngine:
                 payload={
                     **plan.model_dump(),
                     "goal": goal,
-                    "planning_mode": str(self.planner.last_planning_mode or planning_mode),
+                    **planning_metadata,
                     "high_level_plan": high_level_plan,
                     "execution_plan": plan.model_dump(),
                     "original_execution_plan": original_execution_plan,
@@ -431,6 +444,8 @@ class ExecutionEngine:
         except Exception as exc:  # noqa: BLE001
             metrics = dict(state.get("metrics", {}))
             metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + int(self.planner.last_llm_calls)
+            metrics["llm_intent_calls"] = int(metrics.get("llm_intent_calls", 0)) + int(self.planner.last_llm_intent_calls)
+            metrics["raw_planner_llm_calls"] = int(metrics.get("raw_planner_llm_calls", 0)) + int(self.planner.last_raw_planner_llm_calls)
             state["metrics"] = metrics
             failed_policies = list(self.planner.last_policies_used)
             planner_error_type = str(self.planner.last_error_type or type(exc).__name__)
@@ -443,6 +458,17 @@ class ExecutionEngine:
             )
             final_error = normalized_error.message if normalized_error is not None else str(exc)
             final_output_metadata = {"goal": state.get("goal", ""), "planner_error_type": planner_error_type}
+            final_output_metadata.update(
+                {
+                    "planning_mode": str(self.planner.last_planning_mode or planning_mode),
+                    "capability": self.planner.last_capability_name,
+                    "llm_intent_type": self.planner.last_llm_intent_type,
+                    "llm_intent_confidence": self.planner.last_llm_intent_confidence,
+                    "llm_intent_reason": self.planner.last_llm_intent_reason,
+                    "llm_intent_calls": int(self.planner.last_llm_intent_calls),
+                    "raw_planner_llm_calls": int(self.planner.last_raw_planner_llm_calls),
+                }
+            )
             if raw_output_preview is not None:
                 final_output_metadata["planner_raw_output_preview"] = raw_output_preview
             if normalized_error is not None:
@@ -481,6 +507,12 @@ class ExecutionEngine:
                 "error_type": planner_error_type,
                 "stage": planner_error_stage,
                 "planning_mode": str(self.planner.last_planning_mode or planning_mode),
+                "capability": self.planner.last_capability_name,
+                "llm_intent_type": self.planner.last_llm_intent_type,
+                "llm_intent_confidence": self.planner.last_llm_intent_confidence,
+                "llm_intent_reason": self.planner.last_llm_intent_reason,
+                "llm_intent_calls": int(self.planner.last_llm_intent_calls),
+                "raw_planner_llm_calls": int(self.planner.last_raw_planner_llm_calls),
                 "policies": failed_policies,
             }
             if raw_output_preview is not None:
@@ -885,6 +917,11 @@ class ExecutionEngine:
         metadata = dict(final_output.get("metadata") or {})
         content = str(final_output.get("content") or "")
         goal = str(state.get("goal", ""))
+        planning_metadata = {
+            key: value
+            for key, value in dict(state.get("planning_metadata") or {}).items()
+            if value is not None
+        }
 
         if status == "failed" and "failure_type" not in metadata:
             failure_context = dict(state.get("failure_context") or {})
@@ -904,6 +941,7 @@ class ExecutionEngine:
             }
 
         if status == "completed" and int(metrics.get("llm_calls", 0)) > 0 and "prompt_suggestions" not in metadata:
+            metadata.update(planning_metadata)
             suggestion_result = generate_prompt_suggestions(
                 goal,
                 classify_failure(

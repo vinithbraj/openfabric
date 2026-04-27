@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from aor_runtime.runtime.capabilities.base import CapabilityPack, ClassificationContext, CompileContext
+from aor_runtime.runtime.capabilities.base import CapabilityPack, ClassificationContext, CompileContext, CompiledIntentPlan
 from aor_runtime.runtime.capabilities.compound import CompoundCapabilityPack
 from aor_runtime.runtime.capabilities.fetch import FetchCapabilityPack
 from aor_runtime.runtime.capabilities.filesystem import FilesystemCapabilityPack
@@ -24,19 +24,31 @@ class CapabilityRegistry:
     def register(self, pack: CapabilityPack) -> None:
         self._packs.append(pack)
 
-    def classify(self, goal: str, context: ClassificationContext) -> IntentResult:
+    def classify(self, goal: str, context: ClassificationContext, *, extractor: Any | None = None) -> IntentResult:
         for pack in self._packs:
             result = pack.classify(goal, context)
             if result.matched:
                 return result
+        if extractor is not None:
+            for pack in self._packs:
+                if not getattr(pack, "supports_llm_intent_extraction", False):
+                    continue
+                if not pack.is_llm_intent_domain(goal, context):
+                    continue
+                result = pack.try_llm_extract(goal, context, extractor)
+                if result.matched:
+                    return result
         return IntentResult(matched=False, reason="no_deterministic_intent")
 
-    def compile(self, intent: Any, context: CompileContext):
+    def compile_result(self, intent: Any, context: CompileContext) -> CompiledIntentPlan:
         for pack in self._packs:
             compiled = pack.compile(intent, context)
             if compiled is not None:
-                return compiled.plan
+                return compiled
         raise ValueError(f"No capability pack can compile intent type: {type(intent).__name__}")
+
+    def compile(self, intent: Any, context: CompileContext):
+        return self.compile_result(intent, context).plan
 
 
 def build_default_capability_registry() -> CapabilityRegistry:

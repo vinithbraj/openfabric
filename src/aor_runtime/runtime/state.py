@@ -39,6 +39,7 @@ class RuntimeState(TypedDict, total=False):
     validation: dict[str, Any] | None
     validation_checks: list[dict[str, Any]]
     final_output: dict[str, Any]
+    planning_metadata: dict[str, Any]
     failure_context: dict[str, Any] | None
     metrics: dict[str, Any]
     error: str | None
@@ -90,8 +91,9 @@ def initial_runtime_state(
         "validation": None,
         "validation_checks": [],
         "final_output": {"content": "", "artifacts": [], "metadata": {}},
+        "planning_metadata": {},
         "failure_context": None,
-        "metrics": {"llm_calls": 0, "latency_ms": 0.0, "steps_executed": 0, "retries": 0},
+        "metrics": {"llm_calls": 0, "llm_intent_calls": 0, "raw_planner_llm_calls": 0, "latency_ms": 0.0, "steps_executed": 0, "retries": 0},
         "error": None,
         "started_at": timestamp,
         "updated_at": timestamp,

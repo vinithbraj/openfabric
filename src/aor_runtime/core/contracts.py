@@ -93,6 +93,8 @@ class FinalOutput(BaseModel):
 
 class RunMetrics(BaseModel):
     llm_calls: int = 0
+    llm_intent_calls: int = 0
+    raw_planner_llm_calls: int = 0
     latency_ms: float = 0.0
     steps_executed: int = 0
     retries: int = 0

@@ -100,3 +100,4 @@ class IntentResult(BaseModel):
     matched: bool
     intent: Any | None = None
     reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

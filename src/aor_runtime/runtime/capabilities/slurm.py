@@ -9,13 +9,15 @@ from pydantic import BaseModel
 
 from aor_runtime.core.contracts import ExecutionPlan
 from aor_runtime.runtime.capabilities.base import CapabilityPack, ClassificationContext, CompileContext, CompiledIntentPlan
+from aor_runtime.runtime.llm_intent_extractor import LLMIntentExtractor
 from aor_runtime.runtime.intents import IntentResult
 from aor_runtime.runtime.output_contract import build_output_contract
+from aor_runtime.tools.slurm import _validate_job_id, _validate_node_name, _validate_safe_token, _validate_time_value
 
 
 SLURM_KEYWORD_RE = re.compile(r"\b(?:slurm|squeue|sacct|sinfo|scontrol|slurmdbd|accounting)\b", re.IGNORECASE)
 SLURM_MUTATION_RE = re.compile(
-    r"\b(?:sbatch|submit(?:\s+a)?\s+job|run\s+this\s+job|scancel|cancel\s+job|drain\s+node|resume\s+node|requeue\s+job|update\s+node|change\s+partition|kill\s+job)\b",
+    r"\b(?:sbatch|submit(?:\s+a)?\s+job|run\s+this\s+job|scancel|cancel(?:\s+my)?\s+job|drain\s+node|resume\s+node|requeue\s+job|update\s+node|change\s+partition|kill(?:\s+my)?\s+job)\b",
     re.IGNORECASE,
 )
 OUTPUT_JSON_RE = re.compile(r"\b(?:json|json only|as json)\b", re.IGNORECASE)
@@ -30,6 +32,17 @@ NODE_STATUS_FOR_RE = re.compile(r"\bnode\s+status\s+for\s+([A-Za-z0-9._-]+)\b", 
 NODE_NAME_RE = re.compile(r"\bshow\s+(?:slurm\s+)?node\s+([A-Za-z0-9._-]+)\b", re.IGNORECASE)
 CLUSTER_ROUTE_RE = re.compile(r"\b(?:on|via|through)\s+cluster\s+([A-Za-z0-9._-]+)\b", re.IGNORECASE)
 Bare_ROUTE_RE = re.compile(r"\bon\s+([A-Za-z0-9._-]+)\s*$", re.IGNORECASE)
+SLURM_LLM_DOMAIN_RE = re.compile(
+    r"\b(?:slurm|squeue|sacct|sinfo|scontrol|slurmdbd|scheduler|accounting|partition|partitions|node|nodes|queue|cluster|gpu|gres)\b",
+    re.IGNORECASE,
+)
+SLURM_LLM_FUZZY_RE = re.compile(
+    r"\b(?:my jobs|stuck jobs|jobs waiting|cluster health|busy cluster|gpu availability|failed recently|jobs yesterday|scheduler health|anything unhealthy)\b",
+    re.IGNORECASE,
+)
+SUSPICIOUS_VALUE_RE = re.compile(r"[;|&$`><\n/]")
+ALLOWED_JOB_STATES = {"RUNNING", "PENDING", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"}
+ALLOWED_NODE_STATES = {"idle", "allocated", "mixed", "down", "drained"}
 
 
 class SlurmQueueIntent(BaseModel):
@@ -109,6 +122,11 @@ class SlurmMetricsIntent(BaseModel):
     output_mode: Literal["text", "json"] = "json"
 
 
+class SlurmDBDHealthIntent(BaseModel):
+    gateway_node: str | None = None
+    output_mode: Literal["text", "json"] = "json"
+
+
 class SlurmUnsupportedMutationIntent(BaseModel):
     operation: str
     reason: str
@@ -116,6 +134,7 @@ class SlurmUnsupportedMutationIntent(BaseModel):
 
 class SlurmCapabilityPack(CapabilityPack):
     name = "slurm"
+    supports_llm_intent_extraction = True
     intent_types = (
         SlurmQueueIntent,
         SlurmJobDetailIntent,
@@ -125,6 +144,7 @@ class SlurmCapabilityPack(CapabilityPack):
         SlurmNodeDetailIntent,
         SlurmPartitionSummaryIntent,
         SlurmMetricsIntent,
+        SlurmDBDHealthIntent,
         SlurmUnsupportedMutationIntent,
     )
 
@@ -154,8 +174,7 @@ class SlurmCapabilityPack(CapabilityPack):
         if re.search(r"\b(?:slurmdbd\s+health|accounting\s+health)\b", routed_prompt, re.IGNORECASE):
             return IntentResult(
                 matched=True,
-                intent=SlurmMetricsIntent(
-                    metric_group="slurmdbd_health",
+                intent=SlurmDBDHealthIntent(
                     gateway_node=gateway_node,
                     output_mode=_detect_metrics_output_mode(routed_prompt),
                 ),
@@ -312,6 +331,110 @@ class SlurmCapabilityPack(CapabilityPack):
             )
 
         return IntentResult(matched=False, reason="slurm_no_match")
+
+    def is_llm_intent_domain(self, goal: str, context: ClassificationContext) -> bool:
+        if not context.settings.enable_llm_intent_extraction:
+            return False
+        prompt = str(goal or "").strip()
+        if not prompt:
+            return False
+        if SLURM_MUTATION_RE.search(prompt):
+            return True
+        lower = prompt.lower()
+        if SLURM_LLM_FUZZY_RE.search(prompt):
+            return True
+        if re.search(r"\bare\s+gpus?\s+available\b", lower):
+            return True
+        if re.search(r"\bwhat\s+failed\s+recently\b", lower):
+            return True
+        if re.search(r"\bhow\s+did\s+jobs?\s+do\s+yesterday\b", lower):
+            return True
+        if re.search(r"\bdo\s+the\s+gpu\s+nodes?\s+look\s+available\b", lower):
+            return True
+        if "scheduler" in lower:
+            return True
+        if "cluster" in lower and any(token in lower for token in ("busy", "health", "healthy", "unhealthy", "status")):
+            return True
+        if "jobs" in lower and any(token in lower for token in ("stuck", "waiting", "yesterday", "recently", "failed", "pending")):
+            return True
+        return SLURM_LLM_DOMAIN_RE.search(prompt) is not None and any(
+            token in lower for token in ("queue", "jobs", "nodes", "partitions", "gpu", "accounting", "health", "busy")
+        )
+
+    def try_llm_extract(self, goal: str, context: ClassificationContext, extractor: LLMIntentExtractor) -> IntentResult:
+        if not context.settings.enable_llm_intent_extraction:
+            return IntentResult(matched=False, reason="slurm_llm_intent_disabled")
+        prompt = str(goal or "").strip()
+        if not prompt:
+            return IntentResult(matched=False, reason="slurm_llm_empty_goal")
+
+        routed_prompt, gateway_node = _extract_gateway_node(prompt, context.settings.available_nodes)
+        mutation_match = SLURM_MUTATION_RE.search(routed_prompt)
+        if mutation_match is not None:
+            return IntentResult(
+                matched=True,
+                intent=SlurmUnsupportedMutationIntent(
+                    operation=mutation_match.group(0),
+                    reason="This runtime supports read-only SLURM inspection and metrics only.",
+                ),
+                metadata={
+                    "planning_mode": "llm_intent_extractor",
+                    "capability": self.name,
+                    "llm_calls": 0,
+                    "llm_intent_calls": 0,
+                    "raw_planner_llm_calls": 0,
+                    "llm_intent_reason": "Rejected mutating or administrative SLURM request before LLM extraction.",
+                },
+            )
+
+        extracted = extractor.extract_intent(
+            routed_prompt,
+            self.name,
+            [
+                SlurmQueueIntent,
+                SlurmJobDetailIntent,
+                SlurmAccountingIntent,
+                SlurmJobCountIntent,
+                SlurmNodeStatusIntent,
+                SlurmNodeDetailIntent,
+                SlurmPartitionSummaryIntent,
+                SlurmMetricsIntent,
+                SlurmDBDHealthIntent,
+            ],
+            context={
+                "system_prompt": _slurm_llm_intent_system_prompt(),
+                "current_user": getpass.getuser(),
+                "confidence_threshold": 0.70,
+                "temperature": 0.0,
+            },
+        )
+        if not extracted.matched or extracted.intent is None:
+            return IntentResult(matched=False, reason=extracted.reason or "slurm_llm_no_match")
+
+        try:
+            safe_intent = _finalize_llm_slurm_intent(
+                extracted.intent,
+                routed_prompt,
+                gateway_node=gateway_node,
+                available_nodes=context.settings.available_nodes,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return IntentResult(matched=False, reason=str(exc))
+
+        return IntentResult(
+            matched=True,
+            intent=safe_intent,
+            metadata={
+                "planning_mode": "llm_intent_extractor",
+                "capability": self.name,
+                "llm_calls": 1,
+                "llm_intent_calls": 1,
+                "raw_planner_llm_calls": 0,
+                "llm_intent_type": type(safe_intent).__name__,
+                "llm_intent_confidence": extracted.confidence,
+                "llm_intent_reason": extracted.reason,
+            },
+        )
 
     def compile(self, intent: Any, context: CompileContext) -> CompiledIntentPlan | None:
         if not isinstance(intent, self.intent_types):
@@ -507,6 +630,23 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
             ),
         ]
 
+    if isinstance(intent, SlurmDBDHealthIntent):
+        _require_tools(allowed_tools, "slurm.slurmdbd_health")
+        value = {"$ref": "slurm_health"} if intent.output_mode == "json" else {"$ref": "slurm_health", "path": "text_lines"}
+        return [
+            {"id": 1, "action": "slurm.slurmdbd_health", "args": {"gateway_node": intent.gateway_node}, "output": "slurm_health"},
+            {
+                "id": 2,
+                "action": "runtime.return",
+                "input": ["slurm_health"],
+                "args": {
+                    "value": value,
+                    "mode": intent.output_mode,
+                    "output_contract": build_output_contract(mode=intent.output_mode),
+                },
+            },
+        ]
+
     if isinstance(intent, SlurmMetricsIntent):
         if intent.metric_group == "slurmdbd_health":
             _require_tools(allowed_tools, "slurm.slurmdbd_health")
@@ -570,6 +710,196 @@ def _rows_return_step(*, step_id: int, alias: str, collection_path: str, mode: s
             "output_contract": contract,
         },
     }
+
+
+def _slurm_llm_intent_system_prompt() -> str:
+    return """You convert user requests into one typed SLURM read-only intent.
+You must output JSON only.
+You may only choose one of the allowed intent types.
+You must not create shell commands.
+You must not create slurm commands.
+You must not create tool calls.
+You must not create execution plans.
+You must not use python.
+Only read-only inspection and metrics are supported.
+Mutation/admin operations are unsupported:
+- sbatch
+- scancel
+- scontrol update
+- drain
+- resume
+- requeue
+- kill job
+- submit job
+- change partition
+If the user asks for mutation/admin action, return matched=false or an unsupported reason.
+If the request is ambiguous, choose a safe inspection intent or return matched=false.
+Prefer SlurmMetricsIntent for broad health, busy, scheduler, availability, and summary questions.
+Use the exact JSON keys matched, intent_type, confidence, arguments, reason."""
+
+
+def _finalize_llm_slurm_intent(
+    intent: Any,
+    prompt: str,
+    *,
+    gateway_node: str | None,
+    available_nodes: list[str],
+) -> Any:
+    updated: dict[str, Any] = {}
+    prompt_user = _detect_user(prompt)
+    prompt_start, prompt_end = _detect_time_range(prompt)
+
+    if hasattr(intent, "gateway_node") and getattr(intent, "gateway_node", None) is None and gateway_node is not None:
+        updated["gateway_node"] = gateway_node
+    if hasattr(intent, "user") and getattr(intent, "user", None) is None and prompt_user is not None:
+        updated["user"] = prompt_user
+    if hasattr(intent, "start") and getattr(intent, "start", None) is None and prompt_start is not None:
+        updated["start"] = prompt_start
+    if hasattr(intent, "end") and getattr(intent, "end", None) is None and prompt_end is not None:
+        updated["end"] = prompt_end
+    if isinstance(intent, SlurmQueueIntent) and getattr(intent, "state", None) is None and re.search(r"\bstuck\b|\bwaiting\b", prompt, re.IGNORECASE):
+        updated["state"] = "PENDING"
+    if isinstance(intent, SlurmAccountingIntent) and getattr(intent, "state", None) is None and re.search(r"\bfailed\b", prompt, re.IGNORECASE):
+        updated["state"] = "FAILED"
+    if updated:
+        intent = intent.model_copy(update=updated)
+    validated_intent = _validate_llm_slurm_intent(intent)
+    intent_gateway_node = getattr(validated_intent, "gateway_node", None)
+    if intent_gateway_node is not None and intent_gateway_node not in set(available_nodes):
+        raise ValueError(f"SLURM gateway_node is not available: {intent_gateway_node}")
+    return validated_intent
+
+
+def _validate_llm_slurm_intent(intent: Any) -> Any:
+    _reject_suspicious_strings(intent.model_dump())
+
+    if isinstance(intent, SlurmQueueIntent):
+        state = _validate_job_state(intent.state)
+        partition = _validate_safe_token(intent.partition, field_name="partition")
+        user = _validate_safe_token(intent.user, field_name="user")
+        gateway_node = _validate_safe_token(intent.gateway_node, field_name="gateway_node")
+        return intent.model_copy(update={"state": state, "partition": partition, "user": user, "gateway_node": gateway_node})
+
+    if isinstance(intent, SlurmJobDetailIntent):
+        if intent.job_id is None:
+            raise ValueError("SLURM job detail intent requires a job_id.")
+        return intent.model_copy(
+            update={
+                "job_id": _validate_job_id(intent.job_id),
+                "user": _validate_safe_token(intent.user, field_name="user"),
+                "state": _validate_job_state(intent.state),
+                "partition": _validate_safe_token(intent.partition, field_name="partition"),
+                "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
+            }
+        )
+
+    if isinstance(intent, SlurmAccountingIntent):
+        return intent.model_copy(
+            update={
+                "user": _validate_safe_token(intent.user, field_name="user"),
+                "state": _validate_job_state(intent.state),
+                "partition": _validate_safe_token(intent.partition, field_name="partition"),
+                "start": _validate_time_value(intent.start, field_name="start"),
+                "end": _validate_time_value(intent.end, field_name="end"),
+                "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
+            }
+        )
+
+    if isinstance(intent, SlurmJobCountIntent):
+        return intent.model_copy(
+            update={
+                "user": _validate_safe_token(intent.user, field_name="user"),
+                "state": _validate_job_state(intent.state),
+                "partition": _validate_safe_token(intent.partition, field_name="partition"),
+                "start": _validate_time_value(intent.start, field_name="start"),
+                "end": _validate_time_value(intent.end, field_name="end"),
+                "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
+            }
+        )
+
+    if isinstance(intent, SlurmNodeStatusIntent):
+        return intent.model_copy(
+            update={
+                "node": _validate_node_name(intent.node) if intent.node is not None else None,
+                "partition": _validate_safe_token(intent.partition, field_name="partition"),
+                "state": _validate_node_state(intent.state),
+                "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
+            }
+        )
+
+    if isinstance(intent, SlurmNodeDetailIntent):
+        if intent.node is None:
+            raise ValueError("SLURM node detail intent requires a node name.")
+        return intent.model_copy(
+            update={
+                "node": _validate_node_name(intent.node),
+                "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
+            }
+        )
+
+    if isinstance(intent, SlurmPartitionSummaryIntent):
+        return intent.model_copy(
+            update={
+                "partition": _validate_safe_token(intent.partition, field_name="partition"),
+                "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
+            }
+        )
+
+    if isinstance(intent, SlurmMetricsIntent):
+        if intent.metric_group not in {
+            "cluster_summary",
+            "queue_summary",
+            "node_summary",
+            "partition_summary",
+            "gpu_summary",
+            "accounting_summary",
+            "slurmdbd_health",
+        }:
+            raise ValueError(f"Unsupported SLURM metric group: {intent.metric_group}")
+        return intent.model_copy(
+            update={
+                "start": _validate_time_value(intent.start, field_name="start"),
+                "end": _validate_time_value(intent.end, field_name="end"),
+                "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
+            }
+        )
+
+    if isinstance(intent, SlurmDBDHealthIntent):
+        return intent.model_copy(update={"gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node")})
+
+    raise ValueError(f"Unsupported SLURM LLM intent: {type(intent).__name__}")
+
+
+def _reject_suspicious_strings(value: Any) -> None:
+    if isinstance(value, dict):
+        for item in value.values():
+            _reject_suspicious_strings(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _reject_suspicious_strings(item)
+        return
+    if isinstance(value, str) and value.strip():
+        if SUSPICIOUS_VALUE_RE.search(value):
+            raise ValueError("SLURM intent values may not contain shell metacharacters or path separators.")
+
+
+def _validate_job_state(state: str | None) -> str | None:
+    if state is None:
+        return None
+    normalized = str(state).strip().upper()
+    if normalized not in ALLOWED_JOB_STATES:
+        raise ValueError(f"Unsupported SLURM job state: {state}")
+    return normalized
+
+
+def _validate_node_state(state: str | None) -> str | None:
+    if state is None:
+        return None
+    normalized = str(state).strip().lower()
+    if normalized not in ALLOWED_NODE_STATES:
+        raise ValueError(f"Unsupported SLURM node state: {state}")
+    return normalized
 
 
 def _require_tools(allowed_tools: list[str], *required: str) -> None:

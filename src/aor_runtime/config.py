@@ -32,6 +32,9 @@ class Settings(BaseModel):
     default_temperature: float = 0.1
     llm_timeout_seconds: float = 120.0
     allow_destructive_shell: bool = False
+    enable_llm_intent_extraction: bool = Field(
+        default_factory=lambda: os.getenv("AOR_ENABLE_LLM_INTENT_EXTRACTION", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
     max_plan_retries: int = 2
     openai_compat_enabled: bool = True
     openai_compat_model_name: str = "general-purpose-assistant"
@@ -168,6 +171,7 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         default_temperature=app_config.llm.default_temperature,
         llm_timeout_seconds=app_config.llm.timeout_seconds,
         allow_destructive_shell=app_config.runtime.allow_destructive_shell,
+        enable_llm_intent_extraction=app_config.runtime.enable_llm_intent_extraction,
         max_plan_retries=app_config.runtime.max_plan_retries,
         sql_database_url=app_config.sql.database_url,
         sql_databases=app_config.sql.databases,

@@ -35,6 +35,7 @@ class CapabilityPack(ABC):
     intent_types: tuple[type, ...] = ()
     examples: tuple[str, ...] = ()
     eval_prompts: tuple[str, ...] = ()
+    supports_llm_intent_extraction: bool = False
 
     @abstractmethod
     def classify(self, goal: str, context: ClassificationContext) -> IntentResult:
@@ -43,3 +44,9 @@ class CapabilityPack(ABC):
     @abstractmethod
     def compile(self, intent: Any, context: CompileContext) -> CompiledIntentPlan | None:
         raise NotImplementedError
+
+    def is_llm_intent_domain(self, goal: str, context: ClassificationContext) -> bool:
+        return False
+
+    def try_llm_extract(self, goal: str, context: ClassificationContext, extractor: Any) -> IntentResult:
+        return IntentResult(matched=False, reason=f"{self.name}_llm_intent_not_supported")

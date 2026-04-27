@@ -145,8 +145,7 @@ def test_classify_gpu_availability(tmp_path: Path) -> None:
 def test_classify_slurmdbd_health(tmp_path: Path) -> None:
     result = SlurmCapabilityPack().classify("show slurmdbd health", _context(tmp_path))
     assert result.matched is True
-    assert result.intent.__class__.__name__ == "SlurmMetricsIntent"
-    assert result.intent.metric_group == "slurmdbd_health"
+    assert result.intent.__class__.__name__ == "SlurmDBDHealthIntent"
 
 
 def test_compile_plans_use_slurm_tools_and_runtime_return(tmp_path: Path) -> None:

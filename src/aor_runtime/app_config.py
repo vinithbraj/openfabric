@@ -49,6 +49,7 @@ class LLMConfig(BaseModel):
 class RuntimeAppConfig(BaseModel):
     allow_destructive_shell: bool = False
     max_plan_retries: int = 2
+    enable_llm_intent_extraction: bool = False
     openai_compat_enabled: bool = True
     openai_compat_model_name: str = "general-purpose-assistant"
     openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"

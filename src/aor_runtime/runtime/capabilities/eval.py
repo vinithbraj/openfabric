@@ -75,6 +75,9 @@ class CapabilityEvalResult(BaseModel):
     strict_pass: int
     semantic_pass: int
     llm_fallbacks: int
+    llm_intent_calls: int = 0
+    raw_planner_llm_calls: int = 0
+    deterministic_calls: int = 0
     failures: list[dict[str, Any]] = Field(default_factory=list)
 
 

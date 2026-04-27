@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import json
 import shutil
 import sqlite3
 from datetime import datetime, timedelta
@@ -120,6 +121,9 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
     for name, content in _slurm_fixture_files().items():
         _write(slurm_dir / name, content)
 
+    slurm_llm_intent_path = workspace / "slurm_llm_intent_responses.json"
+    _write(slurm_llm_intent_path, json.dumps(_slurm_llm_intent_fixture_payload(), indent=2) + "\n")
+
     sql_path = workspace / "book_club.db"
     db = sqlite3.connect(sql_path)
     try:
@@ -175,6 +179,7 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
             "fetch_story": (fetch_dir / "story.html").resolve().as_uri(),
             "fetch_museum": (fetch_dir / "museum.html").resolve().as_uri(),
             "slurm_fixture_dir": str(slurm_dir),
+            "slurm_llm_intent_fixture_path": str(slurm_llm_intent_path),
             "current_user": getpass.getuser(),
             "slurm_today_date": datetime.now().strftime("%Y-%m-%d"),
             "slurm_yesterday_date": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
@@ -278,4 +283,102 @@ def _slurm_fixture_files() -> dict[str, str]:
         "scontrol_node_slurm-worker-agatha.txt": node_detail + "\n",
         "sacctmgr_show_cluster.txt": "clusterA|controlhost\n",
         "sacct_probe.txt": "12340\n12341\n",
+    }
+
+
+def _slurm_llm_intent_fixture_payload() -> dict[str, dict[str, str]]:
+    current_user = getpass.getuser()
+    return {
+        "slurm": {
+            "Is the cluster busy right now?": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmMetricsIntent",
+                    "confidence": 0.92,
+                    "arguments": {"metric_group": "cluster_summary", "output_mode": "json"},
+                    "reason": "The user wants a broad cluster load summary.",
+                }
+            ),
+            "Are GPUs available?": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmMetricsIntent",
+                    "confidence": 0.91,
+                    "arguments": {"metric_group": "gpu_summary", "output_mode": "json"},
+                    "reason": "The user is asking about GPU availability.",
+                }
+            ),
+            "What is going on with the scheduler?": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmMetricsIntent",
+                    "confidence": 0.83,
+                    "arguments": {"metric_group": "queue_summary", "output_mode": "json"},
+                    "reason": "The user wants a scheduler queue summary.",
+                }
+            ),
+            "Are my jobs stuck?": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmQueueIntent",
+                    "confidence": 0.88,
+                    "arguments": {"user": current_user, "state": "PENDING", "output_mode": "json"},
+                    "reason": "Pending jobs are a safe interpretation of stuck jobs.",
+                }
+            ),
+            "What failed recently?": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmAccountingIntent",
+                    "confidence": 0.89,
+                    "arguments": {"state": "FAILED", "start": None, "end": None, "output_mode": "json"},
+                    "reason": "Recent failures are best answered with accounting history.",
+                }
+            ),
+            "How did jobs do yesterday?": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmAccountingIntent",
+                    "confidence": 0.9,
+                    "arguments": {"start": None, "end": None, "output_mode": "json"},
+                    "reason": "Yesterday job outcomes are a read-only accounting query.",
+                }
+            ),
+            "Show me anything unhealthy in SLURM.": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmNodeStatusIntent",
+                    "confidence": 0.8,
+                    "arguments": {"state": "down", "output_mode": "json"},
+                    "reason": "Down nodes are a safe unhealthy-cluster signal.",
+                }
+            ),
+            "How much pressure are the partitions under?": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmMetricsIntent",
+                    "confidence": 0.84,
+                    "arguments": {"metric_group": "partition_summary", "output_mode": "json"},
+                    "reason": "Partition pressure is best represented with a partition summary.",
+                }
+            ),
+            "Is slurmdbd healthy?": json.dumps(
+                {
+                    "matched": True,
+                    "intent_type": "SlurmDBDHealthIntent",
+                    "confidence": 0.94,
+                    "arguments": {"output_mode": "json"},
+                    "reason": "The user is explicitly asking for SLURMDBD health.",
+                }
+            ),
+            "Cancel my job 123": json.dumps(
+                {
+                    "matched": False,
+                    "intent_type": None,
+                    "confidence": 0.0,
+                    "arguments": {},
+                    "reason": "The user requested a mutating SLURM operation.",
+                }
+            ),
+        }
     }

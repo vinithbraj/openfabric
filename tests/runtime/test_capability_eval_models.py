@@ -59,6 +59,7 @@ def test_json_eval_files_load_successfully() -> None:
         "prompt_suggestions",
         "shell",
         "slurm",
+        "slurm_llm_intent",
         "sql",
         "text_transform",
     ]
