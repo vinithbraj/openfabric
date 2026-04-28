@@ -10,6 +10,10 @@ from aor_runtime.tools.filesystem import fs_aggregate, fs_exists, fs_find, fs_gl
 from aor_runtime.tools.runtime_return import runtime_return
 from aor_runtime.tools.search_content import fs_search_content
 from aor_runtime.tools.slurm import (
+    _canonical_job_state,
+    _canonical_node_state,
+    _is_fixture_mode,
+    slurm_accounting_aggregate,
     slurm_accounting,
     slurm_job_detail,
     slurm_metrics,
@@ -18,6 +22,7 @@ from aor_runtime.tools.slurm import (
     slurm_partitions,
     slurm_queue,
     slurm_slurmdbd_health,
+    is_problematic_node_state,
 )
 from aor_runtime.tools.sql import resolve_sql_databases
 
@@ -194,11 +199,15 @@ class RuntimeValidator:
                 }
 
             if step.action == "slurm.queue":
+                if not _is_fixture_mode():
+                    success, detail = self._validate_live_slurm_queue(step.args, item.result)
+                    return {"name": f"step_{step.id}_{step.action}", "success": success, "detail": detail}
                 actual_result = slurm_queue(
                     self.settings,
                     user=step.args.get("user"),
                     state=step.args.get("state"),
                     partition=step.args.get("partition"),
+                    group_by=step.args.get("group_by"),
                     limit=step.args.get("limit"),
                 )
                 success = actual_result == item.result
@@ -218,6 +227,9 @@ class RuntimeValidator:
                 }
 
             if step.action == "slurm.nodes":
+                if not _is_fixture_mode():
+                    success, detail = self._validate_live_slurm_nodes(step.args, item.result)
+                    return {"name": f"step_{step.id}_{step.action}", "success": success, "detail": detail}
                 actual_result = slurm_nodes(
                     self.settings,
                     node=step.args.get("node"),
@@ -268,6 +280,35 @@ class RuntimeValidator:
                     "name": f"step_{step.id}_{step.action}",
                     "success": success,
                     "detail": "slurm accounting matches expected fixture output" if success else "slurm accounting mismatch",
+                }
+
+            if step.action == "slurm.accounting_aggregate":
+                if not _is_fixture_mode():
+                    success, detail = self._validate_live_slurm_accounting_aggregate(step.args, item.result)
+                    return {"name": f"step_{step.id}_{step.action}", "success": success, "detail": detail}
+                actual_result = slurm_accounting_aggregate(
+                    self.settings,
+                    user=step.args.get("user"),
+                    state=step.args.get("state"),
+                    include_all_states=bool(step.args.get("include_all_states") or False),
+                    excluded_states=list(step.args.get("excluded_states") or []),
+                    default_state_applied=bool(step.args.get("default_state_applied") or False),
+                    partition=step.args.get("partition"),
+                    start=step.args.get("start"),
+                    end=step.args.get("end"),
+                    metric=str(step.args.get("metric", "average_elapsed")),
+                    group_by=step.args.get("group_by"),
+                    threshold_seconds=step.args.get("threshold_seconds"),
+                    limit=step.args.get("limit"),
+                    time_window_label=step.args.get("time_window_label"),
+                )
+                success = actual_result == item.result
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": success,
+                    "detail": "slurm accounting aggregate matches expected fixture output"
+                    if success
+                    else "slurm accounting aggregate mismatch",
                 }
 
             if step.action == "slurm.metrics":
@@ -376,6 +417,100 @@ class RuntimeValidator:
             return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": str(exc)}
 
         return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "unknown action"}
+
+    def _validate_live_slurm_queue(self, args: dict, result: dict) -> tuple[bool, str]:
+        jobs = result.get("jobs")
+        if not isinstance(jobs, list):
+            return False, "slurm queue result missing jobs"
+        expected_state = str(args.get("state") or "").strip()
+        expected_user = str(args.get("user") or "").strip()
+        expected_partition = str(args.get("partition") or "").strip()
+        for job in jobs:
+            if not isinstance(job, dict):
+                return False, "slurm queue job row is not an object"
+            if expected_state and _canonical_job_state(str(job.get("state", ""))) != _canonical_job_state(expected_state):
+                return False, f"slurm queue row does not match state={expected_state}"
+            if expected_user and str(job.get("user", "")) != expected_user:
+                return False, f"slurm queue row does not match user={expected_user}"
+            if expected_partition and str(job.get("partition", "")) != expected_partition:
+                return False, f"slurm queue row does not match partition={expected_partition}"
+        returned_count = int(result.get("returned_count", len(jobs)) or 0)
+        total_count = int(result.get("total_count", result.get("count", returned_count)) or 0)
+        if returned_count != len(jobs):
+            return False, "slurm queue returned_count does not match jobs"
+        if total_count < returned_count:
+            return False, "slurm queue total_count is less than returned_count"
+        if bool(result.get("truncated")) != (returned_count < total_count):
+            return False, "slurm queue truncated flag is inconsistent"
+        return True, f"slurm queue semantic validation passed rows={returned_count} total={total_count}"
+
+    def _validate_live_slurm_accounting_aggregate(self, args: dict, result: dict) -> tuple[bool, str]:
+        if not isinstance(result, dict):
+            return False, "slurm accounting aggregate result is not an object"
+        if str(result.get("result_kind") or "") != "accounting_aggregate":
+            return False, "slurm accounting aggregate result_kind mismatch"
+        if str(result.get("source") or "sacct") != "sacct":
+            return False, "slurm accounting aggregate source must be sacct"
+        expected_metric = str(args.get("metric") or "average_elapsed")
+        if str(result.get("metric") or "") != expected_metric:
+            return False, f"slurm accounting aggregate metric mismatch expected={expected_metric}"
+        include_all_states = bool(args.get("include_all_states") or False)
+        if bool(result.get("include_all_states") or False) != include_all_states:
+            return False, "slurm accounting aggregate include_all_states mismatch"
+        expected_state = str(args.get("state") or "").strip()
+        observed_state = str(result.get("state") or "").strip()
+        if include_all_states:
+            if expected_state or observed_state:
+                return False, "slurm accounting aggregate all-states request must not apply a state filter"
+        elif expected_state and _canonical_job_state(observed_state) != _canonical_job_state(expected_state):
+            return False, f"slurm accounting aggregate state mismatch expected={expected_state}"
+        for field in ("user", "partition", "start", "end", "group_by", "threshold_seconds"):
+            expected = args.get(field)
+            if expected not in (None, "") and result.get(field) != expected:
+                return False, f"slurm accounting aggregate {field} mismatch"
+        job_count = int(result.get("job_count") or 0)
+        total_count = int(result.get("total_count", job_count) or 0)
+        returned_count = int(result.get("returned_count", job_count) or 0)
+        if job_count < 0 or total_count < 0 or returned_count < 0:
+            return False, "slurm accounting aggregate counts must be non-negative"
+        if total_count < returned_count:
+            return False, "slurm accounting aggregate total_count is less than returned_count"
+        if bool(result.get("truncated")) and total_count <= returned_count:
+            return False, "slurm accounting aggregate truncated flag is inconsistent"
+        for field in ("average_elapsed_seconds", "min_elapsed_seconds", "max_elapsed_seconds", "sum_elapsed_seconds"):
+            value = result.get(field)
+            if value is not None and float(value) < 0:
+                return False, f"slurm accounting aggregate {field} must be non-negative"
+        return True, f"slurm accounting aggregate semantic validation passed jobs={job_count} total={total_count}"
+
+    def _validate_live_slurm_nodes(self, args: dict, result: dict) -> tuple[bool, str]:
+        nodes = result.get("nodes")
+        if not isinstance(nodes, list):
+            return False, "slurm nodes result missing nodes"
+        expected_state = str(args.get("state") or "").strip()
+        expected_state_group = str(args.get("state_group") or "").strip().lower()
+        expected_partition = str(args.get("partition") or "").strip()
+        expected_node = str(args.get("node") or "").strip()
+        for node in nodes:
+            if not isinstance(node, dict):
+                return False, "slurm node row is not an object"
+            state = str(node.get("state", ""))
+            if expected_node and str(node.get("name", "")) != expected_node:
+                return False, f"slurm node row does not match node={expected_node}"
+            if expected_partition and str(node.get("partition", "")) != expected_partition:
+                return False, f"slurm node row does not match partition={expected_partition}"
+            if expected_state and _canonical_node_state(state) != _canonical_node_state(expected_state):
+                return False, f"slurm node row does not match state={expected_state}"
+            if expected_state_group:
+                if expected_state_group == "problematic":
+                    if not is_problematic_node_state(state):
+                        return False, "slurm node row is not problematic"
+                elif expected_state_group != "all" and _canonical_node_state(state) != expected_state_group:
+                    return False, f"slurm node row does not match state_group={expected_state_group}"
+        partition_rows = int(result.get("partition_row_count", result.get("count", len(nodes))) or 0)
+        if partition_rows != len(nodes):
+            return False, "slurm nodes partition_row_count does not match nodes"
+        return True, f"slurm nodes semantic validation passed partition_rows={partition_rows}"
 
     def _validate_python_manifest(self, output: str) -> tuple[bool, str] | None:
         try:

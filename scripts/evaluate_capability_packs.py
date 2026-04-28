@@ -42,6 +42,8 @@ def _settings(settings_payload: dict[str, Any]) -> Settings:
         run_store_path=Path(settings_payload["run_store_path"]),
         sql_databases=dict(settings_payload.get("sql_databases", {})),
         sql_default_database=settings_payload.get("sql_default_database"),
+        presentation_mode="raw",
+        response_render_mode="raw",
     )
 
 

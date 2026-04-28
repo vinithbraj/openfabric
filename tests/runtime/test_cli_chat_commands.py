@@ -176,6 +176,7 @@ def test_chat_progress_streams_shell_output(monkeypatch, tmp_path: Path) -> None
             gateway_url="https://gateway.internal/exec",
             available_nodes_raw="localhost",
             default_node="localhost",
+            shell_mode="permissive",
         )
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,11 +14,12 @@ from aor_runtime.runtime.intent_compiler import compile_intent_to_plan
 from aor_runtime.runtime.intents import FetchExtractIntent, FileAggregateIntent, IntentResult, ShellCommandIntent
 from aor_runtime.runtime.llm_intent_extractor import LLMIntentExtractor
 from aor_runtime.runtime.output_contract import build_output_contract
+from aor_runtime.runtime.shell_safety import FORBIDDEN_COMMANDS, MUTATING_COMMANDS, SAFE_READ_ONLY_COMMANDS, classify_shell_command
 
 
 SHELL_FRAMING_RE = re.compile(r"\b(?:using\s+shell|with\s+shell|shell:|bash|terminal|command\s+line)\b", re.IGNORECASE)
 SYSTEM_INSPECTION_RE = re.compile(
-    r"\b(?:uptime|host\s*name|hostname|whoami|disk\s+usage|memory\s+usage|memory\s+summary|top\s+processes|process(?:es)?|network(?:\s+summary)?|listening\s+ports|open\s+ports|system\s+load)\b",
+    r"\b(?:uptime|host\s*name|hostname|whoami|current\s+user|pwd|working\s+directory|disk\s+usage|directory\s+size|folder\s+size|memory\s+usage|memory\s+summary|cpu\s+summary|top\s+processes|process(?:es)?|port\s+\d+|using\s+port|listening\s+ports|open\s+ports|network(?:\s+summary)?|mounts?|service\s+status|recent\s+logs?|system\s+load)\b",
     re.IGNORECASE,
 )
 SHELL_MUTATION_RE = re.compile(
@@ -41,32 +43,81 @@ NODE_FOR_RE = re.compile(r"\bon\s+node\s+([A-Za-z0-9._-]+)\b", re.IGNORECASE)
 TRAILING_NODE_RE = re.compile(r"\bon\s+([A-Za-z0-9._-]+)\s*$", re.IGNORECASE)
 SHELL_META_RE = re.compile(r"[;|&$`><\n]")
 SAFE_NODE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+EXPLICIT_COMMAND_RE = re.compile(
+    r"^\s*(?:run|execute)\s+(?:this\s+command\s*:?\s*)?(?P<command>.+?)\s*$|^\s*(?:shell|bash|terminal)\s*:\s*(?P<prefixed>.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+PORT_RE = re.compile(r"\bport\s+(?P<port>\d{1,5})\b|:\s*(?P<colon_port>\d{1,5})\b", re.IGNORECASE)
+SERVICE_STATUS_RE = re.compile(r"\b(?:service\s+status|status\s+of\s+service|systemctl\s+status)\s+(?:for\s+)?(?P<service>[A-Za-z0-9_.@-]+)\b", re.IGNORECASE)
+PROCESS_SEARCH_RE = re.compile(r"\b(?:process(?:es)?\s+(?:named|called|matching)|show\s+running)\s+(?P<name>[A-Za-z0-9_.@:+-]+)\s+process(?:es)?\b", re.IGNORECASE)
+PATH_VALUE_RE = re.compile(r"(~?/[^,\s]+|\.\.?/[^,\s]+|[A-Za-z]:[\\/][^,\s]+|\.)")
 
 ALLOWED_SHELL_KINDS = {
+    "cpu_summary",
+    "current_user",
+    "current_working_directory",
     "uptime",
     "host_identity",
     "disk_usage",
+    "directory_size",
     "memory_summary",
+    "process_list",
     "process_summary",
+    "process_search",
+    "port_usage",
     "network_summary",
     "listening_ports",
+    "mounts",
+    "service_status",
+    "recent_logs",
+    "large_files",
 }
+
+
+class ShellExplicitCommandIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    command: str
+    cwd: str | None = None
+    node: str | None = None
+    output_mode: Literal["text", "json"] = "text"
+    requires_approval: bool = False
 
 
 class ShellInspectionIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal[
+        "directory_listing",
         "uptime",
         "host_identity",
         "disk_usage",
+        "directory_size",
         "memory_summary",
+        "cpu_summary",
+        "current_user",
+        "current_working_directory",
+        "process_list",
         "process_summary",
+        "process_search",
+        "port_usage",
         "network_summary",
         "listening_ports",
+        "mounts",
+        "environment_summary",
+        "service_status",
+        "recent_logs",
+        "file_find",
+        "large_files",
     ]
+    path: str | None = None
+    pattern: str | None = None
+    process_name: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    service: str | None = None
     node: str | None = None
     limit: int | None = Field(default=20, ge=1, le=200)
+    cwd: str | None = None
     output_mode: Literal["text", "csv", "json"] = "text"
 
 
@@ -88,17 +139,53 @@ class ShellUnsupportedMutationIntent(BaseModel):
     reason: str
 
 
+class ShellMutationIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal[
+        "delete",
+        "move",
+        "copy",
+        "chmod",
+        "chown",
+        "kill_process",
+        "restart_service",
+        "stop_service",
+        "start_service",
+        "install_package",
+        "modify_system",
+        "network_change",
+        "unknown_mutation",
+    ]
+    target: str | None = None
+    reason: str
+    requires_approval: bool = True
+
+
+class ShellUnsupportedIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+    safer_alternatives: list[str] = Field(default_factory=list)
+
+
 class ShellCapabilityPack(CapabilityPack):
     name = "shell"
     supports_llm_intent_extraction = True
     intent_types = (
+        ShellExplicitCommandIntent,
         ShellCommandIntent,
         ShellInspectionIntent,
         FileContentDiagnosticIntent,
+        ShellMutationIntent,
+        ShellUnsupportedIntent,
         ShellUnsupportedMutationIntent,
     )
 
     def classify(self, goal: str, context: ClassificationContext) -> IntentResult:
+        shell_result = _classify_shell_goal(goal, context)
+        if shell_result.matched:
+            return shell_result
         result = classify_single_intent(goal, schema_payload=context.schema_payload)
         if result.matched and isinstance(result.intent, self.intent_types):
             return result
@@ -170,6 +257,8 @@ class ShellCapabilityPack(CapabilityPack):
             self.name,
             [
                 ShellInspectionIntent,
+                ShellMutationIntent,
+                ShellUnsupportedIntent,
                 FileContentDiagnosticIntent,
                 FileAggregateIntent,
                 FetchExtractIntent,
@@ -209,13 +298,61 @@ class ShellCapabilityPack(CapabilityPack):
         )
 
     def compile(self, intent: Any, context: CompileContext) -> CompiledIntentPlan | None:
+        if isinstance(intent, ShellExplicitCommandIntent):
+            _require_tools(context.allowed_tools, "shell.exec")
+            policy = classify_shell_command(
+                intent.command,
+                mode=context.settings.shell_mode,
+                allow_mutation_with_approval=context.settings.shell_allow_mutation_with_approval
+                or context.settings.allow_destructive_shell,
+            )
+            if not policy.allowed:
+                return _compile_shell_refusal(
+                    reason=policy.reason,
+                    risk=policy.risk,
+                    command=policy.redacted_command or intent.command,
+                    approval_required=policy.requires_approval,
+                )
+            shell_args: dict[str, Any] = {"command": intent.command}
+            if intent.node:
+                shell_args["node"] = intent.node
+            return CompiledIntentPlan(
+                plan=ExecutionPlan.model_validate(
+                    {
+                        "steps": [
+                            {"id": 1, "action": "shell.exec", "args": shell_args, "output": "shell_output"},
+                            {
+                                "id": 2,
+                                "action": "runtime.return",
+                                "input": ["shell_output"],
+                                "args": {
+                                    "value": {"$ref": "shell_output", "path": "stdout"},
+                                    "mode": intent.output_mode,
+                                    "output_contract": build_output_contract(mode=intent.output_mode),
+                                },
+                            },
+                        ]
+                    }
+                ),
+                metadata={"capability_pack": self.name, "intent_type": type(intent).__name__},
+            )
+
         if isinstance(intent, ShellCommandIntent):
             return CompiledIntentPlan(
                 plan=compile_intent_to_plan(intent, context.allowed_tools, context.settings),
                 metadata={"capability_pack": self.name, "intent_type": type(intent).__name__},
             )
 
-        if isinstance(intent, ShellUnsupportedMutationIntent):
+        if isinstance(intent, (ShellUnsupportedMutationIntent, ShellMutationIntent, ShellUnsupportedIntent)):
+            if isinstance(intent, ShellMutationIntent):
+                reason = intent.reason
+                operation = intent.operation
+            elif isinstance(intent, ShellUnsupportedIntent):
+                reason = intent.reason
+                operation = "unsupported shell request"
+            else:
+                reason = intent.reason
+                operation = intent.operation
             return CompiledIntentPlan(
                 plan=ExecutionPlan.model_validate(
                     {
@@ -224,7 +361,7 @@ class ShellCapabilityPack(CapabilityPack):
                                 "id": 1,
                                 "action": "runtime.return",
                                 "args": {
-                                    "value": f"{intent.reason} Unsupported request: {intent.operation}.",
+                                    "value": _shell_refusal_markdown(reason=reason, operation=operation),
                                     "mode": "text",
                                     "output_contract": build_output_contract(mode="text"),
                                 },
@@ -359,7 +496,7 @@ Only these read-only request families are supported:
 - filesystem content diagnostics
 - fetch title/head extraction
 Mutation/admin requests are unsupported.
-If the request is unsafe or outside the allowed catalog, return matched=false.
+If the request is unsafe, destructive, or outside the allowed catalog, emit a mutation/unsupported intent or return matched=false.
 For host identity, use the hostname-oriented inspection intent.
 Use the exact JSON keys matched, intent_type, confidence, arguments, reason."""
 
@@ -411,6 +548,11 @@ def _extract_prompt_node(prompt: str, available_nodes: list[str]) -> tuple[str, 
 
 
 def _finalize_llm_shell_intent(intent: Any, prompt: str, *, node: str | None, available_nodes: list[str]) -> Any:
+    if isinstance(intent, (ShellExplicitCommandIntent, ShellCommandIntent)):
+        raise ValueError("LLM shell intent extraction may not emit raw command intents.")
+    if isinstance(intent, (ShellMutationIntent, ShellUnsupportedIntent, ShellUnsupportedMutationIntent)):
+        return intent
+
     if isinstance(intent, ShellInspectionIntent):
         payload = intent.model_dump()
         if not payload.get("node") and node is not None:
@@ -524,19 +666,304 @@ def _validate_shell_string_fields(payload: dict[str, Any], *, allow_path: bool, 
 
 
 def _shell_inspection_command(intent: ShellInspectionIntent) -> str:
+    path = _quote_path(intent.path or ".")
     if intent.kind == "uptime":
         return "uptime"
     if intent.kind == "host_identity":
         return "hostname"
     if intent.kind == "disk_usage":
         return "df -h"
+    if intent.kind == "directory_size":
+        return f"du -sh {path}"
     if intent.kind == "memory_summary":
         return "free -h"
-    if intent.kind == "process_summary":
+    if intent.kind == "cpu_summary":
+        return "lscpu"
+    if intent.kind == "current_user":
+        return "id -un"
+    if intent.kind == "current_working_directory":
+        return "pwd"
+    if intent.kind in {"process_summary", "process_list"}:
         limit = int(intent.limit or 20)
         return f"ps -eo pid,user,comm,pcpu,pmem --sort=-pcpu | head -n {limit + 1}"
+    if intent.kind == "process_search":
+        if not intent.process_name:
+            raise ValueError("process_search requires process_name.")
+        pattern = shlex.quote(intent.process_name)
+        limit = int(intent.limit or 20)
+        return f"ps -eo pid,user,comm,args,pcpu,pmem | grep -i -- {pattern} | head -n {limit}"
+    if intent.kind == "port_usage":
+        if intent.port is None:
+            raise ValueError("port_usage requires port.")
+        return f"lsof -i :{int(intent.port)}"
     if intent.kind == "network_summary":
         return "ip addr"
     if intent.kind == "listening_ports":
         return "ss -tuln"
+    if intent.kind == "mounts":
+        return "findmnt"
+    if intent.kind == "service_status":
+        if not intent.service:
+            raise ValueError("service_status requires service.")
+        return f"systemctl status {shlex.quote(intent.service)} --no-pager"
+    if intent.kind == "recent_logs":
+        limit = int(intent.limit or 50)
+        return f"journalctl -n {limit} --no-pager"
+    if intent.kind == "large_files":
+        limit = int(intent.limit or 20)
+        return f"find {path} -type f -printf '%s %p\\n' | sort -nr | head -n {limit}"
+    if intent.kind == "directory_listing":
+        return f"ls -la {path}"
     raise ValueError(f"Unsupported shell inspection kind: {intent.kind}")
+
+
+def _classify_shell_goal(goal: str, context: ClassificationContext) -> IntentResult:
+    prompt = str(goal or "").strip()
+    if not prompt:
+        return IntentResult(matched=False, reason="shell_empty_goal")
+
+    mutation = _classify_shell_mutation_prompt(prompt)
+    if mutation.matched:
+        return mutation
+
+    explicit = _extract_explicit_command(prompt)
+    if explicit:
+        command, node = _extract_prompt_node(explicit, context.settings.available_nodes)
+        if not command:
+            return IntentResult(matched=False, reason="shell_explicit_empty_command")
+        policy = classify_shell_command(
+            command,
+            mode=context.settings.shell_mode,
+            allow_mutation_with_approval=context.settings.shell_allow_mutation_with_approval
+            or context.settings.allow_destructive_shell,
+        )
+        if not policy.allowed:
+            return IntentResult(
+                matched=True,
+                intent=ShellMutationIntent(
+                    operation=_operation_from_policy(policy.detected_operations),
+                    target=policy.redacted_command or command,
+                    reason=policy.reason,
+                    requires_approval=policy.requires_approval,
+                ),
+                metadata={"shell_risk": policy.risk, "shell_policy_reason": policy.reason},
+            )
+        return IntentResult(
+            matched=True,
+            intent=ShellExplicitCommandIntent(command=command, node=node, output_mode="json" if _wants_json(prompt) else "text"),
+            metadata={"shell_risk": policy.risk, "shell_policy_reason": policy.reason},
+        )
+
+    inspection = _classify_shell_inspection_prompt(prompt)
+    if inspection is not None:
+        return IntentResult(matched=True, intent=inspection, metadata={"capability": "shell", "planning_mode": "deterministic_intent"})
+
+    return IntentResult(matched=False, reason="shell_no_deterministic_match")
+
+
+def _extract_explicit_command(prompt: str) -> str:
+    match = EXPLICIT_COMMAND_RE.match(prompt)
+    if match is None:
+        return ""
+    command = str(match.group("command") or match.group("prefixed") or "").strip()
+    if re.match(r"^(?:a\s+)?shell\s+command\s+that\b", command, re.IGNORECASE):
+        return ""
+    if re.match(r"^(?:print|prints|output)\b", command, re.IGNORECASE) and re.search(
+        r"\b(?:newline|separate\s+lines|return)\b", command, re.IGNORECASE
+    ):
+        return ""
+    if not _looks_like_explicit_shell_command(command):
+        return ""
+    return command
+
+
+def _classify_shell_inspection_prompt(prompt: str) -> ShellInspectionIntent | None:
+    text = prompt.lower()
+    path = _extract_prompt_path(prompt) or ("." if _current_scope_mentioned(prompt) else None)
+
+    service_match = SERVICE_STATUS_RE.search(prompt)
+    if service_match is not None:
+        return ShellInspectionIntent(kind="service_status", service=service_match.group("service"))
+    if re.search(r"\b(?:check|show)\s+disk\s+usage\b|\bdf\b", text):
+        return ShellInspectionIntent(kind="disk_usage")
+    if re.search(r"\b(?:show|check)\s+(?:memory|ram)(?:\s+usage|\s+summary)?\b|\bfree\s+memory\b", text):
+        return ShellInspectionIntent(kind="memory_summary")
+    if re.search(r"\b(?:show|check)\s+cpu(?:\s+summary|\s+info)?\b|\blscpu\b", text):
+        return ShellInspectionIntent(kind="cpu_summary")
+    if re.search(r"\buptime\b", text):
+        return ShellInspectionIntent(kind="uptime")
+    if re.search(r"\b(?:hostname|host\s*name|host identity)\b", text):
+        return ShellInspectionIntent(kind="host_identity")
+    if re.search(r"\b(?:whoami|current user|which user)\b", text):
+        return ShellInspectionIntent(kind="current_user")
+    if re.search(r"\b(?:pwd|working directory|current directory)\b", text) and "file" not in text and "entries" not in text:
+        return ShellInspectionIntent(kind="current_working_directory")
+    if re.search(r"\b(?:directory|folder)\s+size\b|\bdu\s+-sh\b", text):
+        return ShellInspectionIntent(kind="directory_size", path=path or ".")
+    port = _extract_port(prompt)
+    if port is not None and re.search(r"\b(?:using|listening|open|process|port|lsof)\b", text):
+        return ShellInspectionIntent(kind="port_usage", port=port)
+    if re.search(r"\b(?:listening\s+ports|open\s+ports|ss\s+-tuln)\b", text):
+        return ShellInspectionIntent(kind="listening_ports")
+    if re.search(r"\b(?:top\s+processes|process\s+list|show\s+processes|running\s+processes)\b", text):
+        return ShellInspectionIntent(kind="process_list", limit=_extract_limit(prompt) or 20)
+    process_match = PROCESS_SEARCH_RE.search(prompt)
+    if process_match is not None:
+        return ShellInspectionIntent(kind="process_search", process_name=process_match.group("name"), limit=_extract_limit(prompt) or 20)
+    if re.search(r"\b(?:network\s+summary|ip\s+addr|network\s+interfaces)\b", text):
+        return ShellInspectionIntent(kind="network_summary")
+    if re.search(r"\b(?:mounts?|mounted\s+filesystems?|findmnt)\b", text):
+        return ShellInspectionIntent(kind="mounts")
+    if re.search(r"\b(?:recent\s+logs?|journalctl)\b", text):
+        return ShellInspectionIntent(kind="recent_logs", limit=_extract_limit(prompt) or 50)
+    if re.search(r"\b(?:large|largest|biggest)\s+files?\b", text):
+        return ShellInspectionIntent(kind="large_files", path=path or ".", limit=_extract_limit(prompt) or 20)
+    return None
+
+
+def _classify_shell_mutation_prompt(prompt: str) -> IntentResult:
+    text = prompt.lower()
+    explicit = _extract_explicit_command(prompt)
+    if explicit:
+        return IntentResult(matched=False, reason="shell_explicit_classified_later")
+    patterns: list[tuple[str, str]] = [
+        ("delete", r"\b(?:delete|remove|rm)\b"),
+        ("kill_process", r"\b(?:kill|pkill)\b"),
+        ("chmod", r"\bchmod\b"),
+        ("chown", r"\bchown\b"),
+        ("restart_service", r"\b(?:restart|reload)\s+(?:service|systemctl|daemon)\b|\bsystemctl\s+(?:restart|reload)\b"),
+        ("stop_service", r"\b(?:stop)\s+(?:service|systemctl|daemon)\b|\bsystemctl\s+stop\b"),
+        ("start_service", r"\b(?:start)\s+(?:service|systemctl|daemon)\b|\bsystemctl\s+start\b"),
+        ("install_package", r"\b(?:apt|apt-get|yum|pip)\s+install\b|\binstall\s+package\b"),
+        ("modify_system", r"\b(?:sudo|mkfs|dd|shutdown|reboot|poweroff)\b"),
+    ]
+    for operation, pattern in patterns:
+        match = re.search(pattern, text)
+        if match is None:
+            continue
+        return IntentResult(
+            matched=True,
+            intent=ShellMutationIntent(
+                operation=operation,  # type: ignore[arg-type]
+                target=_mutation_target(prompt),
+                reason="This appears to be a mutating or high-risk shell/system request. Only read-only inspection runs automatically.",
+            ),
+            metadata={"shell_mutation": operation},
+        )
+    return IntentResult(matched=False, reason="shell_mutation_no_match")
+
+
+def _compile_shell_refusal(*, reason: str, risk: str, command: str, approval_required: bool) -> CompiledIntentPlan:
+    return CompiledIntentPlan(
+        plan=ExecutionPlan.model_validate(
+            {
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "runtime.return",
+                        "args": {
+                            "value": _shell_refusal_markdown(
+                                reason=reason,
+                                operation=command,
+                                risk=risk,
+                                approval_required=approval_required,
+                            ),
+                            "mode": "text",
+                            "output_contract": build_output_contract(mode="text"),
+                        },
+                    }
+                ]
+            }
+        ),
+        metadata={"capability_pack": "shell", "intent_type": "ShellMutationIntent"},
+    )
+
+
+def _shell_refusal_markdown(
+    *,
+    reason: str,
+    operation: str,
+    risk: str | None = None,
+    approval_required: bool | None = None,
+) -> str:
+    status = "requires approval" if approval_required else "was not executed"
+    risk_line = f"\n\nRisk: {risk}." if risk else ""
+    return (
+        "Request Not Executed\n\n"
+        f"The shell request {status}: {operation}.\n\n"
+        f"{reason}.{risk_line}\n\n"
+        "Safer read-only alternatives:\n"
+        "- List matching files before changing them.\n"
+        "- Show disk usage or directory size.\n"
+        "- Inspect processes or service status without modifying them."
+    )
+
+
+def _quote_path(path: str) -> str:
+    return shlex.quote(str(path or ".").strip() or ".")
+
+
+def _current_scope_mentioned(prompt: str) -> bool:
+    return re.search(r"\b(?:this|current)\s+(?:folder|directory)\b|\bhere\b|(?:^|\s)\.(?:\s|$|[?!.,;:])", prompt, re.IGNORECASE) is not None
+
+
+def _extract_port(prompt: str) -> int | None:
+    match = PORT_RE.search(prompt)
+    if match is None:
+        return None
+    raw = match.group("port") or match.group("colon_port")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= value <= 65535:
+        return value
+    return None
+
+
+def _extract_limit(prompt: str) -> int | None:
+    match = re.search(r"\b(?:top|first|last|limit)\s+(\d{1,3})\b|\b-n\s+(\d{1,3})\b", prompt, re.IGNORECASE)
+    if match is None:
+        return None
+    value = int(match.group(1) or match.group(2))
+    return max(1, min(200, value))
+
+
+def _wants_json(prompt: str) -> bool:
+    return re.search(r"\bjson\b", prompt, re.IGNORECASE) is not None
+
+
+def _mutation_target(prompt: str) -> str | None:
+    text = re.sub(r"^\s*(?:please\s+)?(?:delete|remove|kill|chmod|chown|restart|stop|start)\b", "", prompt, flags=re.IGNORECASE).strip()
+    return text or None
+
+
+def _operation_from_policy(detected: list[str]) -> str:
+    ops = set(detected)
+    if "rm" in ops:
+        return "delete"
+    if ops & {"kill", "pkill"}:
+        return "kill_process"
+    if "chmod" in ops:
+        return "chmod"
+    if "chown" in ops:
+        return "chown"
+    if "systemctl" in ops or "service" in ops:
+        return "modify_system"
+    return "unknown_mutation"
+
+
+def _looks_like_explicit_shell_command(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    first = tokens[0].rsplit("/", 1)[-1].lower()
+    known = SAFE_READ_ONLY_COMMANDS | MUTATING_COMMANDS | FORBIDDEN_COMMANDS
+    if first in known:
+        return True
+    if tokens[0].startswith(("./", "../", "/")):
+        return True
+    return False

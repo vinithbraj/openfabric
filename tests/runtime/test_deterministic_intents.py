@@ -60,7 +60,8 @@ class FakeLLM:
 
 
 def _planner_settings(tmp_path: Path, **overrides) -> Settings:
-    return Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", **overrides)
+    payload = {"response_render_mode": "raw", **overrides}
+    return Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", **payload)
 
 
 def _schema_payload() -> dict:

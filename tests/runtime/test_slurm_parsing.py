@@ -91,6 +91,7 @@ def test_parse_sacct_output() -> None:
             "partition": "gpu",
             "name": "train",
             "elapsed": "01:00:00",
+            "elapsed_seconds": 3600,
             "alloc_cpus": "8",
             "req_mem": "32G",
             "submit": "2026-04-25T08:00:00",

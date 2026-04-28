@@ -37,6 +37,7 @@ def _engine(tmp_path: Path) -> ExecutionEngine:
         gateway_url="https://gateway.internal/exec",
         available_nodes_raw="edge-1,local",
         default_node="local",
+        response_render_mode="raw",
     )
     return ExecutionEngine(settings)
 
@@ -236,7 +237,11 @@ tools:
     )
     session = engine.create_session(str(spec_path), {"task": "Delete temp.log on node edge-1"}, trigger="manual")
 
+    called = False
+
     def fake_post(url, json, timeout):
+        nonlocal called
+        called = True
         return _DummyResponse({"stdout": "removed\n", "stderr": "", "exit_code": 0})
 
     monkeypatch.setattr("aor_runtime.tools.gateway.requests.post", fake_post)
@@ -256,13 +261,13 @@ tools:
 
     final_state = engine.resume_session(session["id"], trigger="manual", approve_dangerous=True)
 
-    assert final_state["status"] == "completed"
-    assert final_state["validation"]["success"] is True
-    assert final_state["final_output"]["content"] == "removed"
+    assert final_state["status"] == "failed"
+    assert "Shell command blocked by policy" in str(final_state["error"])
+    assert called is False
 
 
 def test_engine_uses_gateway_url_from_runtime_spec_nodes(monkeypatch, tmp_path: Path) -> None:
-    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", response_render_mode="raw")
     engine = ExecutionEngine(settings)
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(

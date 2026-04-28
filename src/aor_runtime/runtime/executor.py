@@ -6,9 +6,12 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, PlanStep, StepLog
 from aor_runtime.runtime.dataflow import resolve_execution_step
 from aor_runtime.runtime.policies import infer_output_mode
+from aor_runtime.runtime.presentation import strip_internal_telemetry
+from aor_runtime.runtime.response_renderer import ResponseRenderContext, RenderedResponse, render_agent_response
 from aor_runtime.tools.base import ToolExecutionError, ToolRegistry
 
 
@@ -170,7 +173,12 @@ class PlanExecutor:
         return history, failure
 
 
-def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
+def summarize_final_output(
+    goal: str,
+    history: list[StepLog],
+    settings: Settings | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     artifacts: list[str] = []
     if history:
         for item in history:
@@ -188,6 +196,16 @@ def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
     action = last.step.action
     result = last.result
     output_mode = infer_output_mode(goal)
+
+    if settings is not None and settings.response_render_mode != "raw":
+        rendered = _render_final_result(goal, history, settings=settings, output_mode=output_mode, metadata=metadata or {})
+        if rendered is not None:
+            output_metadata = {"goal": goal, "response_render_mode": settings.response_render_mode}
+            if rendered.title:
+                output_metadata["title"] = rendered.title
+            if rendered.hidden_events:
+                output_metadata["hidden_events"] = rendered.hidden_events
+            return {"content": rendered.markdown.strip(), "artifacts": artifacts, "metadata": output_metadata}
 
     if action == "fs.read":
         content = _shape_text_like_content(str(result.get("content", "")), output_mode)
@@ -237,6 +255,77 @@ def summarize_final_output(goal: str, history: list[StepLog]) -> dict[str, Any]:
         content = "\n".join(lines)
 
     return {"content": content.strip(), "artifacts": artifacts, "metadata": {"goal": goal}}
+
+
+def _render_final_result(
+    goal: str,
+    history: list[StepLog],
+    *,
+    settings: Settings,
+    output_mode: str,
+    metadata: dict[str, Any],
+):
+    if output_mode == "csv":
+        return None
+    last = history[-1]
+    action = last.step.action
+    previous_action = history[-2].step.action if len(history) >= 2 else None
+    context = ResponseRenderContext(
+        mode=settings.response_render_mode,  # type: ignore[arg-type]
+        show_executed_commands=settings.show_executed_commands,
+        show_validation=settings.show_validation_events,
+        show_planning_steps=settings.show_planner_events,
+        show_tool_events=settings.show_tool_events,
+        show_debug_metadata=settings.show_debug_metadata or settings.include_internal_telemetry,
+        enable_llm_summary=settings.enable_presentation_llm_summary,
+        enable_insight_layer=settings.enable_insight_layer,
+        enable_llm_insights=settings.enable_llm_insights,
+        insight_max_facts=settings.insight_max_facts,
+        insight_max_input_chars=settings.insight_max_input_chars,
+        insight_max_output_chars=settings.insight_max_output_chars,
+        max_rows=settings.sql_row_limit if settings.sql_row_limit < 50 else 20,
+        max_command_length=settings.presentation_llm_max_input_chars,
+        source_action=previous_action if action == "runtime.return" else action,
+        output_mode=output_mode,
+        goal=goal,
+        llm_settings=settings,
+    )
+    if action == "runtime.return":
+        value = last.result.get("value")
+        if not _presentation_source_supported(previous_action) and not _presentation_value_supported(value):
+            return None
+        if output_mode == "json":
+            clean = strip_internal_telemetry(value) if settings.response_render_mode == "user" else value
+            return RenderedResponse(markdown=json.dumps(clean, ensure_ascii=False, sort_keys=True), title="JSON")
+        return render_agent_response(value, execution_events=history, metadata={**metadata, "goal": goal}, context=context)
+    elif action in {"sql.query", "shell.exec", "fs.aggregate", "fs.search_content", "fs.find", "fs.list", "fs.size"} or action.startswith("slurm."):
+        if output_mode == "json":
+            clean = strip_internal_telemetry(last.result) if settings.response_render_mode == "user" else last.result
+            return RenderedResponse(markdown=json.dumps(clean, ensure_ascii=False, sort_keys=True), title="JSON")
+        final_result: Any = str(last.result.get("stdout") or "").strip() if action == "shell.exec" else last.result
+        return render_agent_response(final_result, execution_events=history, metadata={**metadata, "goal": goal}, context=context)
+    else:
+        return None
+
+
+def _presentation_source_supported(action: str | None) -> bool:
+    if not action:
+        return False
+    return action in {"sql.query", "shell.exec"} or action.startswith("slurm.") or action.startswith("fs.")
+
+
+def _presentation_value_supported(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if "results" in value and isinstance(value.get("results"), dict):
+        return True
+    if "rows" in value and "database" in value:
+        return True
+    if any(key in value for key in ("file_count", "total_size_bytes", "matches", "entries")):
+        return True
+    if any(key in value for key in ("jobs", "nodes", "partitions", "metric_group")):
+        return True
+    return False
 
 
 def _shape_text_like_content(content: str, mode: str) -> str:

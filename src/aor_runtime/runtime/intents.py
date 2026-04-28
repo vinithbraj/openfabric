@@ -21,6 +21,7 @@ class ListFilesIntent(BaseModel):
     pattern: str | None = None
     recursive: bool = False
     file_only: bool = True
+    dir_only: bool = False
     path_style: Literal["name", "relative", "absolute"] = "relative"
     output_mode: Literal["text", "csv", "json"] = "text"
 

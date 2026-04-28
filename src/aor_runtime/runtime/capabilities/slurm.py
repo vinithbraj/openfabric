@@ -25,7 +25,7 @@ from aor_runtime.tools.slurm import _validate_job_id, _validate_node_name, _vali
 
 SLURM_KEYWORD_RE = re.compile(r"\b(?:slurm|squeue|sacct|sinfo|scontrol|slurmdbd|accounting)\b", re.IGNORECASE)
 SLURM_MUTATION_RE = re.compile(
-    r"\b(?:sbatch|submit(?:\s+a)?\s+job|run\s+this\s+job|scancel|cancel(?:\s+my)?\s+job|drain\s+node|resume\s+node|requeue\s+job|update\s+node|change\s+partition|kill(?:\s+my)?\s+job)\b",
+    r"\b(?:sbatch|submit(?:\s+a)?\s+job|run\s+this\s+job|scancel|cancel(?:\s+(?:all|my|the|pending|running))*\s+jobs?|drain\s+node|resume\s+node|requeue\s+job|update\s+node|change\s+partition|kill(?:\s+my)?\s+job)\b",
     re.IGNORECASE,
 )
 OUTPUT_JSON_RE = re.compile(r"\b(?:json|json only|as json)\b", re.IGNORECASE)
@@ -52,7 +52,7 @@ SUSPICIOUS_VALUE_RE = re.compile(r"[;|&$`><\n/]")
 ALLOWED_JOB_STATES = {"RUNNING", "PENDING", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"}
 ALLOWED_NODE_STATES = {"idle", "allocated", "mixed", "down", "drained"}
 ALLOWED_NODE_STATE_GROUPS = {"idle", "allocated", "mixed", "down", "drained", "problematic", "all"}
-ALLOWED_GROUP_BY = {"state", "user", "partition", "node"}
+ALLOWED_GROUP_BY = {"state", "user", "partition", "node", "job_name"}
 ALLOWED_METRIC_GROUPS = {
     "cluster_summary",
     "queue_summary",
@@ -97,6 +97,32 @@ class SlurmAccountingIntent(BaseModel):
     limit: int | None = 100
     gateway_node: str | None = None
     output_mode: Literal["text", "csv", "json"] = "text"
+
+
+class SlurmAccountingAggregateIntent(BaseModel):
+    user: str | None = None
+    state: str | None = None
+    include_all_states: bool = False
+    excluded_states: list[str] = Field(default_factory=list)
+    default_state_applied: bool = False
+    partition: str | None = None
+    start: str | None = None
+    end: str | None = None
+    metric: Literal[
+        "average_elapsed",
+        "min_elapsed",
+        "max_elapsed",
+        "sum_elapsed",
+        "count",
+        "count_longer_than",
+        "runtime_summary",
+    ] = "average_elapsed"
+    group_by: Literal["partition", "user", "state", "job_name"] | None = None
+    threshold_seconds: int | None = None
+    limit: int | None = 1000
+    gateway_node: str | None = None
+    time_window_label: str | None = None
+    output_mode: Literal["text", "json", "csv"] = "text"
 
 
 class SlurmJobCountIntent(BaseModel):
@@ -184,6 +210,7 @@ class SlurmCapabilityPack(CapabilityPack):
         SlurmQueueIntent,
         SlurmJobDetailIntent,
         SlurmAccountingIntent,
+        SlurmAccountingAggregateIntent,
         SlurmJobCountIntent,
         SlurmNodeStatusIntent,
         SlurmNodeDetailIntent,
@@ -220,6 +247,28 @@ class SlurmCapabilityPack(CapabilityPack):
                         "slurm_generation_mode": "unsupported",
                     },
                 ),
+            )
+
+        if _is_unsupported_runtime_metric(routed_prompt):
+            metadata = _semantic_metadata(
+                semantic_frame,
+                generation_mode="unsupported",
+                coverage=None,
+                extra={"planning_mode": "deterministic_intent", "capability": self.name},
+            )
+            return IntentResult(
+                matched=True,
+                intent=SlurmFailureIntent(
+                    message="Median runtime is not currently supported. Supported runtime metrics are average, min, max, total, count, count longer than a duration, and runtime summary.",
+                    error_type="slurm_request_unresolved",
+                    suggestions=[
+                        "Show average runtime of completed jobs in the totalseg partition.",
+                        "Show min and max runtime by partition for the last 7 days.",
+                        "Count completed jobs longer than 2 hours on totalseg.",
+                    ],
+                    metadata=metadata,
+                ),
+                metadata=metadata,
             )
 
         if semantic_frame.requests:
@@ -509,6 +558,7 @@ class SlurmCapabilityPack(CapabilityPack):
                 SlurmQueueIntent,
                 SlurmJobDetailIntent,
                 SlurmAccountingIntent,
+                SlurmAccountingAggregateIntent,
                 SlurmJobCountIntent,
                 SlurmNodeStatusIntent,
                 SlurmNodeDetailIntent,
@@ -690,21 +740,69 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
             ),
         ]
 
+    if isinstance(intent, SlurmAccountingAggregateIntent):
+        _require_tools(allowed_tools, "slurm.accounting_aggregate")
+        mode = "json" if intent.output_mode == "json" else "text"
+        return [
+            {
+                "id": 1,
+                "action": "slurm.accounting_aggregate",
+                "args": {
+                    "user": intent.user,
+                    "state": intent.state,
+                    "include_all_states": intent.include_all_states,
+                    "excluded_states": intent.excluded_states,
+                    "default_state_applied": intent.default_state_applied,
+                    "partition": intent.partition,
+                    "start": intent.start,
+                    "end": intent.end,
+                    "metric": intent.metric,
+                    "group_by": intent.group_by,
+                    "threshold_seconds": intent.threshold_seconds,
+                    "limit": intent.limit,
+                    "gateway_node": intent.gateway_node,
+                    "time_window_label": intent.time_window_label,
+                },
+                "output": "slurm_accounting_aggregate",
+            },
+            {
+                "id": 2,
+                "action": "runtime.return",
+                "input": ["slurm_accounting_aggregate"],
+                "args": {
+                    "value": {"$ref": "slurm_accounting_aggregate"},
+                    "mode": mode,
+                    "output_contract": build_output_contract(mode=mode),
+                },
+            },
+        ]
+
     if isinstance(intent, SlurmJobCountIntent):
         if intent.group_by:
-            _require_tools(allowed_tools, "slurm.metrics")
-            metric_group = "accounting_summary" if intent.source == "sacct" else "queue_summary"
-            path = f"payload.by_{intent.group_by}"
+            action = "slurm.accounting" if intent.source == "sacct" else "slurm.queue"
+            _require_tools(allowed_tools, action)
+            args: dict[str, Any] = {
+                "user": intent.user,
+                "state": intent.state,
+                "partition": intent.partition,
+                "group_by": intent.group_by,
+                "limit": None,
+                "gateway_node": intent.gateway_node,
+            }
+            if intent.source == "sacct":
+                args.update(
+                    {
+                        "start": intent.start,
+                        "end": intent.end,
+                        "min_elapsed_seconds": None,
+                        "max_elapsed_seconds": None,
+                    }
+                )
             return [
                 {
                     "id": 1,
-                    "action": "slurm.metrics",
-                    "args": {
-                        "metric_group": metric_group,
-                        "start": intent.start,
-                        "end": intent.end,
-                        "gateway_node": intent.gateway_node,
-                    },
+                    "action": action,
+                    "args": args,
                     "output": "slurm_job_count_grouped",
                 },
                 {
@@ -712,7 +810,7 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
                     "action": "runtime.return",
                     "input": ["slurm_job_count_grouped"],
                     "args": {
-                        "value": {"$ref": "slurm_job_count_grouped", "path": path},
+                        "value": {"$ref": "slurm_job_count_grouped", "path": "grouped"},
                         "mode": "json",
                         "output_contract": build_output_contract(mode="json"),
                     },
@@ -968,18 +1066,47 @@ def _compile_slurm_tool_step(intent: Any, *, step_id: int, alias: str, allowed_t
             },
             "output": alias,
         }
+    if isinstance(intent, SlurmAccountingAggregateIntent):
+        _require_tools(allowed_tools, "slurm.accounting_aggregate")
+        return {
+            "id": step_id,
+            "action": "slurm.accounting_aggregate",
+            "args": {
+                "user": intent.user,
+                "state": intent.state,
+                "include_all_states": intent.include_all_states,
+                "excluded_states": intent.excluded_states,
+                "default_state_applied": intent.default_state_applied,
+                "partition": intent.partition,
+                "start": intent.start,
+                "end": intent.end,
+                "metric": intent.metric,
+                "group_by": intent.group_by,
+                "threshold_seconds": intent.threshold_seconds,
+                "limit": intent.limit,
+                "gateway_node": intent.gateway_node,
+                "time_window_label": intent.time_window_label,
+            },
+            "output": alias,
+        }
     if isinstance(intent, SlurmJobCountIntent):
         if intent.group_by:
-            _require_tools(allowed_tools, "slurm.metrics")
+            action = "slurm.accounting" if intent.source == "sacct" else "slurm.queue"
+            _require_tools(allowed_tools, action)
+            args: dict[str, Any] = {
+                "user": intent.user,
+                "state": intent.state,
+                "partition": intent.partition,
+                "group_by": intent.group_by,
+                "limit": None,
+                "gateway_node": intent.gateway_node,
+            }
+            if intent.source == "sacct":
+                args.update({"start": intent.start, "end": intent.end, "min_elapsed_seconds": None, "max_elapsed_seconds": None})
             return {
                 "id": step_id,
-                "action": "slurm.metrics",
-                "args": {
-                    "metric_group": "accounting_summary" if intent.source == "sacct" else "queue_summary",
-                    "start": intent.start,
-                    "end": intent.end,
-                    "gateway_node": intent.gateway_node,
-                },
+                "action": action,
+                "args": args,
                 "output": alias,
             }
         action = "slurm.accounting" if intent.source == "sacct" else "slurm.queue"
@@ -1060,6 +1187,8 @@ def _compound_alias(intent: Any, index: int, used_labels: set[str]) -> str:
         base = str(intent.metric_group)
     elif isinstance(intent, SlurmDBDHealthIntent):
         base = "slurmdbd_health"
+    elif isinstance(intent, SlurmAccountingAggregateIntent):
+        base = "accounting_runtime"
     elif isinstance(intent, SlurmAccountingIntent):
         base = "accounting_jobs"
     candidate = re.sub(r"[^A-Za-z0-9_]+", "_", base).strip("_") or f"slurm_result_{index}"
@@ -1204,6 +1333,28 @@ def _intents_for_slurm_request(
                 output_mode=output_mode if output_mode in {"text", "csv", "json"} else "json",
             )
         ]
+    if request.kind == "accounting_aggregate":
+        include_all_states = bool(filters.get("include_all_states") or filters.get("all_states"))
+        aggregate_state = None if include_all_states else filters.get("state")
+        return [
+            SlurmAccountingAggregateIntent(
+                user=filters.get("user"),
+                state=aggregate_state,
+                include_all_states=include_all_states,
+                excluded_states=list(filters.get("excluded_states") or []),
+                default_state_applied=bool(filters.get("default_state_applied") or False),
+                partition=filters.get("partition"),
+                start=filters.get("start"),
+                end=filters.get("end"),
+                metric=filters.get("metric", "average_elapsed"),
+                group_by=filters.get("group_by"),
+                threshold_seconds=filters.get("threshold_seconds"),
+                limit=filters.get("limit", 1000),
+                gateway_node=gateway_node,
+                time_window_label=filters.get("time_window_label"),
+                output_mode=output_mode if output_mode in {"text", "json", "csv"} else "text",
+            )
+        ]
     if request.kind == "job_detail":
         return [SlurmJobDetailIntent(job_id=filters.get("job_id"), gateway_node=gateway_node, output_mode=output_mode if output_mode in {"text", "csv", "json"} else "json")]
     if request.kind in {"slurmdbd_health", "accounting_health"}:
@@ -1287,8 +1438,10 @@ def _slurm_tools_for_intent(intent: Any | None) -> list[str]:
         return ["slurm.queue"]
     if isinstance(intent, SlurmAccountingIntent):
         return ["slurm.accounting"]
+    if isinstance(intent, SlurmAccountingAggregateIntent):
+        return ["slurm.accounting_aggregate"]
     if isinstance(intent, SlurmJobCountIntent):
-        return ["slurm.metrics"] if intent.group_by else (["slurm.accounting"] if intent.source == "sacct" else ["slurm.queue"])
+        return ["slurm.accounting"] if intent.source == "sacct" else ["slurm.queue"]
     if isinstance(intent, SlurmJobDetailIntent):
         return ["slurm.job_detail"]
     if isinstance(intent, SlurmNodeStatusIntent):
@@ -1451,6 +1604,24 @@ def _validate_llm_slurm_intent(intent: Any) -> Any:
             }
         )
 
+    if isinstance(intent, SlurmAccountingAggregateIntent):
+        normalized_include_all = bool(intent.include_all_states)
+        return intent.model_copy(
+            update={
+                "user": _validate_safe_token(intent.user, field_name="user"),
+                "state": None if normalized_include_all else _validate_job_state(intent.state),
+                "include_all_states": normalized_include_all,
+                "excluded_states": [_validate_job_state(state) for state in list(intent.excluded_states or [])],
+                "default_state_applied": bool(intent.default_state_applied and not normalized_include_all),
+                "partition": _validate_safe_token(intent.partition, field_name="partition"),
+                "start": _validate_time_value(intent.start, field_name="start"),
+                "end": _validate_time_value(intent.end, field_name="end"),
+                "group_by": normalize_group_by(intent.group_by),
+                "threshold_seconds": intent.threshold_seconds,
+                "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
+            }
+        )
+
     if isinstance(intent, SlurmJobCountIntent):
         return intent.model_copy(
             update={
@@ -1531,6 +1702,7 @@ def self_intent_types() -> tuple[type, ...]:
         SlurmQueueIntent,
         SlurmJobDetailIntent,
         SlurmAccountingIntent,
+        SlurmAccountingAggregateIntent,
         SlurmJobCountIntent,
         SlurmNodeStatusIntent,
         SlurmNodeDetailIntent,
@@ -1612,7 +1784,7 @@ def _detect_partition(prompt: str) -> str | None:
     if match is None:
         return None
     candidate = match.group(1)
-    if candidate.lower() in {"status", "summary", "cpu", "allocation"}:
+    if candidate.lower() in {"status", "summary", "cpu", "allocation", "as", "json", "csv", "only"}:
         return None
     return candidate
 
@@ -1679,7 +1851,7 @@ def _detect_node_state(prompt: str) -> str | None:
 
 def _looks_like_accounting_prompt(prompt: str) -> bool:
     lower = prompt.lower()
-    return any(
+    return _looks_like_runtime_aggregate_prompt(prompt) or any(
         token in lower
         for token in (
             "sacct",
@@ -1695,6 +1867,22 @@ def _looks_like_accounting_prompt(prompt: str) -> bool:
             "this week",
         )
     )
+
+
+def _looks_like_runtime_aggregate_prompt(prompt: str) -> bool:
+    lower = prompt.lower()
+    return re.search(
+        r"\b(?:how\s+long|average\s+(?:run\s*time|runtime|elapsed|duration)|avg\s+elapsed|mean\s+runtime|"
+        r"min(?:imum)?\s+(?:run\s*time|runtime|elapsed|duration)|max(?:imum)?\s+(?:run\s*time|runtime|elapsed|duration)|"
+        r"longest\s+(?:run\s*time|runtime|elapsed|duration)|total\s+(?:run\s*time|runtime|elapsed|duration)|"
+        r"runtime\s+summary|elapsed\s+time|took\s+to\s+run|ran\s+longer\s+than|jobs?\s+longer\s+than)\b",
+        lower,
+    ) is not None
+
+
+def _is_unsupported_runtime_metric(prompt: str) -> bool:
+    lower = prompt.lower()
+    return "median" in lower and re.search(r"\b(?:runtime|run\s*time|elapsed|duration|jobs?)\b", lower) is not None
 
 
 def _detect_time_range(prompt: str) -> tuple[str | None, str | None]:

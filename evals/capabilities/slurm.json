@@ -76,7 +76,7 @@
       "prompt": "Show recent failed jobs from sacct as json only.",
       "expected": {
         "jobs": [
-          {"job_id": "12341", "user": "alice", "state": "FAILED", "partition": "cpu", "name": "align", "elapsed": "00:20:00", "alloc_cpus": "4", "req_mem": "8G", "submit": "{slurm_yesterday_date}T10:00:00", "start": "{slurm_yesterday_date}T10:05:00", "end": "{slurm_yesterday_date}T10:25:00", "exit_code": "1:0"}
+          {"job_id": "12341", "user": "alice", "state": "FAILED", "partition": "cpu", "name": "align", "elapsed": "00:20:00", "elapsed_seconds": 1200, "alloc_cpus": "4", "req_mem": "8G", "submit": "{slurm_yesterday_date}T10:00:00", "start": "{slurm_yesterday_date}T10:05:00", "end": "{slurm_yesterday_date}T10:25:00", "exit_code": "1:0"}
         ]
       }
     },
@@ -84,7 +84,7 @@
       "id": "slurm_acct_02",
       "category": "completed_since_yesterday_csv",
       "prompt": "Show completed jobs since yesterday from sacct as csv only.",
-      "expected": "job_id,user,state,partition,name,elapsed,alloc_cpus,req_mem,submit,start,end,exit_code\n12340,{current_user},COMPLETED,gpu,train-gpu,01:00:00,8,32G,{slurm_yesterday_date}T08:00:00,{slurm_yesterday_date}T08:10:00,{slurm_yesterday_date}T09:10:00,0:0"
+      "expected": "job_id,user,state,partition,name,elapsed,elapsed_seconds,alloc_cpus,req_mem,submit,start,end,exit_code\n12340,{current_user},COMPLETED,gpu,train-gpu,01:00:00,3600,8,32G,{slurm_yesterday_date}T08:00:00,{slurm_yesterday_date}T08:10:00,{slurm_yesterday_date}T09:10:00,0:0"
     },
     {
       "id": "slurm_acct_03",
@@ -92,7 +92,7 @@
       "prompt": "Show sacct jobs for user alice as json only.",
       "expected": {
         "jobs": [
-          {"job_id": "12341", "user": "alice", "state": "FAILED", "partition": "cpu", "name": "align", "elapsed": "00:20:00", "alloc_cpus": "4", "req_mem": "8G", "submit": "{slurm_yesterday_date}T10:00:00", "start": "{slurm_yesterday_date}T10:05:00", "end": "{slurm_yesterday_date}T10:25:00", "exit_code": "1:0"}
+          {"job_id": "12341", "user": "alice", "state": "FAILED", "partition": "cpu", "name": "align", "elapsed": "00:20:00", "elapsed_seconds": 1200, "alloc_cpus": "4", "req_mem": "8G", "submit": "{slurm_yesterday_date}T10:00:00", "start": "{slurm_yesterday_date}T10:05:00", "end": "{slurm_yesterday_date}T10:25:00", "exit_code": "1:0"}
         ]
       }
     },
@@ -172,7 +172,7 @@
       "id": "slurm_metrics_02",
       "category": "cluster_metrics_json",
       "prompt": "Collect slurm cluster metrics as json only.",
-      "expected": {"queue_count": 4, "running_jobs": 2, "pending_jobs": 2, "node_count": 5, "idle_nodes": 1, "allocated_nodes": 1, "mixed_nodes": 1, "down_nodes": 1, "drained_nodes": 1, "problematic_nodes": 2, "gpu_available": true, "total_gpus": 9}
+      "expected": {"queue_count": 4, "running_jobs": 2, "pending_jobs": 2, "node_count": 5, "partition_node_rows": 5, "idle_nodes": 1, "allocated_nodes": 1, "mixed_nodes": 1, "down_nodes": 1, "drained_nodes": 1, "problematic_nodes": 2, "problematic_partition_rows": 2, "gpu_available": true, "total_gpus": 9}
     },
     {
       "id": "slurm_metrics_03",
@@ -215,6 +215,54 @@
       "category": "running_pending_problematic_json",
       "prompt": "Show running jobs, pending jobs, and problematic nodes as JSON.",
       "expected_contains": ["\"running_jobs\"", "\"pending_jobs\"", "\"problematic_nodes\"", "\"slurm-worker-echo\"", "\"slurm_coverage_passed\": true"]
+    },
+    {
+      "id": "slurm_presentation_regression_01",
+      "category": "running_jobs_table_source",
+      "prompt": "List all running jobs in the slurm cluster.",
+      "expected_contains": ["12345", "RUNNING", "train-gpu", "12348", "notebook"]
+    },
+    {
+      "id": "slurm_presentation_regression_02",
+      "category": "pending_jobs_table_source",
+      "prompt": "List all pending jobs in the slurm cluster.",
+      "expected_contains": ["12346", "PENDING", "align", "12347", "prep"]
+    },
+    {
+      "id": "slurm_grouped_01",
+      "category": "running_jobs_by_partition",
+      "prompt": "Show running jobs by partition.",
+      "expected": {"debug": 1, "gpu": 1}
+    },
+    {
+      "id": "slurm_grouped_02",
+      "category": "pending_jobs_by_partition",
+      "prompt": "Show pending jobs by partition.",
+      "expected": {"cpu": 1, "gpu": 1}
+    },
+    {
+      "id": "slurm_nodes_regression_01",
+      "category": "problematic_nodes",
+      "prompt": "Show problematic slurm nodes.",
+      "expected_contains": ["slurm-worker-delta", "slurm-worker-echo"]
+    },
+    {
+      "id": "slurm_accounting_aggregate_01",
+      "category": "average_runtime_gpu",
+      "prompt": "Average runtime of completed jobs on gpu partition as json only.",
+      "expected_contains": ["\"result_kind\": \"accounting_aggregate\"", "\"metric\": \"average_elapsed\"", "\"partition\": \"gpu\"", "\"average_elapsed_human\": \"1h\"", "\"job_count\": 1"]
+    },
+    {
+      "id": "slurm_accounting_aggregate_02",
+      "category": "jobs_longer_than_threshold",
+      "prompt": "How many completed jobs ran longer than 2 hours on gpu as json only?",
+      "expected_contains": ["\"metric\": \"count_longer_than\"", "\"threshold_seconds\": 7200", "\"job_count\": 0", "No matching accounting jobs were found"]
+    },
+    {
+      "id": "slurm_accounting_aggregate_03",
+      "category": "average_runtime_by_partition",
+      "prompt": "Average runtime by partition as json only.",
+      "expected_contains": ["\"group_by\": \"partition\"", "\"state\": \"COMPLETED\"", "\"default_state_applied\": true", "\"key\": \"gpu\"", "\"average_elapsed_human\": \"1h\""]
     },
     {
       "id": "slurm_negative_01",

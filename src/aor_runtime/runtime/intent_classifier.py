@@ -59,6 +59,10 @@ NON_RECURSIVE_HINTS = (
     "only in this folder",
 )
 RECURSIVE_HINTS = ("under", "recursively", "anywhere below", "inside this tree")
+CURRENT_FOLDER_RE = re.compile(
+    r"\b(?:this|current)\s+(?:folder|directory)\b|\bhere\b|\bworkspace\b|\brepo\s+root\b|\bproject\s+root\b|(?:^|\s)\.(?:\s|$|[?!.,;:])",
+    re.IGNORECASE,
+)
 PATH_STOPWORDS = {
     "the",
     "this",
@@ -278,6 +282,19 @@ def classify_compound_intent(goal: str, *, schema_payload: dict[str, Any] | None
     inline_operations, producer_clause = _extract_inline_transform_operations(clauses[0])
     producer_result = classify_single_intent(producer_clause, schema_payload=schema_payload)
     clause_start_index = 1
+    if (
+        producer_result.matched
+        and isinstance(producer_result.intent, ListFilesIntent)
+        and producer_result.intent.path == "."
+        and len(clauses) >= 2
+        and _extract_first_path_candidate(clauses[1])
+    ):
+        combined_clause = f"{clauses[0]}, {clauses[1]}"
+        inline_operations, producer_clause = _extract_inline_transform_operations(combined_clause)
+        combined_result = classify_single_intent(producer_clause, schema_payload=schema_payload)
+        if combined_result.matched:
+            producer_result = combined_result
+            clause_start_index = 2
     if not producer_result.matched:
         if len(clauses) >= 2:
             combined_clause = f"{clauses[0]}, {clauses[1]}"
@@ -406,20 +423,34 @@ def _classify_list_files(goal: str) -> IntentResult:
     if match is not None:
         path = _clean_path(match.group("path"))
         body = str(match.group("body") or "")
-        if _looks_like_path_candidate(path) and "file" in body.lower() and not _looks_like_content_diagnostic_body(body):
+        dir_only = _contains_directory_phrase(body)
+        if (
+            _looks_like_path_candidate(path)
+            and (_contains_file_phrase(body) or dir_only)
+            and not _looks_like_content_diagnostic_body(body)
+        ):
             query = normalize_file_query(goal, explicit_path=path)
             output_mode = _infer_output_mode(goal)
+            recursive = (
+                _wants_recursive_current_folder_listing(goal, query.recursive)
+                if path == "."
+                else _wants_recursive_listing(goal, fallback=query.recursive if not dir_only else False)
+            )
             return IntentResult(
                 matched=True,
                 intent=ListFilesIntent(
                     path=path,
                     pattern=query.pattern if query.pattern != "*" else None,
-                    recursive=query.recursive,
-                    file_only=True,
+                    recursive=recursive,
+                    file_only=not dir_only,
+                    dir_only=dir_only,
                     path_style=query.path_style,
                     output_mode=output_mode,
                 ),
             )
+    current_result = _classify_list_files_in_current_folder(goal)
+    if current_result.matched:
+        return current_result
     return _classify_list_files_by_path_hint(goal)
 
 
@@ -756,25 +787,83 @@ def _classify_count_files_by_path_hint(goal: str) -> IntentResult:
 
 def _classify_list_files_by_path_hint(goal: str) -> IntentResult:
     normalized = goal.lower().strip()
-    if not re.match(r"^(?:list|show|return|give\s+me)\b", normalized):
+    dir_only = _contains_directory_phrase(goal)
+    if not re.match(r"^(?:list|show|return|give\s+me)\b", normalized) and not (
+        dir_only and re.match(r"^find\b", normalized)
+    ):
         return IntentResult(matched=False, reason="list_files_no_match")
     path = _extract_first_path_candidate(goal)
     if not _looks_like_path_candidate(path):
         return IntentResult(matched=False, reason="list_files_missing_path")
-    if not _contains_file_phrase(goal):
+    if not (_contains_file_phrase(goal) or dir_only):
         return IntentResult(matched=False, reason="list_files_missing_file_phrase")
     query = normalize_file_query(goal, explicit_path=path)
+    recursive = _wants_recursive_listing(goal, fallback=query.recursive if not dir_only else False)
     return IntentResult(
         matched=True,
         intent=ListFilesIntent(
             path=path,
             pattern=query.pattern if query.pattern != "*" else None,
-            recursive=query.recursive,
-            file_only=True,
+            recursive=recursive,
+            file_only=not dir_only,
+            dir_only=dir_only,
             path_style=query.path_style,
             output_mode=_infer_output_mode(goal),
         ),
     )
+
+
+def _classify_list_files_in_current_folder(goal: str) -> IntentResult:
+    normalized = goal.lower().strip()
+    dir_only = _contains_directory_phrase(goal)
+    if not re.match(r"^(?:list|show|return|give\s+me)\b", normalized) and not (
+        dir_only and re.match(r"^find\b", normalized)
+    ):
+        return IntentResult(matched=False, reason="list_files_current_no_match")
+    if CURRENT_FOLDER_RE.search(goal) is None:
+        return IntentResult(matched=False, reason="list_files_current_missing_scope")
+    explicit_path = _extract_first_path_candidate(goal)
+    if explicit_path:
+        return IntentResult(matched=False, reason="list_files_current_has_explicit_path")
+    if not (_contains_file_phrase(goal) or dir_only):
+        return IntentResult(matched=False, reason="list_files_current_missing_file_phrase")
+
+    query = normalize_file_query(goal, explicit_path=".")
+    recursive = _wants_recursive_current_folder_listing(goal, query.recursive)
+    return IntentResult(
+        matched=True,
+        intent=ListFilesIntent(
+            path=".",
+            pattern=query.pattern if query.pattern != "*" else None,
+            recursive=recursive,
+            file_only=not dir_only,
+            dir_only=dir_only,
+            path_style=query.path_style,
+            output_mode=_infer_output_mode(goal),
+        ),
+    )
+
+
+def _wants_recursive_current_folder_listing(goal: str, query_recursive: bool) -> bool:
+    text = str(goal or "").lower()
+    if any(hint in text for hint in NON_RECURSIVE_HINTS):
+        return False
+    if any(hint in text for hint in RECURSIVE_HINTS):
+        return True
+    if re.search(r"\b(?:find|recursively|recursive|under|below)\b", text):
+        return True
+    return False if CURRENT_FOLDER_RE.search(goal) is not None else bool(query_recursive)
+
+
+def _wants_recursive_listing(goal: str, *, fallback: bool) -> bool:
+    text = str(goal or "").lower()
+    if any(hint in text for hint in NON_RECURSIVE_HINTS):
+        return False
+    if any(hint in text for hint in RECURSIVE_HINTS):
+        return True
+    if re.search(r"\b(?:find|recursively|recursive|under|below)\b", text):
+        return True
+    return bool(fallback)
 
 
 def _extract_glob_pattern(body: str | None) -> str | None:
@@ -830,6 +919,16 @@ def _contains_file_phrase(text: str) -> bool:
     normalized = str(text or "").lower()
     scrubbed = PATH_CANDIDATE_RE.sub(" ", normalized)
     return re.search(r"\b(?:file|files|filename|filenames)\b", scrubbed) is not None
+
+
+def _contains_directory_phrase(text: str) -> bool:
+    normalized = str(text or "").lower()
+    scrubbed = PATH_CANDIDATE_RE.sub(" ", normalized)
+    scrubbed = re.sub(r"\b(?:this|current)\s+(?:folder|directory)\b", " ", scrubbed)
+    return (
+        re.search(r"\b(?:dirs|directories|folders)\b", scrubbed) is not None
+        or re.search(r"\b(?:dir|directory|folder)\s+(?:names?|entries?)\b", scrubbed) is not None
+    )
 
 
 def _looks_like_content_diagnostic_body(text: str) -> bool:
@@ -945,6 +1044,8 @@ def _normalize_url(raw_url: str | None) -> str:
 def _normalize_goal_text(value: str) -> str:
     text = str(value or "").strip()
     while text.endswith((".", "!", "?")):
+        if text.endswith(" ."):
+            break
         text = text[:-1].rstrip()
     return text
 

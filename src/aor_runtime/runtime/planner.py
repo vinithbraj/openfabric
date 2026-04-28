@@ -739,6 +739,10 @@ SHELL_NATIVE_FIRST_INTENT_RE = re.compile(
     r"\b(?:using|use|with)\s+shell(?:\.exec)?\b.*\b(?:total\s+file\s+size|total\s+size|sum(?:\s+the)?\s+size|how\s+much\s+space|disk\s+space\s+used\s+by|size\s+of\s+all|total\s+bytes|count\s+and\s+total\s+size|matching\s+lines?|lines?\s+containing|files?\s+containing|contents?\s+(?:include|contain)|mention(?:ing)?)\b",
     re.IGNORECASE,
 )
+SHELL_NATIVE_FIRST_FETCH_RE = re.compile(
+    r"(?:\b(?:fetch|curl)\b.*\b(?:title|head)\b.*\b(?:using|use|with)\s+shell(?:\.exec)?\b|\b(?:using|use|with)\s+shell(?:\.exec)?\b.*\b(?:fetch|curl)\b.*\b(?:title|head)\b)",
+    re.IGNORECASE,
+)
 FILESYSTEM_TOOL_INTENT_PATTERNS = {
     "fs.copy": [r"\b(?:using|use|with)\s+fs\.copy\b"],
     "fs.exists": [r"\b(?:using|use|with)\s+fs\.exists\b"],
@@ -774,7 +778,7 @@ def extract_explicit_tool_intent(goal: str, allowed_tools: list[str]) -> list[st
             continue
         if tool_name == "fs.*" and not any(name.startswith("fs.") for name in allowed_tools):
             continue
-        if tool_name == "shell.exec" and SHELL_NATIVE_FIRST_INTENT_RE.search(goal_text):
+        if tool_name == "shell.exec" and (SHELL_NATIVE_FIRST_INTENT_RE.search(goal_text) or SHELL_NATIVE_FIRST_FETCH_RE.search(goal_text)):
             continue
         if any(re.search(pattern, goal_text) for pattern in patterns):
             requested.append(tool_name)

@@ -69,6 +69,7 @@ def _settings(tmp_path: Path, spec_path: Path) -> Settings:
         gateway_url="https://gateway.internal/exec",
         available_nodes_raw="localhost",
         default_node="localhost",
+        shell_mode="permissive",
         openai_compat_enabled=True,
         openai_compat_model_name="openfabric-agent",
         openai_compat_spec_path=str(spec_path),
@@ -193,7 +194,10 @@ def test_runs_stream_and_openai_compat_stream(tmp_path: Path, monkeypatch) -> No
         },
     )
     assert completion.status_code == 200
-    assert completion.json()["choices"][0]["message"]["content"] == "hello"
+    content = completion.json()["choices"][0]["message"]["content"]
+    assert "## Result" in content
+    assert "hello" in content
+    assert "## Command Used" in content
 
     with client.stream(
         "POST",
@@ -207,12 +211,12 @@ def test_runs_stream_and_openai_compat_stream(tmp_path: Path, monkeypatch) -> No
         body = response.read().decode()
 
     assert response.status_code == 200
-    assert "Thinking..." in body
-    assert "Executing shell.exec on localhost:" in body
+    assert "Thinking..." not in body
+    assert "Executing shell.exec on localhost:" not in body
     assert "printf" in body
-    assert "warn" in body
-    assert "hello\\n" in body
-    assert "[stderr] warn\\n" in body
+    assert "## Command Used" in body
+    assert "hello" in body
+    assert "[stderr] warn\\n" not in body
     assert "data: [DONE]" in body
 
 
