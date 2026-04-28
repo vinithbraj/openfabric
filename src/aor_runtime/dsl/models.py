@@ -23,6 +23,7 @@ DEFAULT_TOOLS = [
     "slurm.node_detail",
     "slurm.partitions",
     "slurm.accounting",
+    "slurm.accounting_aggregate",
     "slurm.metrics",
     "slurm.slurmdbd_health",
     "shell.exec",

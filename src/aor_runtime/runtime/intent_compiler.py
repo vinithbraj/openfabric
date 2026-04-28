@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import shlex
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan
@@ -136,6 +137,7 @@ def compile_intent_to_plan(intent: Any, allowed_tools: list[str], settings: Sett
             intent.pattern,
             recursive=intent.recursive,
             file_only=intent.file_only,
+            dir_only=intent.dir_only,
             path_style=intent.path_style,
         )
         _require_tools(allowed_tools, action)
@@ -339,20 +341,56 @@ def compile_intent_to_plan(intent: Any, allowed_tools: list[str], settings: Sett
         )
 
     if isinstance(intent, FetchExtractIntent):
-        _require_tools(allowed_tools, "shell.exec")
-        if intent.extract == "title":
-            command = (
-                f"curl -sL {shlex.quote(intent.url)} | tr '\\n' ' ' | "
-                "sed -n 's:.*<title[^>]*>\\([^<]*\\)</title>.*:\\1:p'"
-            )
-        elif intent.extract == "head":
-            command = (
-                f"curl -sL {shlex.quote(intent.url)} | tr '\\n' ' ' | "
-                "sed -n 's:.*\\(<head[^>]*>.*</head>\\).*:\\1:p'"
-            )
-        else:
+        if intent.extract not in {"title", "head"}:
             raise ValueError("FetchExtractIntent body_text is not supported in the deterministic compiler.")
-        return ExecutionPlan.model_validate({"steps": [{"id": 1, "action": "shell.exec", "args": {"command": command}}]})
+
+        parsed_url = urlparse(intent.url)
+        if parsed_url.scheme == "file":
+            _require_tools(allowed_tools, "fs.read", "python.exec")
+            fetch_step = {
+                "id": 1,
+                "action": "fs.read",
+                "args": {"path": unquote(parsed_url.path)},
+                "output": "html_content",
+            }
+            html_ref = {"$ref": "html_content", "path": "content"}
+        else:
+            _require_tools(allowed_tools, "shell.exec", "python.exec")
+            fetch_step = {
+                "id": 1,
+                "action": "shell.exec",
+                "args": {"command": f"curl -sL {shlex.quote(intent.url)}"},
+                "output": "html_content",
+            }
+            html_ref = {"$ref": "html_content", "path": "stdout"}
+
+        return ExecutionPlan.model_validate(
+            {
+                "steps": [
+                    fetch_step,
+                    {
+                        "id": 2,
+                        "action": "python.exec",
+                        "input": ["html_content"],
+                        "args": {
+                            "inputs": {"html": html_ref},
+                            "code": _fetch_extract_code(intent.extract),
+                        },
+                        "output": "fetch_extract",
+                    },
+                    {
+                        "id": 3,
+                        "action": INTERNAL_RETURN_ACTION,
+                        "input": ["fetch_extract"],
+                        "args": {
+                            "value": {"$ref": "fetch_extract", "path": "result"},
+                            "mode": intent.output_mode,
+                            "output_contract": build_output_contract(mode=intent.output_mode),
+                        },
+                    },
+                ]
+            }
+        )
 
     raise ValueError(f"Unsupported deterministic intent type: {type(intent).__name__}")
 
@@ -446,6 +484,7 @@ def _compile_producer_fragment(intent: Any, allowed_tools: list[str], settings: 
             intent.pattern,
             recursive=intent.recursive,
             file_only=intent.file_only,
+            dir_only=intent.dir_only,
             path_style=intent.path_style,
         )
         _require_tools(allowed_tools, action)
@@ -690,6 +729,23 @@ def _next_transform_alias(fragment: CompiledFragment) -> str:
     return f"transform{transform_count + 1}_result"
 
 
+def _fetch_extract_code(extract: str) -> str:
+    if extract == "title":
+        pattern = r"<title[^>]*>(.*?)</title>"
+        group_expression = "match.group(1).strip()"
+    elif extract == "head":
+        pattern = r"(<head[^>]*>.*?</head>)"
+        group_expression = "match.group(1).strip()"
+    else:
+        raise ValueError(f"Unsupported fetch extraction: {extract}")
+    return (
+        "import re\n"
+        "html = str(inputs.get('html') or '')\n"
+        f"match = re.search({pattern!r}, html, re.IGNORECASE | re.DOTALL)\n"
+        f"result = {group_expression} if match else ''\n"
+    )
+
+
 def _output_contract_for_fragment(fragment: CompiledFragment, *, mode: str | None = None) -> dict[str, Any]:
     contract_mode = mode or fragment.return_mode
     json_shape = None
@@ -717,19 +773,20 @@ def _file_discovery_step(
     *,
     recursive: bool,
     file_only: bool = True,
+    dir_only: bool = False,
     path_style: str = "relative",
 ) -> tuple[str, dict[str, Any], str]:
     normalized_pattern = pattern or "*"
-    if recursive:
+    if recursive and not dir_only:
         return "fs.find", {"path": path, "pattern": normalized_pattern}, "file_matches"
     return (
         "fs.glob",
         {
             "path": path,
             "pattern": normalized_pattern,
-            "recursive": False,
+            "recursive": recursive,
             "file_only": file_only,
-            "dir_only": False,
+            "dir_only": dir_only,
             "path_style": path_style,
         },
         "file_matches",

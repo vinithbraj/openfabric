@@ -48,10 +48,37 @@ class LLMConfig(BaseModel):
 
 class RuntimeAppConfig(BaseModel):
     allow_destructive_shell: bool = False
+    shell_mode: str = "read_only"
+    shell_allow_mutation_with_approval: bool = False
+    shell_allowed_roots: str | None = None
+    shell_default_cwd: str | None = None
+    shell_max_output_chars: int = 20000
+    shell_command_timeout_seconds: int = 30
     max_plan_retries: int = 2
     run_store_path: str | None = None
     enable_llm_intent_extraction: bool = False
     enable_sql_llm_generation: bool = False
+    presentation_mode: str = "user"
+    enable_llm_summary: bool = False
+    llm_summary_max_facts: int = 50
+    include_internal_telemetry: bool = False
+    response_render_mode: str = "user"
+    show_executed_commands: bool = True
+    show_validation_events: bool = False
+    show_planner_events: bool = False
+    show_tool_events: bool = False
+    show_debug_metadata: bool = False
+    enable_presentation_llm_summary: bool = False
+    presentation_llm_max_facts: int = 50
+    presentation_llm_max_input_chars: int = 4000
+    presentation_llm_max_output_chars: int = 1500
+    presentation_llm_include_row_samples: bool = False
+    presentation_llm_include_paths: bool = False
+    enable_insight_layer: bool = True
+    enable_llm_insights: bool = False
+    insight_max_facts: int = 50
+    insight_max_input_chars: int = 4000
+    insight_max_output_chars: int = 1500
     openai_compat_enabled: bool = True
     openai_compat_model_name: str = "general-purpose-assistant"
     openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"
@@ -60,8 +87,35 @@ class RuntimeAppConfig(BaseModel):
     def validate_runtime(self) -> "RuntimeAppConfig":
         if self.max_plan_retries < 0:
             raise ValueError("runtime.max_plan_retries must be zero or greater.")
+        self.shell_mode = str(self.shell_mode or "read_only").strip().lower() or "read_only"
+        if self.shell_mode not in {"disabled", "read_only", "approval_required", "permissive"}:
+            raise ValueError("runtime.shell_mode must be one of: disabled, read_only, approval_required, permissive.")
+        if self.shell_max_output_chars <= 0:
+            raise ValueError("runtime.shell_max_output_chars must be greater than zero.")
+        if self.shell_command_timeout_seconds <= 0:
+            raise ValueError("runtime.shell_command_timeout_seconds must be greater than zero.")
+        if self.llm_summary_max_facts <= 0:
+            raise ValueError("runtime.llm_summary_max_facts must be greater than zero.")
+        if self.presentation_llm_max_facts <= 0:
+            raise ValueError("runtime.presentation_llm_max_facts must be greater than zero.")
+        if self.presentation_llm_max_input_chars <= 0:
+            raise ValueError("runtime.presentation_llm_max_input_chars must be greater than zero.")
+        if self.presentation_llm_max_output_chars <= 0:
+            raise ValueError("runtime.presentation_llm_max_output_chars must be greater than zero.")
+        if self.insight_max_facts <= 0:
+            raise ValueError("runtime.insight_max_facts must be greater than zero.")
+        if self.insight_max_input_chars <= 0:
+            raise ValueError("runtime.insight_max_input_chars must be greater than zero.")
+        if self.insight_max_output_chars <= 0:
+            raise ValueError("runtime.insight_max_output_chars must be greater than zero.")
         normalized_run_store_path = str(self.run_store_path or "").strip()
         self.run_store_path = normalized_run_store_path or None
+        self.presentation_mode = str(self.presentation_mode or "user").strip().lower() or "user"
+        if self.presentation_mode not in {"user", "debug", "raw"}:
+            raise ValueError("runtime.presentation_mode must be one of: user, debug, raw.")
+        self.response_render_mode = str(self.response_render_mode or self.presentation_mode or "user").strip().lower() or "user"
+        if self.response_render_mode not in {"user", "debug", "raw"}:
+            raise ValueError("runtime.response_render_mode must be one of: user, debug, raw.")
         self.openai_compat_model_name = str(self.openai_compat_model_name or "").strip() or "general-purpose-assistant"
         self.openai_compat_spec_path = str(self.openai_compat_spec_path or "").strip() or "examples/general_purpose_assistant.yaml"
         return self

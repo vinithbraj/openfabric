@@ -110,6 +110,13 @@ def test_slurm_queue_filters_user_state_and_partition(monkeypatch, tmp_path: Pat
             }
         ],
         "count": 1,
+        "total_count": 1,
+        "returned_count": 1,
+        "limit": 100,
+        "truncated": False,
+        "filters": {"user": "alice", "state": "PENDING", "partition": "gpu"},
+        "group_by": None,
+        "grouped": None,
     }
 
 

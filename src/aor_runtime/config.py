@@ -9,6 +9,13 @@ from pydantic import BaseModel, Field, model_validator
 from aor_runtime.app_config import load_app_config
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Settings(BaseModel):
     workspace_root: Path = Field(default_factory=lambda: Path.cwd())
     prompts_root: Path = Field(default_factory=lambda: Path.cwd() / "prompts")
@@ -32,12 +39,45 @@ class Settings(BaseModel):
     default_temperature: float = 0.1
     llm_timeout_seconds: float = 120.0
     allow_destructive_shell: bool = False
+    shell_mode: str = Field(default_factory=lambda: os.getenv("AOR_SHELL_MODE", "read_only"))
+    shell_allow_mutation_with_approval: bool = Field(default_factory=lambda: _env_bool("AOR_SHELL_ALLOW_MUTATION_WITH_APPROVAL"))
+    shell_allowed_roots_raw: str | None = Field(default_factory=lambda: os.getenv("AOR_SHELL_ALLOWED_ROOTS") or None)
+    shell_default_cwd: str | None = Field(default_factory=lambda: os.getenv("AOR_SHELL_DEFAULT_CWD") or None)
+    shell_max_output_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_SHELL_MAX_OUTPUT_CHARS", "20000")))
+    shell_command_timeout_seconds: int = Field(default_factory=lambda: int(os.getenv("AOR_SHELL_COMMAND_TIMEOUT_SECONDS", "30")))
     enable_llm_intent_extraction: bool = Field(
         default_factory=lambda: os.getenv("AOR_ENABLE_LLM_INTENT_EXTRACTION", "").strip().lower() in {"1", "true", "yes", "on"}
     )
     enable_sql_llm_generation: bool = Field(
         default_factory=lambda: os.getenv("AOR_ENABLE_SQL_LLM_GENERATION", "").strip().lower() in {"1", "true", "yes", "on"}
     )
+    presentation_mode: str = Field(default_factory=lambda: os.getenv("AOR_PRESENTATION_MODE", "user"))
+    enable_llm_summary: bool = Field(
+        default_factory=lambda: os.getenv("AOR_ENABLE_LLM_SUMMARY", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+    llm_summary_max_facts: int = Field(default_factory=lambda: int(os.getenv("AOR_LLM_SUMMARY_MAX_FACTS", "50")))
+    include_internal_telemetry: bool = Field(
+        default_factory=lambda: os.getenv("AOR_INCLUDE_INTERNAL_TELEMETRY", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+    response_render_mode: str = Field(
+        default_factory=lambda: os.getenv("AOR_RESPONSE_RENDER_MODE") or os.getenv("AOR_PRESENTATION_MODE", "user")
+    )
+    show_executed_commands: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_EXECUTED_COMMANDS", True))
+    show_validation_events: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_VALIDATION_EVENTS"))
+    show_planner_events: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_PLANNER_EVENTS"))
+    show_tool_events: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_TOOL_EVENTS"))
+    show_debug_metadata: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_DEBUG_METADATA"))
+    enable_presentation_llm_summary: bool = Field(default_factory=lambda: _env_bool("AOR_ENABLE_PRESENTATION_LLM_SUMMARY"))
+    presentation_llm_max_facts: int = Field(default_factory=lambda: int(os.getenv("AOR_PRESENTATION_LLM_MAX_FACTS", "50")))
+    presentation_llm_max_input_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_PRESENTATION_LLM_MAX_INPUT_CHARS", "4000")))
+    presentation_llm_max_output_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_PRESENTATION_LLM_MAX_OUTPUT_CHARS", "1500")))
+    presentation_llm_include_row_samples: bool = Field(default_factory=lambda: _env_bool("AOR_PRESENTATION_LLM_INCLUDE_ROW_SAMPLES"))
+    presentation_llm_include_paths: bool = Field(default_factory=lambda: _env_bool("AOR_PRESENTATION_LLM_INCLUDE_PATHS"))
+    enable_insight_layer: bool = Field(default_factory=lambda: _env_bool("AOR_ENABLE_INSIGHT_LAYER", True))
+    enable_llm_insights: bool = Field(default_factory=lambda: _env_bool("AOR_ENABLE_LLM_INSIGHTS"))
+    insight_max_facts: int = Field(default_factory=lambda: int(os.getenv("AOR_INSIGHT_MAX_FACTS", "50")))
+    insight_max_input_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_INSIGHT_MAX_INPUT_CHARS", "4000")))
+    insight_max_output_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_INSIGHT_MAX_OUTPUT_CHARS", "1500")))
     max_plan_retries: int = 2
     openai_compat_enabled: bool = True
     openai_compat_model_name: str = "general-purpose-assistant"
@@ -137,8 +177,35 @@ class Settings(BaseModel):
             raise ValueError("sql_row_limit must be greater than zero.")
         if self.sql_timeout_seconds <= 0:
             raise ValueError("sql_timeout_seconds must be greater than zero.")
+        self.shell_mode = str(self.shell_mode or "read_only").strip().lower() or "read_only"
+        if self.shell_mode not in {"disabled", "read_only", "approval_required", "permissive"}:
+            raise ValueError("shell_mode must be one of: disabled, read_only, approval_required, permissive.")
+        if self.shell_max_output_chars <= 0:
+            raise ValueError("shell_max_output_chars must be greater than zero.")
+        if self.shell_command_timeout_seconds <= 0:
+            raise ValueError("shell_command_timeout_seconds must be greater than zero.")
         if self.max_plan_retries < 0:
             raise ValueError("max_plan_retries must be zero or greater.")
+        self.presentation_mode = str(self.presentation_mode or "user").strip().lower() or "user"
+        if self.presentation_mode not in {"user", "debug", "raw"}:
+            raise ValueError("presentation_mode must be one of: user, debug, raw.")
+        self.response_render_mode = str(self.response_render_mode or self.presentation_mode or "user").strip().lower() or "user"
+        if self.response_render_mode not in {"user", "debug", "raw"}:
+            raise ValueError("response_render_mode must be one of: user, debug, raw.")
+        if self.llm_summary_max_facts <= 0:
+            raise ValueError("llm_summary_max_facts must be greater than zero.")
+        if self.presentation_llm_max_facts <= 0:
+            raise ValueError("presentation_llm_max_facts must be greater than zero.")
+        if self.presentation_llm_max_input_chars <= 0:
+            raise ValueError("presentation_llm_max_input_chars must be greater than zero.")
+        if self.presentation_llm_max_output_chars <= 0:
+            raise ValueError("presentation_llm_max_output_chars must be greater than zero.")
+        if self.insight_max_facts <= 0:
+            raise ValueError("insight_max_facts must be greater than zero.")
+        if self.insight_max_input_chars <= 0:
+            raise ValueError("insight_max_input_chars must be greater than zero.")
+        if self.insight_max_output_chars <= 0:
+            raise ValueError("insight_max_output_chars must be greater than zero.")
         self.openai_compat_model_name = str(self.openai_compat_model_name or "").strip() or "general-purpose-assistant"
         self.openai_compat_spec_path = str(self.openai_compat_spec_path or "").strip() or "examples/general_purpose_assistant.yaml"
         normalized_endpoints: dict[str, str] = {}
@@ -182,11 +249,62 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         default_temperature=app_config.llm.default_temperature,
         llm_timeout_seconds=app_config.llm.timeout_seconds,
         allow_destructive_shell=app_config.runtime.allow_destructive_shell,
+        shell_mode=os.getenv("AOR_SHELL_MODE", "").strip().lower() or app_config.runtime.shell_mode,
+        shell_allow_mutation_with_approval=_env_bool(
+            "AOR_SHELL_ALLOW_MUTATION_WITH_APPROVAL", app_config.runtime.shell_allow_mutation_with_approval
+        ),
+        shell_allowed_roots_raw=os.getenv("AOR_SHELL_ALLOWED_ROOTS") or app_config.runtime.shell_allowed_roots,
+        shell_default_cwd=os.getenv("AOR_SHELL_DEFAULT_CWD") or app_config.runtime.shell_default_cwd,
+        shell_max_output_chars=int(os.getenv("AOR_SHELL_MAX_OUTPUT_CHARS", str(app_config.runtime.shell_max_output_chars))),
+        shell_command_timeout_seconds=int(
+            os.getenv("AOR_SHELL_COMMAND_TIMEOUT_SECONDS", str(app_config.runtime.shell_command_timeout_seconds))
+        ),
         enable_llm_intent_extraction=app_config.runtime.enable_llm_intent_extraction,
         enable_sql_llm_generation=(
             os.getenv("AOR_ENABLE_SQL_LLM_GENERATION", "").strip().lower() in {"1", "true", "yes", "on"}
             or app_config.runtime.enable_sql_llm_generation
         ),
+        presentation_mode=os.getenv("AOR_PRESENTATION_MODE", "").strip().lower() or app_config.runtime.presentation_mode,
+        enable_llm_summary=(
+            os.getenv("AOR_ENABLE_LLM_SUMMARY", "").strip().lower() in {"1", "true", "yes", "on"}
+            or app_config.runtime.enable_llm_summary
+        ),
+        llm_summary_max_facts=int(os.getenv("AOR_LLM_SUMMARY_MAX_FACTS", str(app_config.runtime.llm_summary_max_facts))),
+        include_internal_telemetry=(
+            os.getenv("AOR_INCLUDE_INTERNAL_TELEMETRY", "").strip().lower() in {"1", "true", "yes", "on"}
+            or app_config.runtime.include_internal_telemetry
+        ),
+        response_render_mode=(
+            os.getenv("AOR_RESPONSE_RENDER_MODE", "").strip().lower()
+            or os.getenv("AOR_PRESENTATION_MODE", "").strip().lower()
+            or app_config.runtime.response_render_mode
+            or app_config.runtime.presentation_mode
+        ),
+        show_executed_commands=_env_bool("AOR_SHOW_EXECUTED_COMMANDS", app_config.runtime.show_executed_commands),
+        show_validation_events=_env_bool("AOR_SHOW_VALIDATION_EVENTS", app_config.runtime.show_validation_events),
+        show_planner_events=_env_bool("AOR_SHOW_PLANNER_EVENTS", app_config.runtime.show_planner_events),
+        show_tool_events=_env_bool("AOR_SHOW_TOOL_EVENTS", app_config.runtime.show_tool_events),
+        show_debug_metadata=_env_bool("AOR_SHOW_DEBUG_METADATA", app_config.runtime.show_debug_metadata),
+        enable_presentation_llm_summary=_env_bool(
+            "AOR_ENABLE_PRESENTATION_LLM_SUMMARY",
+            app_config.runtime.enable_presentation_llm_summary or app_config.runtime.enable_llm_summary,
+        ),
+        presentation_llm_max_facts=int(os.getenv("AOR_PRESENTATION_LLM_MAX_FACTS", str(app_config.runtime.presentation_llm_max_facts))),
+        presentation_llm_max_input_chars=int(
+            os.getenv("AOR_PRESENTATION_LLM_MAX_INPUT_CHARS", str(app_config.runtime.presentation_llm_max_input_chars))
+        ),
+        presentation_llm_max_output_chars=int(
+            os.getenv("AOR_PRESENTATION_LLM_MAX_OUTPUT_CHARS", str(app_config.runtime.presentation_llm_max_output_chars))
+        ),
+        presentation_llm_include_row_samples=_env_bool(
+            "AOR_PRESENTATION_LLM_INCLUDE_ROW_SAMPLES", app_config.runtime.presentation_llm_include_row_samples
+        ),
+        presentation_llm_include_paths=_env_bool("AOR_PRESENTATION_LLM_INCLUDE_PATHS", app_config.runtime.presentation_llm_include_paths),
+        enable_insight_layer=_env_bool("AOR_ENABLE_INSIGHT_LAYER", app_config.runtime.enable_insight_layer),
+        enable_llm_insights=_env_bool("AOR_ENABLE_LLM_INSIGHTS", app_config.runtime.enable_llm_insights),
+        insight_max_facts=int(os.getenv("AOR_INSIGHT_MAX_FACTS", str(app_config.runtime.insight_max_facts))),
+        insight_max_input_chars=int(os.getenv("AOR_INSIGHT_MAX_INPUT_CHARS", str(app_config.runtime.insight_max_input_chars))),
+        insight_max_output_chars=int(os.getenv("AOR_INSIGHT_MAX_OUTPUT_CHARS", str(app_config.runtime.insight_max_output_chars))),
         max_plan_retries=app_config.runtime.max_plan_retries,
         sql_database_url=app_config.sql.database_url,
         sql_databases=app_config.sql.databases,

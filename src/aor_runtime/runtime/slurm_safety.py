@@ -17,7 +17,7 @@ MUTATION_KEYWORD_RE = re.compile(
 ALLOWED_JOB_STATES = {"RUNNING", "PENDING", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"}
 ALLOWED_NODE_STATES = {"idle", "allocated", "mixed", "down", "drained"}
 ALLOWED_NODE_GROUPS = {"idle", "allocated", "mixed", "down", "drained", "problematic", "all"}
-ALLOWED_GROUP_BY = {"state", "user", "partition", "node"}
+ALLOWED_GROUP_BY = {"state", "user", "partition", "node", "job_name"}
 ALLOWED_METRIC_GROUPS = {
     "cluster_summary",
     "queue_summary",
@@ -174,7 +174,7 @@ def _validate_known_fields(intent: Any) -> None:
         return
     if hasattr(intent, "state"):
         state = getattr(intent, "state", None)
-        if class_name in {"SlurmQueueIntent", "SlurmJobDetailIntent", "SlurmAccountingIntent", "SlurmJobCountIntent"}:
+        if class_name in {"SlurmQueueIntent", "SlurmJobDetailIntent", "SlurmAccountingIntent", "SlurmAccountingAggregateIntent", "SlurmJobCountIntent"}:
             normalize_job_state(state)
         elif state is not None:
             normalize_node_state(state)

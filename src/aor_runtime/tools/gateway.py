@@ -29,7 +29,7 @@ def resolve_execution_node(settings: Settings, node: str = "") -> str:
         raise ToolExecutionError(str(exc)) from exc
 
 
-def execute_gateway_command(settings: Settings, *, node: str, command: str) -> GatewayExecResult:
+def execute_gateway_command(settings: Settings, *, node: str, command: str, timeout: float | None = None) -> GatewayExecResult:
     normalized_command = str(command).strip()
     if not normalized_command:
         raise ToolExecutionError("Command is required.")
@@ -43,7 +43,7 @@ def execute_gateway_command(settings: Settings, *, node: str, command: str) -> G
         response = requests.post(
             gateway_url,
             json={"node": node, "command": normalized_command},
-            timeout=settings.gateway_timeout_seconds,
+            timeout=timeout if timeout is not None else settings.gateway_timeout_seconds,
         )
         response.raise_for_status()
         payload = response.json()
@@ -56,7 +56,7 @@ def execute_gateway_command(settings: Settings, *, node: str, command: str) -> G
         raise ToolExecutionError("Gateway response is not valid JSON.") from exc
 
 
-def stream_gateway_command(settings: Settings, *, node: str, command: str) -> Iterator[GatewayExecStreamChunk]:
+def stream_gateway_command(settings: Settings, *, node: str, command: str, timeout: float | None = None) -> Iterator[GatewayExecStreamChunk]:
     normalized_command = str(command or "").strip()
     if not normalized_command:
         raise ToolExecutionError("Command is required.")
@@ -72,7 +72,7 @@ def stream_gateway_command(settings: Settings, *, node: str, command: str) -> It
         with requests.post(
             stream_url,
             json={"node": node, "command": normalized_command},
-            timeout=settings.gateway_timeout_seconds,
+            timeout=timeout if timeout is not None else settings.gateway_timeout_seconds,
             stream=True,
         ) as response:
             response.raise_for_status()

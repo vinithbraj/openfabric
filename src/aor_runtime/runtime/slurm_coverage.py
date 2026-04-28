@@ -109,6 +109,15 @@ def _single_intent_covers_request(request: SlurmRequest, intent: Any) -> bool:
             return False
         return _job_filters_match(filters, intent) and _time_filters_match(filters, intent) and _duration_filters_match(filters, intent)
 
+    if request.kind == "accounting_aggregate":
+        if name != "SlurmAccountingAggregateIntent":
+            return False
+        return (
+            _job_filters_match(filters, intent)
+            and _time_filters_match(filters, intent)
+            and _aggregate_filters_match(filters, intent)
+        )
+
     if request.kind == "node_status":
         if name != "SlurmNodeStatusIntent":
             return False
@@ -139,10 +148,25 @@ def _single_intent_covers_request(request: SlurmRequest, intent: Any) -> bool:
 
 
 def _constraint_is_covered(constraint: SlurmSemanticConstraint, intents: list[Any]) -> bool:
+    if constraint.kind == "source":
+        return any(_source_for_intent(intent) == constraint.value for intent in intents)
+    if constraint.kind == "metric":
+        return any(_attr(intent, "metric") == constraint.value for intent in intents)
     if constraint.kind == "output_mode":
         return any(str(_attr(intent, "output_mode") or "").lower() == str(constraint.value).lower() for intent in intents)
     if constraint.kind == "job_state":
         return any(str(_attr(intent, "state") or "").upper() == str(constraint.value).upper() for intent in intents)
+    if constraint.kind == "job_state_all":
+        return any((bool(_attr(intent, "include_all_states")) or _attr(intent, "state") in (None, "")) and _attr(intent, "state") in (None, "") for intent in intents)
+    if constraint.kind == "job_state_negation":
+        return any((bool(_attr(intent, "include_all_states")) or _attr(intent, "state") in (None, "")) and _attr(intent, "state") in (None, "") for intent in intents)
+    if constraint.kind == "job_state_default":
+        return any(
+            bool(_attr(intent, "default_state_applied"))
+            and not bool(_attr(intent, "include_all_states"))
+            and str(_attr(intent, "state") or "").upper() == str(constraint.value).upper()
+            for intent in intents
+        )
     if constraint.kind == "job_user":
         return any(_attr(intent, "user") == constraint.value for intent in intents)
     if constraint.kind in {"job_partition", "partition_filter"}:
@@ -156,7 +180,12 @@ def _constraint_is_covered(constraint: SlurmSemanticConstraint, intents: list[An
     if constraint.kind == "time_window":
         return any(_attr(intent, "start") or _attr(intent, "end") for intent in intents)
     if constraint.kind == "duration_comparison":
-        return any(_attr(intent, "min_elapsed_seconds") == constraint.value or _attr(intent, "max_elapsed_seconds") == constraint.value for intent in intents)
+        return any(
+            _attr(intent, "min_elapsed_seconds") == constraint.value
+            or _attr(intent, "max_elapsed_seconds") == constraint.value
+            or _attr(intent, "threshold_seconds") == constraint.value
+            for intent in intents
+        )
     if constraint.kind == "group_by":
         return any(_attr(intent, "group_by") == constraint.value or _metric_group(intent) in {"queue_summary", "accounting_summary"} for intent in intents)
     if constraint.kind == "limit":
@@ -200,12 +229,44 @@ def _duration_filters_match(filters: dict[str, Any], intent: Any) -> bool:
     return True
 
 
+def _aggregate_filters_match(filters: dict[str, Any], intent: Any) -> bool:
+    for field in ("metric", "threshold_seconds"):
+        if field in filters and _attr(intent, field) != filters[field]:
+            return False
+    if bool(filters.get("include_all_states")):
+        if not bool(_attr(intent, "include_all_states")) or _attr(intent, "state") not in (None, ""):
+            return False
+    if bool(filters.get("default_state_applied")):
+        if not bool(_attr(intent, "default_state_applied")) or str(_attr(intent, "state") or "").upper() != "COMPLETED":
+            return False
+    return True
+
+
 def _metric_group(intent: Any) -> str | None:
     return _attr(intent, "metric_group")
 
 
 def _attr(intent: Any, field: str) -> Any:
     return getattr(intent, field, None)
+
+
+def _source_for_intent(intent: Any) -> str:
+    name = type(intent).__name__
+    if name == "SlurmAccountingAggregateIntent":
+        return "sacct"
+    if name == "SlurmAccountingIntent":
+        return "sacct"
+    if name == "SlurmJobCountIntent":
+        return str(_attr(intent, "source") or "squeue")
+    if name == "SlurmQueueIntent":
+        return "squeue"
+    if name in {"SlurmNodeStatusIntent", "SlurmPartitionSummaryIntent", "SlurmMetricsIntent"}:
+        return "sinfo"
+    if name in {"SlurmJobDetailIntent", "SlurmNodeDetailIntent"}:
+        return "scontrol"
+    if name == "SlurmDBDHealthIntent":
+        return "sacctmgr"
+    return "unknown"
 
 
 def _coverage_reason(missing_requests: list[SlurmRequest], missing_constraints: list[SlurmSemanticConstraint]) -> str:

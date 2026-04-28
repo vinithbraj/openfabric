@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
+from aor_runtime.runtime.slurm_aggregations import aggregate_slurm_accounting_jobs
 from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
 from aor_runtime.tools.gateway import GatewayExecStreamChunk, execute_gateway_command, resolve_execution_node, stream_gateway_command
 
@@ -25,6 +26,47 @@ SQUEUE_FORMAT = "%i|%u|%T|%P|%j|%M|%D|%R"
 SINFO_NODE_FORMAT = "%N|%t|%P|%c|%m|%G"
 SINFO_PARTITION_FORMAT = "%P|%a|%l|%D|%t|%C|%G"
 SACCT_FORMAT = "JobID,User,State,Partition,JobName,Elapsed,AllocCPUS,ReqMem,Submit,Start,End,ExitCode"
+ACCOUNTING_AGGREGATE_METRICS = {
+    "average_elapsed",
+    "min_elapsed",
+    "max_elapsed",
+    "sum_elapsed",
+    "count",
+    "count_longer_than",
+    "runtime_summary",
+}
+ACCOUNTING_AGGREGATE_GROUP_BY = {"partition", "user", "state", "job_name", None}
+
+
+class _AggregateIntent:
+    def __init__(
+        self,
+        *,
+        user: str | None,
+        state: str | None,
+        partition: str | None,
+        start: str | None,
+        end: str | None,
+        metric: str,
+        group_by: str | None,
+        threshold_seconds: int | None,
+        time_window_label: str | None,
+        include_all_states: bool = False,
+        excluded_states: list[str] | None = None,
+        default_state_applied: bool = False,
+    ) -> None:
+        self.user = user
+        self.state = state
+        self.include_all_states = include_all_states
+        self.excluded_states = list(excluded_states or [])
+        self.default_state_applied = default_state_applied
+        self.partition = partition
+        self.start = start
+        self.end = end
+        self.metric = metric
+        self.group_by = group_by
+        self.threshold_seconds = threshold_seconds
+        self.time_window_label = time_window_label
 
 
 def slurm_queue(
@@ -33,12 +75,14 @@ def slurm_queue(
     user: str | None = None,
     state: str | None = None,
     partition: str | None = None,
+    group_by: str | None = None,
     limit: int | None = 100,
     gateway_node: str | None = None,
 ) -> dict[str, Any]:
     normalized_user = _validate_safe_token(user, field_name="user")
     normalized_partition = _validate_safe_token(partition, field_name="partition")
     normalized_state = _validate_safe_token(state, field_name="state")
+    normalized_group_by = _validate_safe_token(group_by, field_name="group_by")
     normalized_limit = _validate_limit(limit)
     result = _run_command(
         settings,
@@ -51,6 +95,7 @@ def slurm_queue(
         user=normalized_user,
         state=normalized_state,
         partition=normalized_partition,
+        group_by=normalized_group_by,
         limit=normalized_limit,
     )
 
@@ -128,6 +173,7 @@ def slurm_accounting(
     end: str | None = None,
     min_elapsed_seconds: int | None = None,
     max_elapsed_seconds: int | None = None,
+    group_by: str | None = None,
     limit: int | None = 100,
     gateway_node: str | None = None,
 ) -> dict[str, Any]:
@@ -136,6 +182,7 @@ def slurm_accounting(
     normalized_partition = _validate_safe_token(partition, field_name="partition")
     normalized_start = _validate_time_value(start, field_name="start")
     normalized_end = _validate_time_value(end, field_name="end")
+    normalized_group_by = _validate_safe_token(group_by, field_name="group_by")
     normalized_limit = _validate_limit(limit)
 
     command = ["sacct", "-X", "-P", f"--format={SACCT_FORMAT}"]
@@ -165,8 +212,93 @@ def slurm_accounting(
         end=normalized_end,
         min_elapsed_seconds=min_elapsed_seconds,
         max_elapsed_seconds=max_elapsed_seconds,
+        group_by=normalized_group_by,
         limit=normalized_limit,
     )
+
+
+def slurm_accounting_aggregate(
+    settings: Settings,
+    *,
+    user: str | None = None,
+    state: str | None = None,
+    include_all_states: bool = False,
+    excluded_states: list[str] | None = None,
+    default_state_applied: bool = False,
+    partition: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    metric: str = "average_elapsed",
+    group_by: str | None = None,
+    threshold_seconds: int | None = None,
+    limit: int | None = 1000,
+    gateway_node: str | None = None,
+    time_window_label: str | None = None,
+) -> dict[str, Any]:
+    normalized_metric = _validate_aggregate_metric(metric)
+    normalized_group_by = _validate_aggregate_group_by(group_by)
+    normalized_threshold = _validate_nonnegative_int(threshold_seconds, field_name="threshold_seconds")
+    normalized_include_all_states = bool(include_all_states)
+    normalized_excluded_states = [
+        state_value
+        for state_value in (_validate_safe_token(state, field_name="excluded_state") for state in list(excluded_states or []))
+        if state_value
+    ]
+    normalized_state = None if normalized_include_all_states else state
+    accounting = slurm_accounting(
+        settings,
+        user=user,
+        state=normalized_state,
+        partition=partition,
+        start=start,
+        end=end,
+        min_elapsed_seconds=None,
+        max_elapsed_seconds=None,
+        group_by=None,
+        limit=limit,
+        gateway_node=gateway_node,
+    )
+    intent = _AggregateIntent(
+        user=_validate_safe_token(user, field_name="user"),
+        state=_validate_safe_token(normalized_state, field_name="state"),
+        include_all_states=normalized_include_all_states,
+        excluded_states=normalized_excluded_states,
+        default_state_applied=bool(default_state_applied and not normalized_include_all_states),
+        partition=_validate_safe_token(partition, field_name="partition"),
+        start=_validate_time_value(start, field_name="start"),
+        end=_validate_time_value(end, field_name="end"),
+        metric=normalized_metric,
+        group_by=normalized_group_by,
+        threshold_seconds=normalized_threshold,
+        time_window_label=time_window_label,
+    )
+    aggregate = aggregate_slurm_accounting_jobs(list(accounting.get("jobs") or []), intent)
+    warnings = list(aggregate.get("warnings") or [])
+    if accounting.get("truncated"):
+        warnings.append(
+            f"Aggregation used the first {accounting.get('returned_count')} of {accounting.get('total_count')} matching accounting rows."
+        )
+    aggregate.update(
+        {
+            "value_seconds": aggregate.get("value_seconds"),
+            "value_human": aggregate.get("value_human"),
+            "count": aggregate.get("count"),
+            "count_longer_than": aggregate.get("count_longer_than"),
+            "threshold_human": aggregate.get("threshold_human"),
+            "filters": dict(accounting.get("filters") or {}),
+            "source": "sacct",
+            "include_all_states": normalized_include_all_states,
+            "excluded_states": normalized_excluded_states,
+            "default_state_applied": bool(default_state_applied and not normalized_include_all_states),
+            "state": _validate_safe_token(normalized_state, field_name="state"),
+            "total_count": accounting.get("total_count"),
+            "returned_count": accounting.get("returned_count"),
+            "limit": accounting.get("limit"),
+            "truncated": accounting.get("truncated"),
+            "warnings": warnings,
+        }
+    )
+    return aggregate
 
 
 def slurm_metrics(
@@ -194,20 +326,23 @@ def slurm_metrics(
         queue = slurm_queue(settings, limit=None, gateway_node=gateway_node)
         nodes = slurm_nodes(settings, gateway_node=gateway_node)
         gpu_summary = summarize_gpu_gres(nodes["nodes"])
-        problematic_nodes = [node for node in nodes["nodes"] if is_problematic_node_state(str(node.get("state", "")))]
+        node_summary = summarize_slurm_nodes(nodes["nodes"], unique_by_name=True)
+        problematic_summary = summarize_problematic_nodes(nodes["nodes"], unique_by_name=True)
         payload = {
             "queue_count": int(queue["count"]),
             "running_jobs": summarize_jobs_by_state(queue["jobs"]).get("RUNNING", 0),
             "pending_jobs": summarize_jobs_by_state(queue["jobs"]).get("PENDING", 0),
-            "node_count": int(nodes["count"]),
-            "idle_nodes": int(nodes["summary"]["idle"]),
-            "allocated_nodes": int(nodes["summary"]["allocated"]),
-            "mixed_nodes": int(nodes["summary"]["mixed"]),
-            "down_nodes": int(nodes["summary"]["down"]),
-            "drained_nodes": int(nodes["summary"]["drained"]),
-            "problematic_nodes": len(problematic_nodes),
+            "node_count": int(node_summary["unique_count"]),
+            "partition_node_rows": int(node_summary["partition_row_count"]),
+            "idle_nodes": int(node_summary["summary"]["idle"]),
+            "allocated_nodes": int(node_summary["summary"]["allocated"]),
+            "mixed_nodes": int(node_summary["summary"]["mixed"]),
+            "down_nodes": int(node_summary["summary"]["down"]),
+            "drained_nodes": int(node_summary["summary"]["drained"]),
+            "problematic_nodes": int(problematic_summary["unique_count"]),
+            "problematic_partition_rows": int(problematic_summary["partition_row_count"]),
             "gpu_available": bool(gpu_summary["available"]),
-            "total_gpus": int(gpu_summary["total_gpus"]),
+            "total_gpus": gpu_summary["total_gpus"],
         }
     elif metric_group == "queue_summary":
         queue = slurm_queue(settings, limit=None, gateway_node=gateway_node)
@@ -222,17 +357,22 @@ def slurm_metrics(
         }
     elif metric_group == "node_summary":
         nodes = slurm_nodes(settings, gateway_node=gateway_node)
+        node_summary = summarize_slurm_nodes(nodes["nodes"], unique_by_name=True)
         payload = {
-            "node_count": int(nodes["count"]),
-            "by_state": dict(nodes["summary"]),
+            "node_count": int(node_summary["unique_count"]),
+            "partition_node_rows": int(node_summary["partition_row_count"]),
+            "by_state": dict(node_summary["summary"]),
             "by_partition": _summarize_field(nodes["nodes"], "partition"),
         }
     elif metric_group == "problematic_nodes":
         nodes = slurm_nodes(settings, state_group="problematic", gateway_node=gateway_node)
+        problematic_summary = summarize_problematic_nodes(nodes["nodes"], unique_by_name=True)
         payload = {
-            "count": int(nodes["count"]),
+            "count": int(problematic_summary["unique_count"]),
+            "partition_row_count": int(problematic_summary["partition_row_count"]),
             "nodes": nodes["nodes"],
-            "by_state": dict(nodes["summary"]),
+            "unique_nodes": problematic_summary["nodes"],
+            "by_state": dict(problematic_summary["summary"]),
         }
     elif metric_group == "partition_summary":
         partitions = slurm_partitions(settings, gateway_node=gateway_node)
@@ -360,6 +500,72 @@ def summarize_node_states(nodes: list[dict[str, str]]) -> dict[str, int]:
     return summary
 
 
+def dedupe_slurm_nodes_by_name(nodes: list[dict[str, str]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in nodes:
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        entry = grouped.setdefault(
+            name,
+            {
+                "name": name,
+                "states_seen": [],
+                "partitions": [],
+                "gres_values": [],
+                "cpus": row.get("cpus", ""),
+                "memory": row.get("memory", ""),
+            },
+        )
+        state = str(row.get("state", "")).strip()
+        partition = str(row.get("partition", "")).strip()
+        gres = str(row.get("gres", "")).strip()
+        if state and state not in entry["states_seen"]:
+            entry["states_seen"].append(state)
+        if partition and partition not in entry["partitions"]:
+            entry["partitions"].append(partition)
+        if gres and gres not in entry["gres_values"]:
+            entry["gres_values"].append(gres)
+    normalized = []
+    for entry in grouped.values():
+        states = entry.pop("states_seen")
+        partitions = entry.pop("partitions")
+        gres_values = entry.pop("gres_values")
+        entry["state"] = ",".join(states)
+        entry["states_seen"] = states
+        entry["partition"] = ",".join(partitions)
+        entry["partitions"] = partitions
+        entry["gres"] = "; ".join(gres_values)
+        entry["gres_values"] = gres_values
+        normalized.append(entry)
+    return sorted(normalized, key=lambda item: str(item.get("name", "")))
+
+
+def summarize_slurm_nodes(nodes: list[dict[str, str]], unique_by_name: bool = True) -> dict[str, Any]:
+    selected = dedupe_slurm_nodes_by_name(nodes) if unique_by_name else list(nodes)
+    state_rows: list[dict[str, str]] = []
+    for node in selected:
+        states = node.get("states_seen") if isinstance(node, dict) else None
+        if isinstance(states, list) and states:
+            state = str(states[0])
+        else:
+            state = str(node.get("state", "")) if isinstance(node, dict) else ""
+        state_rows.append({"state": state})
+    return {
+        "nodes": selected,
+        "unique_count": len(dedupe_slurm_nodes_by_name(nodes)),
+        "partition_row_count": len(nodes),
+        "summary": summarize_node_states(state_rows),
+    }
+
+
+def summarize_problematic_nodes(nodes: list[dict[str, str]], unique_by_name: bool = True) -> dict[str, Any]:
+    problematic_rows = [node for node in nodes if is_problematic_node_state(str(node.get("state", "")))]
+    summary = summarize_slurm_nodes(problematic_rows, unique_by_name=unique_by_name)
+    summary["partition_rows"] = problematic_rows
+    return summary
+
+
 def parse_sinfo_partitions_output(text: str) -> list[dict[str, str]]:
     partitions: list[dict[str, str]] = []
     for line in text.splitlines():
@@ -384,8 +590,8 @@ def parse_sinfo_partitions_output(text: str) -> list[dict[str, str]]:
     return partitions
 
 
-def parse_sacct_output(text: str) -> list[dict[str, str]]:
-    jobs: list[dict[str, str]] = []
+def parse_sacct_output(text: str) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -404,6 +610,7 @@ def parse_sacct_output(text: str) -> list[dict[str, str]]:
                 "partition": _normalize_partition_name(partition),
                 "name": name,
                 "elapsed": elapsed,
+                "elapsed_seconds": parse_elapsed_to_seconds(elapsed),
                 "alloc_cpus": alloc_cpus,
                 "req_mem": req_mem,
                 "submit": submit,
@@ -434,27 +641,44 @@ def summarize_jobs_by_state(jobs: list[dict[str, str]]) -> dict[str, int]:
 def summarize_gpu_gres(nodes: list[dict[str, str]]) -> dict[str, Any]:
     nodes_with_gpu = 0
     total_gpus = 0
+    unknown_gpu_count = False
     by_gres: Counter[str] = Counter()
+    gpu_memory_gres: Counter[str] = Counter()
     for node in nodes:
         gres = str(node.get("gres", "") or "")
         if not gres or gres in {"(null)", "N/A", "none"}:
             continue
         gpu_count = 0
+        node_has_gpu = False
         for token in [part.strip() for part in gres.split(",") if part.strip()]:
             cleaned = token.split("(")[0]
-            if "gpu" not in cleaned.lower():
+            lowered = cleaned.lower()
+            if lowered.startswith("gpu_mem:"):
+                gpu_memory_gres[cleaned] += 1
+                continue
+            if not lowered.startswith("gpu"):
                 continue
             by_gres[cleaned] += 1
-            gpu_count += _extract_gpu_count(cleaned)
-        if gpu_count > 0:
+            count = _extract_gpu_count(cleaned)
+            if count is None:
+                unknown_gpu_count = True
+                node_has_gpu = True
+                continue
+            if count > 0:
+                node_has_gpu = True
+                gpu_count += count
+        if node_has_gpu:
             nodes_with_gpu += 1
             total_gpus += gpu_count
-    return {
-        "available": total_gpus > 0,
+    summary = {
+        "available": total_gpus > 0 or unknown_gpu_count,
         "nodes_with_gpu": nodes_with_gpu,
-        "total_gpus": total_gpus,
+        "total_gpus": "Unknown" if unknown_gpu_count else total_gpus,
         "by_gres": dict(sorted(by_gres.items())),
     }
+    if gpu_memory_gres:
+        summary["gpu_memory_gres"] = dict(sorted(gpu_memory_gres.items()))
+    return summary
 
 
 def parse_elapsed_to_seconds(value: str) -> int | None:
@@ -494,12 +718,20 @@ class SlurmQueueTool(BaseTool):
         user: str | None = None
         state: str | None = None
         partition: str | None = None
+        group_by: str | None = None
         limit: int | None = 100
         gateway_node: str | None = None
 
     class ToolResult(ToolResultModel):
-        jobs: list[dict[str, str]]
+        jobs: list[dict[str, Any]]
         count: int
+        total_count: int
+        returned_count: int
+        limit: int | None = None
+        truncated: bool = False
+        filters: dict[str, Any]
+        group_by: str | None = None
+        grouped: dict[str, int] | None = None
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -514,6 +746,7 @@ class SlurmQueueTool(BaseTool):
                     "user": {"type": ["string", "null"]},
                     "state": {"type": ["string", "null"]},
                     "partition": {"type": ["string", "null"]},
+                    "group_by": {"type": ["string", "null"], "enum": ["state", "user", "partition", "node", None]},
                     "limit": {"type": ["integer", "null"], "minimum": 1},
                     "gateway_node": {"type": ["string", "null"]},
                 },
@@ -527,6 +760,7 @@ class SlurmQueueTool(BaseTool):
                 user=arguments.user,
                 state=arguments.state,
                 partition=arguments.partition,
+                group_by=arguments.group_by,
                 limit=arguments.limit,
                 gateway_node=arguments.gateway_node,
             )
@@ -558,6 +792,7 @@ class SlurmQueueTool(BaseTool):
             user=arguments.user,
             state=arguments.state,
             partition=arguments.partition,
+            group_by=arguments.group_by,
             limit=arguments.limit,
             gateway_node=arguments.gateway_node,
         ) if _is_fixture_mode() else _queue_result_from_stdout(
@@ -565,6 +800,7 @@ class SlurmQueueTool(BaseTool):
             user=_validate_safe_token(arguments.user, field_name="user"),
             state=_validate_safe_token(arguments.state, field_name="state"),
             partition=_validate_safe_token(arguments.partition, field_name="partition"),
+            group_by=_validate_safe_token(arguments.group_by, field_name="group_by"),
             limit=_validate_limit(arguments.limit),
         )
 
@@ -639,7 +875,12 @@ class SlurmNodesTool(BaseTool):
     class ToolResult(ToolResultModel):
         nodes: list[dict[str, str]]
         count: int
+        partition_row_count: int
+        unique_count: int
         summary: dict[str, int]
+        unique_summary: dict[str, Any]
+        problematic_summary: dict[str, Any]
+        filters: dict[str, Any]
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -829,12 +1070,20 @@ class SlurmAccountingTool(BaseTool):
         end: str | None = None
         min_elapsed_seconds: int | None = None
         max_elapsed_seconds: int | None = None
+        group_by: str | None = None
         limit: int | None = 100
         gateway_node: str | None = None
 
     class ToolResult(ToolResultModel):
-        jobs: list[dict[str, str]]
+        jobs: list[dict[str, Any]]
         count: int
+        total_count: int
+        returned_count: int
+        limit: int | None = None
+        truncated: bool = False
+        filters: dict[str, Any]
+        group_by: str | None = None
+        grouped: dict[str, int] | None = None
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -853,6 +1102,7 @@ class SlurmAccountingTool(BaseTool):
                     "end": {"type": ["string", "null"]},
                     "min_elapsed_seconds": {"type": ["integer", "null"], "minimum": 0},
                     "max_elapsed_seconds": {"type": ["integer", "null"], "minimum": 0},
+                    "group_by": {"type": ["string", "null"], "enum": ["state", "user", "partition", "node", "job_name", None]},
                     "limit": {"type": ["integer", "null"], "minimum": 1},
                     "gateway_node": {"type": ["string", "null"]},
                 },
@@ -870,6 +1120,7 @@ class SlurmAccountingTool(BaseTool):
                 end=arguments.end,
                 min_elapsed_seconds=arguments.min_elapsed_seconds,
                 max_elapsed_seconds=arguments.max_elapsed_seconds,
+                group_by=arguments.group_by,
                 limit=arguments.limit,
                 gateway_node=arguments.gateway_node,
             )
@@ -906,8 +1157,194 @@ class SlurmAccountingTool(BaseTool):
             end=_validate_time_value(arguments.end, field_name="end"),
             min_elapsed_seconds=arguments.min_elapsed_seconds,
             max_elapsed_seconds=arguments.max_elapsed_seconds,
+            group_by=_validate_safe_token(arguments.group_by, field_name="group_by"),
             limit=_validate_limit(arguments.limit),
         )
+
+
+class SlurmAccountingAggregateTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        user: str | None = None
+        state: str | None = None
+        include_all_states: bool = False
+        excluded_states: list[str] = []
+        default_state_applied: bool = False
+        partition: str | None = None
+        start: str | None = None
+        end: str | None = None
+        metric: str = "average_elapsed"
+        group_by: str | None = None
+        threshold_seconds: int | None = None
+        limit: int | None = 1000
+        gateway_node: str | None = None
+        time_window_label: str | None = None
+
+    class ToolResult(ToolResultModel):
+        result_kind: str
+        metric: str
+        source: str | None = None
+        partition: str | None = None
+        user: str | None = None
+        state: str | None = None
+        include_all_states: bool = False
+        excluded_states: list[str] = []
+        default_state_applied: bool = False
+        start: str | None = None
+        end: str | None = None
+        time_window_label: str | None = None
+        group_by: str | None = None
+        threshold_seconds: int | None = None
+        job_count: int
+        average_elapsed_seconds: float | None = None
+        average_elapsed_human: str | None = None
+        min_elapsed_seconds: int | None = None
+        min_elapsed_human: str | None = None
+        max_elapsed_seconds: int | None = None
+        max_elapsed_human: str | None = None
+        sum_elapsed_seconds: int | None = None
+        sum_elapsed_human: str | None = None
+        value_seconds: float | int | None = None
+        value_human: str | None = None
+        count: int | None = None
+        count_longer_than: int | None = None
+        threshold_human: str | None = None
+        groups: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        filters: dict[str, Any] = {}
+        total_count: int | None = None
+        returned_count: int | None = None
+        limit: int | None = None
+        truncated: bool = False
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
+        self.spec = ToolSpec(
+            name="slurm.accounting_aggregate",
+            description="Compute read-only SLURM accounting runtime aggregates from sacct.",
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "user": {"type": ["string", "null"]},
+                    "state": {"type": ["string", "null"]},
+                    "include_all_states": {"type": "boolean"},
+                    "excluded_states": {"type": "array", "items": {"type": "string"}},
+                    "default_state_applied": {"type": "boolean"},
+                    "partition": {"type": ["string", "null"]},
+                    "start": {"type": ["string", "null"]},
+                    "end": {"type": ["string", "null"]},
+                    "metric": {
+                        "type": "string",
+                        "enum": sorted(ACCOUNTING_AGGREGATE_METRICS),
+                    },
+                    "group_by": {"type": ["string", "null"], "enum": ["partition", "user", "state", "job_name", None]},
+                    "threshold_seconds": {"type": ["integer", "null"], "minimum": 0},
+                    "limit": {"type": ["integer", "null"], "minimum": 1},
+                    "gateway_node": {"type": ["string", "null"]},
+                    "time_window_label": {"type": ["string", "null"]},
+                },
+            },
+        )
+
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        return self.ToolResult.model_validate(
+            slurm_accounting_aggregate(
+                self.settings,
+                user=arguments.user,
+                state=arguments.state,
+                include_all_states=arguments.include_all_states,
+                excluded_states=arguments.excluded_states,
+                default_state_applied=arguments.default_state_applied,
+                partition=arguments.partition,
+                start=arguments.start,
+                end=arguments.end,
+                metric=arguments.metric,
+                group_by=arguments.group_by,
+                threshold_seconds=arguments.threshold_seconds,
+                limit=arguments.limit,
+                gateway_node=arguments.gateway_node,
+                time_window_label=arguments.time_window_label,
+            )
+        )
+
+    def stream(self, arguments: ToolArgs) -> Iterator[dict[str, Any]]:
+        command = _accounting_argv(arguments)
+        return _stream_command(
+            self.settings,
+            command,
+            gateway_node=arguments.gateway_node,
+            fixture_name="sacct.txt",
+        )
+
+    def preview_command(self, arguments: ToolArgs) -> str:
+        return _join_argv(_accounting_argv(arguments))
+
+    def build_stream_result(
+        self,
+        arguments: ToolArgs,
+        *,
+        stdout: str,
+        stderr: str,
+        returncode: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        _raise_for_returncode(returncode, stderr, "sacct")
+        normalized_include_all_states = bool(arguments.include_all_states)
+        normalized_state = None if normalized_include_all_states else _validate_safe_token(arguments.state, field_name="state")
+        accounting = _accounting_result_from_stdout(
+            stdout,
+            user=_validate_safe_token(arguments.user, field_name="user"),
+            state=normalized_state,
+            partition=_validate_safe_token(arguments.partition, field_name="partition"),
+            start=_validate_time_value(arguments.start, field_name="start"),
+            end=_validate_time_value(arguments.end, field_name="end"),
+            min_elapsed_seconds=None,
+            max_elapsed_seconds=None,
+            group_by=None,
+            limit=_validate_limit(arguments.limit),
+        )
+        intent = _AggregateIntent(
+            user=_validate_safe_token(arguments.user, field_name="user"),
+            state=normalized_state,
+            include_all_states=normalized_include_all_states,
+            excluded_states=list(arguments.excluded_states or []),
+            default_state_applied=bool(arguments.default_state_applied and not normalized_include_all_states),
+            partition=_validate_safe_token(arguments.partition, field_name="partition"),
+            start=_validate_time_value(arguments.start, field_name="start"),
+            end=_validate_time_value(arguments.end, field_name="end"),
+            metric=_validate_aggregate_metric(arguments.metric),
+            group_by=_validate_aggregate_group_by(arguments.group_by),
+            threshold_seconds=_validate_nonnegative_int(arguments.threshold_seconds, field_name="threshold_seconds"),
+            time_window_label=arguments.time_window_label,
+        )
+        aggregate = aggregate_slurm_accounting_jobs(list(accounting.get("jobs") or []), intent)
+        warnings = list(aggregate.get("warnings") or [])
+        if accounting.get("truncated"):
+            warnings.append(
+                f"Aggregation used the first {accounting.get('returned_count')} of {accounting.get('total_count')} matching accounting rows."
+            )
+        aggregate.update(
+        {
+            "value_seconds": aggregate.get("value_seconds"),
+            "value_human": aggregate.get("value_human"),
+            "count": aggregate.get("count"),
+            "count_longer_than": aggregate.get("count_longer_than"),
+            "threshold_human": aggregate.get("threshold_human"),
+                "filters": dict(accounting.get("filters") or {}),
+                "source": "sacct",
+                "include_all_states": normalized_include_all_states,
+                "excluded_states": list(arguments.excluded_states or []),
+                "default_state_applied": bool(arguments.default_state_applied and not normalized_include_all_states),
+                "state": normalized_state,
+                "total_count": accounting.get("total_count"),
+                "returned_count": accounting.get("returned_count"),
+                "limit": accounting.get("limit"),
+                "truncated": accounting.get("truncated"),
+                "warnings": warnings,
+            }
+        )
+        return aggregate
 
 
 class SlurmMetricsTool(BaseTool):
@@ -1014,13 +1451,28 @@ def _queue_result_from_stdout(
     user: str | None,
     state: str | None,
     partition: str | None,
+    group_by: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
     jobs = parse_squeue_output(stdout)
     filtered = _filter_jobs(jobs, user=user, state=state, partition=partition)
+    total_count = len(filtered)
     if limit is not None:
         filtered = filtered[:limit]
-    return {"jobs": filtered, "count": len(filtered)}
+    result: dict[str, Any] = {
+        "jobs": filtered,
+        "count": total_count,
+        "total_count": total_count,
+        "returned_count": len(filtered),
+        "limit": limit,
+        "truncated": len(filtered) < total_count,
+        "filters": {"user": user, "state": state, "partition": partition},
+        "group_by": group_by,
+        "grouped": None,
+    }
+    if group_by:
+        result["grouped"] = _summarize_field(filtered, group_by)
+    return result
 
 
 def _job_detail_result_from_stdout(stdout: str, *, job_id: str) -> dict[str, Any]:
@@ -1044,7 +1496,18 @@ def _nodes_result_from_stdout(
 ) -> dict[str, Any]:
     nodes = parse_sinfo_nodes_output(stdout)
     filtered = _filter_nodes(nodes, node=node, partition=partition, state=state, state_group=state_group, gpu_only=gpu_only)
-    return {"nodes": filtered, "count": len(filtered), "summary": summarize_node_states(filtered)}
+    unique_summary = summarize_slurm_nodes(filtered, unique_by_name=True)
+    problematic_summary = summarize_problematic_nodes(filtered, unique_by_name=True)
+    return {
+        "nodes": filtered,
+        "count": len(filtered),
+        "partition_row_count": len(filtered),
+        "unique_count": int(unique_summary["unique_count"]),
+        "summary": summarize_node_states(filtered),
+        "unique_summary": unique_summary,
+        "problematic_summary": problematic_summary,
+        "filters": {"node": node, "partition": partition, "state": state, "state_group": state_group, "gpu_only": gpu_only},
+    }
 
 
 def _node_detail_result_from_stdout(stdout: str, *, node: str) -> dict[str, Any]:
@@ -1074,6 +1537,7 @@ def _accounting_result_from_stdout(
     end: str | None,
     min_elapsed_seconds: int | None = None,
     max_elapsed_seconds: int | None = None,
+    group_by: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
     jobs = parse_sacct_output(stdout)
@@ -1084,14 +1548,37 @@ def _accounting_result_from_stdout(
         min_elapsed_seconds=min_elapsed_seconds,
         max_elapsed_seconds=max_elapsed_seconds,
     )
+    total_count = len(filtered)
     if limit is not None:
         filtered = filtered[:limit]
-    return {"jobs": filtered, "count": len(filtered)}
+    result: dict[str, Any] = {
+        "jobs": filtered,
+        "count": total_count,
+        "total_count": total_count,
+        "returned_count": len(filtered),
+        "limit": limit,
+        "truncated": len(filtered) < total_count,
+        "filters": {
+            "user": user,
+            "state": state,
+            "partition": partition,
+            "start": start,
+            "end": end,
+            "min_elapsed_seconds": min_elapsed_seconds,
+            "max_elapsed_seconds": max_elapsed_seconds,
+        },
+        "group_by": group_by,
+        "grouped": None,
+    }
+    if group_by:
+        result["grouped"] = _summarize_field(filtered, group_by)
+    return result
 
 
 def _accounting_argv(arguments: Any) -> list[str]:
     normalized_user = _validate_safe_token(getattr(arguments, "user", None), field_name="user")
-    normalized_state = _validate_safe_token(getattr(arguments, "state", None), field_name="state")
+    include_all_states = bool(getattr(arguments, "include_all_states", False))
+    normalized_state = None if include_all_states else _validate_safe_token(getattr(arguments, "state", None), field_name="state")
     normalized_partition = _validate_safe_token(getattr(arguments, "partition", None), field_name="partition")
     normalized_start = _validate_time_value(getattr(arguments, "start", None), field_name="start")
     normalized_end = _validate_time_value(getattr(arguments, "end", None), field_name="end")
@@ -1222,14 +1709,14 @@ def _raise_for_returncode(returncode: int, stderr: str, binary: str) -> None:
 
 
 def _filter_jobs(
-    jobs: list[dict[str, str]],
+    jobs: list[dict[str, Any]],
     *,
     user: str | None = None,
     state: str | None = None,
     partition: str | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     normalized_state = _canonical_job_state(state) if state else None
-    filtered: list[dict[str, str]] = []
+    filtered: list[dict[str, Any]] = []
     for job in jobs:
         if user and str(job.get("user", "")) != user:
             continue
@@ -1273,12 +1760,12 @@ def _filter_nodes(
     return filtered
 
 
-def _filter_jobs_by_time(jobs: list[dict[str, str]], *, start: str | None, end: str | None) -> list[dict[str, str]]:
+def _filter_jobs_by_time(jobs: list[dict[str, Any]], *, start: str | None, end: str | None) -> list[dict[str, Any]]:
     if not start and not end:
         return jobs
     start_dt = _parse_time_value(start) if start else None
     end_dt = _parse_time_value(end) if end else None
-    filtered: list[dict[str, str]] = []
+    filtered: list[dict[str, Any]] = []
     for job in jobs:
         candidate = _parse_time_value(str(job.get("submit", ""))) or _parse_time_value(str(job.get("start", "")))
         if candidate is None:
@@ -1293,16 +1780,18 @@ def _filter_jobs_by_time(jobs: list[dict[str, str]], *, start: str | None, end: 
 
 
 def _filter_jobs_by_elapsed(
-    jobs: list[dict[str, str]],
+    jobs: list[dict[str, Any]],
     *,
     min_elapsed_seconds: int | None = None,
     max_elapsed_seconds: int | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     if min_elapsed_seconds is None and max_elapsed_seconds is None:
         return jobs
-    filtered: list[dict[str, str]] = []
+    filtered: list[dict[str, Any]] = []
     for job in jobs:
-        elapsed = parse_elapsed_to_seconds(str(job.get("elapsed", "")))
+        elapsed = job.get("elapsed_seconds")
+        if elapsed is None:
+            elapsed = parse_elapsed_to_seconds(str(job.get("elapsed", "")))
         if elapsed is None:
             continue
         if min_elapsed_seconds is not None and elapsed <= int(min_elapsed_seconds):
@@ -1313,10 +1802,11 @@ def _filter_jobs_by_elapsed(
     return filtered
 
 
-def _summarize_field(items: list[dict[str, str]], key: str) -> dict[str, int]:
+def _summarize_field(items: list[dict[str, Any]], key: str) -> dict[str, int]:
     counter: Counter[str] = Counter()
+    field = "name" if key == "job_name" else key
     for item in items:
-        value = str(item.get(key, "")).strip()
+        value = str(item.get(field, "")).strip()
         if value:
             counter[value] += 1
     return dict(sorted(counter.items()))
@@ -1342,25 +1832,25 @@ def _health_text_lines(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _extract_gpu_count(gres: str) -> int:
+def _extract_gpu_count(gres: str) -> int | None:
     normalized = gres.split("(")[0].strip()
-    if "gpu" not in normalized.lower():
-        return 0
     parts = [part for part in normalized.split(":") if part]
-    if not parts:
+    if not parts or parts[0].lower() != "gpu":
         return 0
     if parts[-1].isdigit():
         return int(parts[-1])
-    if any(part.lower() == "gpu" for part in parts):
-        return 1
-    return 0
+    return None
 
 
 def _node_has_gpu(node: dict[str, str]) -> bool:
     gres = str(node.get("gres", "") or "")
     if not gres or gres in {"(null)", "N/A", "none"}:
         return False
-    return any("gpu" in part.lower() and _extract_gpu_count(part) > 0 for part in gres.split(","))
+    for part in gres.split(","):
+        count = _extract_gpu_count(part)
+        if count is None or count > 0:
+            return True
+    return False
 
 
 def _canonical_job_state(state: str | None) -> str:
@@ -1451,6 +1941,29 @@ def _validate_limit(limit: int | None) -> int | None:
     normalized = int(limit)
     if normalized <= 0:
         raise ToolExecutionError("slurm limit must be greater than zero.")
+    return normalized
+
+
+def _validate_nonnegative_int(value: int | None, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    normalized = int(value)
+    if normalized < 0:
+        raise ToolExecutionError(f"slurm {field_name} must be zero or greater.")
+    return normalized
+
+
+def _validate_aggregate_metric(metric: str | None) -> str:
+    normalized = _validate_safe_token(metric or "average_elapsed", field_name="metric") or "average_elapsed"
+    if normalized not in ACCOUNTING_AGGREGATE_METRICS:
+        raise ToolExecutionError(f"Unsupported SLURM accounting aggregate metric: {metric}.")
+    return normalized
+
+
+def _validate_aggregate_group_by(group_by: str | None) -> str | None:
+    normalized = _validate_safe_token(group_by, field_name="group_by")
+    if normalized not in ACCOUNTING_AGGREGATE_GROUP_BY:
+        raise ToolExecutionError(f"Unsupported SLURM accounting aggregate group_by: {group_by}.")
     return normalized
 
 

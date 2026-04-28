@@ -20,6 +20,7 @@ from aor_runtime.tools.runtime_return import RuntimeReturnTool
 from aor_runtime.tools.search_content import SearchContentTool
 from aor_runtime.tools.shell import ShellExecTool
 from aor_runtime.tools.slurm import (
+    SlurmAccountingAggregateTool,
     SlurmAccountingTool,
     SlurmDBDHealthTool,
     SlurmJobDetailTool,
@@ -55,6 +56,7 @@ def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
             SlurmNodeDetailTool(configured),
             SlurmPartitionsTool(configured),
             SlurmAccountingTool(configured),
+            SlurmAccountingAggregateTool(configured),
             SlurmMetricsTool(configured),
             SlurmDBDHealthTool(configured),
             PythonExecTool(configured),

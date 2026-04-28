@@ -282,7 +282,7 @@ def test_validate_plan_efficiency_accepts_compliant_plan() -> None:
     validate_plan_efficiency(plan)
 
 
-def test_planner_accepts_delete_plan_with_fs_not_exists(tmp_path: Path) -> None:
+def test_planner_refuses_delete_plan_before_shell_execution(tmp_path: Path) -> None:
     planner, _ = _planner_with_settings(
         tmp_path,
         {
@@ -303,7 +303,8 @@ def test_planner_accepts_delete_plan_with_fs_not_exists(tmp_path: Path) -> None:
         input_payload={"task": "Delete notes.txt"},
     )
 
-    assert [step.action for step in plan.steps] == ["fs.exists", "shell.exec", "fs.not_exists"]
+    assert [step.action for step in plan.steps] == ["runtime.return"]
+    assert "Request Not Executed" in plan.steps[0].args["value"]
 
 
 def test_planner_injects_logical_nodes_without_gateway_details(tmp_path: Path) -> None:

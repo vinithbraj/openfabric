@@ -13,6 +13,7 @@ SlurmRequestKind = Literal[
     "job_listing",
     "job_detail",
     "accounting_jobs",
+    "accounting_aggregate",
     "node_status",
     "problematic_nodes",
     "partition_status",
@@ -27,7 +28,12 @@ SlurmRequestKind = Literal[
     "unknown",
 ]
 SlurmConstraintKind = Literal[
+    "source",
+    "metric",
     "job_state",
+    "job_state_all",
+    "job_state_negation",
+    "job_state_default",
     "job_user",
     "job_partition",
     "job_name",
@@ -56,6 +62,7 @@ SlurmQueryType = Literal[
     "unsupported_mutation",
     "unknown",
 ]
+SlurmDataSource = Literal["squeue", "sacct", "sinfo", "scontrol", "sacctmgr", "derived", "unknown"]
 
 
 @dataclass
@@ -69,6 +76,7 @@ class SlurmRequest:
         Literal[
             "slurm.queue",
             "slurm.accounting",
+            "slurm.accounting_aggregate",
             "slurm.nodes",
             "slurm.partitions",
             "slurm.metrics",
@@ -109,6 +117,16 @@ class SlurmSemanticFrame:
     requests: list[SlurmRequest] = field(default_factory=list)
     constraints: list[SlurmSemanticConstraint] = field(default_factory=list)
     output_mode: Literal["text", "csv", "json", "count"] = "text"
+    source: SlurmDataSource = "unknown"
+    metric: str | None = None
+    aggregation: str | None = None
+    include_all_states: bool = False
+    excluded_states: list[str] = field(default_factory=list)
+    explicit_state_filter: str | None = None
+    default_state_applied: bool = False
+    negated_filters: list[SlurmSemanticConstraint] = field(default_factory=list)
+    requested_tools: list[str] = field(default_factory=list)
+    compound_requests: list[dict[str, Any]] = field(default_factory=list)
     unresolved_requests: list[SlurmRequest] = field(default_factory=list)
     unresolved_constraints: list[SlurmSemanticConstraint] = field(default_factory=list)
     covered_request_ids: list[str] = field(default_factory=list)
@@ -122,6 +140,16 @@ class SlurmSemanticFrame:
             "requests": [request.to_dict() for request in self.requests],
             "constraints": [constraint.to_dict() for constraint in self.constraints],
             "output_mode": self.output_mode,
+            "source": self.source,
+            "metric": self.metric,
+            "aggregation": self.aggregation,
+            "include_all_states": self.include_all_states,
+            "excluded_states": list(self.excluded_states),
+            "explicit_state_filter": self.explicit_state_filter,
+            "default_state_applied": self.default_state_applied,
+            "negated_filters": [constraint.to_dict() for constraint in self.negated_filters],
+            "requested_tools": list(self.requested_tools),
+            "compound_requests": list(self.compound_requests),
             "unresolved_requests": [request.to_dict() for request in self.unresolved_requests],
             "unresolved_constraints": [constraint.to_dict() for constraint in self.unresolved_constraints],
             "covered_request_ids": list(self.covered_request_ids),
@@ -132,7 +160,7 @@ class SlurmSemanticFrame:
 
 
 _MUTATION_RE = re.compile(
-    r"\b(?:sbatch|submit(?:\s+a)?\s+job|scancel|cancel(?:\s+my)?\s+job|drain\s+nodes?|resume\s+nodes?|"
+    r"\b(?:sbatch|submit(?:\s+a)?\s+job|scancel|cancel(?:\s+(?:all|my|the|pending|running))*\s+jobs?|drain\s+nodes?|resume\s+nodes?|"
     r"requeue\s+jobs?|suspend\s+jobs?|hold\s+jobs?|release\s+jobs?|scontrol\s+update|update\s+nodes?|"
     r"change\s+partition|delete\s+jobs?|kill(?:\s+my)?\s+jobs?|restart(?:\s+slurm|\s+services?)?|"
     r"systemctl\s+restart|stop\s+service|start\s+service)\b",
@@ -150,9 +178,16 @@ _MY_RE = re.compile(r"\bmy\b", re.IGNORECASE)
 _USER_RE = re.compile(r"\b(?:for\s+user|user)\s+([A-Za-z0-9._-]+)\b", re.IGNORECASE)
 _PARTITION_RE = re.compile(r"\b(?:partition|in\s+partition|on\s+partition)\s+([A-Za-z0-9._-]+)\b", re.IGNORECASE)
 _JOB_ID_RE = re.compile(r"\bjob\s+(\d+(?:[._][A-Za-z0-9_-]+)*)\b", re.IGNORECASE)
-_GROUP_BY_RE = re.compile(r"\b(?:by|group(?:ed)?\s+by)\s+(state|user|partition|node)\b", re.IGNORECASE)
+_GROUP_BY_RE = re.compile(r"\b(?:by|group(?:ed)?\s+by)\s+(state|user|partition|node|job\s+name)\b", re.IGNORECASE)
 _LIMIT_RE = re.compile(r"\b(?:top|latest|recent|first|last)\s+(\d+)\b", re.IGNORECASE)
 _DURATION_RE = re.compile(r"\b(?:longer\s+than|over|more\s+than)\s+(\d+)\s*(seconds?|minutes?|hours?|days?)\b", re.IGNORECASE)
+_RUNTIME_AGGREGATE_RE = re.compile(
+    r"\b(?:how\s+long|average\s+(?:run\s*time|runtime|elapsed|duration)|avg\s+elapsed|mean\s+runtime|"
+    r"min(?:imum)?\s+(?:run\s*time|runtime|elapsed|duration)|max(?:imum)?\s+(?:run\s*time|runtime|elapsed|duration)|"
+    r"longest\s+(?:run\s*time|runtime|elapsed|duration)|total\s+(?:run\s*time|runtime|elapsed|duration)|"
+    r"runtime\s+summary|elapsed\s+time|took\s+to\s+run|ran\s+longer\s+than|jobs?\s+longer\s+than)\b",
+    re.IGNORECASE,
+)
 
 
 def extract_slurm_semantic_frame(goal: str, context: dict[str, Any] | None = None) -> SlurmSemanticFrame:
@@ -210,23 +245,59 @@ class _FrameBuilder:
 
     def frame(self) -> SlurmSemanticFrame:
         query_type = _query_type_for_requests(self.requests)
-        return SlurmSemanticFrame(
+        requested_tools = [
+            str(request.requires_tool)
+            for request in self.requests
+            if request.requires_tool and request.requires_tool != "runtime.return"
+        ]
+        metric = _first_filter_value(self.requests, "metric")
+        explicit_state = _first_filter_value(self.requests, "state")
+        include_all_states = any(bool((request.filters or {}).get("include_all_states")) for request in self.requests)
+        default_state_applied = any(bool((request.filters or {}).get("default_state_applied")) for request in self.requests)
+        negated_filters = [constraint for constraint in self.constraints if constraint.kind == "job_state_negation"]
+        frame = SlurmSemanticFrame(
             query_type=query_type,
             requests=self.requests,
             constraints=self.constraints,
             output_mode=self.output_mode,
+            metric=str(metric) if metric else None,
+            aggregation=str(metric) if metric else None,
+            include_all_states=include_all_states,
+            explicit_state_filter=str(explicit_state) if explicit_state else None,
+            default_state_applied=default_state_applied,
+            negated_filters=negated_filters,
+            requested_tools=requested_tools,
+            compound_requests=[request.to_dict() for request in self.requests] if query_type == "compound" else [],
         )
+        frame.source = select_slurm_data_source(frame)
+        return frame
 
     def add_common_constraints(self) -> None:
         user = _detect_user(self.prompt)
         if user:
             self._constraint("job_user", "my" if user == getpass.getuser() and _MY_RE.search(self.prompt) else user, value=user, resolved_field="user")
-        partition = _detect_partition(self.prompt)
+        partition = _detect_partition(self.prompt) or (_detect_runtime_partition(self.prompt) if _mentions_runtime_aggregate(self.lower) else None)
         if partition:
             self._constraint("job_partition", partition, value=partition, resolved_field="partition")
             self._constraint("partition_filter", partition, value=partition, resolved_field="partition")
-        for state in _detect_job_states(self.prompt):
-            self._constraint("job_state", state.lower(), value=state, resolved_field="state")
+        runtime_aggregate = _detect_runtime_aggregate(self.prompt)
+        if runtime_aggregate is not None:
+            self._constraint("source", "accounting source", value="sacct", resolved_field="source")
+            self._constraint("metric", str(runtime_aggregate["metric"]), value=runtime_aggregate["metric"], resolved_field="metric")
+        if _runtime_all_states(self.prompt):
+            raw = _runtime_all_states_raw(self.prompt) or "all states"
+            self._constraint("job_state_all", raw, value=True, resolved_field="include_all_states")
+            for state in _detect_negated_state_filters(self.prompt):
+                self._constraint(
+                    "job_state_negation",
+                    raw,
+                    operator="neq",
+                    value=state,
+                    resolved_field="state",
+                )
+        else:
+            for state in _detect_job_states(self.prompt):
+                self._constraint("job_state", state.lower(), value=state, resolved_field="state")
         node_state = _detect_node_state_group(self.prompt)
         if node_state:
             self._constraint("node_state", node_state, value=node_state, resolved_field="state_group")
@@ -268,6 +339,7 @@ class _FrameBuilder:
         states = _detect_job_states(prompt)
         job_id = _detect_job_id(prompt)
         duration = _detect_duration(prompt)
+        runtime_aggregate = _detect_runtime_aggregate(prompt)
         job_detail_requested = bool(job_id and re.search(r"\b(?:details?|detail|show)\b", lower))
         node_detail_requested = _mentions_node_detail(lower)
 
@@ -283,10 +355,17 @@ class _FrameBuilder:
         if _mentions_accounting_health(lower):
             self._request("accounting_health", "accounting health", output="summary", requires_tool="slurm.slurmdbd_health")
 
-        if _mentions_gpu(lower):
+        if _mentions_gpu(lower) and runtime_aggregate is None:
             self._request("gpu_availability", "gpu availability", output="json" if self.output_mode == "json" else "summary", requires_tool="slurm.metrics")
 
-        if _mentions_partitions(lower):
+        state_summary_requested = bool(
+            group_by == "state"
+            and _mentions_jobs(lower)
+            and re.search(r"\b(?:summarize|summary)\b", lower)
+        )
+        grouped_jobs_requested = bool(group_by and _mentions_jobs(lower) and not state_summary_requested)
+
+        if _mentions_partitions(lower) and not grouped_jobs_requested and runtime_aggregate is None:
             self._request(
                 "partition_status",
                 "partition status",
@@ -308,7 +387,48 @@ class _FrameBuilder:
                 requires_tool="slurm.nodes",
             )
 
-        if _mentions_accounting_jobs(lower) or duration is not None:
+        if runtime_aggregate is not None:
+            include_all_states = _runtime_all_states(prompt)
+            explicit_state = runtime_aggregate["state"] or _first_state(states)
+            default_state_applied = False
+            if include_all_states:
+                state = None
+            elif explicit_state:
+                state = explicit_state
+            else:
+                state = "COMPLETED"
+                default_state_applied = True
+                self._constraint(
+                    "job_state_default",
+                    "default completed jobs",
+                    value="COMPLETED",
+                    resolved_field="state",
+                )
+            self._request(
+                "accounting_aggregate",
+                "SLURM accounting runtime",
+                filters=_clean_filters(
+                    {
+                        "user": user,
+                        "state": state,
+                        "include_all_states": True if include_all_states else None,
+                        "excluded_states": [],
+                        "default_state_applied": True if default_state_applied else None,
+                        "partition": runtime_aggregate["partition"] or partition,
+                        "start": runtime_aggregate["start"],
+                        "end": runtime_aggregate["end"],
+                        "metric": runtime_aggregate["metric"],
+                        "group_by": runtime_aggregate["group_by"] or group_by,
+                        "threshold_seconds": runtime_aggregate["threshold_seconds"],
+                        "limit": limit or 1000,
+                        "time_window_label": runtime_aggregate["time_window_label"],
+                    }
+                ),
+                output="json" if self.output_mode == "json" else "summary",
+                requires_tool="slurm.accounting_aggregate",
+            )
+
+        if runtime_aggregate is None and (_mentions_accounting_jobs(lower) or duration is not None):
             state = _first_state(states) or ("FAILED" if "fail" in lower else None)
             elapsed_seconds = duration[0] if duration else None
             self._request(
@@ -338,14 +458,16 @@ class _FrameBuilder:
                 requires_tool="slurm.job_detail",
             )
 
-        queue_status_requested = _mentions_queue_status(lower) or bool(group_by and re.search(r"\b(?:summarize|summary|jobs?\s+by)\b", lower))
+        queue_status_requested = _mentions_queue_status(lower) or bool(
+            group_by and not grouped_jobs_requested and re.search(r"\b(?:summarize|summary)\b", lower)
+        )
         if queue_status_requested:
             self._request("queue_status", "queue status", output="json" if self.output_mode == "json" else "summary", requires_tool="slurm.metrics")
 
-        if _mentions_jobs(lower) and not _mentions_accounting_jobs(lower) and not queue_status_requested and not job_detail_requested:
-            requested_states = states or ([None] if not (_COUNT_RE.search(prompt) or re.search(r"\b(?:running|pending)\b", lower)) else [])
+        if _mentions_jobs(lower) and runtime_aggregate is None and not (_mentions_accounting_jobs(lower) or duration is not None) and not queue_status_requested and not job_detail_requested:
+            requested_states = states or ([None] if (group_by or not (_COUNT_RE.search(prompt) or re.search(r"\b(?:running|pending)\b", lower))) else [])
             for state in requested_states:
-                kind: SlurmRequestKind = "job_count" if output == "count" else "job_listing"
+                kind: SlurmRequestKind = "job_count" if output == "count" or group_by else "job_listing"
                 self._request(
                     kind,
                     f"{state.lower() if state else ''} jobs".strip(),
@@ -358,7 +480,7 @@ class _FrameBuilder:
                             "limit": limit,
                         }
                     ),
-                    output=output,
+                    output="count" if group_by else output,
                     requires_tool="slurm.queue",
                 )
 
@@ -479,7 +601,7 @@ def _detect_partition(prompt: str) -> str | None:
     if match is None:
         return None
     candidate = match.group(1)
-    if candidate.lower() in {"status", "summary", "cpu", "allocation", "state"}:
+    if candidate.lower() in {"status", "summary", "cpu", "allocation", "state", "in", "on", "by", "as", "json", "csv", "only"}:
         return None
     return candidate
 
@@ -529,12 +651,15 @@ def _detect_job_id(prompt: str) -> str | None:
 
 def _detect_group_by(prompt: str) -> str | None:
     match = _GROUP_BY_RE.search(prompt)
-    return match.group(1).lower() if match else None
+    return match.group(1).lower().replace(" ", "_") if match else None
 
 
 def _detect_limit(prompt: str) -> int | None:
     match = _LIMIT_RE.search(prompt)
     if match is None:
+        return None
+    tail = prompt[match.end() : match.end() + 12].lower()
+    if re.match(r"\s*(?:seconds?|minutes?|hours?|days?|weeks?)\b", tail):
         return None
     return int(match.group(1))
 
@@ -553,6 +678,183 @@ def _detect_duration(prompt: str) -> tuple[int, str] | None:
     elif unit.startswith("day"):
         multiplier = 86400
     return value * multiplier, match.group(0)
+
+
+def _mentions_runtime_aggregate(lower: str) -> bool:
+    return _RUNTIME_AGGREGATE_RE.search(lower) is not None or (
+        "runtime" in lower and re.search(r"\b(?:average|avg|mean|min|max|longest|total|summary|by|longer\s+than)\b", lower)
+        is not None
+    )
+
+
+def _detect_runtime_aggregate(prompt: str) -> dict[str, Any] | None:
+    lower = prompt.lower()
+    if not _mentions_runtime_aggregate(lower):
+        return None
+    if re.search(r"\b(?:show|list|display)\b", lower) and not re.search(
+        r"\b(?:average|avg|mean|min|minimum|max|maximum|longest|total|sum|summary|count|how\s+many|longer\s+than|how\s+long|took\s+to\s+run)\b",
+        lower,
+    ):
+        return None
+    if "median" in lower:
+        return {
+            "metric": "unsupported_median",
+            "state": None,
+            "partition": _detect_runtime_partition(prompt),
+            "start": None,
+            "end": None,
+            "group_by": _detect_group_by(prompt),
+            "threshold_seconds": None,
+            "time_window_label": None,
+        }
+    duration = _detect_duration(prompt)
+    metric = _detect_runtime_metric(lower, duration)
+    start, end = detect_time_range(prompt)
+    time_window_label = _time_window_label(prompt, start, end)
+    if start is None and end is None:
+        start = _default_accounting_start()
+        time_window_label = "Last 7 days"
+    state = _detect_runtime_state(prompt)
+    return {
+        "metric": metric,
+        "state": state,
+        "partition": _detect_runtime_partition(prompt),
+        "start": start,
+        "end": end,
+        "group_by": _detect_group_by(prompt),
+        "threshold_seconds": duration[0] if duration else None,
+        "time_window_label": time_window_label,
+    }
+
+
+def _detect_runtime_metric(lower: str, duration: tuple[int, str] | None) -> str:
+    if duration is not None and re.search(r"\b(?:count|how\s+many)\b", lower):
+        return "count_longer_than"
+    if re.search(r"\bruntime\s+summary\b|\bmin\s*/\s*max\s*/\s*average\b", lower):
+        return "runtime_summary"
+    if re.search(r"\b(?:min|minimum|shortest)\b", lower):
+        return "min_elapsed"
+    if re.search(r"\b(?:max|maximum|longest)\b", lower):
+        return "max_elapsed"
+    if re.search(r"\b(?:sum|total)\s+(?:run\s*time|runtime|elapsed|duration)\b", lower):
+        return "sum_elapsed"
+    if re.search(r"\b(?:count|how\s+many)\b", lower):
+        return "count"
+    return "average_elapsed"
+
+
+def _detect_runtime_state(prompt: str) -> str | None:
+    lower = prompt.lower()
+    if _runtime_all_states(prompt):
+        return None
+    states = _detect_job_states(prompt)
+    return _first_state(states)
+
+
+def _runtime_all_states(prompt: str) -> bool:
+    return _runtime_all_states_raw(prompt) is not None
+
+
+def _runtime_all_states_raw(prompt: str) -> str | None:
+    patterns = [
+        r"\bdo\s+not\s+filter\s+by\s+completed\b",
+        r"\bdon't\s+filter\s+by\s+completed\b",
+        r"\bdo\s+not\s+restrict\s+to\s+completed\b",
+        r"\bdon't\s+restrict\s+to\s+completed\b",
+        r"\bnot\s+just\s+completed\b",
+        r"\ball\s+jobs?\b",
+        r"\bany\s+state\b",
+        r"\ball\s+job\s+states\b",
+        r"\bacross\s+all\s+states\b",
+        r"\bregardless\s+of\s+state\b",
+        r"\bget\s+all\s+jobs?\b",
+        r"\binclude\s+all\s+job\s+states\b",
+        r"\binclude\s+failed\s+jobs?\s+too\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, prompt, re.IGNORECASE)
+        if match:
+            return match.group(0)
+    return None
+
+
+def _detect_negated_state_filters(prompt: str) -> list[str]:
+    if re.search(
+        r"\b(?:do\s+not|don't)\s+(?:filter\s+by|restrict\s+to)\s+completed\b|\bnot\s+just\s+completed\b",
+        prompt,
+        re.IGNORECASE,
+    ):
+        return ["COMPLETED"]
+    return []
+
+
+def _detect_runtime_partition(prompt: str) -> str | None:
+    patterns = [
+        r"\b(?:on|in)\s+([A-Za-z0-9._-]+)\s+partition\b",
+        r"\b([A-Za-z0-9._-]+)\s+partition\b",
+        r"\b(?:on|in)\s+([A-Za-z0-9._-]+)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, prompt, re.IGNORECASE)
+        if match is None:
+            continue
+        candidate = match.group(1).strip()
+        if candidate.lower() in {
+            "a",
+            "an",
+            "the",
+            "all",
+            "completed",
+            "failed",
+            "cancelled",
+            "canceled",
+            "timed",
+            "jobs",
+            "job",
+            "last",
+            "by",
+            "as",
+            "json",
+            "csv",
+            "only",
+            "today",
+            "yesterday",
+            "partition",
+            "partitions",
+            "slurm",
+            "cluster",
+            "accounting",
+            "sacct",
+        }:
+            continue
+        return candidate
+    explicit = _detect_partition(prompt)
+    if explicit:
+        return explicit
+    return None
+
+
+def _default_accounting_start() -> str:
+    return (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _time_window_label(prompt: str, start: str | None, end: str | None) -> str | None:
+    lower = prompt.lower()
+    if "last 7 days" in lower:
+        return "Last 7 days"
+    if "last 24 hours" in lower:
+        return "Last 24 hours"
+    if "since yesterday" in lower:
+        return "Since yesterday"
+    if "yesterday" in lower:
+        return "Yesterday"
+    if "today" in lower:
+        return "Today"
+    if "this week" in lower:
+        return "This week"
+    if start or end:
+        return "Requested time window"
+    return None
 
 
 def _is_broad_cluster_health(lower: str) -> bool:
@@ -599,7 +901,22 @@ def _mentions_unhealthy_things(lower: str) -> bool:
 
 
 def _mentions_accounting_jobs(lower: str) -> bool:
-    return any(token in lower for token in ("sacct", "accounting", "failed", "completed", "cancelled", "canceled", "timed out", "timeout", "yesterday", "recent"))
+    return any(
+        token in lower
+        for token in (
+            "sacct",
+            "accounting",
+            "failed",
+            "completed",
+            "cancelled",
+            "canceled",
+            "timed out",
+            "timeout",
+            "yesterday",
+            "recent",
+            "elapsed time",
+        )
+    )
 
 
 def _mentions_jobs(lower: str) -> bool:
@@ -625,7 +942,7 @@ def _query_type_for_requests(requests: list[SlurmRequest]) -> SlurmQueryType:
     kind = next(iter(kinds))
     if kind in {"job_count", "job_listing", "job_detail"}:
         return "jobs"
-    if kind == "accounting_jobs":
+    if kind in {"accounting_jobs", "accounting_aggregate"}:
         return "accounting"
     if kind in {"node_status", "problematic_nodes"}:
         return "nodes"
@@ -636,6 +953,38 @@ def _query_type_for_requests(requests: list[SlurmRequest]) -> SlurmQueryType:
     if kind in {"slurmdbd_health", "accounting_health"}:
         return "health"
     return "unknown"
+
+
+def select_slurm_data_source(frame: SlurmSemanticFrame) -> SlurmDataSource:
+    if frame.query_type == "unsupported_mutation":
+        return "unknown"
+    if len(frame.requests) > 1 or frame.query_type == "compound":
+        return "derived"
+    if not frame.requests:
+        return "unknown"
+    request = frame.requests[0]
+    if request.kind == "accounting_aggregate":
+        return "sacct"
+    if request.kind == "accounting_jobs":
+        return "sacct"
+    if request.kind in {"job_count", "job_listing"}:
+        return "sacct" if request.filters.get("source") == "sacct" else "squeue"
+    if request.kind == "job_detail":
+        return "scontrol"
+    if request.kind in {"node_status", "problematic_nodes", "partition_status", "gpu_availability", "resource_summary"}:
+        return "sinfo"
+    if request.kind in {"slurmdbd_health", "accounting_health"}:
+        return "sacctmgr"
+    if request.kind in {"cluster_health", "scheduler_health", "queue_status"}:
+        return "derived" if request.kind == "cluster_health" else "squeue"
+    return "unknown"
+
+
+def _first_filter_value(requests: list[SlurmRequest], key: str) -> Any | None:
+    for request in requests:
+        if key in request.filters:
+            return request.filters[key]
+    return None
 
 
 def _clean_filters(filters: dict[str, Any]) -> dict[str, Any]:

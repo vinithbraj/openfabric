@@ -21,6 +21,7 @@ def _engine(tmp_path: Path) -> ExecutionEngine:
         run_store_path=tmp_path / "runtime.db",
         available_nodes_raw="local",
         default_node="local",
+        shell_mode="permissive",
     )
     return ExecutionEngine(settings)
 

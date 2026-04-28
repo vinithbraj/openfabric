@@ -32,6 +32,7 @@ def _settings(workspace: Path, sql_payload: dict[str, object]) -> Settings:
         run_store_path=workspace / "runtime.db",
         sql_databases=dict(sql_payload["sql_databases"]),
         sql_default_database=str(sql_payload["sql_default_database"]),
+        response_render_mode="raw",
     )
 
 

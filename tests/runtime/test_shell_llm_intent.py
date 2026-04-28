@@ -75,9 +75,9 @@ def test_check_uptime_maps_to_shell_inspection(tmp_path: Path) -> None:
 
     assert [step.action for step in plan.steps] == ["shell.exec", "runtime.return"]
     assert plan.steps[0].args["command"] == "uptime"
-    assert planner.last_planning_mode == "llm_intent_extractor"
-    assert planner.last_llm_calls == 1
-    assert planner.last_llm_intent_calls == 1
+    assert planner.last_planning_mode == "deterministic_intent"
+    assert planner.last_llm_calls == 0
+    assert planner.last_llm_intent_calls == 0
     assert planner.last_raw_planner_llm_calls == 0
 
 
@@ -128,10 +128,10 @@ def test_show_top_processes_maps_to_fixed_template_with_limit(tmp_path: Path) ->
     planner = _planner(tmp_path, llm)
 
     plan = planner.build_plan(
-        goal="show top processes",
+        goal="show top 10 processes",
         planner=PlannerConfig(temperature=0.0),
         allowed_tools=SHELL_ALLOWED_TOOLS,
-        input_payload={"task": "show top processes"},
+        input_payload={"task": "show top 10 processes"},
     )
 
     assert [step.action for step in plan.steps] == ["shell.exec", "runtime.return"]
@@ -245,11 +245,11 @@ def test_shell_framed_fetch_routes_to_existing_fetch_compile_path(tmp_path: Path
     plan = planner.build_plan(
         goal="fetch the title of https://example.com using shell",
         planner=PlannerConfig(temperature=0.0),
-        allowed_tools=["shell.exec"],
+        allowed_tools=["shell.exec", "python.exec"],
         input_payload={"task": "fetch the title of https://example.com using shell"},
     )
 
-    assert [step.action for step in plan.steps] == ["shell.exec"]
+    assert [step.action for step in plan.steps] == ["shell.exec", "python.exec", "runtime.return"]
     assert "curl -sL" in plan.steps[0].args["command"]
     assert planner.last_capability_name == "fetch"
 
@@ -266,7 +266,7 @@ def test_delete_request_is_rejected_before_llm(tmp_path: Path) -> None:
     )
 
     assert [step.action for step in plan.steps] == ["runtime.return"]
-    assert planner.last_planning_mode == "llm_intent_extractor"
+    assert planner.last_planning_mode == "deterministic_intent"
     assert planner.last_llm_calls == 0
     assert planner.last_llm_intent_calls == 0
     assert planner.last_raw_planner_llm_calls == 0

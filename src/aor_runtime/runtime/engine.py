@@ -660,7 +660,12 @@ class ExecutionEngine:
         next_index = step_index + 1
         if next_index >= len(plan.steps):
             attempt_models = [self._step_log_from_dict(item) for item in attempt_history]
-            final_output = summarize_final_output(str(state.get("goal", "")), attempt_models)
+            final_output = summarize_final_output(
+                str(state.get("goal", "")),
+                attempt_models,
+                settings=self.settings,
+                metadata=dict(state.get("planning_metadata") or {}),
+            )
             state.update(
                 {
                     "current_node": "executor",

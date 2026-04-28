@@ -45,6 +45,7 @@ def _settings(tmp_path: Path) -> Settings:
         gateway_url="https://gateway.internal/exec",
         available_nodes_raw="localhost",
         default_node="localhost",
+        shell_mode="permissive",
     )
 
 

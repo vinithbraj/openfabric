@@ -78,14 +78,26 @@ def _latest_session_status(engine: ExecutionEngine, session_id: str) -> tuple[st
     return str(session.get("status") or ""), payload
 
 
-def _event_text_for_openai(event: dict[str, Any]) -> tuple[str | None, str | None]:
+def _event_text_for_openai(event: dict[str, Any], settings: Settings | None = None) -> tuple[str | None, str | None]:
     event_type = str(event.get("event_type") or "")
     payload = dict(event.get("payload") or {})
+    mode = str(getattr(settings, "response_render_mode", "raw") or "raw").lower()
+    if mode == "user":
+        return None, None
+    show_planner = mode == "raw" or bool(getattr(settings, "show_planner_events", False))
+    show_tools = mode == "raw" or bool(getattr(settings, "show_tool_events", False))
+    show_validation = mode == "raw" or bool(getattr(settings, "show_validation_events", False))
     if event_type == "planner.started":
+        if not show_planner:
+            return None, None
         return "Thinking...\n", None
     if event_type == "planner.completed":
+        if not show_planner:
+            return None, None
         return "Plan ready.\n", None
     if event_type == "executor.step.started":
+        if not show_tools:
+            return None, None
         step = dict(payload.get("step") or {})
         node = str(payload.get("node") or "").strip()
         command = str(payload.get("command") or "").strip()
@@ -96,14 +108,20 @@ def _event_text_for_openai(event: dict[str, Any]) -> tuple[str | None, str | Non
             line = f"{line}: {command}"
         return f"{line}...\n", None
     if event_type == "executor.step.output":
+        if not show_tools:
+            return None, None
         channel = str(payload.get("channel") or "")
         text = str(payload.get("text") or "")
         if channel == "stderr":
             return f"[stderr] {text}", text
         return text, text
     if event_type == "validator.started":
+        if not show_validation:
+            return None, None
         return "Validating...\n", None
     if event_type == "validator.completed":
+        if not show_validation:
+            return None, None
         result = dict(payload.get("result") or {})
         return ("Validation passed.\n" if bool(result.get("success")) else "Validation failed.\n"), None
     if event_type.endswith(".failed"):
@@ -361,7 +379,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for event in engine.store.get_events_after(session_id, after_id=cursor):
                     emitted = True
                     cursor = int(event["id"])
-                    text, visible = _event_text_for_openai(event)
+                    text, visible = _event_text_for_openai(event, configured_settings)
                     if visible:
                         visible_output.append(visible)
                     if text:

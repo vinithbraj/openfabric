@@ -106,7 +106,7 @@ def test_supported_prompt_uses_zero_llm_calls(tmp_path: Path) -> None:
     (tmp_path / "clip2.mp4").write_text("bb")
     (tmp_path / "nested").mkdir()
     (tmp_path / "nested" / "clip3.mp4").write_text("hello")
-    engine = ExecutionEngine(Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db"))
+    engine = ExecutionEngine(Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", response_render_mode="raw"))
 
     state = engine.run_spec(
         str(SPEC_PATH),
