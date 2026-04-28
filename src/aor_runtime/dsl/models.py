@@ -28,6 +28,7 @@ DEFAULT_TOOLS = [
     "shell.exec",
     "python.exec",
     "sql.query",
+    "sql.schema",
 ]
 
 

@@ -172,7 +172,7 @@
       "id": "slurm_metrics_02",
       "category": "cluster_metrics_json",
       "prompt": "Collect slurm cluster metrics as json only.",
-      "expected": {"queue_count": 4, "running_jobs": 2, "pending_jobs": 2, "node_count": 5, "idle_nodes": 1, "allocated_nodes": 1, "mixed_nodes": 1, "down_nodes": 1, "drained_nodes": 1}
+      "expected": {"queue_count": 4, "running_jobs": 2, "pending_jobs": 2, "node_count": 5, "idle_nodes": 1, "allocated_nodes": 1, "mixed_nodes": 1, "down_nodes": 1, "drained_nodes": 1, "problematic_nodes": 2, "gpu_available": true, "total_gpus": 9}
     },
     {
       "id": "slurm_metrics_03",
@@ -191,6 +191,30 @@
       "category": "accounting_health_text",
       "prompt": "Check slurm accounting health.",
       "expected_contains": ["available: true", "status: ok"]
+    },
+    {
+      "id": "slurm_compound_01",
+      "category": "cluster_status_compound",
+      "prompt": "What is the status of my SLURM cluster?",
+      "expected_contains": ["\"cluster_summary\"", "\"partition_summary\"", "\"gpu_summary\"", "\"slurmdbd_health\"", "\"slurm_coverage_passed\": true"]
+    },
+    {
+      "id": "slurm_compound_02",
+      "category": "running_pending_problematic",
+      "prompt": "How many jobs are running and pending, and are there any problematic nodes?",
+      "expected_contains": ["\"running_job_count\"", "\"pending_job_count\"", "\"problematic_nodes\"", "\"slurm-worker-delta\"", "\"slurm_coverage_passed\": true"]
+    },
+    {
+      "id": "slurm_compound_03",
+      "category": "queue_node_gpu_summary",
+      "prompt": "Summarize queue, node, and GPU status.",
+      "expected_contains": ["\"queue_summary\"", "\"nodes\"", "\"gpu_summary\"", "\"total_gpus\": 9", "\"slurm_coverage_passed\": true"]
+    },
+    {
+      "id": "slurm_compound_04",
+      "category": "running_pending_problematic_json",
+      "prompt": "Show running jobs, pending jobs, and problematic nodes as JSON.",
+      "expected_contains": ["\"running_jobs\"", "\"pending_jobs\"", "\"problematic_nodes\"", "\"slurm-worker-echo\"", "\"slurm_coverage_passed\": true"]
     },
     {
       "id": "slurm_negative_01",

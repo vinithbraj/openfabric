@@ -62,6 +62,7 @@ def test_json_eval_files_load_successfully() -> None:
         "slurm",
         "slurm_llm_intent",
         "sql",
+        "sql_llm",
         "text_transform",
     ]
     assert all(pack.cases for pack in packs)

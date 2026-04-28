@@ -68,10 +68,10 @@ def test_cluster_busy_maps_to_metrics_intent(tmp_path: Path) -> None:
     planner = _planner(tmp_path, llm)
 
     plan = planner.build_plan(
-        goal="Is the cluster busy right now?",
+        goal="How saturated is the HPC scheduler right now?",
         planner=PlannerConfig(temperature=0.0),
         allowed_tools=SLURM_ALLOWED_TOOLS,
-        input_payload={"task": "Is the cluster busy right now?"},
+        input_payload={"task": "How saturated is the HPC scheduler right now?"},
     )
 
     assert [step.action for step in plan.steps] == ["slurm.metrics", "runtime.return"]
@@ -199,6 +199,35 @@ def test_malicious_llm_argument_payload_is_rejected(tmp_path: Path) -> None:
     result = pack.try_llm_extract("Are my jobs stuck?", _classification_context(tmp_path), planner.llm_intent_extractor)
 
     assert result.matched is False
+
+
+def test_llm_compound_intent_must_cover_all_semantic_requests(tmp_path: Path) -> None:
+    llm = FakeLLM(
+        [
+            '{"matched": true, "intent_type": "SlurmCompoundIntent", "confidence": 0.9, "arguments": {"output_mode": "json", "intents": [{"intent_type": "SlurmMetricsIntent", "arguments": {"metric_group": "queue_summary", "output_mode": "json"}}, {"intent_type": "SlurmNodeStatusIntent", "arguments": {"output_mode": "json"}}]}, "reason": "Queue and node status."}'
+        ]
+    )
+    pack = SlurmCapabilityPack()
+    planner = _planner(tmp_path, llm)
+    result = pack.try_llm_extract("Queue pressure and nodes?", _classification_context(tmp_path), planner.llm_intent_extractor)
+
+    assert result.matched is True
+    assert result.intent.__class__.__name__ == "SlurmCompoundIntent"
+    assert result.metadata["slurm_coverage_passed"] is True
+
+
+def test_llm_compound_intent_missing_child_is_rejected(tmp_path: Path) -> None:
+    llm = FakeLLM(
+        [
+            '{"matched": true, "intent_type": "SlurmCompoundIntent", "confidence": 0.9, "arguments": {"output_mode": "json", "intents": [{"intent_type": "SlurmMetricsIntent", "arguments": {"metric_group": "queue_summary", "output_mode": "json"}}]}, "reason": "Incomplete."}'
+        ]
+    )
+    pack = SlurmCapabilityPack()
+    planner = _planner(tmp_path, llm)
+    result = pack.try_llm_extract("Queue pressure and nodes?", _classification_context(tmp_path), planner.llm_intent_extractor)
+
+    assert result.matched is False
+    assert "slurm_llm_intent_rejected" in str(result.reason)
 
 
 def test_deterministic_prompt_still_uses_zero_llm_calls(tmp_path: Path) -> None:

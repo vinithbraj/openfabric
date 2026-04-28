@@ -398,6 +398,13 @@ class ExecutionEngine:
                 "llm_intent_calls": int(self.planner.last_llm_intent_calls),
                 "raw_planner_llm_calls": int(self.planner.last_raw_planner_llm_calls),
             }
+            planning_metadata.update(
+                {
+                    key: value
+                    for key, value in dict(getattr(self.planner, "last_capability_metadata", {}) or {}).items()
+                    if str(key).startswith("sql_")
+                }
+            )
             awaiting_confirmation = bool(state.get("dry_run"))
             state.update(
                 {

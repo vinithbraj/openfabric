@@ -12,8 +12,10 @@ from aor_runtime.tools.slurm import (
     SlurmAccountingTool,
     SlurmQueueTool,
     SlurmNodesTool,
+    parse_elapsed_to_seconds,
     slurm_accounting,
     slurm_job_detail,
+    slurm_metrics,
     slurm_node_detail,
     slurm_nodes,
     slurm_partitions,
@@ -124,6 +126,39 @@ def test_slurm_nodes_with_mocked_sinfo(monkeypatch, tmp_path: Path) -> None:
     assert result["count"] == 2
     assert result["summary"]["idle"] == 1
     assert result["summary"]["allocated"] == 1
+
+
+def test_slurm_nodes_filters_problematic_and_gpu_only(monkeypatch, tmp_path: Path) -> None:
+    def fake_execute(settings, *, node: str, command: str):
+        return _gateway_result(
+            "slurm-worker-agatha|idle|gpu|64|256000|gpu:a100:4\n"
+            "slurm-worker-delta|down|cpu|32|128000|(null)\n"
+            "slurm-worker-echo|drain|cpu|32|128000|gpu:v100:1\n"
+        )
+
+    monkeypatch.setattr("aor_runtime.tools.slurm.execute_gateway_command", fake_execute)
+    problematic = slurm_nodes(_settings(tmp_path), state_group="problematic")
+    gpu_only = slurm_nodes(_settings(tmp_path), gpu_only=True)
+
+    assert [node["name"] for node in problematic["nodes"]] == ["slurm-worker-delta", "slurm-worker-echo"]
+    assert [node["name"] for node in gpu_only["nodes"]] == ["slurm-worker-agatha", "slurm-worker-echo"]
+
+
+def test_slurm_problematic_metrics_and_elapsed_parser(monkeypatch, tmp_path: Path) -> None:
+    def fake_execute(settings, *, node: str, command: str):
+        if command.startswith("sinfo "):
+            return _gateway_result(
+                "slurm-worker-agatha|idle|gpu|64|256000|gpu:a100:4\n"
+                "slurm-worker-delta|down|cpu|32|128000|(null)\n"
+                "slurm-worker-echo|drain|cpu|32|128000|gpu:v100:1\n"
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("aor_runtime.tools.slurm.execute_gateway_command", fake_execute)
+    result = slurm_metrics(_settings(tmp_path), metric_group="problematic_nodes")
+
+    assert result["payload"]["count"] == 2
+    assert parse_elapsed_to_seconds("1-02:03:04") == 93784
 
 
 def test_slurm_partitions_with_mocked_sinfo(monkeypatch, tmp_path: Path) -> None:

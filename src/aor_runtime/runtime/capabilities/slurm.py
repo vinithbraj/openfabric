@@ -5,13 +5,21 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from aor_runtime.core.contracts import ExecutionPlan
 from aor_runtime.runtime.capabilities.base import CapabilityPack, ClassificationContext, CompileContext, CompiledIntentPlan
 from aor_runtime.runtime.llm_intent_extractor import LLMIntentExtractor
 from aor_runtime.runtime.intents import IntentResult
 from aor_runtime.runtime.output_contract import build_output_contract
+from aor_runtime.runtime.slurm_coverage import SlurmCoverageResult, validate_slurm_coverage
+from aor_runtime.runtime.slurm_safety import (
+    normalize_group_by,
+    normalize_metric_group,
+    normalize_node_state_group,
+    validate_slurm_intent_safety,
+)
+from aor_runtime.runtime.slurm_semantics import SlurmRequest, SlurmSemanticFrame, extract_slurm_semantic_frame
 from aor_runtime.tools.slurm import _validate_job_id, _validate_node_name, _validate_safe_token, _validate_time_value
 
 
@@ -37,12 +45,26 @@ SLURM_LLM_DOMAIN_RE = re.compile(
     re.IGNORECASE,
 )
 SLURM_LLM_FUZZY_RE = re.compile(
-    r"\b(?:my jobs|stuck jobs|jobs waiting|cluster health|busy cluster|gpu availability|failed recently|jobs yesterday|scheduler health|anything unhealthy)\b",
+    r"\b(?:my jobs|stuck jobs|jobs waiting|cluster health|busy cluster|gpu availability|failed recently|jobs yesterday|scheduler health|anything unhealthy|what is wrong with the cluster|queue pressure|gpus free|jobs stuck)\b",
     re.IGNORECASE,
 )
 SUSPICIOUS_VALUE_RE = re.compile(r"[;|&$`><\n/]")
 ALLOWED_JOB_STATES = {"RUNNING", "PENDING", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"}
 ALLOWED_NODE_STATES = {"idle", "allocated", "mixed", "down", "drained"}
+ALLOWED_NODE_STATE_GROUPS = {"idle", "allocated", "mixed", "down", "drained", "problematic", "all"}
+ALLOWED_GROUP_BY = {"state", "user", "partition", "node"}
+ALLOWED_METRIC_GROUPS = {
+    "cluster_summary",
+    "queue_summary",
+    "node_summary",
+    "problematic_nodes",
+    "partition_summary",
+    "gpu_summary",
+    "accounting_summary",
+    "slurmdbd_health",
+    "scheduler_health",
+    "accounting_health",
+}
 
 
 class SlurmQueueIntent(BaseModel):
@@ -70,6 +92,8 @@ class SlurmAccountingIntent(BaseModel):
     partition: str | None = None
     start: str | None = None
     end: str | None = None
+    min_elapsed_seconds: int | None = None
+    max_elapsed_seconds: int | None = None
     limit: int | None = 100
     gateway_node: str | None = None
     output_mode: Literal["text", "csv", "json"] = "text"
@@ -82,6 +106,7 @@ class SlurmJobCountIntent(BaseModel):
     source: Literal["squeue", "sacct"] = "squeue"
     start: str | None = None
     end: str | None = None
+    group_by: Literal["state", "user", "partition", "node"] | None = None
     gateway_node: str | None = None
     output_mode: Literal["count", "json"] = "count"
 
@@ -90,6 +115,8 @@ class SlurmNodeStatusIntent(BaseModel):
     node: str | None = None
     partition: str | None = None
     state: str | None = None
+    state_group: Literal["idle", "allocated", "mixed", "down", "drained", "problematic", "all"] | None = None
+    gpu_only: bool = False
     gateway_node: str | None = None
     output_mode: Literal["text", "csv", "json"] = "text"
 
@@ -111,10 +138,13 @@ class SlurmMetricsIntent(BaseModel):
         "cluster_summary",
         "queue_summary",
         "node_summary",
+        "problematic_nodes",
         "partition_summary",
         "gpu_summary",
         "accounting_summary",
         "slurmdbd_health",
+        "scheduler_health",
+        "accounting_health",
     ] = "cluster_summary"
     start: str | None = None
     end: str | None = None
@@ -132,6 +162,21 @@ class SlurmUnsupportedMutationIntent(BaseModel):
     reason: str
 
 
+class SlurmCompoundIntent(BaseModel):
+    intents: list[Any] = Field(default_factory=list)
+    output_mode: Literal["text", "json"] = "json"
+    return_policy: Literal["combined_summary", "all_results"] = "combined_summary"
+    request_ids: list[str] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
+
+
+class SlurmFailureIntent(BaseModel):
+    message: str
+    error_type: str = "slurm_request_uncovered"
+    suggestions: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class SlurmCapabilityPack(CapabilityPack):
     name = "slurm"
     supports_llm_intent_extraction = True
@@ -146,13 +191,18 @@ class SlurmCapabilityPack(CapabilityPack):
         SlurmMetricsIntent,
         SlurmDBDHealthIntent,
         SlurmUnsupportedMutationIntent,
+        SlurmCompoundIntent,
+        SlurmFailureIntent,
     )
 
     def classify(self, goal: str, context: ClassificationContext) -> IntentResult:
         prompt = str(goal or "").strip()
         if not prompt:
             return IntentResult(matched=False, reason="slurm_no_match")
-        if SLURM_MUTATION_RE.search(prompt) and SLURM_KEYWORD_RE.search(prompt):
+
+        routed_prompt, gateway_node = _extract_gateway_node(prompt, context.settings.available_nodes)
+        semantic_frame = extract_slurm_semantic_frame(routed_prompt)
+        if semantic_frame.query_type == "unsupported_mutation" or SLURM_MUTATION_RE.search(prompt):
             operation = SLURM_MUTATION_RE.search(prompt)
             return IntentResult(
                 matched=True,
@@ -160,11 +210,75 @@ class SlurmCapabilityPack(CapabilityPack):
                     operation=str(operation.group(0) if operation is not None else "mutation"),
                     reason="This runtime supports read-only SLURM inspection and metrics only.",
                 ),
+                metadata=_semantic_metadata(
+                    semantic_frame,
+                    generation_mode="unsupported",
+                    coverage=None,
+                    extra={
+                        "planning_mode": "deterministic_intent",
+                        "capability": self.name,
+                        "slurm_generation_mode": "unsupported",
+                    },
+                ),
             )
+
+        if semantic_frame.requests:
+            try:
+                semantic_intent = _resolve_slurm_semantic_frame(semantic_frame, routed_prompt, gateway_node=gateway_node)
+                coverage = validate_slurm_coverage(semantic_frame, semantic_intent)
+                metadata = _semantic_metadata(
+                    semantic_frame,
+                    generation_mode="deterministic",
+                    coverage=coverage,
+                    intent=semantic_intent,
+                    extra={
+                        "planning_mode": "deterministic_intent",
+                        "capability": self.name,
+                        "llm_calls": 0,
+                        "llm_intent_calls": 0,
+                        "raw_planner_llm_calls": 0,
+                    },
+                )
+                safety = validate_slurm_intent_safety(semantic_intent)
+                if coverage.passed and safety.valid:
+                    semantic_intent = _attach_compound_coverage(semantic_intent, semantic_frame, coverage)
+                    return IntentResult(matched=True, intent=semantic_intent, metadata=metadata)
+                if not safety.valid:
+                    metadata["slurm_safety_failure"] = safety.reason
+                return IntentResult(
+                    matched=True,
+                    intent=SlurmFailureIntent(
+                        message="That SLURM request could not be covered safely by read-only SLURM intents.",
+                        error_type="slurm_request_uncovered",
+                        suggestions=_slurm_failure_suggestions(),
+                        metadata=metadata,
+                    ),
+                    metadata=metadata,
+                )
+            except Exception as exc:  # noqa: BLE001
+                metadata = _semantic_metadata(
+                    semantic_frame,
+                    generation_mode="deterministic",
+                    coverage=None,
+                    extra={
+                        "planning_mode": "deterministic_intent",
+                        "capability": self.name,
+                        "slurm_resolution_failure": str(exc),
+                    },
+                )
+                return IntentResult(
+                    matched=True,
+                    intent=SlurmFailureIntent(
+                        message="That SLURM request could not be resolved into safe read-only SLURM intents.",
+                        error_type="slurm_request_unresolved",
+                        suggestions=_slurm_failure_suggestions(),
+                        metadata=metadata,
+                    ),
+                    metadata=metadata,
+                )
+
         if not SLURM_KEYWORD_RE.search(prompt):
             return IntentResult(matched=False, reason="slurm_no_match")
-
-        routed_prompt, gateway_node = _extract_gateway_node(prompt, context.settings.available_nodes)
         output_mode = _detect_output_mode(routed_prompt)
         user = _detect_user(routed_prompt)
         partition = _detect_partition(routed_prompt)
@@ -369,6 +483,7 @@ class SlurmCapabilityPack(CapabilityPack):
             return IntentResult(matched=False, reason="slurm_llm_empty_goal")
 
         routed_prompt, gateway_node = _extract_gateway_node(prompt, context.settings.available_nodes)
+        semantic_frame = extract_slurm_semantic_frame(routed_prompt)
         mutation_match = SLURM_MUTATION_RE.search(routed_prompt)
         if mutation_match is not None:
             return IntentResult(
@@ -400,10 +515,12 @@ class SlurmCapabilityPack(CapabilityPack):
                 SlurmPartitionSummaryIntent,
                 SlurmMetricsIntent,
                 SlurmDBDHealthIntent,
+                SlurmCompoundIntent,
             ],
             context={
                 "system_prompt": _slurm_llm_intent_system_prompt(),
                 "current_user": getpass.getuser(),
+                "semantic_frame": semantic_frame.to_dict(),
                 "confidence_threshold": 0.70,
                 "temperature": 0.0,
             },
@@ -421,10 +538,26 @@ class SlurmCapabilityPack(CapabilityPack):
         except Exception as exc:  # noqa: BLE001
             return IntentResult(matched=False, reason=str(exc))
 
+        if semantic_frame.requests:
+            coverage = validate_slurm_coverage(semantic_frame, safe_intent)
+            safety = validate_slurm_intent_safety(safe_intent)
+            if not coverage.passed:
+                return IntentResult(matched=False, reason=f"slurm_llm_intent_rejected:{coverage.reason}")
+            if not safety.valid:
+                return IntentResult(matched=False, reason=f"slurm_llm_intent_rejected:{safety.reason}")
+            safe_intent = _attach_compound_coverage(safe_intent, semantic_frame, coverage)
+        else:
+            coverage = None
+
         return IntentResult(
             matched=True,
             intent=safe_intent,
-            metadata={
+            metadata=_semantic_metadata(
+                semantic_frame,
+                generation_mode="llm_intent",
+                coverage=coverage,
+                intent=safe_intent,
+                extra={
                 "planning_mode": "llm_intent_extractor",
                 "capability": self.name,
                 "llm_calls": 1,
@@ -433,7 +566,8 @@ class SlurmCapabilityPack(CapabilityPack):
                 "llm_intent_type": type(safe_intent).__name__,
                 "llm_intent_confidence": extracted.confidence,
                 "llm_intent_reason": extracted.reason,
-            },
+                },
+            ),
         )
 
     def compile(self, intent: Any, context: CompileContext) -> CompiledIntentPlan | None:
@@ -458,6 +592,42 @@ class SlurmCapabilityPack(CapabilityPack):
                     }
                 ),
                 metadata={"capability_pack": self.name, "intent_type": type(intent).__name__},
+            )
+
+        if isinstance(intent, SlurmFailureIntent):
+            return CompiledIntentPlan(
+                plan=ExecutionPlan.model_validate(
+                    {
+                        "steps": [
+                            {
+                                "id": 1,
+                                "action": "runtime.return",
+                                "args": {
+                                    "value": _failure_message(intent),
+                                    "mode": "text",
+                                    "output_contract": build_output_contract(mode="text"),
+                                },
+                            }
+                        ]
+                    }
+                ),
+                metadata={
+                    "capability_pack": self.name,
+                    "intent_type": type(intent).__name__,
+                    "slurm_error_type": intent.error_type,
+                    **intent.metadata,
+                },
+            )
+
+        if isinstance(intent, SlurmCompoundIntent):
+            steps = _compile_slurm_compound_intent(intent, context.allowed_tools)
+            return CompiledIntentPlan(
+                plan=ExecutionPlan.model_validate({"steps": steps}),
+                metadata={
+                    "capability_pack": self.name,
+                    "intent_type": type(intent).__name__,
+                    **intent.coverage,
+                },
             )
 
         steps = _compile_slurm_intent(intent, context.allowed_tools)
@@ -504,6 +674,8 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
                     "partition": intent.partition,
                     "start": intent.start,
                     "end": intent.end,
+                    "min_elapsed_seconds": intent.min_elapsed_seconds,
+                    "max_elapsed_seconds": intent.max_elapsed_seconds,
                     "limit": intent.limit,
                     "gateway_node": intent.gateway_node,
                 },
@@ -519,6 +691,33 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
         ]
 
     if isinstance(intent, SlurmJobCountIntent):
+        if intent.group_by:
+            _require_tools(allowed_tools, "slurm.metrics")
+            metric_group = "accounting_summary" if intent.source == "sacct" else "queue_summary"
+            path = f"payload.by_{intent.group_by}"
+            return [
+                {
+                    "id": 1,
+                    "action": "slurm.metrics",
+                    "args": {
+                        "metric_group": metric_group,
+                        "start": intent.start,
+                        "end": intent.end,
+                        "gateway_node": intent.gateway_node,
+                    },
+                    "output": "slurm_job_count_grouped",
+                },
+                {
+                    "id": 2,
+                    "action": "runtime.return",
+                    "input": ["slurm_job_count_grouped"],
+                    "args": {
+                        "value": {"$ref": "slurm_job_count_grouped", "path": path},
+                        "mode": "json",
+                        "output_contract": build_output_contract(mode="json"),
+                    },
+                },
+            ]
         action = "slurm.accounting" if intent.source == "sacct" else "slurm.queue"
         _require_tools(allowed_tools, action)
         args = {
@@ -531,6 +730,8 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
         if intent.source == "sacct":
             args["start"] = intent.start
             args["end"] = intent.end
+            args["min_elapsed_seconds"] = None
+            args["max_elapsed_seconds"] = None
         return [
             {"id": 1, "action": action, "args": args, "output": "slurm_job_count"},
             {
@@ -577,7 +778,14 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
             {
                 "id": 1,
                 "action": "slurm.nodes",
-                "args": {"node": intent.node, "partition": intent.partition, "state": intent.state, "gateway_node": intent.gateway_node},
+                "args": {
+                    "node": intent.node,
+                    "partition": intent.partition,
+                    "state": intent.state,
+                    "state_group": intent.state_group,
+                    "gpu_only": intent.gpu_only,
+                    "gateway_node": intent.gateway_node,
+                },
                 "output": "slurm_nodes",
             },
             _rows_return_step(
@@ -648,7 +856,7 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
         ]
 
     if isinstance(intent, SlurmMetricsIntent):
-        if intent.metric_group == "slurmdbd_health":
+        if intent.metric_group in {"slurmdbd_health", "accounting_health"}:
             _require_tools(allowed_tools, "slurm.slurmdbd_health")
             value = {"$ref": "slurm_health"} if intent.output_mode == "json" else {"$ref": "slurm_health", "path": "text_lines"}
             return [
@@ -693,6 +901,173 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
     raise ValueError(f"Unsupported SLURM intent: {type(intent).__name__}")
 
 
+def _compile_slurm_compound_intent(intent: SlurmCompoundIntent, allowed_tools: list[str]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    inputs: list[str] = []
+    result_refs: dict[str, Any] = {}
+    used_labels: set[str] = set()
+    for index, child in enumerate(intent.intents, start=1):
+        alias = _compound_alias(child, index, used_labels)
+        used_labels.add(alias)
+        steps.append(_compile_slurm_tool_step(child, step_id=index, alias=alias, allowed_tools=allowed_tools))
+        inputs.append(alias)
+        result_refs[alias] = {"$ref": alias}
+
+    steps.append(
+        {
+            "id": len(steps) + 1,
+            "action": "runtime.return",
+            "input": inputs,
+            "args": {
+                "value": {
+                    "summary": {
+                        "request_count": len(intent.request_ids) or len(intent.intents),
+                        "tool_count": len(intent.intents),
+                    },
+                    "results": result_refs,
+                    "coverage": intent.coverage,
+                },
+                "mode": intent.output_mode,
+                "output_contract": build_output_contract(mode=intent.output_mode),
+            },
+        }
+    )
+    return steps
+
+
+def _compile_slurm_tool_step(intent: Any, *, step_id: int, alias: str, allowed_tools: list[str]) -> dict[str, Any]:
+    if isinstance(intent, SlurmQueueIntent):
+        _require_tools(allowed_tools, "slurm.queue")
+        return {
+            "id": step_id,
+            "action": "slurm.queue",
+            "args": {
+                "user": intent.user,
+                "state": intent.state,
+                "partition": intent.partition,
+                "limit": intent.limit,
+                "gateway_node": intent.gateway_node,
+            },
+            "output": alias,
+        }
+    if isinstance(intent, SlurmAccountingIntent):
+        _require_tools(allowed_tools, "slurm.accounting")
+        return {
+            "id": step_id,
+            "action": "slurm.accounting",
+            "args": {
+                "user": intent.user,
+                "state": intent.state,
+                "partition": intent.partition,
+                "start": intent.start,
+                "end": intent.end,
+                "min_elapsed_seconds": intent.min_elapsed_seconds,
+                "max_elapsed_seconds": intent.max_elapsed_seconds,
+                "limit": intent.limit,
+                "gateway_node": intent.gateway_node,
+            },
+            "output": alias,
+        }
+    if isinstance(intent, SlurmJobCountIntent):
+        if intent.group_by:
+            _require_tools(allowed_tools, "slurm.metrics")
+            return {
+                "id": step_id,
+                "action": "slurm.metrics",
+                "args": {
+                    "metric_group": "accounting_summary" if intent.source == "sacct" else "queue_summary",
+                    "start": intent.start,
+                    "end": intent.end,
+                    "gateway_node": intent.gateway_node,
+                },
+                "output": alias,
+            }
+        action = "slurm.accounting" if intent.source == "sacct" else "slurm.queue"
+        _require_tools(allowed_tools, action)
+        args: dict[str, Any] = {
+            "user": intent.user,
+            "state": intent.state,
+            "partition": intent.partition,
+            "limit": None,
+            "gateway_node": intent.gateway_node,
+        }
+        if intent.source == "sacct":
+            args.update({"start": intent.start, "end": intent.end, "min_elapsed_seconds": None, "max_elapsed_seconds": None})
+        return {"id": step_id, "action": action, "args": args, "output": alias}
+    if isinstance(intent, SlurmJobDetailIntent):
+        if not intent.job_id:
+            raise ValueError("SLURM job detail requires a job_id.")
+        _require_tools(allowed_tools, "slurm.job_detail")
+        return {"id": step_id, "action": "slurm.job_detail", "args": {"job_id": intent.job_id, "gateway_node": intent.gateway_node}, "output": alias}
+    if isinstance(intent, SlurmNodeStatusIntent):
+        _require_tools(allowed_tools, "slurm.nodes")
+        return {
+            "id": step_id,
+            "action": "slurm.nodes",
+            "args": {
+                "node": intent.node,
+                "partition": intent.partition,
+                "state": intent.state,
+                "state_group": intent.state_group,
+                "gpu_only": intent.gpu_only,
+                "gateway_node": intent.gateway_node,
+            },
+            "output": alias,
+        }
+    if isinstance(intent, SlurmNodeDetailIntent):
+        if not intent.node:
+            raise ValueError("SLURM node detail requires a node name.")
+        _require_tools(allowed_tools, "slurm.node_detail")
+        return {"id": step_id, "action": "slurm.node_detail", "args": {"node": intent.node, "gateway_node": intent.gateway_node}, "output": alias}
+    if isinstance(intent, SlurmPartitionSummaryIntent):
+        _require_tools(allowed_tools, "slurm.partitions")
+        return {"id": step_id, "action": "slurm.partitions", "args": {"partition": intent.partition, "gateway_node": intent.gateway_node}, "output": alias}
+    if isinstance(intent, SlurmDBDHealthIntent):
+        _require_tools(allowed_tools, "slurm.slurmdbd_health")
+        return {"id": step_id, "action": "slurm.slurmdbd_health", "args": {"gateway_node": intent.gateway_node}, "output": alias}
+    if isinstance(intent, SlurmMetricsIntent):
+        if intent.metric_group in {"slurmdbd_health", "accounting_health"}:
+            _require_tools(allowed_tools, "slurm.slurmdbd_health")
+            return {"id": step_id, "action": "slurm.slurmdbd_health", "args": {"gateway_node": intent.gateway_node}, "output": alias}
+        _require_tools(allowed_tools, "slurm.metrics")
+        return {
+            "id": step_id,
+            "action": "slurm.metrics",
+            "args": {
+                "metric_group": intent.metric_group,
+                "start": intent.start,
+                "end": intent.end,
+                "gateway_node": intent.gateway_node,
+            },
+            "output": alias,
+        }
+    raise ValueError(f"Unsupported SLURM compound child intent: {type(intent).__name__}")
+
+
+def _compound_alias(intent: Any, index: int, used_labels: set[str]) -> str:
+    base = "slurm_result"
+    if isinstance(intent, SlurmJobCountIntent):
+        state = str(intent.state or "jobs").lower()
+        base = f"{state}_job_count" if not intent.group_by else f"jobs_by_{intent.group_by}"
+    elif isinstance(intent, SlurmQueueIntent):
+        state = str(intent.state or "queue").lower()
+        base = f"{state}_jobs"
+    elif isinstance(intent, SlurmNodeStatusIntent):
+        base = "problematic_nodes" if intent.state_group == "problematic" else "nodes"
+    elif isinstance(intent, SlurmPartitionSummaryIntent):
+        base = "partitions"
+    elif isinstance(intent, SlurmMetricsIntent):
+        base = str(intent.metric_group)
+    elif isinstance(intent, SlurmDBDHealthIntent):
+        base = "slurmdbd_health"
+    elif isinstance(intent, SlurmAccountingIntent):
+        base = "accounting_jobs"
+    candidate = re.sub(r"[^A-Za-z0-9_]+", "_", base).strip("_") or f"slurm_result_{index}"
+    if candidate not in used_labels:
+        return candidate
+    return f"{candidate}_{index}"
+
+
 def _rows_return_step(*, step_id: int, alias: str, collection_path: str, mode: str, wrapper_key: str) -> dict[str, Any]:
     if mode == "json":
         value = {wrapper_key: {"$ref": alias, "path": collection_path}}
@@ -710,6 +1085,256 @@ def _rows_return_step(*, step_id: int, alias: str, collection_path: str, mode: s
             "output_contract": contract,
         },
     }
+
+
+def _resolve_slurm_semantic_frame(frame: SlurmSemanticFrame, prompt: str, *, gateway_node: str | None) -> Any:
+    intents: list[Any] = []
+    for request in frame.requests:
+        intents.extend(_intents_for_slurm_request(request, prompt, gateway_node=gateway_node, frame_output_mode=frame.output_mode))
+    intents = _dedupe_slurm_intents(intents)
+    if not intents:
+        raise ValueError("No supported read-only SLURM intent covered the semantic frame.")
+    if len(intents) == 1 and len(frame.requests) == 1 and frame.query_type != "compound":
+        return intents[0]
+    compound_output_mode: Literal["text", "json"] = "json" if frame.output_mode != "text" or len(frame.requests) > 1 or len(intents) > 1 else "text"
+    return SlurmCompoundIntent(
+        intents=intents,
+        output_mode=compound_output_mode,
+        return_policy="combined_summary",
+        request_ids=[request.id for request in frame.requests],
+    )
+
+
+def _intents_for_slurm_request(
+    request: SlurmRequest,
+    prompt: str,
+    *,
+    gateway_node: str | None,
+    frame_output_mode: str,
+) -> list[Any]:
+    filters = dict(request.filters or {})
+    output_mode = _output_mode_for_request(request, frame_output_mode)
+    metrics_output = "json" if output_mode == "json" else "text"
+
+    if request.kind == "cluster_health":
+        return [
+            SlurmMetricsIntent(metric_group="cluster_summary", gateway_node=gateway_node, output_mode="json"),
+            SlurmMetricsIntent(metric_group="partition_summary", gateway_node=gateway_node, output_mode="json"),
+            SlurmMetricsIntent(metric_group="gpu_summary", gateway_node=gateway_node, output_mode="json"),
+            SlurmDBDHealthIntent(gateway_node=gateway_node, output_mode="json"),
+        ]
+    if request.kind == "queue_status":
+        return [SlurmMetricsIntent(metric_group="queue_summary", gateway_node=gateway_node, output_mode=metrics_output)]
+    if request.kind == "scheduler_health":
+        return [SlurmMetricsIntent(metric_group="scheduler_health", gateway_node=gateway_node, output_mode=metrics_output)]
+    if request.kind == "gpu_availability":
+        return [SlurmMetricsIntent(metric_group="gpu_summary", gateway_node=gateway_node, output_mode="json")]
+    if request.kind == "partition_status":
+        return [SlurmPartitionSummaryIntent(partition=filters.get("partition"), gateway_node=gateway_node, output_mode=output_mode if output_mode in {"text", "csv", "json"} else "json")]
+    if request.kind == "problematic_nodes":
+        return [SlurmNodeStatusIntent(state_group="problematic", gateway_node=gateway_node, output_mode=output_mode if output_mode in {"text", "csv", "json"} else "json")]
+    if request.kind == "node_status":
+        state_group = filters.get("state_group")
+        state = filters.get("state")
+        if state_group in {"idle", "allocated", "mixed", "down", "drained"}:
+            state = state_group
+            state_group = None
+        return [
+            SlurmNodeStatusIntent(
+                node=filters.get("node"),
+                partition=filters.get("partition"),
+                state=state,
+                state_group=state_group,
+                gateway_node=gateway_node,
+                output_mode=output_mode if output_mode in {"text", "csv", "json"} else "json",
+            )
+        ]
+    if request.kind == "job_count":
+        source: Literal["squeue", "sacct"] = "sacct" if any(filters.get(key) for key in ("start", "end", "min_elapsed_seconds", "max_elapsed_seconds")) else "squeue"
+        return [
+            SlurmJobCountIntent(
+                user=filters.get("user"),
+                state=filters.get("state"),
+                partition=filters.get("partition"),
+                source=source,
+                start=filters.get("start"),
+                end=filters.get("end"),
+                group_by=filters.get("group_by"),
+                gateway_node=gateway_node,
+                output_mode="json" if output_mode == "json" or filters.get("group_by") else "count",
+            )
+        ]
+    if request.kind == "job_listing":
+        return [
+            SlurmQueueIntent(
+                user=filters.get("user"),
+                state=filters.get("state"),
+                partition=filters.get("partition"),
+                limit=filters.get("limit", 100),
+                gateway_node=gateway_node,
+                output_mode=output_mode if output_mode in {"text", "csv", "json"} else "json",
+            )
+        ]
+    if request.kind == "accounting_jobs":
+        if request.output == "count":
+            return [
+                SlurmJobCountIntent(
+                    user=filters.get("user"),
+                    state=filters.get("state"),
+                    partition=filters.get("partition"),
+                    source="sacct",
+                    start=filters.get("start"),
+                    end=filters.get("end"),
+                    group_by=filters.get("group_by"),
+                    gateway_node=gateway_node,
+                    output_mode="json" if output_mode == "json" or filters.get("group_by") else "count",
+                )
+            ]
+        return [
+            SlurmAccountingIntent(
+                user=filters.get("user"),
+                state=filters.get("state"),
+                partition=filters.get("partition"),
+                start=filters.get("start"),
+                end=filters.get("end"),
+                min_elapsed_seconds=filters.get("min_elapsed_seconds"),
+                max_elapsed_seconds=filters.get("max_elapsed_seconds"),
+                limit=filters.get("limit", 100),
+                gateway_node=gateway_node,
+                output_mode=output_mode if output_mode in {"text", "csv", "json"} else "json",
+            )
+        ]
+    if request.kind == "job_detail":
+        return [SlurmJobDetailIntent(job_id=filters.get("job_id"), gateway_node=gateway_node, output_mode=output_mode if output_mode in {"text", "csv", "json"} else "json")]
+    if request.kind in {"slurmdbd_health", "accounting_health"}:
+        return [SlurmDBDHealthIntent(gateway_node=gateway_node, output_mode="json" if output_mode == "json" else "text")]
+    if request.kind == "resource_summary":
+        return [SlurmMetricsIntent(metric_group="cluster_summary", gateway_node=gateway_node, output_mode=metrics_output)]
+    raise ValueError(f"Unsupported SLURM request kind: {request.kind}")
+
+
+def _output_mode_for_request(request: SlurmRequest, frame_output_mode: str) -> str:
+    if frame_output_mode in {"json", "csv", "count"}:
+        return frame_output_mode
+    if request.output == "json":
+        return "json"
+    if request.output == "count":
+        return "count"
+    return "text"
+
+
+def _dedupe_slurm_intents(intents: list[Any]) -> list[Any]:
+    deduped: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for intent in intents:
+        payload = intent.model_dump(exclude_none=True) if hasattr(intent, "model_dump") else {}
+        key = (type(intent).__name__, str(sorted(payload.items())))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(intent)
+    return deduped
+
+
+def _attach_compound_coverage(intent: Any, frame: SlurmSemanticFrame, coverage: SlurmCoverageResult) -> Any:
+    coverage_payload = _semantic_metadata(frame, generation_mode="deterministic", coverage=coverage, intent=intent)
+    if isinstance(intent, SlurmCompoundIntent):
+        return intent.model_copy(update={"coverage": coverage_payload})
+    return intent
+
+
+def _semantic_metadata(
+    frame: SlurmSemanticFrame,
+    *,
+    generation_mode: str,
+    coverage: SlurmCoverageResult | None,
+    intent: Any | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    covered_requests = list(coverage.covered_requests) if coverage else []
+    missing_requests = [request.id for request in coverage.missing_requests] if coverage else []
+    covered_constraints = list(coverage.covered_constraints) if coverage else []
+    missing_constraints = [constraint.id for constraint in coverage.missing_constraints] if coverage else []
+    metadata = {
+        "slurm_semantic_frame": frame.to_dict(),
+        "slurm_requests_extracted": [request.to_dict() for request in frame.requests],
+        "slurm_requests_covered": covered_requests,
+        "slurm_requests_missing": missing_requests,
+        "slurm_constraints_extracted": [constraint.to_dict() for constraint in frame.constraints],
+        "slurm_constraints_covered": covered_constraints,
+        "slurm_constraints_missing": missing_constraints,
+        "slurm_coverage_passed": bool(coverage.passed) if coverage else False,
+        "slurm_coverage_reason": coverage.reason if coverage else "",
+        "slurm_generation_mode": generation_mode,
+        "slurm_tools_used": _slurm_tools_for_intent(intent) if intent is not None else [],
+        "slurm_compound_children": len(getattr(intent, "intents", []) or []) if intent is not None else 0,
+        "slurm_metric_groups": _slurm_metric_groups_for_intent(intent) if intent is not None else [],
+        "raw_planner_llm_calls": 0,
+    }
+    metadata.update(extra or {})
+    return metadata
+
+
+def _slurm_tools_for_intent(intent: Any | None) -> list[str]:
+    if intent is None:
+        return []
+    if isinstance(intent, SlurmCompoundIntent):
+        tools: list[str] = []
+        for child in intent.intents:
+            tools.extend(_slurm_tools_for_intent(child))
+        return sorted(set(tools))
+    if isinstance(intent, SlurmQueueIntent):
+        return ["slurm.queue"]
+    if isinstance(intent, SlurmAccountingIntent):
+        return ["slurm.accounting"]
+    if isinstance(intent, SlurmJobCountIntent):
+        return ["slurm.metrics"] if intent.group_by else (["slurm.accounting"] if intent.source == "sacct" else ["slurm.queue"])
+    if isinstance(intent, SlurmJobDetailIntent):
+        return ["slurm.job_detail"]
+    if isinstance(intent, SlurmNodeStatusIntent):
+        return ["slurm.nodes"]
+    if isinstance(intent, SlurmNodeDetailIntent):
+        return ["slurm.node_detail"]
+    if isinstance(intent, SlurmPartitionSummaryIntent):
+        return ["slurm.partitions"]
+    if isinstance(intent, SlurmDBDHealthIntent):
+        return ["slurm.slurmdbd_health"]
+    if isinstance(intent, SlurmMetricsIntent):
+        return ["slurm.slurmdbd_health"] if intent.metric_group in {"slurmdbd_health", "accounting_health"} else ["slurm.metrics"]
+    return []
+
+
+def _slurm_metric_groups_for_intent(intent: Any | None) -> list[str]:
+    if intent is None:
+        return []
+    if isinstance(intent, SlurmCompoundIntent):
+        groups: list[str] = []
+        for child in intent.intents:
+            groups.extend(_slurm_metric_groups_for_intent(child))
+        return sorted(set(groups))
+    if isinstance(intent, SlurmMetricsIntent):
+        return [intent.metric_group]
+    return []
+
+
+def _failure_message(intent: SlurmFailureIntent) -> str:
+    lines = [intent.message]
+    if intent.suggestions:
+        lines.append("")
+        lines.append("Suggested prompts:")
+        for index, suggestion in enumerate(intent.suggestions, start=1):
+            lines.append(f"{index}. {suggestion}")
+    return "\n".join(lines)
+
+
+def _slurm_failure_suggestions() -> list[str]:
+    return [
+        "Show SLURM queue as JSON.",
+        "Count running and pending SLURM jobs.",
+        "Show problematic SLURM nodes.",
+        "Summarize queue, node, and GPU status.",
+        "Check SLURMDBD health.",
+    ]
 
 
 def _slurm_llm_intent_system_prompt() -> str:
@@ -735,6 +1360,8 @@ Mutation/admin operations are unsupported:
 If the user asks for mutation/admin action, return matched=false or an unsupported reason.
 If the request is ambiguous, choose a safe inspection intent or return matched=false.
 Prefer SlurmMetricsIntent for broad health, busy, scheduler, availability, and summary questions.
+Use SlurmCompoundIntent when the user asks for multiple SLURM facts in one request.
+SlurmCompoundIntent children must be typed intent objects with intent_type and arguments, never commands.
 Use the exact JSON keys matched, intent_type, confidence, arguments, reason."""
 
 
@@ -745,6 +1372,19 @@ def _finalize_llm_slurm_intent(
     gateway_node: str | None,
     available_nodes: list[str],
 ) -> Any:
+    if isinstance(intent, SlurmCompoundIntent):
+        finalized_children = [
+            _finalize_llm_slurm_intent(
+                _coerce_slurm_child_intent(child),
+                prompt,
+                gateway_node=gateway_node,
+                available_nodes=available_nodes,
+            )
+            for child in intent.intents
+        ]
+        updated_compound = intent.model_copy(update={"intents": finalized_children})
+        return _validate_llm_slurm_intent(updated_compound)
+
     updated: dict[str, Any] = {}
     prompt_user = _detect_user(prompt)
     prompt_start, prompt_end = _detect_time_range(prompt)
@@ -772,6 +1412,10 @@ def _finalize_llm_slurm_intent(
 
 def _validate_llm_slurm_intent(intent: Any) -> Any:
     _reject_suspicious_strings(intent.model_dump())
+
+    if isinstance(intent, SlurmCompoundIntent):
+        children = [_validate_llm_slurm_intent(_coerce_slurm_child_intent(child)) for child in intent.intents]
+        return intent.model_copy(update={"intents": children})
 
     if isinstance(intent, SlurmQueueIntent):
         state = _validate_job_state(intent.state)
@@ -801,6 +1445,8 @@ def _validate_llm_slurm_intent(intent: Any) -> Any:
                 "partition": _validate_safe_token(intent.partition, field_name="partition"),
                 "start": _validate_time_value(intent.start, field_name="start"),
                 "end": _validate_time_value(intent.end, field_name="end"),
+                "min_elapsed_seconds": intent.min_elapsed_seconds,
+                "max_elapsed_seconds": intent.max_elapsed_seconds,
                 "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
             }
         )
@@ -813,6 +1459,7 @@ def _validate_llm_slurm_intent(intent: Any) -> Any:
                 "partition": _validate_safe_token(intent.partition, field_name="partition"),
                 "start": _validate_time_value(intent.start, field_name="start"),
                 "end": _validate_time_value(intent.end, field_name="end"),
+                "group_by": normalize_group_by(intent.group_by),
                 "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
             }
         )
@@ -823,6 +1470,8 @@ def _validate_llm_slurm_intent(intent: Any) -> Any:
                 "node": _validate_node_name(intent.node) if intent.node is not None else None,
                 "partition": _validate_safe_token(intent.partition, field_name="partition"),
                 "state": _validate_node_state(intent.state),
+                "state_group": normalize_node_state_group(intent.state_group),
+                "gpu_only": bool(intent.gpu_only),
                 "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
             }
         )
@@ -846,18 +1495,10 @@ def _validate_llm_slurm_intent(intent: Any) -> Any:
         )
 
     if isinstance(intent, SlurmMetricsIntent):
-        if intent.metric_group not in {
-            "cluster_summary",
-            "queue_summary",
-            "node_summary",
-            "partition_summary",
-            "gpu_summary",
-            "accounting_summary",
-            "slurmdbd_health",
-        }:
-            raise ValueError(f"Unsupported SLURM metric group: {intent.metric_group}")
+        metric_group = normalize_metric_group(intent.metric_group)
         return intent.model_copy(
             update={
+                "metric_group": metric_group,
                 "start": _validate_time_value(intent.start, field_name="start"),
                 "end": _validate_time_value(intent.end, field_name="end"),
                 "gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node"),
@@ -868,6 +1509,38 @@ def _validate_llm_slurm_intent(intent: Any) -> Any:
         return intent.model_copy(update={"gateway_node": _validate_safe_token(intent.gateway_node, field_name="gateway_node")})
 
     raise ValueError(f"Unsupported SLURM LLM intent: {type(intent).__name__}")
+
+
+def _coerce_slurm_child_intent(child: Any) -> Any:
+    if isinstance(child, self_intent_types()):
+        return child
+    if not isinstance(child, dict):
+        raise ValueError("SLURM compound children must be typed intent objects.")
+    intent_type = str(child.get("intent_type") or child.get("type") or "").strip()
+    arguments = child.get("arguments") if isinstance(child.get("arguments"), dict) else {
+        key: value for key, value in child.items() if key not in {"intent_type", "type"}
+    }
+    model_lookup = {model.__name__: model for model in self_intent_types() if model is not SlurmCompoundIntent and model is not SlurmFailureIntent}
+    if intent_type not in model_lookup:
+        raise ValueError(f"Unsupported SLURM compound child intent type: {intent_type}")
+    return model_lookup[intent_type].model_validate(arguments)
+
+
+def self_intent_types() -> tuple[type, ...]:
+    return (
+        SlurmQueueIntent,
+        SlurmJobDetailIntent,
+        SlurmAccountingIntent,
+        SlurmJobCountIntent,
+        SlurmNodeStatusIntent,
+        SlurmNodeDetailIntent,
+        SlurmPartitionSummaryIntent,
+        SlurmMetricsIntent,
+        SlurmDBDHealthIntent,
+        SlurmCompoundIntent,
+        SlurmUnsupportedMutationIntent,
+        SlurmFailureIntent,
+    )
 
 
 def _reject_suspicious_strings(value: Any) -> None:

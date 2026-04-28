@@ -35,6 +35,9 @@ class Settings(BaseModel):
     enable_llm_intent_extraction: bool = Field(
         default_factory=lambda: os.getenv("AOR_ENABLE_LLM_INTENT_EXTRACTION", "").strip().lower() in {"1", "true", "yes", "on"}
     )
+    enable_sql_llm_generation: bool = Field(
+        default_factory=lambda: os.getenv("AOR_ENABLE_SQL_LLM_GENERATION", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
     max_plan_retries: int = 2
     openai_compat_enabled: bool = True
     openai_compat_model_name: str = "general-purpose-assistant"
@@ -180,6 +183,10 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         llm_timeout_seconds=app_config.llm.timeout_seconds,
         allow_destructive_shell=app_config.runtime.allow_destructive_shell,
         enable_llm_intent_extraction=app_config.runtime.enable_llm_intent_extraction,
+        enable_sql_llm_generation=(
+            os.getenv("AOR_ENABLE_SQL_LLM_GENERATION", "").strip().lower() in {"1", "true", "yes", "on"}
+            or app_config.runtime.enable_sql_llm_generation
+        ),
         max_plan_retries=app_config.runtime.max_plan_retries,
         sql_database_url=app_config.sql.database_url,
         sql_databases=app_config.sql.databases,

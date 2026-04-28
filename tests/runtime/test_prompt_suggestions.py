@@ -47,7 +47,7 @@ def test_mutating_slurm_prompt_produces_unsupported_mutating_operation_suggestio
     error_type = classify_failure(goal)
     result = generate_prompt_suggestions(goal, error_type)
 
-    assert error_type == "unsupported_mutating_operation"
+    assert error_type == "slurm_mutation_unsupported"
     assert any("SLURM" in suggestion.suggested_prompt for suggestion in result.suggestions)
 
 

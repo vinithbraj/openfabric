@@ -15,6 +15,7 @@ class ClassificationContext:
     allowed_tools: list[str]
     settings: Settings
     input_payload: dict[str, Any] | None = None
+    failure_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

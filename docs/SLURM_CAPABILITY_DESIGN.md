@@ -66,10 +66,21 @@ In fixture mode, the tools read prepared outputs instead of calling a live gatew
 It owns:
 
 - SLURM-specific intent types
+- SLURM semantic frame extraction
+- request and constraint coverage validation
 - SLURM prompt classification
 - compilation to `slurm.*` plus `runtime.return`
 - optional typed LLM intent extraction for fuzzy SLURM prompts
 - SLURM-specific safety rules
+
+The current flow is:
+
+1. Extract a `SlurmSemanticFrame` from the prompt.
+2. Resolve every `SlurmRequest` into a read-only typed SLURM intent.
+3. Validate safety and coverage before execution.
+4. Compile only to `slurm.*` tools and `runtime.return`.
+
+Compound prompts use `SlurmCompoundIntent`. A prompt such as “How many jobs are running and pending, and are there any problematic nodes?” becomes separate covered child intents for running job count, pending job count, and problematic nodes. If any requested fact is missing, the runtime returns a SLURM-specific safe failure instead of a partial answer.
 
 ## Safety Rules
 
@@ -107,8 +118,21 @@ Current output patterns include:
 - partitions -> `partitions`
 - detail views -> raw text or structured fields
 - metrics -> structured metrics payload
+- compound prompts -> JSON with `results` and `coverage`
 
 This keeps outputs deterministic and compatible with validation and eval gates.
+
+Coverage metadata includes:
+
+- `slurm_semantic_frame`
+- `slurm_requests_extracted`
+- `slurm_requests_covered`
+- `slurm_requests_missing`
+- `slurm_constraints_extracted`
+- `slurm_constraints_covered`
+- `slurm_constraints_missing`
+- `slurm_coverage_passed`
+- `slurm_tools_used`
 
 ## Typed LLM Intent Extraction
 
@@ -118,7 +142,9 @@ That path:
 
 - is disabled by default
 - only runs after deterministic classification misses
-- only accepts validated typed intent JSON
+- only accepts validated typed intent JSON, including bounded compound intents
+- rejects raw commands, argv, shell fields, tool calls, gateway commands, and execution plans
+- runs the same safety and coverage validators as deterministic extraction
 - still compiles through the same SLURM compiler path
 
 The LLM never emits commands or plans.

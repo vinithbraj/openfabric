@@ -223,6 +223,8 @@ class RuntimeValidator:
                     node=step.args.get("node"),
                     partition=step.args.get("partition"),
                     state=step.args.get("state"),
+                    state_group=step.args.get("state_group"),
+                    gpu_only=bool(step.args.get("gpu_only") or False),
                 )
                 success = actual_result == item.result
                 return {
@@ -257,6 +259,8 @@ class RuntimeValidator:
                     partition=step.args.get("partition"),
                     start=step.args.get("start"),
                     end=step.args.get("end"),
+                    min_elapsed_seconds=step.args.get("min_elapsed_seconds"),
+                    max_elapsed_seconds=step.args.get("max_elapsed_seconds"),
                     limit=step.args.get("limit"),
                 )
                 success = actual_result == item.result

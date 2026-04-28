@@ -10,6 +10,9 @@ from typing import Any
 
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "exhaustive_nlp_phase3_cases.json"
 WORKSPACE_NAME = "exhaustive_nlp_phase3"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LEGACY_WORKSPACE_ROOT = "/home/vinith/Desktop/Workspace/openfabric/artifacts/exhaustive_nlp_phase3"
+CURRENT_WORKSPACE_ROOT = str(REPO_ROOT / "artifacts" / WORKSPACE_NAME)
 
 
 @dataclass(frozen=True)
@@ -90,7 +93,7 @@ def load_cases(case_ids: set[str] | None = None) -> list[CaseSpec]:
         CaseSpec(
             case_id=item["case_id"],
             category=item["category"],
-            prompt=item["prompt"],
+            prompt=str(item["prompt"]).replace(LEGACY_WORKSPACE_ROOT, CURRENT_WORKSPACE_ROOT),
             expected=item["expected"],
             mode=item["mode"],
             deterministic_expected=bool(item.get("deterministic_expected", True)),

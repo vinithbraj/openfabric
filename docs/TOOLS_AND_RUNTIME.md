@@ -119,12 +119,16 @@ The gateway layer is transport only. Shell capability planning remains separate 
 
 ## SQL
 
-`sql.query` is the read-only database execution tool used by deterministic SQL intents.
+`sql.query` is the read-only database execution tool used by deterministic and schema-aware SQL intents. `sql.schema` exposes the same schema catalog used internally for inspection and cache refresh.
 
 The deterministic compiler emits:
 
 - `SqlCountIntent` -> `sql.query` -> `runtime.return`
 - `SqlSelectIntent` -> `sql.query` -> `runtime.return`
+
+For PostgreSQL, the SQL layer introspects non-system schemas, preserves mixed-case identifiers, normalizes relation quoting, and validates that generated SQL is a single read-only `SELECT`/`WITH` query. Broad schema-aware LLM SQL generation is gated by `AOR_ENABLE_SQL_LLM_GENERATION`.
+
+Before execution, schema-aware SQL extracts semantic constraints from the prompt and validates that the final SQL covers them. A prompt such as `count patients above age 70` must contain the resolved birth-date predicate, and `with 2 studies` must contain the related-row count predicate. If coverage fails, `sql.query` is not executed.
 
 The validator re-checks SQL outputs against deterministic expectations where applicable.
 
@@ -149,6 +153,8 @@ Important runtime properties:
 - strict argument validation
 - no arbitrary command input surface
 - fixture mode for tests and evals via `AOR_SLURM_FIXTURE_DIR`
+- semantic request extraction for compound queue/node/GPU/accounting questions
+- coverage validation before any read-only `slurm.*` tool executes
 
 See [SLURM_CAPABILITY_DESIGN.md](./SLURM_CAPABILITY_DESIGN.md) for the domain-level design.
 

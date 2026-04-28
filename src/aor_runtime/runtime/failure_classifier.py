@@ -35,11 +35,18 @@ COMPOUND_HINT_RE = re.compile(r"\b(?:then|and then|after that|save .* return|wri
 PATH_PREPOSITION_RE = re.compile(r"\b(?:in|under|from|inside|within|at|to)\s+([^\s,;:]+)", re.IGNORECASE)
 BARE_FILE_RE = re.compile(r"\b(?!\*\.)[\w.-]+\.[A-Za-z0-9]{1,8}\b")
 ABSOLUTE_PATH_RE = re.compile(r"(?:\.\.?/|~/|/|[A-Za-z]:\\)[^\s,;:]+")
-DATABASE_HINT_RE = re.compile(r"\b(?:database|table|sql|query|rows|select|from)\b", re.IGNORECASE)
+DATABASE_HINT_RE = re.compile(r"\b(?:database|table|tables|schema|sql|query|queries|rows|select|join|columns?)\b", re.IGNORECASE)
 DATABASE_NAME_RE = re.compile(r"\b(?:database\s+([A-Za-z_][\w-]*)|in\s+([A-Za-z_][\w-]*_db|dicom))\b", re.IGNORECASE)
 TABLE_NAME_RE = re.compile(r"\b(?:from|in)\s+([A-Za-z_][\w-]*)\b", re.IGNORECASE)
+SQL_TABLE_NOT_FOUND_RE = re.compile(r"(?:UndefinedTable|relation .+ does not exist)", re.IGNORECASE)
+SQL_COLUMN_NOT_FOUND_RE = re.compile(r"(?:UndefinedColumn|column .+ does not exist)", re.IGNORECASE)
+SQL_AMBIGUOUS_RE = re.compile(r"\bambiguous\s+(?:column|table|alias)\b", re.IGNORECASE)
 COMMAND_NOT_FOUND_RE = re.compile(
     r"(?:command not found|not installed|tool not found|executable file not found|no such file or directory)",
+    re.IGNORECASE,
+)
+SLURM_HINT_RE = re.compile(
+    r"\b(?:slurm|squeue|sacct|sinfo|scontrol|slurmdbd|scheduler|accounting|partition|partitions|node|nodes|queue|cluster|gpu|gpus|gres|jobs?)\b",
     re.IGNORECASE,
 )
 GENERIC_PATH_TOKENS = {
@@ -78,8 +85,12 @@ def classify_failure(
     if bool(metadata_payload.get("llm_calls")) and str(metadata_payload.get("status") or "").lower() == "completed":
         return "llm_fallback_used"
 
+    slurm_error_type = str(metadata_payload.get("slurm_error_type") or "").strip()
+    if slurm_error_type:
+        return slurm_error_type
+
     if MUTATING_OPERATION_RE.search(text):
-        return "unsupported_mutating_operation"
+        return "slurm_mutation_unsupported" if _looks_like_slurm_task(text, plan=plan, metadata=metadata_payload) else "unsupported_mutating_operation"
 
     if VAGUE_OUTPUT_RE.search(text):
         return "unsupported_output_shape"
@@ -98,8 +109,33 @@ def classify_failure(
     ):
         return "file_aggregate_not_matched"
 
+    if _looks_like_sql_task(text, plan=plan, metadata=metadata_payload):
+        sql_error_class = str(metadata_payload.get("sql_error_class") or "").strip()
+        if sql_error_class:
+            return sql_error_class
+        if SQL_TABLE_NOT_FOUND_RE.search(error_text) or SQL_TABLE_NOT_FOUND_RE.search(detail):
+            return "sql_table_not_found"
+        if SQL_COLUMN_NOT_FOUND_RE.search(error_text) or SQL_COLUMN_NOT_FOUND_RE.search(detail):
+            return "sql_column_not_found"
+        if SQL_AMBIGUOUS_RE.search(error_text) or SQL_AMBIGUOUS_RE.search(detail):
+            return "sql_ambiguous_column"
+        if "read-only validation" in lowered_error or "read-only validation" in lowered_detail:
+            return "sql_readonly_validation_failed"
+        if "schema is unavailable" in lowered_error or "schema unavailable" in lowered_detail:
+            return "sql_schema_unavailable"
+        if not _has_explicit_database(text):
+            return "ambiguous_database"
+
     if _looks_like_sql_task(text, plan=plan, metadata=metadata_payload) and not _has_explicit_database(text):
         return "ambiguous_database"
+
+    if _looks_like_slurm_task(text, plan=plan, metadata=metadata_payload):
+        if metadata_payload.get("slurm_requests_missing"):
+            return "slurm_request_uncovered"
+        if metadata_payload.get("slurm_constraints_missing"):
+            return "slurm_constraint_uncovered"
+        if COMMAND_NOT_FOUND_RE.search(lowered_error) or COMMAND_NOT_FOUND_RE.search(lowered_detail):
+            return "slurm_tool_unavailable"
 
     if COMMAND_NOT_FOUND_RE.search(lowered_error) or COMMAND_NOT_FOUND_RE.search(lowered_detail):
         return "tool_unavailable"
@@ -237,7 +273,7 @@ def generate_prompt_suggestions(goal: str, error_type: str, context: dict[str, A
 
     if error_type == "ambiguous_database":
         table = _infer_table_name(goal) or "patients"
-        database = _infer_database_name(goal) or ("dicom" if table in {"patient", "patients", "study", "studies"} else "clinical_db")
+        database = _infer_database_name(goal) or "database_name"
         column = _infer_column_name(goal, table)
         suggestions = [
             PromptSuggestion(
@@ -261,6 +297,101 @@ def generate_prompt_suggestions(goal: str, error_type: str, context: dict[str, A
             message="I could not determine the exact database query shape you wanted.",
             suggestions=suggestions,
         )
+
+    if error_type in {
+        "sql_table_not_found",
+        "sql_column_not_found",
+        "sql_ambiguous_table",
+        "sql_ambiguous_column",
+        "sql_constraint_unresolved",
+        "sql_constraint_uncovered",
+        "sql_projection_unresolved",
+        "sql_projection_uncovered",
+        "sql_generation_failed",
+        "sql_readonly_validation_failed",
+        "sql_schema_unavailable",
+    }:
+        database = _infer_database_name(goal) or "dicom"
+        table = _infer_sql_relation_from_context(context_payload) or _infer_table_name(goal) or "table_name"
+        suggestions = [
+            PromptSuggestion(
+                title="List SQL tables",
+                suggested_prompt=f"List all tables in {database}.",
+                reason="The schema catalog is the source of truth for available tables.",
+            ),
+            PromptSuggestion(
+                title="Describe the table",
+                suggested_prompt=f"Describe table {table} in {database}.",
+                reason="Column names must match the database schema exactly, including case.",
+            ),
+            PromptSuggestion(
+                title="Count rows explicitly",
+                suggested_prompt=f"Count rows in {table} from {database}.",
+                reason="A direct table count is a safe read-only SQL query.",
+            ),
+        ]
+        message = {
+            "sql_table_not_found": "The SQL query referenced a table that was not found.",
+            "sql_column_not_found": "The SQL query referenced a column that was not found.",
+            "sql_ambiguous_table": "The SQL request matched more than one table.",
+            "sql_ambiguous_column": "The SQL request matched more than one column.",
+            "sql_constraint_unresolved": "The SQL request contained constraints that could not be resolved against the schema.",
+            "sql_constraint_uncovered": "The generated SQL did not cover every requested constraint.",
+            "sql_projection_unresolved": "The SQL request contained projections that could not be resolved against the schema.",
+            "sql_projection_uncovered": "The generated SQL did not cover every requested projection.",
+            "sql_generation_failed": "The SQL generator could not produce a safe query for that request.",
+            "sql_readonly_validation_failed": "The SQL query was rejected by read-only safety validation.",
+            "sql_schema_unavailable": "The SQL schema catalog could not be loaded.",
+        }.get(error_type, "The SQL request could not be completed safely.")
+        return PromptSuggestionResult(error_type=error_type, message=message, suggestions=suggestions)
+
+    if error_type in {
+        "slurm_request_unresolved",
+        "slurm_request_uncovered",
+        "slurm_constraint_unresolved",
+        "slurm_constraint_uncovered",
+        "slurm_tool_unavailable",
+        "slurm_accounting_unavailable",
+        "slurmdbd_unavailable",
+        "slurm_mutation_unsupported",
+        "slurm_ambiguous_request",
+        "slurm_llm_intent_rejected",
+    }:
+        suggestions = [
+            PromptSuggestion(
+                title="Show queue",
+                suggested_prompt="Show SLURM queue as JSON.",
+                reason="Queue inspection is read-only and deterministic.",
+            ),
+            PromptSuggestion(
+                title="Count queue states",
+                suggested_prompt="Count running and pending SLURM jobs.",
+                reason="This covers two explicit queue facts without mutation.",
+            ),
+            PromptSuggestion(
+                title="Inspect nodes",
+                suggested_prompt="Show problematic SLURM nodes.",
+                reason="Problematic node inspection uses read-only node status.",
+            ),
+            PromptSuggestion(
+                title="Summarize health",
+                suggested_prompt="Summarize queue, node, and GPU status.",
+                reason="A compound health summary can cover several cluster facts together.",
+            ),
+        ]
+        message = {
+            "slurm_request_unresolved": "The SLURM request could not be resolved into safe read-only intents.",
+            "slurm_request_uncovered": "The SLURM plan did not cover every requested fact.",
+            "slurm_constraint_unresolved": "A SLURM filter or constraint could not be resolved safely.",
+            "slurm_constraint_uncovered": "A SLURM filter or constraint was not represented in the plan.",
+            "slurm_tool_unavailable": "A required SLURM inspection tool appears unavailable.",
+            "slurm_accounting_unavailable": "SLURM accounting appears unavailable or inaccessible.",
+            "slurmdbd_unavailable": "SLURMDBD appears unavailable or inaccessible.",
+            "slurm_mutation_unsupported": "I can inspect SLURM, but I cannot cancel, drain, submit, or modify it.",
+            "slurm_ambiguous_request": "The SLURM request is ambiguous.",
+            "slurm_llm_intent_rejected": "The SLURM LLM intent output was rejected by safety or coverage validation.",
+        }.get(error_type, "The SLURM request could not be completed safely.")
+        return PromptSuggestionResult(error_type=error_type, message=message, suggestions=suggestions)
 
     if error_type == "unsupported_compound_task":
         suggestions = [
@@ -471,6 +602,16 @@ def _looks_like_sql_task(goal: str, *, plan: ExecutionPlan | None, metadata: dic
     return any(token in lowered for token in ("patient", "patients", "study", "studies", "dicom"))
 
 
+def _looks_like_slurm_task(goal: str, *, plan: ExecutionPlan | None, metadata: dict[str, Any]) -> bool:
+    if plan is not None and any(step.action.startswith("slurm.") for step in plan.steps):
+        return True
+    if str(metadata.get("capability") or metadata.get("capability_pack") or "").strip().lower() == "slurm":
+        return True
+    if any(key.startswith("slurm_") for key in metadata):
+        return True
+    return SLURM_HINT_RE.search(goal) is not None
+
+
 def _has_explicit_database(goal: str) -> bool:
     return DATABASE_NAME_RE.search(goal) is not None
 
@@ -561,11 +702,27 @@ def _infer_column_name(goal: str, table: str) -> str:
     return "name"
 
 
+def _infer_sql_relation_from_context(context: dict[str, Any]) -> str | None:
+    for key in ("sql_table", "table", "relation"):
+        value = str(context.get(key) or "").strip()
+        if value:
+            return value
+    step = context.get("step")
+    if isinstance(step, dict):
+        args = step.get("args")
+        if isinstance(args, dict):
+            query = str(args.get("query") or "")
+            match = re.search(r"\bfrom\s+([^\s,;]+)", query, re.IGNORECASE)
+            if match is not None:
+                return match.group(1)
+    return None
+
+
 def _llm_fallback_suggestions(goal: str, workspace_root: Path, outputs_dir: Path) -> list[PromptSuggestion]:
     lowered = goal.lower()
     if _looks_like_sql_task(goal, plan=None, metadata={}):
-        table = _infer_table_name(goal) or "patients"
-        database = _infer_database_name(goal) or ("dicom" if table == "study" else "clinical_db")
+        table = _infer_table_name(goal) or "table_name"
+        database = _infer_database_name(goal) or "database_name"
         column = _infer_column_name(goal, table)
         return [
             PromptSuggestion(

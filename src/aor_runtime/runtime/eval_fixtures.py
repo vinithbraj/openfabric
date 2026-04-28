@@ -147,6 +147,17 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
                 id INTEGER PRIMARY KEY,
                 title TEXT NOT NULL
             );
+            CREATE TABLE "Patient" (
+                "PatientID" TEXT PRIMARY KEY,
+                "PatientName" TEXT NOT NULL,
+                "PatientBirthDate" TEXT
+            );
+            CREATE TABLE "Study" (
+                "StudyInstanceUID" TEXT PRIMARY KEY,
+                "PatientID" TEXT NOT NULL,
+                "Modality" TEXT,
+                FOREIGN KEY("PatientID") REFERENCES "Patient"("PatientID")
+            );
             INSERT INTO members(id, name, city) VALUES
                 (1, 'Alice', 'Portland'),
                 (2, 'Bob', 'Seattle'),
@@ -154,6 +165,14 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
             INSERT INTO books(id, title) VALUES
                 (1, 'North Window'),
                 (2, 'Evening Train');
+            INSERT INTO "Patient"("PatientID", "PatientName", "PatientBirthDate") VALUES
+                ('p1', 'Ada Alpha', '1940-01-01'),
+                ('p2', 'Ben Beta', '1980-01-01'),
+                ('p3', 'Cid Gamma', '2015-01-01');
+            INSERT INTO "Study"("StudyInstanceUID", "PatientID", "Modality") VALUES
+                ('s1', 'p1', 'CT'),
+                ('s2', 'p1', 'MR'),
+                ('s3', 'p2', 'CT');
             """
         )
         db.commit()

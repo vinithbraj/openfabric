@@ -818,6 +818,7 @@ class TaskPlanner:
         self.last_canonicalized_execution_plan: dict[str, Any] | None = None
         self.last_plan_repairs: list[str] = []
         self.last_plan_canonicalized: bool = False
+        self.last_capability_metadata: dict[str, Any] = {}
 
     def build_plan(
         self,
@@ -841,6 +842,7 @@ class TaskPlanner:
                 allowed_tools=allowed_tools,
                 settings=self.settings,
                 input_payload=input_payload,
+                failure_context=failure_context,
             )
             if self.settings.enable_llm_intent_extraction:
                 try:
@@ -862,6 +864,7 @@ class TaskPlanner:
                         compiled_plan = self.capability_registry.compile_result(deterministic_match.intent, compile_context)
                     else:
                         compiled_plan = CompiledIntentPlan(plan=self.capability_registry.compile(deterministic_match.intent, compile_context))
+                    self.last_capability_metadata = {**compiled_plan.metadata, **deterministic_match.metadata}
                     planning_mode = str(deterministic_match.metadata.get("planning_mode") or compiled_plan.planning_mode or "deterministic_intent")
                     self.last_planning_mode = planning_mode
                     self.last_policies_used = [*self.last_policies_used, planning_mode]
@@ -912,6 +915,7 @@ class TaskPlanner:
                     self.last_llm_intent_confidence = None
                     self.last_llm_intent_reason = None
                     self.last_capability_name = None
+                    self.last_capability_metadata = {}
 
             self.last_planning_mode = "hierarchical" if is_complex_goal(goal) else "direct"
             self.last_llm_intent_calls = 0
@@ -919,6 +923,7 @@ class TaskPlanner:
             self.last_llm_intent_confidence = None
             self.last_llm_intent_reason = None
             self.last_capability_name = None
+            self.last_capability_metadata = {}
             if self.last_planning_mode == "hierarchical":
                 high_level_plan = self._decompose_goal(
                     goal=goal,
@@ -982,6 +987,7 @@ class TaskPlanner:
         self.last_canonicalized_execution_plan = None
         self.last_plan_repairs = []
         self.last_plan_canonicalized = False
+        self.last_capability_metadata = {}
 
     def _schema_payload(self, goal: str, allowed_tools: list[str]) -> dict[str, Any] | None:
         if "sql.query" not in allowed_tools:

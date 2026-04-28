@@ -61,6 +61,27 @@ class SqlSelectIntent(BaseModel):
     output_mode: Literal["text", "csv", "json"] = "text"
 
 
+class SqlGeneratedQueryIntent(BaseModel):
+    database: str
+    query: str
+    output_mode: Literal["text", "csv", "json", "count"] = "json"
+    scalar_key: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SqlCatalogReturnIntent(BaseModel):
+    database: str
+    value: Any
+    output_mode: Literal["text", "csv", "json", "count"] = "text"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SqlFailureIntent(BaseModel):
+    message: str
+    suggestions: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class WriteTextIntent(BaseModel):
     path: str
     content: str

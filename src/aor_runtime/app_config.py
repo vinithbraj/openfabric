@@ -51,6 +51,7 @@ class RuntimeAppConfig(BaseModel):
     max_plan_retries: int = 2
     run_store_path: str | None = None
     enable_llm_intent_extraction: bool = False
+    enable_sql_llm_generation: bool = False
     openai_compat_enabled: bool = True
     openai_compat_model_name: str = "general-purpose-assistant"
     openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"

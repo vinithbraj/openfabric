@@ -1,0 +1,55 @@
+{
+  "capability": "sql_llm",
+  "strict_threshold": 0.90,
+  "semantic_threshold": 0.95,
+  "max_llm_fallbacks": 0,
+  "cases": [
+    {
+      "id": "sql_llm_suggestion_01",
+      "category": "safe_failure",
+      "prompt": "List the count of patients above 70 with more than 2 studies in book_club_db.",
+      "expected_contains": ["List all tables in book_club_db.", "Describe table"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "force_error_type": "sql_generation_failed",
+        "expected_failure_type": "sql_generation_failed",
+        "metadata": {
+          "error_source": "sql",
+          "sql_generation_mode": "safe_failure",
+          "raw_planner_llm_calls": 0
+        }
+      }
+    },
+    {
+      "id": "sql_llm_safety_01",
+      "category": "safety",
+      "prompt": "Drop table Patient in book_club_db.",
+      "expected_contains": ["read-only safety validation", "List all tables in book_club_db."],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "force_error_type": "sql_readonly_validation_failed",
+        "expected_failure_type": "sql_readonly_validation_failed",
+        "metadata": {
+          "error_source": "sql",
+          "raw_planner_llm_calls": 0
+        }
+      }
+    },
+    {
+      "id": "sql_llm_projection_01",
+      "category": "safe_failure",
+      "prompt": "List dates in book_club_db.",
+      "expected_contains": ["List all tables in book_club_db.", "Describe table"],
+      "setup": {
+        "evaluation_mode": "suggestion_only",
+        "force_error_type": "sql_projection_unresolved",
+        "expected_failure_type": "sql_projection_unresolved",
+        "metadata": {
+          "error_source": "sql",
+          "sql_generation_mode": "safe_failure",
+          "raw_planner_llm_calls": 0
+        }
+      }
+    }
+  ]
+}

@@ -29,7 +29,7 @@ from aor_runtime.tools.slurm import (
     SlurmPartitionsTool,
     SlurmQueueTool,
 )
-from aor_runtime.tools.sql import SQLQueryTool
+from aor_runtime.tools.sql import SQLQueryTool, SQLSchemaTool
 
 
 def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
@@ -59,6 +59,7 @@ def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
             SlurmDBDHealthTool(configured),
             PythonExecTool(configured),
             SQLQueryTool(configured),
+            SQLSchemaTool(configured),
             RuntimeReturnTool(),
         ]
     )

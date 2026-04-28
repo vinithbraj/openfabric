@@ -112,12 +112,44 @@ Symptoms:
 
 - SLURM tool failures
 - inconsistent queue/node/accounting outputs
+- compound SLURM prompts return a safe coverage failure
 
 Look at:
 
 - `AOR_SLURM_FIXTURE_DIR`
 - gateway node resolution
 - command preview and gateway trace logs
+- `slurm_semantic_frame`
+- `slurm_requests_extracted`
+- `slurm_requests_covered`
+- `slurm_requests_missing`
+- `slurm_constraints_covered`
+- `slurm_constraints_missing`
+- `slurm_coverage_passed`
+
+Compound SLURM prompts are coverage-gated. If the user asks for running jobs, pending jobs, and problematic nodes, all three requests must be represented by typed read-only SLURM intents before any `slurm.*` tool runs. Mutation/admin prompts such as `sbatch`, `scancel`, `drain`, `resume`, `requeue`, or service restarts compile only to a refusal.
+
+### SQL schema or quoting issue
+
+Symptoms:
+
+- `relation does not exist`
+- `column does not exist`
+- only `public` tables appear
+- mixed-case PostgreSQL names fail unless quoted
+
+Start with:
+
+- `List all tables in <database>.`
+- `Describe table <schema>."<MixedCaseTable>" in <database>.`
+
+The SQL catalog includes non-system PostgreSQL schemas outside `public` and preserves exact table/column case. The correct PostgreSQL form for a mixed-case table in a schema is `schema."Table"`, not `"schema.Table"`.
+
+Broad SQL generation is enabled only when `AOR_ENABLE_SQL_LLM_GENERATION=true`. With it disabled, deterministic schema-aware SQL still works, and broad joins/grouping questions fail safely with SQL-specific suggestions.
+
+If a constrained prompt returns a SQL-safe failure with `sql_constraint_unresolved` or `sql_constraint_uncovered`, inspect the planning metadata fields `sql_constraints_extracted`, `sql_constraints_covered`, and `sql_constraints_missing`. A constrained prompt must not execute as a plain unfiltered `COUNT(*)`.
+
+Mutation requests such as `delete`, `drop`, `alter`, and `update` are rejected before execution.
 - SLURM input validation failures
 
 ### Prompt suggestion issue
