@@ -28,8 +28,75 @@ from aor_runtime.tools.sql import resolve_sql_databases
 
 
 ALIAS_RE = re.compile(r'\bas\s+("?)([a-zA-Z_][a-zA-Z0-9_]*)\1', re.IGNORECASE)
+SQL_TYPE_ALIAS_FALSE_POSITIVES = {
+    "bigint",
+    "boolean",
+    "date",
+    "decimal",
+    "double",
+    "float",
+    "integer",
+    "int",
+    "numeric",
+    "real",
+    "text",
+    "timestamp",
+    "timestamptz",
+    "uuid",
+    "varchar",
+}
 STORAGE_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 DU_OUTPUT_RE = re.compile(r"^\s*[0-9.]+[A-Za-z]+\s+\S+")
+SQL_IDENTIFIER_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+
+def _top_level_select_list(query: str) -> str:
+    text = str(query or "")
+    select_start = _find_top_level_keyword(text, "select")
+    if select_start < 0:
+        return text
+    list_start = select_start + len("select")
+    from_start = _find_top_level_keyword(text, "from", start=list_start)
+    if from_start < 0:
+        return text[list_start:]
+    return text[list_start:from_start]
+
+
+def _find_top_level_keyword(text: str, keyword: str, *, start: int = 0) -> int:
+    keyword_lower = keyword.lower()
+    depth = 0
+    quote: str | None = None
+    index = max(0, start)
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                if quote == "'" and index + 1 < len(text) and text[index + 1] == "'":
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if depth == 0 and text[index : index + len(keyword)].lower() == keyword_lower:
+            before = text[index - 1] if index > 0 else ""
+            after_index = index + len(keyword)
+            after = text[after_index] if after_index < len(text) else ""
+            if before not in SQL_IDENTIFIER_CHARS and after not in SQL_IDENTIFIER_CHARS:
+                return index
+        index += 1
+    return -1
 
 
 class RuntimeValidator:
@@ -344,6 +411,23 @@ class RuntimeValidator:
                     return {"name": f"step_{step.id}_{step.action}", "success": shell_semantics[0], "detail": shell_semantics[1]}
                 return {"name": f"step_{step.id}_{step.action}", "success": True, "detail": f"returncode={returncode}"}
 
+            if step.action == "sql.schema":
+                catalog = item.result.get("catalog")
+                configured_databases = resolve_sql_databases(self.settings)
+                if not isinstance(catalog, dict):
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "sql.schema result missing catalog"}
+                database_name = str(catalog.get("database") or "").strip()
+                if not database_name:
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "sql.schema catalog missing database"}
+                if database_name not in configured_databases:
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": f"unknown database {database_name!r}"}
+                if catalog.get("error"):
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": f"sql.schema catalog error: {catalog.get('error')}"}
+                tables = catalog.get("tables")
+                if not isinstance(tables, list):
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "sql.schema catalog missing tables"}
+                return {"name": f"step_{step.id}_{step.action}", "success": True, "detail": f"database={database_name} tables={len(tables)}"}
+
             if step.action == "sql.query":
                 database_name = item.result.get("database")
                 rows = item.result.get("rows")
@@ -399,6 +483,22 @@ class RuntimeValidator:
                     if manifest_check is not None:
                         return {"name": f"step_{step.id}_{step.action}", "success": manifest_check[0], "detail": manifest_check[1]}
                 return {"name": f"step_{step.id}_{step.action}", "success": True, "detail": "python.exec returned structured result"}
+
+            if step.action == "text.format":
+                content = item.result.get("content")
+                row_count = item.result.get("row_count")
+                output_format = str(item.result.get("format") or "")
+                if not isinstance(content, str):
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "text.format result missing content"}
+                if not isinstance(row_count, int) or row_count < 0:
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "text.format result has invalid row_count"}
+                if output_format not in {"txt", "csv", "json", "markdown"}:
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "text.format result has invalid format"}
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": True,
+                    "detail": f"text.format produced {output_format} rows={row_count}",
+                }
 
             if step.action == "runtime.return":
                 expected = runtime_return(
@@ -546,8 +646,11 @@ class RuntimeValidator:
 
     def _extract_sql_aliases(self, query: str) -> list[str]:
         aliases: list[str] = []
-        for match in ALIAS_RE.finditer(query):
+        select_list = _top_level_select_list(str(query or ""))
+        for match in ALIAS_RE.finditer(select_list):
             alias = match.group(2)
+            if alias.lower() in SQL_TYPE_ALIAS_FALSE_POSITIVES:
+                continue
             if alias not in aliases:
                 aliases.append(alias)
         return aliases

@@ -267,6 +267,7 @@ def _render_final_result(
 ):
     if output_mode == "csv":
         return None
+    raw_mode = settings.response_render_mode == "raw"
     last = history[-1]
     action = last.step.action
     previous_action = history[-2].step.action if len(history) >= 2 else None
@@ -291,15 +292,15 @@ def _render_final_result(
         llm_settings=settings,
     )
     if action == "runtime.return":
-        value = last.result.get("value")
+        value = _coerce_structured_user_value(last.result.get("value"), fallback=last.result.get("output"))
         if not _presentation_source_supported(previous_action) and not _presentation_value_supported(value):
             return None
-        if output_mode == "json":
+        if output_mode == "json" and raw_mode:
             clean = strip_internal_telemetry(value) if settings.response_render_mode == "user" else value
             return RenderedResponse(markdown=json.dumps(clean, ensure_ascii=False, sort_keys=True), title="JSON")
         return render_agent_response(value, execution_events=history, metadata={**metadata, "goal": goal}, context=context)
     elif action in {"sql.query", "shell.exec", "fs.aggregate", "fs.search_content", "fs.find", "fs.list", "fs.size"} or action.startswith("slurm."):
-        if output_mode == "json":
+        if output_mode == "json" and raw_mode:
             clean = strip_internal_telemetry(last.result) if settings.response_render_mode == "user" else last.result
             return RenderedResponse(markdown=json.dumps(clean, ensure_ascii=False, sort_keys=True), title="JSON")
         final_result: Any = str(last.result.get("stdout") or "").strip() if action == "shell.exec" else last.result
@@ -315,17 +316,28 @@ def _presentation_source_supported(action: str | None) -> bool:
 
 
 def _presentation_value_supported(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    if "results" in value and isinstance(value.get("results"), dict):
+    if isinstance(value, list):
         return True
-    if "rows" in value and "database" in value:
-        return True
-    if any(key in value for key in ("file_count", "total_size_bytes", "matches", "entries")):
-        return True
-    if any(key in value for key in ("jobs", "nodes", "partitions", "metric_group")):
-        return True
-    return False
+    return isinstance(value, dict)
+
+
+def _coerce_structured_user_value(value: Any, *, fallback: Any = None) -> Any:
+    if isinstance(value, str) and _looks_like_json_object_or_array(value):
+        decoded = _decode_json_string(value)
+        if decoded is not None:
+            return decoded
+    if value is None and isinstance(fallback, str) and _looks_like_json_object_or_array(fallback):
+        decoded = _decode_json_string(fallback)
+        if decoded is not None:
+            return decoded
+    return value
+
+
+def _decode_json_string(value: str) -> Any | None:
+    try:
+        return json.loads(value)
+    except Exception:
+        return None
 
 
 def _shape_text_like_content(content: str, mode: str) -> str:

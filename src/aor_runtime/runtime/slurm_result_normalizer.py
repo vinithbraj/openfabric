@@ -86,6 +86,8 @@ def normalize_slurm_result(result: Any, context: Any | None = None) -> Normalize
     if metric_group in {"slurmdbd_health", "accounting_health"}:
         return _normalize_slurmdbd(metric_payload, payload)
 
+    if _looks_like_multi_metric_accounting_aggregate(payload):
+        return _normalize_multi_metric_accounting_aggregate(payload)
     if source_action == "slurm.accounting_aggregate" or payload.get("result_kind") == "accounting_aggregate":
         return _normalize_accounting_aggregate(payload)
     if "jobs" in payload and source_action == "slurm.accounting":
@@ -306,6 +308,116 @@ def _normalize_accounting_aggregate(payload: dict[str, Any]) -> NormalizedSlurmR
         warnings=warnings,
         raw_debug=payload,
     )
+
+
+def _looks_like_multi_metric_accounting_aggregate(payload: dict[str, Any]) -> bool:
+    if not payload or "result_kind" in payload:
+        return False
+    metric_children = [
+        value
+        for value in payload.values()
+        if isinstance(value, dict)
+        and (
+            value.get("result_kind") == "accounting_aggregate"
+            or {"average_elapsed_seconds", "min_elapsed_seconds", "max_elapsed_seconds"} & set(value)
+        )
+    ]
+    return len(metric_children) >= 2 and len(metric_children) == len(payload)
+
+
+def _normalize_multi_metric_accounting_aggregate(payload: dict[str, Any]) -> NormalizedSlurmResult:
+    metric_order = {
+        "min": 0,
+        "min_elapsed": 0,
+        "minimum": 0,
+        "max": 1,
+        "max_elapsed": 1,
+        "maximum": 1,
+        "avg": 2,
+        "average": 2,
+        "average_elapsed": 2,
+        "sum": 3,
+        "sum_elapsed": 3,
+        "total": 3,
+        "count": 4,
+    }
+    rows: list[dict[str, Any]] = []
+    children = [(str(key), dict(value)) for key, value in payload.items() if isinstance(value, dict)]
+    children.sort(key=lambda item: (metric_order.get(str(item[0]).lower(), 99), str(item[0]).lower()))
+    first = children[0][1] if children else {}
+    warnings: list[str] = []
+    for key, child in children:
+        warnings.extend(str(warning) for warning in child.get("warnings") or [] if str(warning))
+        metric = str(child.get("metric") or key)
+        rows.append(
+            _drop_none(
+                {
+                    "metric": _metric_row_label(key, metric),
+                    "value": child.get("value_human") or _metric_value_for_child(metric, child),
+                    "jobs": child.get("job_count") or child.get("total_count") or child.get("returned_count"),
+                    "average": child.get("average_elapsed_human"),
+                    "minimum": child.get("min_elapsed_human"),
+                    "maximum": child.get("max_elapsed_human"),
+                    "total": child.get("sum_elapsed_human"),
+                    "partition": child.get("partition"),
+                    "state": child.get("state"),
+                }
+            )
+        )
+    summary = _drop_none(
+        {
+            "partition": first.get("partition"),
+            "user": first.get("user"),
+            "state": first.get("state"),
+            "job_count": first.get("job_count") or first.get("total_count") or first.get("returned_count"),
+            "source": first.get("source"),
+            "start": first.get("start"),
+            "end": first.get("end"),
+            "time_window_label": first.get("time_window_label"),
+            "filters": first.get("filters"),
+        }
+    )
+    return NormalizedSlurmResult(
+        kind=SlurmResultKind.ACCOUNTING_AGGREGATE,
+        title="SLURM Job Runtime Summary",
+        summary=summary,
+        grouped={"metrics": rows},
+        total_count=_to_int(summary.get("job_count")),
+        returned_count=_to_int(summary.get("job_count")),
+        truncated=any(bool(child.get("truncated")) for _, child in children),
+        warnings=_dedupe(warnings),
+        raw_debug=payload,
+    )
+
+
+def _metric_row_label(key: str, metric: str) -> str:
+    normalized = str(metric or key).lower()
+    if normalized == "average_elapsed" or key.lower() in {"avg", "average"}:
+        return "Average runtime"
+    if normalized == "min_elapsed" or key.lower() in {"min", "minimum"}:
+        return "Minimum runtime"
+    if normalized == "max_elapsed" or key.lower() in {"max", "maximum"}:
+        return "Maximum runtime"
+    if normalized == "sum_elapsed" or key.lower() in {"sum", "total"}:
+        return "Total runtime"
+    if normalized == "count":
+        return "Matching jobs"
+    return str(key or metric).replace("_", " ").title()
+
+
+def _metric_value_for_child(metric: str, child: dict[str, Any]) -> Any:
+    normalized = str(metric or "").lower()
+    if normalized == "average_elapsed":
+        return child.get("average_elapsed_human")
+    if normalized == "min_elapsed":
+        return child.get("min_elapsed_human")
+    if normalized == "max_elapsed":
+        return child.get("max_elapsed_human")
+    if normalized == "sum_elapsed":
+        return child.get("sum_elapsed_human")
+    if normalized == "count":
+        return child.get("count") or child.get("job_count")
+    return child.get("value_human") or child.get("value_seconds")
 
 
 def _normalize_nodes(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSlurmResult:

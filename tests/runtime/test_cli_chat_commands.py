@@ -231,7 +231,7 @@ def test_chat_progress_streams_shell_output(monkeypatch, tmp_path: Path) -> None
     assert "Finished: completed" in result.stdout
 
 
-def test_chat_failure_prints_prompt_suggestions(monkeypatch, tmp_path: Path) -> None:
+def test_chat_failure_hides_prompt_suggestions_by_default(monkeypatch, tmp_path: Path) -> None:
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(
         "\n".join(
@@ -271,5 +271,4 @@ def test_chat_failure_prints_prompt_suggestions(monkeypatch, tmp_path: Path) -> 
     )
 
     assert result.exit_code == 0
-    assert "Suggested prompts:" in result.stdout
-    assert "meeting_notes.txt" in result.stdout
+    assert "Suggested prompts:" not in result.stdout

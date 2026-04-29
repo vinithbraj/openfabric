@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, model_validator
 
 from aor_runtime.app_config import load_app_config
+from aor_runtime.model_identity import DEFAULT_OPENAI_COMPAT_MODEL_NAME, normalize_openai_compat_model_name
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -45,6 +46,7 @@ class Settings(BaseModel):
     shell_default_cwd: str | None = Field(default_factory=lambda: os.getenv("AOR_SHELL_DEFAULT_CWD") or None)
     shell_max_output_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_SHELL_MAX_OUTPUT_CHARS", "20000")))
     shell_command_timeout_seconds: int = Field(default_factory=lambda: int(os.getenv("AOR_SHELL_COMMAND_TIMEOUT_SECONDS", "30")))
+    runtime_timezone: str = Field(default_factory=lambda: os.getenv("AOR_RUNTIME_TIMEZONE", "").strip())
     enable_llm_intent_extraction: bool = Field(
         default_factory=lambda: os.getenv("AOR_ENABLE_LLM_INTENT_EXTRACTION", "").strip().lower() in {"1", "true", "yes", "on"}
     )
@@ -66,6 +68,9 @@ class Settings(BaseModel):
     show_validation_events: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_VALIDATION_EVENTS"))
     show_planner_events: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_PLANNER_EVENTS"))
     show_tool_events: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_TOOL_EVENTS"))
+    openwebui_trace_mode: str = Field(default_factory=lambda: os.getenv("AOR_OPENWEBUI_TRACE_MODE", "").strip().lower())
+    show_response_stats: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_RESPONSE_STATS", True))
+    show_prompt_suggestions: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_PROMPT_SUGGESTIONS"))
     show_debug_metadata: bool = Field(default_factory=lambda: _env_bool("AOR_SHOW_DEBUG_METADATA"))
     enable_presentation_llm_summary: bool = Field(default_factory=lambda: _env_bool("AOR_ENABLE_PRESENTATION_LLM_SUMMARY"))
     presentation_llm_max_facts: int = Field(default_factory=lambda: int(os.getenv("AOR_PRESENTATION_LLM_MAX_FACTS", "50")))
@@ -78,9 +83,15 @@ class Settings(BaseModel):
     insight_max_facts: int = Field(default_factory=lambda: int(os.getenv("AOR_INSIGHT_MAX_FACTS", "50")))
     insight_max_input_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_INSIGHT_MAX_INPUT_CHARS", "4000")))
     insight_max_output_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_INSIGHT_MAX_OUTPUT_CHARS", "1500")))
+    action_planner_enabled: bool = Field(default_factory=lambda: _env_bool("AOR_ACTION_PLANNER_ENABLED", True))
+    legacy_execution_planner_enabled: bool = Field(default_factory=lambda: _env_bool("AOR_LEGACY_EXECUTION_PLANNER_ENABLED"))
+    auto_artifacts_enabled: bool = Field(default_factory=lambda: _env_bool("AOR_AUTO_ARTIFACTS_ENABLED", True))
+    auto_artifact_row_threshold: int = Field(default_factory=lambda: int(os.getenv("AOR_AUTO_ARTIFACT_ROW_THRESHOLD", "50")))
+    auto_artifact_dir: str = Field(default_factory=lambda: os.getenv("AOR_AUTO_ARTIFACT_DIR", "outputs"))
+    auto_artifact_format: str = Field(default_factory=lambda: os.getenv("AOR_AUTO_ARTIFACT_FORMAT", "csv"))
     max_plan_retries: int = 2
     openai_compat_enabled: bool = True
-    openai_compat_model_name: str = "general-purpose-assistant"
+    openai_compat_model_name: str = DEFAULT_OPENAI_COMPAT_MODEL_NAME
     openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"
 
     @property
@@ -184,6 +195,7 @@ class Settings(BaseModel):
             raise ValueError("shell_max_output_chars must be greater than zero.")
         if self.shell_command_timeout_seconds <= 0:
             raise ValueError("shell_command_timeout_seconds must be greater than zero.")
+        self.runtime_timezone = str(self.runtime_timezone or "").strip()
         if self.max_plan_retries < 0:
             raise ValueError("max_plan_retries must be zero or greater.")
         self.presentation_mode = str(self.presentation_mode or "user").strip().lower() or "user"
@@ -206,7 +218,13 @@ class Settings(BaseModel):
             raise ValueError("insight_max_input_chars must be greater than zero.")
         if self.insight_max_output_chars <= 0:
             raise ValueError("insight_max_output_chars must be greater than zero.")
-        self.openai_compat_model_name = str(self.openai_compat_model_name or "").strip() or "general-purpose-assistant"
+        if self.auto_artifact_row_threshold < 0:
+            raise ValueError("auto_artifact_row_threshold must be zero or greater.")
+        self.auto_artifact_dir = str(self.auto_artifact_dir or "outputs").strip() or "outputs"
+        self.auto_artifact_format = str(self.auto_artifact_format or "csv").strip().lower() or "csv"
+        if self.auto_artifact_format not in {"csv"}:
+            raise ValueError("auto_artifact_format must be csv.")
+        self.openai_compat_model_name = normalize_openai_compat_model_name(self.openai_compat_model_name)
         self.openai_compat_spec_path = str(self.openai_compat_spec_path or "").strip() or "examples/general_purpose_assistant.yaml"
         normalized_endpoints: dict[str, str] = {}
         for raw_node, raw_url in dict(self.gateway_endpoints or {}).items():
@@ -259,6 +277,7 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         shell_command_timeout_seconds=int(
             os.getenv("AOR_SHELL_COMMAND_TIMEOUT_SECONDS", str(app_config.runtime.shell_command_timeout_seconds))
         ),
+        runtime_timezone=os.getenv("AOR_RUNTIME_TIMEZONE", "").strip() or app_config.runtime.runtime_timezone,
         enable_llm_intent_extraction=app_config.runtime.enable_llm_intent_extraction,
         enable_sql_llm_generation=(
             os.getenv("AOR_ENABLE_SQL_LLM_GENERATION", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -284,6 +303,12 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         show_validation_events=_env_bool("AOR_SHOW_VALIDATION_EVENTS", app_config.runtime.show_validation_events),
         show_planner_events=_env_bool("AOR_SHOW_PLANNER_EVENTS", app_config.runtime.show_planner_events),
         show_tool_events=_env_bool("AOR_SHOW_TOOL_EVENTS", app_config.runtime.show_tool_events),
+        openwebui_trace_mode=(
+            os.getenv("AOR_OPENWEBUI_TRACE_MODE", "").strip().lower()
+            or app_config.runtime.openwebui_trace_mode
+        ),
+        show_response_stats=_env_bool("AOR_SHOW_RESPONSE_STATS", app_config.runtime.show_response_stats),
+        show_prompt_suggestions=_env_bool("AOR_SHOW_PROMPT_SUGGESTIONS", app_config.runtime.show_prompt_suggestions),
         show_debug_metadata=_env_bool("AOR_SHOW_DEBUG_METADATA", app_config.runtime.show_debug_metadata),
         enable_presentation_llm_summary=_env_bool(
             "AOR_ENABLE_PRESENTATION_LLM_SUMMARY",
@@ -305,6 +330,16 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         insight_max_facts=int(os.getenv("AOR_INSIGHT_MAX_FACTS", str(app_config.runtime.insight_max_facts))),
         insight_max_input_chars=int(os.getenv("AOR_INSIGHT_MAX_INPUT_CHARS", str(app_config.runtime.insight_max_input_chars))),
         insight_max_output_chars=int(os.getenv("AOR_INSIGHT_MAX_OUTPUT_CHARS", str(app_config.runtime.insight_max_output_chars))),
+        action_planner_enabled=_env_bool("AOR_ACTION_PLANNER_ENABLED", app_config.runtime.action_planner_enabled),
+        legacy_execution_planner_enabled=_env_bool(
+            "AOR_LEGACY_EXECUTION_PLANNER_ENABLED", app_config.runtime.legacy_execution_planner_enabled
+        ),
+        auto_artifacts_enabled=_env_bool("AOR_AUTO_ARTIFACTS_ENABLED", app_config.runtime.auto_artifacts_enabled),
+        auto_artifact_row_threshold=int(
+            os.getenv("AOR_AUTO_ARTIFACT_ROW_THRESHOLD", str(app_config.runtime.auto_artifact_row_threshold))
+        ),
+        auto_artifact_dir=os.getenv("AOR_AUTO_ARTIFACT_DIR", app_config.runtime.auto_artifact_dir),
+        auto_artifact_format=os.getenv("AOR_AUTO_ARTIFACT_FORMAT", app_config.runtime.auto_artifact_format),
         max_plan_retries=app_config.runtime.max_plan_retries,
         sql_database_url=app_config.sql.database_url,
         sql_databases=app_config.sql.databases,

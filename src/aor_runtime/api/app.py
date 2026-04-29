@@ -13,7 +13,9 @@ from pydantic import BaseModel, Field
 from aor_runtime import __version__
 from aor_runtime.app_config import APP_CONFIG_PATH_ENV
 from aor_runtime.config import Settings, get_settings
+from aor_runtime.model_identity import is_accepted_openai_compat_model_name
 from aor_runtime.runtime.engine import ExecutionEngine
+from aor_runtime.runtime.openwebui_trace import OpenWebUITraceRenderer
 
 
 class RunRequest(BaseModel):
@@ -78,67 +80,14 @@ def _latest_session_status(engine: ExecutionEngine, session_id: str) -> tuple[st
     return str(session.get("status") or ""), payload
 
 
-def _event_text_for_openai(event: dict[str, Any], settings: Settings | None = None) -> tuple[str | None, str | None]:
-    event_type = str(event.get("event_type") or "")
-    payload = dict(event.get("payload") or {})
-    mode = str(getattr(settings, "response_render_mode", "raw") or "raw").lower()
-    if mode == "user":
-        return None, None
-    show_planner = mode == "raw" or bool(getattr(settings, "show_planner_events", False))
-    show_tools = mode == "raw" or bool(getattr(settings, "show_tool_events", False))
-    show_validation = mode == "raw" or bool(getattr(settings, "show_validation_events", False))
-    if event_type == "planner.started":
-        if not show_planner:
-            return None, None
-        return "Thinking...\n", None
-    if event_type == "planner.completed":
-        if not show_planner:
-            return None, None
-        return "Plan ready.\n", None
-    if event_type == "executor.step.started":
-        if not show_tools:
-            return None, None
-        step = dict(payload.get("step") or {})
-        node = str(payload.get("node") or "").strip()
-        command = str(payload.get("command") or "").strip()
-        line = f"Executing {step.get('action', 'step')}"
-        if node:
-            line = f"{line} on {node}"
-        if command:
-            line = f"{line}: {command}"
-        return f"{line}...\n", None
-    if event_type == "executor.step.output":
-        if not show_tools:
-            return None, None
-        channel = str(payload.get("channel") or "")
-        text = str(payload.get("text") or "")
-        if channel == "stderr":
-            return f"[stderr] {text}", text
-        return text, text
-    if event_type == "validator.started":
-        if not show_validation:
-            return None, None
-        return "Validating...\n", None
-    if event_type == "validator.completed":
-        if not show_validation:
-            return None, None
-        result = dict(payload.get("result") or {})
-        return ("Validation passed.\n" if bool(result.get("success")) else "Validation failed.\n"), None
-    if event_type.endswith(".failed"):
-        error = str(payload.get("error") or "Task failed.")
-        phase = event_type.split(".", 1)[0]
-        return f"Failed during {phase}: {error}\n", None
-    return None, None
-
-
 def _messages_to_task(messages: list[ChatMessage]) -> str:
     for message in reversed(messages):
         text = _message_content_to_text(message.content)
-        if message.role == "user" and text:
+        if message.role == "user" and text and not _is_openwebui_meta_prompt(text):
             return text
     for message in reversed(messages):
         text = _message_content_to_text(message.content)
-        if text:
+        if text and not _is_openwebui_meta_prompt(text):
             return text
     return ""
 
@@ -157,6 +106,27 @@ def _message_content_to_text(content: Any) -> str:
                     parts.append(text)
         return "\n".join(part for part in parts if part).strip()
     return str(content or "").strip()
+
+
+def _is_openwebui_meta_prompt(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    has_chat_history = "<chat_history>" in lowered or "### chat history" in lowered
+    if "### task:" in lowered and has_chat_history:
+        return True
+    meta_markers = (
+        "suggest 3-5 relevant follow-up questions",
+        "suggest relevant follow-up questions",
+        "generate a concise title",
+        "create a concise",
+        "generate tags",
+    )
+    if has_chat_history and any(marker in lowered for marker in meta_markers):
+        return True
+    if lowered.startswith("### task:") and any(marker in lowered for marker in meta_markers):
+        return True
+    return False
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -320,13 +290,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def openai_chat_completions(request: ChatCompletionsRequest):
         if not configured_settings.openai_compat_enabled:
             raise HTTPException(status_code=404, detail="OpenAI compatibility is disabled.")
-        if request.model != configured_settings.openai_compat_model_name:
+        if not is_accepted_openai_compat_model_name(request.model, configured_settings.openai_compat_model_name):
             raise HTTPException(status_code=400, detail=f"Unknown model: {request.model}")
 
         spec_path = configured_settings.resolve_openai_compat_spec_path()
         task = _messages_to_task(request.messages)
         if not task:
-            raise HTTPException(status_code=400, detail="At least one message with content is required.")
+            raise HTTPException(status_code=400, detail="No actionable user task found.")
 
         if not request.stream:
             final_state = engine.run_spec(str(spec_path), {"task": task})
@@ -373,15 +343,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def event_stream():
             cursor: int | None = None
             visible_output: list[str] = []
+            trace_renderer = OpenWebUITraceRenderer.from_settings(configured_settings)
             yield chunk({"role": "assistant"})
             while True:
                 emitted = False
                 for event in engine.store.get_events_after(session_id, after_id=cursor):
                     emitted = True
                     cursor = int(event["id"])
-                    text, visible = _event_text_for_openai(event, configured_settings)
-                    if visible:
-                        visible_output.append(visible)
+                    text = trace_renderer.render(event)
                     if text:
                         yield chunk({"content": text})
                     if str(event.get("event_type") or "") == "finalize.completed":

@@ -220,7 +220,7 @@ def test_runs_stream_and_openai_compat_stream(tmp_path: Path, monkeypatch) -> No
     assert "data: [DONE]" in body
 
 
-def test_failed_run_and_openai_surfaces_include_prompt_suggestions(tmp_path: Path, monkeypatch) -> None:
+def test_failed_run_and_openai_surfaces_hide_prompt_suggestions_by_default(tmp_path: Path, monkeypatch) -> None:
     spec_path = _write_shell_spec(tmp_path)
     app = create_app(_settings(tmp_path, spec_path))
     engine = app.state.engine
@@ -233,8 +233,7 @@ def test_failed_run_and_openai_surfaces_include_prompt_suggestions(tmp_path: Pat
     )
     assert run_response.status_code == 200
     run_payload = run_response.json()
-    assert "Suggested prompts:" in run_payload["final_output"]["content"]
-    assert "meeting_notes.txt" in run_payload["final_output"]["content"]
+    assert "Suggested prompts:" not in run_payload["final_output"]["content"]
     assert run_payload["final_output"]["metadata"]["failure_type"] == "ambiguous_file_reference"
     assert run_payload["final_output"]["metadata"]["suggestion_count"] >= 1
 
@@ -252,8 +251,7 @@ def test_failed_run_and_openai_surfaces_include_prompt_suggestions(tmp_path: Pat
         },
     )
     assert completion.status_code == 200
-    assert "Suggested prompts:" in completion.json()["choices"][0]["message"]["content"]
-    assert "meeting_notes.txt" in completion.json()["choices"][0]["message"]["content"]
+    assert "Suggested prompts:" not in completion.json()["choices"][0]["message"]["content"]
 
     with client.stream(
         "POST",
@@ -267,5 +265,4 @@ def test_failed_run_and_openai_surfaces_include_prompt_suggestions(tmp_path: Pat
         body = response.read().decode()
 
     assert response.status_code == 200
-    assert "Suggested prompts:" in body
-    assert "meeting_notes.txt" in body
+    assert "Suggested prompts:" not in body

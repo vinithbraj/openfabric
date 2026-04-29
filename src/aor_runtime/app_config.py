@@ -6,6 +6,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from aor_runtime.model_identity import DEFAULT_OPENAI_COMPAT_MODEL_NAME, normalize_openai_compat_model_name
+
 
 APP_CONFIG_FILENAME = "config.yaml"
 APP_CONFIG_PATH_ENV = "AOR_APP_CONFIG_PATH"
@@ -54,7 +56,14 @@ class RuntimeAppConfig(BaseModel):
     shell_default_cwd: str | None = None
     shell_max_output_chars: int = 20000
     shell_command_timeout_seconds: int = 30
+    runtime_timezone: str = ""
     max_plan_retries: int = 2
+    action_planner_enabled: bool = True
+    legacy_execution_planner_enabled: bool = False
+    auto_artifacts_enabled: bool = True
+    auto_artifact_row_threshold: int = 50
+    auto_artifact_dir: str = "outputs"
+    auto_artifact_format: str = "csv"
     run_store_path: str | None = None
     enable_llm_intent_extraction: bool = False
     enable_sql_llm_generation: bool = False
@@ -67,6 +76,9 @@ class RuntimeAppConfig(BaseModel):
     show_validation_events: bool = False
     show_planner_events: bool = False
     show_tool_events: bool = False
+    openwebui_trace_mode: str = ""
+    show_response_stats: bool = True
+    show_prompt_suggestions: bool = False
     show_debug_metadata: bool = False
     enable_presentation_llm_summary: bool = False
     presentation_llm_max_facts: int = 50
@@ -80,7 +92,7 @@ class RuntimeAppConfig(BaseModel):
     insight_max_input_chars: int = 4000
     insight_max_output_chars: int = 1500
     openai_compat_enabled: bool = True
-    openai_compat_model_name: str = "general-purpose-assistant"
+    openai_compat_model_name: str = DEFAULT_OPENAI_COMPAT_MODEL_NAME
     openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"
 
     @model_validator(mode="after")
@@ -94,6 +106,7 @@ class RuntimeAppConfig(BaseModel):
             raise ValueError("runtime.shell_max_output_chars must be greater than zero.")
         if self.shell_command_timeout_seconds <= 0:
             raise ValueError("runtime.shell_command_timeout_seconds must be greater than zero.")
+        self.runtime_timezone = str(self.runtime_timezone or "").strip()
         if self.llm_summary_max_facts <= 0:
             raise ValueError("runtime.llm_summary_max_facts must be greater than zero.")
         if self.presentation_llm_max_facts <= 0:
@@ -108,6 +121,12 @@ class RuntimeAppConfig(BaseModel):
             raise ValueError("runtime.insight_max_input_chars must be greater than zero.")
         if self.insight_max_output_chars <= 0:
             raise ValueError("runtime.insight_max_output_chars must be greater than zero.")
+        if self.auto_artifact_row_threshold < 0:
+            raise ValueError("runtime.auto_artifact_row_threshold must be zero or greater.")
+        self.auto_artifact_dir = str(self.auto_artifact_dir or "outputs").strip() or "outputs"
+        self.auto_artifact_format = str(self.auto_artifact_format or "csv").strip().lower() or "csv"
+        if self.auto_artifact_format not in {"csv"}:
+            raise ValueError("runtime.auto_artifact_format must be csv.")
         normalized_run_store_path = str(self.run_store_path or "").strip()
         self.run_store_path = normalized_run_store_path or None
         self.presentation_mode = str(self.presentation_mode or "user").strip().lower() or "user"
@@ -116,7 +135,10 @@ class RuntimeAppConfig(BaseModel):
         self.response_render_mode = str(self.response_render_mode or self.presentation_mode or "user").strip().lower() or "user"
         if self.response_render_mode not in {"user", "debug", "raw"}:
             raise ValueError("runtime.response_render_mode must be one of: user, debug, raw.")
-        self.openai_compat_model_name = str(self.openai_compat_model_name or "").strip() or "general-purpose-assistant"
+        self.openwebui_trace_mode = str(self.openwebui_trace_mode or "").strip().lower()
+        if self.openwebui_trace_mode and self.openwebui_trace_mode not in {"off", "summary", "diagnostic"}:
+            raise ValueError("runtime.openwebui_trace_mode must be one of: off, summary, diagnostic.")
+        self.openai_compat_model_name = normalize_openai_compat_model_name(self.openai_compat_model_name)
         self.openai_compat_spec_path = str(self.openai_compat_spec_path or "").strip() or "examples/general_purpose_assistant.yaml"
         return self
 

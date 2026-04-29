@@ -95,7 +95,7 @@ def test_runtime_return_uses_presentation_for_openwebui_style_final_output(tmp_p
     assert not output["content"].lstrip().startswith("{")
 
 
-def test_explicit_json_strips_internal_telemetry_in_user_mode(tmp_path: Path) -> None:
+def test_explicit_json_renders_markdown_in_user_mode(tmp_path: Path) -> None:
     history = [
         StepLog(
             step=ExecutionStep(id=1, action="runtime.return"),
@@ -105,8 +105,76 @@ def test_explicit_json_strips_internal_telemetry_in_user_mode(tmp_path: Path) ->
     ]
 
     output = summarize_final_output("Show SLURM cluster status as JSON.", history, settings=_settings(tmp_path))
-    payload = json.loads(output["content"])
 
-    assert "coverage" not in payload
-    assert "slurm_semantic_frame" not in payload
-    assert "results" in payload
+    assert not output["content"].lstrip().startswith("{")
+    assert "coverage" not in output["content"]
+    assert "slurm_semantic_frame" not in output["content"]
+    assert "SLURM Cluster Status" in output["content"] or "| Field | Value |" in output["content"]
+
+
+def test_raw_render_mode_keeps_json_for_integrations(tmp_path: Path) -> None:
+    history = [
+        StepLog(
+            step=ExecutionStep(id=1, action="runtime.return"),
+            result={"value": {"queue_count": 10}, "output": '{"queue_count": 10}'},
+            success=True,
+        )
+    ]
+
+    output = summarize_final_output(
+        "Show SLURM cluster status as JSON.",
+        history,
+        settings=_settings(tmp_path, response_render_mode="raw"),
+    )
+
+    assert json.loads(output["content"]) == {"queue_count": 10}
+
+
+def test_slurm_multi_metric_accounting_aggregate_renders_table() -> None:
+    payload = {
+        "min": {
+            "result_kind": "accounting_aggregate",
+            "metric": "min_elapsed",
+            "partition": "totalseg",
+            "job_count": 364,
+            "average_elapsed_human": "10m 53s",
+            "min_elapsed_human": "0s",
+            "max_elapsed_human": "1h 11m 3s",
+            "sum_elapsed_human": "2d 18h 3m 6s",
+            "value_human": "0s",
+            "source": "sacct",
+        },
+        "max": {
+            "result_kind": "accounting_aggregate",
+            "metric": "max_elapsed",
+            "partition": "totalseg",
+            "job_count": 364,
+            "average_elapsed_human": "10m 53s",
+            "min_elapsed_human": "0s",
+            "max_elapsed_human": "1h 11m 3s",
+            "sum_elapsed_human": "2d 18h 3m 6s",
+            "value_human": "1h 11m 3s",
+            "source": "sacct",
+        },
+        "avg": {
+            "result_kind": "accounting_aggregate",
+            "metric": "average_elapsed",
+            "partition": "totalseg",
+            "job_count": 364,
+            "average_elapsed_human": "10m 53s",
+            "min_elapsed_human": "0s",
+            "max_elapsed_human": "1h 11m 3s",
+            "sum_elapsed_human": "2d 18h 3m 10s",
+            "value_human": "10m 53s",
+            "source": "sacct",
+        },
+    }
+
+    rendered = present_result(payload, PresentationContext(mode="user", source_action="slurm.accounting_aggregate"))
+
+    assert not rendered.markdown.lstrip().startswith("{")
+    assert "## SLURM Job Runtime Summary" in rendered.markdown
+    assert "| Metric | Value | Jobs | Average | Min | Max | Total |" in rendered.markdown
+    assert "Minimum runtime" in rendered.markdown
+    assert "Maximum runtime" in rendered.markdown
+    assert "Average runtime" in rendered.markdown

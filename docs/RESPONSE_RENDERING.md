@@ -11,19 +11,26 @@ The runtime separates execution telemetry from user-facing answers. Tool executi
 Environment flags:
 
 - `AOR_RESPONSE_RENDER_MODE=user|debug|raw`
+- `AOR_OPENWEBUI_TRACE_MODE=off|summary|diagnostic`
 - `AOR_SHOW_EXECUTED_COMMANDS=true|false`
 - `AOR_SHOW_VALIDATION_EVENTS=true|false`
 - `AOR_SHOW_PLANNER_EVENTS=true|false`
 - `AOR_SHOW_TOOL_EVENTS=true|false`
 - `AOR_SHOW_DEBUG_METADATA=true|false`
+- `AOR_SHOW_PROMPT_SUGGESTIONS=false|true`
 
 `AOR_PRESENTATION_MODE` remains a backward-compatible alias for the render mode when `AOR_RESPONSE_RENDER_MODE` is not set.
+If `AOR_OPENWEBUI_TRACE_MODE` is not set, enabling any legacy planner/tool/validation event flag maps OpenWebUI chat streaming to compact `summary` tracing.
 
 ## What User Mode Hides
 
 User mode does not include lifecycle text such as `Thinking...`, `Plan ready`, `Executing runtime.return`, `Validating...`, or `Validation passed`. It also strips raw planner metadata, semantic frames, coverage blocks, gateway internals, stdout/stderr payloads, and raw command output unless that output is the requested result.
 
-OpenAI-compatible streaming sends only the final rendered Markdown in user mode. Native event streams such as `/runs/stream` and `/sessions/{id}/events/stream` still expose events for debugging and progress tooling.
+User/OpenWebUI mode also forbids raw inline JSON. Structured dictionaries render as Markdown key-value tables, lists of dictionaries render as Markdown tables, and nested structures render as compact readable cells or capability-specific sections. If a client needs exact JSON, use `AOR_RESPONSE_RENDER_MODE=raw` through a developer/integration path or write the result to a `.json` file; normal chat output remains readable Markdown.
+
+Prompt suggestions are disabled in normal chat output by default. Failure metadata may still classify the failure for debug/session APIs, but generic `Suggested prompts:` sections are shown only when `AOR_SHOW_PROMPT_SUGGESTIONS=true`.
+
+OpenAI-compatible streaming sends only the final rendered Markdown by default. When `AOR_OPENWEBUI_TRACE_MODE=summary`, it streams compact progress such as planning status, a short plan overview, sanitized SQL/shell/path details, row counts, file-write summaries, and validation/repair status. `diagnostic` adds compact validation and repair details. OpenWebUI tracing never streams raw LLM prompts, raw LLM responses, raw action JSON, raw rows, full schemas, or tool stdout/stderr payloads. Native event streams such as `/runs/stream` and `/sessions/{id}/events/stream` still expose structured events for debugging and progress tooling.
 
 ## Execution Details
 
@@ -35,6 +42,8 @@ The renderer appends safe execution details after the deterministic result:
 - Shell: `Command Used` for already-approved shell execution paths.
 
 `runtime.return` is never shown as a user-visible tool in user mode.
+
+The OpenAI-compatible model id exposed to OpenWebUI is `OpenFABRIC v<runtime-version>`. The older `general-purpose-assistant` name remains accepted as a temporary request alias for existing OpenWebUI configurations.
 
 ## Optional LLM-Assisted Presentation
 

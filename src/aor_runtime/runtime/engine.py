@@ -15,6 +15,7 @@ from aor_runtime.dsl.loader import load_runtime_spec
 from aor_runtime.dsl.models import CompiledRuntimeSpec
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.compiler import GraphCompiler
+from aor_runtime.runtime.auto_artifact import AutoArtifactMaterializer
 from aor_runtime.runtime.dataflow import resolve_execution_step
 from aor_runtime.runtime.decomposer import is_complex_goal
 from aor_runtime.runtime.error_normalization import normalize_planner_error, normalize_runtime_failure
@@ -23,6 +24,9 @@ from aor_runtime.runtime.failure_classifier import classify_failure, generate_pr
 from aor_runtime.runtime.planner import TaskPlanner, summarize_plan, summarize_planner_raw_output
 from aor_runtime.runtime.policies import PlanContractViolation
 from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
+from aor_runtime.runtime.response_renderer import ResponseRenderContext, render_agent_response
+from aor_runtime.runtime.response_stats import append_response_stats
+from aor_runtime.runtime.result_shape import validate_result_shape
 from aor_runtime.runtime.sessions import SessionManager
 from aor_runtime.runtime.state import RuntimeState
 from aor_runtime.runtime.store import SQLiteRunStore
@@ -62,6 +66,13 @@ def _safe_execution_plan(plan_data: Any) -> ExecutionPlan | None:
         return ExecutionPlan.model_validate(plan_data)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _strip_prompt_suggestions(content: str) -> str:
+    text = str(content or "")
+    if "Suggested prompts:" not in text:
+        return text
+    return re.split(r"\n\s*Suggested prompts:\s*\n", text, maxsplit=1)[0].rstrip()
 
 
 def summarize_failure_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -369,6 +380,7 @@ class ExecutionEngine:
                 "planning_mode": planning_mode,
             },
         )
+        llm_usage_before = self._llm_usage_snapshot()
         try:
             plan = self.planner.build_plan(
                 goal=goal,
@@ -381,6 +393,7 @@ class ExecutionEngine:
             metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + int(self.planner.last_llm_calls)
             metrics["llm_intent_calls"] = int(metrics.get("llm_intent_calls", 0)) + int(self.planner.last_llm_intent_calls)
             metrics["raw_planner_llm_calls"] = int(metrics.get("raw_planner_llm_calls", 0)) + int(self.planner.last_raw_planner_llm_calls)
+            self._merge_llm_token_metrics(metrics, llm_usage_before)
             state["metrics"] = metrics
             plan_summary = summarize_plan(plan)
             policies_used = list(self.planner.last_policies_used)
@@ -403,6 +416,17 @@ class ExecutionEngine:
                     key: value
                     for key, value in dict(getattr(self.planner, "last_capability_metadata", {}) or {}).items()
                     if str(key).startswith("sql_")
+                    or str(key).startswith("action_")
+                    or key
+                    in {
+                        "planning_mode",
+                        "raw_action_plan",
+                        "normalized_action_plan",
+                        "canonicalized_action_plan",
+                        "canonicalization_repairs",
+                        "contract_validation_errors",
+                        "domain_validation_errors",
+                    }
                 }
             )
             awaiting_confirmation = bool(state.get("dry_run"))
@@ -453,6 +477,7 @@ class ExecutionEngine:
             metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + int(self.planner.last_llm_calls)
             metrics["llm_intent_calls"] = int(metrics.get("llm_intent_calls", 0)) + int(self.planner.last_llm_intent_calls)
             metrics["raw_planner_llm_calls"] = int(metrics.get("raw_planner_llm_calls", 0)) + int(self.planner.last_raw_planner_llm_calls)
+            self._merge_llm_token_metrics(metrics, llm_usage_before)
             state["metrics"] = metrics
             failed_policies = list(self.planner.last_policies_used)
             planner_error_type = str(self.planner.last_error_type or type(exc).__name__)
@@ -541,6 +566,68 @@ class ExecutionEngine:
                 event_type="planner.failed",
                 payload=failure_payload,
             )
+            retries = int(state.get("retries", 0))
+            retryable = not _is_non_retryable_failure(
+                "planner_failed",
+                final_error,
+                {
+                    "error_kind": final_output_metadata.get("error_kind") or planner_error_type,
+                    "planner_error_type": planner_error_type,
+                },
+            )
+            should_retry = (
+                retryable
+                and str(self.planner.last_capability_name or "") == "action_planner"
+                and retries < min(compiled.runtime.max_retries, self.settings.max_plan_retries)
+            )
+            if should_retry:
+                previous_failure_context = dict(state.get("failure_context") or {})
+                failure_context = _cap_failure_context_size(
+                    {
+                        "reason": "planner_failed",
+                        "error": final_error,
+                        "planner_error_type": planner_error_type,
+                        "planner_error_stage": planner_error_stage,
+                        "raw_output_preview": raw_output_preview,
+                        "validation_errors": list(getattr(self.planner, "last_validation_errors", []) or [])[:8],
+                        "contract_validation_errors": list(
+                            getattr(self.planner, "last_contract_validation_errors", []) or []
+                        )[:8],
+                        "domain_validation_errors": list(getattr(self.planner, "last_domain_validation_errors", []) or [])[:8],
+                        **{
+                            key: previous_failure_context[key]
+                            for key in ("shape_error", "expected_shape", "actual_shape", "failed_sql")
+                            if key in previous_failure_context
+                        },
+                        "retryable": True,
+                    }
+                )
+                state.update(
+                    {
+                        "current_node": "planner",
+                        "next_action": "planner",
+                        "status": "retrying",
+                        "done": False,
+                        "retries": retries + 1,
+                        "failure_context": failure_context,
+                        "error": final_error,
+                        "awaiting_confirmation": False,
+                        "confirmation_kind": None,
+                        "confirmation_step": None,
+                        "confirmation_message": None,
+                        "policies_used": [],
+                        "high_level_plan": None,
+                        "step_outputs": {},
+                        "plan": {},
+                        "plan_summary": None,
+                        "plan_canonicalized": False,
+                        "plan_repairs": [],
+                        "attempt_history": [],
+                        "current_step_index": 0,
+                    }
+                )
+                self._persist(session, node_name="planner")
+                return
         self._persist(session, node_name="planner")
 
     def _run_executor_step(self, session: AgentSession, approved_dangerous_step_id: int | None = None) -> None:
@@ -709,7 +796,52 @@ class ExecutionEngine:
         )
 
         if validation.success:
+            shape_validation = validate_result_shape(str(state.get("goal", "")), attempt_history)
+            self.store.append_event(
+                session_id=session.id,
+                node_name="validator",
+                event_type="validator.result_shape",
+                payload={
+                    "success": shape_validation.success,
+                    "reason": shape_validation.reason,
+                    **dict(shape_validation.metadata or {}),
+                },
+            )
+            if not shape_validation.success:
+                self._handle_retry_or_failure(
+                    session,
+                    node_name="validator",
+                    reason="result_shape_failed",
+                    detail=shape_validation.reason or "Result shape did not satisfy the request.",
+                    extra_context={
+                        "shape_error": shape_validation.reason,
+                        **dict(shape_validation.metadata or {}),
+                        "plan": state.get("plan", {}),
+                        "history": state.get("attempt_history", []),
+                    },
+                )
+                return
             final_output = state.get("final_output") or FinalOutput(metadata={"goal": state.get("goal", "")}).model_dump()
+            artifact_result = AutoArtifactMaterializer(self.settings).maybe_materialize(
+                goal=str(state.get("goal", "")),
+                history=attempt_history,
+                final_output=final_output,
+            )
+            if artifact_result.applied:
+                final_output = artifact_result.final_output
+                self.store.append_event(
+                    session_id=session.id,
+                    node_name="validator",
+                    event_type="validator.auto_artifact",
+                    payload={"applied": True, **dict(artifact_result.metadata or {})},
+                )
+            else:
+                self.store.append_event(
+                    session_id=session.id,
+                    node_name="validator",
+                    event_type="validator.auto_artifact",
+                    payload={"applied": False, "reason": artifact_result.reason, **dict(artifact_result.metadata or {})},
+                )
             state.update(
                 {
                     "current_node": "validator",
@@ -782,6 +914,13 @@ class ExecutionEngine:
                 for item in validation_checks[:5]
                 if _truncate_string(item, limit=120)
             ]
+        for key in ("shape_error", "expected_shape", "actual_shape", "failed_sql"):
+            if key not in extra_context:
+                continue
+            if key == "failed_sql":
+                failure_context[key] = _truncate_string(extra_context[key], limit=4000)
+            else:
+                failure_context[key] = _truncate_failure_context_strings(extra_context[key])
         if normalized_error is not None:
             failure_context.update(normalized_error.as_metadata())
         failure_context["retryable"] = retryable
@@ -934,6 +1073,10 @@ class ExecutionEngine:
             for key, value in dict(state.get("planning_metadata") or {}).items()
             if value is not None
         }
+        metadata.update(planning_metadata)
+        content = self._sanitize_user_final_content(content, state=state, metadata={**metadata, **planning_metadata})
+        if not self.settings.show_prompt_suggestions:
+            content = _strip_prompt_suggestions(content)
 
         if status == "failed" and "failure_type" not in metadata:
             failure_context = dict(state.get("failure_context") or {})
@@ -946,13 +1089,25 @@ class ExecutionEngine:
                 error=RuntimeError(failure_message),
                 plan=plan,
             )
+            suggestion_content = append_response_stats(
+                suggestion_content,
+                state=state,
+                metrics=metrics,
+                status=status,
+                enabled=self.settings.show_response_stats and self.settings.response_render_mode != "raw",
+            )
             return {
                 "content": suggestion_content,
                 "artifacts": list(final_output.get("artifacts", [])),
                 "metadata": suggestion_metadata,
             }
 
-        if status == "completed" and int(metrics.get("llm_calls", 0)) > 0 and "prompt_suggestions" not in metadata:
+        if (
+            self.settings.show_prompt_suggestions
+            and status == "completed"
+            and int(metrics.get("llm_calls", 0)) > 0
+            and "prompt_suggestions" not in metadata
+        ):
             metadata.update(planning_metadata)
             suggestion_result = generate_prompt_suggestions(
                 goal,
@@ -963,17 +1118,68 @@ class ExecutionEngine:
                 context=self._prompt_suggestion_context(state, metadata),
             )
             metadata.update(suggestion_result.metadata_payload())
+            content = append_response_stats(
+                content,
+                state=state,
+                metrics=metrics,
+                status=status,
+                enabled=self.settings.show_response_stats and self.settings.response_render_mode != "raw",
+            )
             return {
                 "content": content,
                 "artifacts": list(final_output.get("artifacts", [])),
                 "metadata": metadata,
             }
 
+        content = append_response_stats(
+            content,
+            state=state,
+            metrics=metrics,
+            status=status,
+            enabled=self.settings.show_response_stats and self.settings.response_render_mode != "raw",
+        )
         return {
             "content": content,
             "artifacts": list(final_output.get("artifacts", [])),
             "metadata": metadata,
         }
+
+    def _sanitize_user_final_content(self, content: str, *, state: RuntimeState, metadata: dict[str, Any]) -> str:
+        if self.settings.response_render_mode == "raw":
+            return content
+        text = str(content or "").strip()
+        if not text or text[0] not in "{[":
+            return content
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return content
+        rendered = render_agent_response(
+            parsed,
+            execution_events=list(state.get("history") or []),
+            plan=_safe_execution_plan(state.get("plan", {})),
+            metadata={**metadata, "goal": state.get("goal", "")},
+            context=ResponseRenderContext(
+                mode=self.settings.response_render_mode,
+                show_executed_commands=self.settings.show_executed_commands,
+                show_validation=self.settings.show_validation_events,
+                show_planning_steps=self.settings.show_planner_events,
+                show_tool_events=self.settings.show_tool_events,
+                show_debug_metadata=self.settings.show_debug_metadata or self.settings.include_internal_telemetry,
+                enable_llm_summary=self.settings.enable_presentation_llm_summary,
+                enable_insight_layer=self.settings.enable_insight_layer,
+                enable_llm_insights=self.settings.enable_llm_insights,
+                insight_max_facts=self.settings.insight_max_facts,
+                insight_max_input_chars=self.settings.insight_max_input_chars,
+                insight_max_output_chars=self.settings.insight_max_output_chars,
+                max_rows=20,
+                max_command_length=self.settings.presentation_llm_max_input_chars,
+                output_mode="text",
+                goal=str(state.get("goal", "")),
+                llm_settings=self.settings,
+            ),
+        )
+        return rendered.markdown.strip() or content
 
     def _failure_output_with_suggestions(
         self,
@@ -991,6 +1197,9 @@ class ExecutionEngine:
         )
         enriched_metadata = dict(metadata)
         enriched_metadata.update(suggestion_result.metadata_payload())
+        if not self.settings.show_prompt_suggestions:
+            enriched_metadata["suggestions_hidden"] = True
+            return _strip_prompt_suggestions(message), enriched_metadata
         return append_prompt_suggestions(message, suggestion_result), enriched_metadata
 
     def _prompt_suggestion_context(self, state: RuntimeState | None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1074,6 +1283,24 @@ class ExecutionEngine:
         metrics["latency_ms"] = elapsed_ms
         metrics["retries"] = int(state.get("retries", 0))
         state["metrics"] = metrics
+
+    def _llm_usage_snapshot(self) -> dict[str, int]:
+        return {
+            "prompt_tokens": int(getattr(self.llm, "total_prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(self.llm, "total_completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(self.llm, "total_tokens", 0) or 0),
+        }
+
+    def _merge_llm_token_metrics(self, metrics: dict[str, Any], before: dict[str, int]) -> None:
+        after = self._llm_usage_snapshot()
+        prompt_delta = max(0, int(after.get("prompt_tokens", 0)) - int(before.get("prompt_tokens", 0)))
+        completion_delta = max(0, int(after.get("completion_tokens", 0)) - int(before.get("completion_tokens", 0)))
+        total_delta = max(0, int(after.get("total_tokens", 0)) - int(before.get("total_tokens", 0)))
+        if total_delta <= 0 and (prompt_delta or completion_delta):
+            total_delta = prompt_delta + completion_delta
+        metrics["llm_prompt_tokens"] = int(metrics.get("llm_prompt_tokens", 0) or 0) + prompt_delta
+        metrics["llm_completion_tokens"] = int(metrics.get("llm_completion_tokens", 0) or 0) + completion_delta
+        metrics["llm_total_tokens"] = int(metrics.get("llm_total_tokens", 0) or 0) + total_delta
 
     def _get_required_session(self, session_id: str) -> AgentSession:
         session = self.session_manager.get_session(session_id)

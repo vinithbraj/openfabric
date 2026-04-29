@@ -8,6 +8,7 @@ from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ExecutionPlan, HighLevelPlan, PlannerConfig
 from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
+from aor_runtime.runtime.action_planner import LLMActionPlanner
 from aor_runtime.runtime.capabilities.registry import build_default_capability_registry
 from aor_runtime.runtime.capabilities.base import ClassificationContext, CompileContext, CompiledIntentPlan
 from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow
@@ -833,8 +834,75 @@ class TaskPlanner:
         input_payload: dict[str, Any],
         failure_context: dict[str, Any] | None = None,
     ) -> ExecutionPlan:
-        system_prompt = self.llm.load_prompt(planner.prompt, DEFAULT_PLANNER_PROMPT)
         self._reset_tracking()
+        if self.settings.action_planner_enabled and not self.settings.legacy_execution_planner_enabled:
+            self.last_planning_mode = "validator_enforced_action_plan"
+            self.last_capability_name = "action_planner"
+            self.last_policies_used = ["validator_enforced_action_plan"]
+            action_planner: LLMActionPlanner | None = None
+            try:
+                action_planner = LLMActionPlanner(llm=self.llm, tools=self.tools, settings=self.settings)
+                plan = action_planner.build_plan(
+                    goal=goal,
+                    planner=planner,
+                    allowed_tools=allowed_tools,
+                    input_payload=input_payload,
+                    failure_context=failure_context,
+                )
+                self.last_llm_calls = 1 + int(action_planner.last_temporal_llm_calls)
+                self.last_raw_planner_llm_calls = 1
+                self.last_raw_output = action_planner.last_raw_output
+                self.last_capability_metadata = {
+                    "capability_pack": "action_planner",
+                    "planning_mode": "validator_enforced_action_plan",
+                    "action_prompt": action_planner.last_prompt,
+                    "raw_action_plan": action_planner.last_raw_action_plan,
+                    "normalized_action_plan": action_planner.last_normalized_action_plan,
+                    "canonicalized_action_plan": action_planner.last_canonicalized_action_plan,
+                    "canonicalization_repairs": action_planner.last_canonicalization_repairs,
+                    "database_propagation_repairs": action_planner.last_database_propagation_repairs,
+                    "dataflow_canonicalization_repairs": action_planner.last_dataflow_canonicalization_repairs,
+                    "temporal_normalization_repairs": action_planner.last_temporal_normalization_repairs,
+                    "temporal_normalization_metadata": action_planner.last_temporal_normalization_metadata,
+                    "action_validation_errors": action_planner.last_validation_errors,
+                    "contract_validation_errors": action_planner.last_contract_validation_errors,
+                    "domain_validation_errors": action_planner.last_domain_validation_errors,
+                }
+                finalized_plan = self._finalize_plan(
+                    goal,
+                    plan,
+                    allowed_tools,
+                    extract_explicit_tool_intent(goal, allowed_tools),
+                    allow_internal_tools=INTERNAL_ALLOWED_TOOLS | {"text.format", "sql.schema"},
+                )
+                self.last_error_stage = None
+                return finalized_plan
+            except Exception as exc:
+                self.last_error_type = type(exc).__name__
+                self.last_error_stage = "action_planner"
+                if action_planner is not None:
+                    self.last_raw_output = action_planner.last_raw_output
+                    self.last_llm_calls = (1 if action_planner.last_raw_output is not None else 0) + int(action_planner.last_temporal_llm_calls)
+                    self.last_raw_planner_llm_calls = 1 if action_planner.last_raw_output is not None else 0
+                    self.last_capability_metadata = {
+                        "capability_pack": "action_planner",
+                        "planning_mode": "validator_enforced_action_plan",
+                        "action_prompt": action_planner.last_prompt,
+                        "raw_action_plan": action_planner.last_raw_action_plan,
+                        "normalized_action_plan": action_planner.last_normalized_action_plan,
+                        "canonicalized_action_plan": action_planner.last_canonicalized_action_plan,
+                        "canonicalization_repairs": action_planner.last_canonicalization_repairs,
+                        "database_propagation_repairs": action_planner.last_database_propagation_repairs,
+                        "dataflow_canonicalization_repairs": action_planner.last_dataflow_canonicalization_repairs,
+                        "temporal_normalization_repairs": action_planner.last_temporal_normalization_repairs,
+                        "temporal_normalization_metadata": action_planner.last_temporal_normalization_metadata,
+                        "action_validation_errors": action_planner.last_validation_errors,
+                        "contract_validation_errors": action_planner.last_contract_validation_errors,
+                        "domain_validation_errors": action_planner.last_domain_validation_errors,
+                    }
+                raise
+
+        system_prompt = self.llm.load_prompt(planner.prompt, DEFAULT_PLANNER_PROMPT)
         schema_payload = self._schema_payload(goal, allowed_tools)
         policies = select_policies(goal, allowed_tools, schema_payload)
         explicit_tool_intent = extract_explicit_tool_intent(goal, allowed_tools)

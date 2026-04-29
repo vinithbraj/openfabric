@@ -31,6 +31,7 @@ def normalize_execution_plan_dataflow(plan: ExecutionPlan) -> ExecutionPlan:
     output_producers: dict[str, str] = {}
     for step in plan.steps:
         _normalize_python_inputs(step, output_producers)
+        step.args = _canonicalize_reference_paths(step.args, output_producers)
         referenced_outputs = sorted(collect_step_references(step.args))
         if not referenced_outputs:
             output_name = str(step.output or "").strip()
@@ -63,7 +64,8 @@ def resolve_step_value(value: Any, step_outputs: dict[str, Any]) -> Any:
         if alias not in step_outputs:
             raise ValueError(f"Unknown step output reference: {alias}")
         resolved = deepcopy(step_outputs[alias])
-        path = str(value.get("path", "")).strip()
+        raw_path = value.get("path", "")
+        path = "" if raw_path is None else str(raw_path).strip()
         if path:
             resolved = _resolve_output_path(resolved, path)
         return resolved
@@ -116,8 +118,11 @@ def _resolve_output_path(value: Any, path: str) -> Any:
                             raise ValueError(f"Reference path index out of range: {path}") from exc
             if segment not in current and segment in TEXTUAL_OUTPUT_PATH_ALIASES and isinstance(current.get("output"), str):
                 return deepcopy(current["output"])
+            if segment == "exit_code" and segment not in current and "returncode" in current:
+                current = current["returncode"]
+                continue
             if segment not in current:
-                raise ValueError(f"Reference path not found: {path}")
+                raise ValueError(f"Reference path not found: {path}. Available fields: {_available_fields(current)}")
             current = current[segment]
             continue
         if isinstance(current, list):
@@ -132,6 +137,38 @@ def _resolve_output_path(value: Any, path: str) -> Any:
             continue
         raise ValueError(f"Cannot traverse reference path {path!r} through non-container value.")
     return deepcopy(current)
+
+
+def _canonicalize_reference_paths(value: Any, output_producers: dict[str, str]) -> Any:
+    if is_step_reference(value):
+        normalized = dict(value)
+        alias = str(normalized["$ref"]).strip()
+        raw_path = normalized.get("path", "")
+        path = "" if raw_path is None else str(raw_path).strip()
+        if not path:
+            default_path = _default_ref_path_for_action(output_producers.get(alias, ""))
+            if default_path:
+                normalized["path"] = default_path
+            else:
+                normalized.pop("path", None)
+        else:
+            normalized["path"] = path
+        return normalized
+    if isinstance(value, dict):
+        return {key: _canonicalize_reference_paths(nested, output_producers) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_canonicalize_reference_paths(nested, output_producers) for nested in value]
+    return value
+
+
+def _available_fields(value: Any) -> str:
+    if not isinstance(value, dict) or not value:
+        return "<none>"
+    fields = sorted(str(key) for key in value.keys())
+    preview = ", ".join(fields[:12])
+    if len(fields) > 12:
+        preview = f"{preview}, ..."
+    return preview
 
 
 def _normalize_python_inputs(step: ExecutionStep, output_producers: dict[str, str]) -> None:
@@ -165,6 +202,10 @@ def _default_ref_path_for_action(action: str) -> str | None:
         return "stdout"
     if action == "sql.query":
         return "rows"
+    if action == "sql.schema":
+        return "catalog"
+    if action == "text.format":
+        return "content"
     if action == "fs.glob":
         return "matches"
     if action == "fs.search_content":
@@ -181,6 +222,8 @@ def _default_ref_path_for_action(action: str) -> str | None:
         return "exists"
     if action in {"slurm.queue", "slurm.accounting"}:
         return "jobs"
+    if action == "slurm.metrics":
+        return "payload"
     if action == "slurm.nodes":
         return "nodes"
     if action == "slurm.partitions":

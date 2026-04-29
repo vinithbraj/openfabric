@@ -63,6 +63,81 @@ def test_normalize_execution_plan_dataflow_backfills_inputs_from_refs() -> None:
     assert plan.steps[2].input == ["patient_csv"]
 
 
+def test_normalize_execution_plan_dataflow_defaults_null_ref_path() -> None:
+    plan = ExecutionPlan.model_validate(
+        {
+            "steps": [
+                {"id": 1, "action": "slurm.metrics", "args": {"metric_group": "cluster_summary"}, "output": "cluster_metrics"},
+                {
+                    "id": 2,
+                    "action": "text.format",
+                    "args": {"source": {"$ref": "cluster_metrics", "path": None}, "format": "markdown"},
+                    "output": "formatted_output",
+                },
+            ]
+        }
+    )
+
+    normalize_execution_plan_dataflow(plan)
+    resolved = resolve_execution_step(
+        plan.steps[1],
+        {"cluster_metrics": {"payload": {"queue_count": 12, "pending_jobs": 10}, "metric_group": "cluster_summary"}},
+    )
+
+    assert plan.steps[1].args["source"] == {"$ref": "cluster_metrics", "path": "payload"}
+    assert resolved.args["source"] == {"queue_count": 12, "pending_jobs": 10}
+
+
+def test_resolve_execution_step_treats_null_path_as_whole_result() -> None:
+    step = ExecutionStep.model_validate(
+        {
+            "id": 2,
+            "action": "text.format",
+            "input": ["summary"],
+            "args": {"source": {"$ref": "summary", "path": None}, "format": "markdown"},
+        }
+    )
+
+    resolved = resolve_execution_step(step, {"summary": {"count": 3}})
+
+    assert resolved.args["source"] == {"count": 3}
+
+
+def test_invalid_ref_path_lists_available_fields() -> None:
+    step = ExecutionStep.model_validate(
+        {
+            "id": 2,
+            "action": "text.format",
+            "input": ["summary"],
+            "args": {"source": {"$ref": "summary", "path": "missing"}, "format": "markdown"},
+        }
+    )
+
+    with pytest.raises(ValueError) as exc:
+        resolve_execution_step(step, {"summary": {"payload": {"count": 3}, "metric_group": "cluster_summary"}})
+
+    message = str(exc.value)
+    assert "Reference path not found: missing" in message
+    assert "payload" in message
+    assert "metric_group" in message
+    assert "None" not in message
+
+
+def test_shell_exit_code_alias_resolves_to_returncode() -> None:
+    step = ExecutionStep.model_validate(
+        {
+            "id": 2,
+            "action": "runtime.return",
+            "input": ["shell_result"],
+            "args": {"value": {"$ref": "shell_result", "path": "exit_code"}, "mode": "count"},
+        }
+    )
+
+    resolved = resolve_execution_step(step, {"shell_result": {"stdout": "42\n", "returncode": 0}})
+
+    assert resolved.args["value"] == 0
+
+
 def test_python_exec_receives_inputs_dict(tmp_path: Path) -> None:
     executor = PlanExecutor(build_tool_registry(_settings(tmp_path)))
     step = ExecutionStep.model_validate(

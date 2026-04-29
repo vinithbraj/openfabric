@@ -353,7 +353,7 @@ def _validate_placeholder_outputs(plan: ExecutionPlan) -> None:
         output_name = str(step.output or "").strip()
         if output_name:
             seen_outputs.add(output_name)
-        if step.action in {"fs.read", "fs.list", "fs.find", "fs.size", "sql.query", "python.exec"}:
+        if step.action in {"fs.read", "fs.list", "fs.find", "fs.size", "sql.query", "python.exec", "text.format"}:
             prior_data_steps += 1
 
 

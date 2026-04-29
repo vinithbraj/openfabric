@@ -85,6 +85,22 @@ def normalize_planner_error(*, error_type: str, detail: str, llm_base_url: str) 
             detail=sanitized_detail,
         )
 
+    if normalized_type == "JSONDecodeError":
+        return NormalizedRuntimeError(
+            message="Planner returned malformed JSON and the request was not executed.",
+            source="planner",
+            kind="malformed_json",
+            detail=sanitized_detail,
+        )
+
+    if normalized_type == "ValidationError" and "ActionPlan" in sanitized_detail:
+        return NormalizedRuntimeError(
+            message="Planner produced an invalid action plan and the request was not executed.",
+            source="planner",
+            kind="invalid_action_plan",
+            detail=sanitized_detail,
+        )
+
     return None
 
 

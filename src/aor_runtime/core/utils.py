@@ -73,12 +73,49 @@ def extract_json_object(text: str) -> Any:
 def _repair_json_candidates(text: str, *, include_original: bool = False) -> list[str]:
     candidates: list[str] = [text] if include_original else []
     multiline_fixed = _escape_multiline_code_strings(text)
+    control_fixed = _escape_control_chars_in_strings(text)
     invalid_escape_fixed = _repair_invalid_json_string_escapes(text)
     combined_fixed = _repair_invalid_json_string_escapes(multiline_fixed)
-    for candidate in (multiline_fixed, invalid_escape_fixed, combined_fixed):
+    combined_control_fixed = _repair_invalid_json_string_escapes(control_fixed)
+    for candidate in (multiline_fixed, control_fixed, invalid_escape_fixed, combined_fixed, combined_control_fixed):
         if candidate not in candidates:
             candidates.append(candidate)
     return candidates
+
+
+def _escape_control_chars_in_strings(text: str) -> str:
+    chars: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if not in_string:
+            chars.append(ch)
+            if ch == '"':
+                in_string = True
+            continue
+        if escaped:
+            chars.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            chars.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            chars.append(ch)
+            in_string = False
+            continue
+        if ch == "\n":
+            chars.append("\\n")
+            continue
+        if ch == "\r":
+            chars.append("\\r")
+            continue
+        if ch == "\t":
+            chars.append("\\t")
+            continue
+        chars.append(ch)
+    return "".join(chars)
 
 
 def _escape_multiline_code_strings(text: str) -> str:

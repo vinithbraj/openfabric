@@ -15,6 +15,10 @@ class LLMClient:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self._discovered_models: list[str] | None = None
+        self.last_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self.total_prompt_tokens: int = 0
+        self.total_completion_tokens: int = 0
+        self.total_tokens: int = 0
 
     def available_models(self) -> list[str]:
         if self._discovered_models is not None:
@@ -55,6 +59,7 @@ class LLMClient:
     def complete(self, *, system_prompt: str, user_prompt: str, model: str | None = None, temperature: float | None = None) -> str:
         llm = self._build_model(model=model, temperature=temperature)
         response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
+        self._record_usage(response)
         return str(response.content)
 
     def complete_json(
@@ -78,3 +83,49 @@ class LLMClient:
         if prompt_path.exists():
             return prompt_path.read_text()
         return fallback
+
+    def _record_usage(self, response: Any) -> None:
+        usage = self._extract_usage(response)
+        self.last_usage = usage
+        self.total_prompt_tokens += usage["prompt_tokens"]
+        self.total_completion_tokens += usage["completion_tokens"]
+        self.total_tokens += usage["total_tokens"]
+
+    @staticmethod
+    def _extract_usage(response: Any) -> dict[str, int]:
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if isinstance(usage_metadata, dict) and usage_metadata:
+            prompt_tokens = _coerce_int(usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens"))
+            completion_tokens = _coerce_int(usage_metadata.get("output_tokens") or usage_metadata.get("completion_tokens"))
+            total_tokens = _coerce_int(usage_metadata.get("total_tokens"))
+            if total_tokens <= 0 and (prompt_tokens or completion_tokens):
+                total_tokens = prompt_tokens + completion_tokens
+            return {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            }
+
+        response_metadata = getattr(response, "response_metadata", None)
+        if isinstance(response_metadata, dict):
+            token_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
+            if isinstance(token_usage, dict):
+                prompt_tokens = _coerce_int(token_usage.get("prompt_tokens") or token_usage.get("input_tokens"))
+                completion_tokens = _coerce_int(token_usage.get("completion_tokens") or token_usage.get("output_tokens"))
+                total_tokens = _coerce_int(token_usage.get("total_tokens"))
+                if total_tokens <= 0 and (prompt_tokens or completion_tokens):
+                    total_tokens = prompt_tokens + completion_tokens
+                return {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                }
+
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except Exception:  # noqa: BLE001
+        return 0

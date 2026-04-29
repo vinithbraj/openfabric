@@ -39,7 +39,10 @@ DATABASE_HINT_RE = re.compile(r"\b(?:database|table|tables|schema|sql|query|quer
 DATABASE_NAME_RE = re.compile(r"\b(?:database\s+([A-Za-z_][\w-]*)|in\s+([A-Za-z_][\w-]*_db|dicom))\b", re.IGNORECASE)
 TABLE_NAME_RE = re.compile(r"\b(?:from|in)\s+([A-Za-z_][\w-]*)\b", re.IGNORECASE)
 SQL_TABLE_NOT_FOUND_RE = re.compile(r"(?:UndefinedTable|relation .+ does not exist)", re.IGNORECASE)
-SQL_COLUMN_NOT_FOUND_RE = re.compile(r"(?:UndefinedColumn|column .+ does not exist)", re.IGNORECASE)
+SQL_COLUMN_NOT_FOUND_RE = re.compile(
+    r"(?:UndefinedColumn|column .+ does not exist|SQL references unknown column)",
+    re.IGNORECASE,
+)
 SQL_AMBIGUOUS_RE = re.compile(r"\bambiguous\s+(?:column|table|alias)\b", re.IGNORECASE)
 COMMAND_NOT_FOUND_RE = re.compile(
     r"(?:command not found|not installed|tool not found|executable file not found|no such file or directory)",
@@ -113,6 +116,10 @@ def classify_failure(
         sql_error_class = str(metadata_payload.get("sql_error_class") or "").strip()
         if sql_error_class:
             return sql_error_class
+        if str(metadata_payload.get("error_source") or "").strip().lower() == "planner" and str(
+            metadata_payload.get("error_kind") or ""
+        ).strip().lower() in {"invalid_action_plan", "malformed_json"}:
+            return "sql_generation_failed"
         if SQL_TABLE_NOT_FOUND_RE.search(error_text) or SQL_TABLE_NOT_FOUND_RE.search(detail):
             return "sql_table_not_found"
         if SQL_COLUMN_NOT_FOUND_RE.search(error_text) or SQL_COLUMN_NOT_FOUND_RE.search(detail):

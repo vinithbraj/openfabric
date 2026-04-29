@@ -298,6 +298,9 @@ def _render_slurm_accounting_jobs(normalized: NormalizedSlurmResult, context: Pr
 
 def _render_slurm_accounting_aggregate(normalized: NormalizedSlurmResult, context: PresentationContext) -> list[str]:
     del context
+    metric_rows = [row for row in list(normalized.grouped.get("metrics") or []) if isinstance(row, dict)]
+    if metric_rows:
+        return _render_slurm_accounting_metric_table(normalized, metric_rows)
     summary = normalized.summary
     metric = str(summary.get("metric") or "average_elapsed")
     partition = summary.get("partition")
@@ -354,6 +357,46 @@ def _render_slurm_accounting_aggregate(normalized: NormalizedSlurmResult, contex
         normalized.warnings.append("Included all job states; no completed-only filter was applied.")
     elif default_state_applied:
         normalized.warnings.append("Defaulted to completed jobs for runtime calculation.")
+    _append_slurm_notes(lines, normalized.warnings)
+    return lines
+
+
+def _render_slurm_accounting_metric_table(normalized: NormalizedSlurmResult, metric_rows: list[dict[str, Any]]) -> list[str]:
+    summary = normalized.summary
+    lines = md_section(normalized.title)
+    lines.append("")
+    partition = summary.get("partition")
+    if partition:
+        lines.append(f"Runtime metrics for partition `{partition}`.")
+    elif summary.get("job_count"):
+        lines.append(f"Runtime metrics across {_format_number(summary.get('job_count'))} jobs.")
+    rows = [
+        [
+            row.get("metric"),
+            row.get("value"),
+            _format_number(row.get("jobs")),
+            row.get("average"),
+            row.get("minimum"),
+            row.get("maximum"),
+            row.get("total"),
+        ]
+        for row in metric_rows
+    ]
+    lines.extend(["", *md_table(
+        ["Metric", "Value", "Jobs", "Average", "Min", "Max", "Total"],
+        rows,
+        alignments=["left", "right", "right", "right", "right", "right", "right"],
+    )])
+    metadata_rows = [
+        ("Partition", partition),
+        ("State filter", summary.get("state")),
+        ("Time window", summary.get("time_window_label") or _time_window_text(summary)),
+        ("Source", summary.get("source")),
+    ]
+    visible_metadata = [(key, value) for key, value in metadata_rows if value not in (None, "")]
+    if visible_metadata:
+        lines.extend(["", *md_section("Filters")])
+        lines.extend(["", *md_table(["Field", "Value"], visible_metadata, alignments=["left", "left"])])
     _append_slurm_notes(lines, normalized.warnings)
     return lines
 
@@ -696,6 +739,17 @@ def _is_slurm_result(result: Any, context: PresentationContext) -> bool:
         return True
     if "results" in result and isinstance(result["results"], dict):
         return any(_is_slurm_result(item, PresentationContext(source_action=str(key))) for key, item in result["results"].items())
+    accounting_children = [
+        value
+        for value in result.values()
+        if isinstance(value, dict)
+        and (
+            value.get("result_kind") == "accounting_aggregate"
+            or {"average_elapsed_seconds", "min_elapsed_seconds", "max_elapsed_seconds"} & set(value)
+        )
+    ]
+    if len(accounting_children) >= 2 and len(accounting_children) == len(result):
+        return True
     return any(key in result for key in ("jobs", "nodes", "partitions")) and not any(key in result for key in ("database", "rows"))
 
 

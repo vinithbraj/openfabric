@@ -24,6 +24,29 @@ from aor_runtime.tools.slurm import SACCT_FORMAT, SINFO_NODE_FORMAT, SINFO_PARTI
 
 ResponseRenderMode = Literal["user", "debug", "raw"]
 ExecutionStatus = Literal["completed", "failed", "skipped"]
+DISPLAY_CODE_WRAP_WIDTH = 100
+
+SQL_DISPLAY_CLAUSES = [
+    "LEFT OUTER JOIN",
+    "RIGHT OUTER JOIN",
+    "FULL OUTER JOIN",
+    "INNER JOIN",
+    "LEFT JOIN",
+    "RIGHT JOIN",
+    "FULL JOIN",
+    "CROSS JOIN",
+    "GROUP BY",
+    "ORDER BY",
+    "UNION ALL",
+    "SELECT",
+    "FROM",
+    "JOIN",
+    "WHERE",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "UNION",
+]
 
 
 @dataclass
@@ -295,15 +318,15 @@ def _executed_actions_markdown(actions: list[ExecutedAction], context: ResponseR
     if sql_actions:
         action = sql_actions[-1]
         lines.extend(md_section("Query Used"))
-        lines.extend(md_code_block("sql", _truncate(action.sql or "", context.max_command_length)))
+        lines.extend(md_code_block("sql", _format_sql_for_display(action.sql or "", context.max_command_length)))
         lines.extend(_execution_table([("Tool", action.tool), ("Database", action.database or ""), ("Status", _title(action.status))]))
     if slurm_actions:
         lines.extend(["", *md_section("Commands Used")])
         commands = _unique([action.command or "" for action in slurm_actions])
-        rendered_commands = [_truncate(command, context.max_command_length) for command in commands[:5]]
+        rendered_commands = [_format_command_for_display(command, context.max_command_length) for command in commands[:5]]
         if len(commands) > 5:
             rendered_commands.append(f"{len(commands) - 5} additional commands hidden; use debug/raw mode for full list.")
-        lines.extend(md_code_block("bash", "\n".join(rendered_commands)))
+        lines.extend(md_code_block("bash", "\n\n".join(rendered_commands)))
         lines.extend(_execution_table([("Backend", "SLURM gateway"), ("Tools", ", ".join(_unique([action.tool for action in slurm_actions]))), ("Status", _overall_status(slurm_actions))]))
     if fs_actions:
         lines.extend(["", *md_section("Operation")])
@@ -319,7 +342,15 @@ def _executed_actions_markdown(actions: list[ExecutedAction], context: ResponseR
         lines.extend(_execution_table(rows))
     if shell_actions:
         lines.extend(["", *md_section("Command Used")])
-        lines.extend(md_code_block("bash", "\n".join(_truncate(command, context.max_command_length) for command in _unique([action.command or "" for action in shell_actions]))))
+        lines.extend(
+            md_code_block(
+                "bash",
+                "\n\n".join(
+                    _format_command_for_display(command, context.max_command_length)
+                    for command in _unique([action.command or "" for action in shell_actions])
+                ),
+            )
+        )
         risks = _unique([str((action.result or {}).get("risk") or (action.args_summary or {}).get("risk") or "") for action in shell_actions])
         reasons = _unique([str((action.result or {}).get("policy_reason") or "") for action in shell_actions])
         rows: list[tuple[str, Any]] = [("Tool", "shell.exec")]
@@ -499,6 +530,219 @@ def _title(value: Any) -> str:
 
 def _join_argv(argv: list[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in argv)
+
+
+def _format_sql_for_display(sql: str, max_chars: int, *, width: int = DISPLAY_CODE_WRAP_WIDTH) -> str:
+    text = _normalize_whitespace_outside_quotes(sql)
+    if not text:
+        return ""
+    clause_lines = _break_sql_clauses(text)
+    wrapped: list[str] = []
+    for line in clause_lines:
+        wrapped.extend(_wrap_sql_line(line, width=width))
+    return _truncate("\n".join(wrapped), max_chars)
+
+
+def _format_command_for_display(command: str, max_chars: int, *, width: int = DISPLAY_CODE_WRAP_WIDTH) -> str:
+    text = str(command or "").strip()
+    if not text:
+        return ""
+    wrapped_lines: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            wrapped_lines.append("")
+            continue
+        wrapped_lines.extend(_wrap_shell_line(line.strip(), width=width))
+    return _truncate("\n".join(wrapped_lines), max_chars)
+
+
+def _normalize_whitespace_outside_quotes(value: str) -> str:
+    text = str(value or "")
+    result: list[str] = []
+    quote: str | None = None
+    escaped = False
+    pending_space = False
+    for char in text:
+        if escaped:
+            if pending_space and quote is None and result:
+                result.append(" ")
+                pending_space = False
+            result.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            if pending_space and quote is None and result:
+                result.append(" ")
+                pending_space = False
+            result.append(char)
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if pending_space and quote is None and result:
+                result.append(" ")
+                pending_space = False
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            result.append(char)
+            continue
+        if quote is None and char.isspace():
+            pending_space = bool(result)
+            continue
+        if pending_space and quote is None and result:
+            result.append(" ")
+            pending_space = False
+        result.append(char)
+    return "".join(result).strip()
+
+
+def _break_sql_clauses(sql: str) -> list[str]:
+    lines: list[str] = []
+    current: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(sql):
+        char = sql[index]
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            current.append(char)
+            index += 1
+            continue
+        if quote is None:
+            clause = _match_sql_clause(sql, index)
+            if clause:
+                current_text = "".join(current).strip()
+                if current_text:
+                    lines.append(current_text)
+                    current = []
+                current.append(sql[index : index + len(clause)])
+                index += len(clause)
+                continue
+        current.append(char)
+        index += 1
+    tail = "".join(current).strip()
+    if tail:
+        lines.append(tail)
+    return lines or [sql]
+
+
+def _match_sql_clause(sql: str, index: int) -> str | None:
+    for clause in SQL_DISPLAY_CLAUSES:
+        end = index + len(clause)
+        if sql[index:end].upper() != clause:
+            continue
+        previous = sql[index - 1] if index > 0 else ""
+        following = sql[end] if end < len(sql) else ""
+        if previous and (previous.isalnum() or previous == "_"):
+            continue
+        if following and (following.isalnum() or following == "_"):
+            continue
+        if index == 0:
+            return None
+        return clause
+    return None
+
+
+def _wrap_sql_line(line: str, *, width: int) -> list[str]:
+    text = line.strip()
+    if len(text) <= width:
+        return [text]
+    comma_parts = _split_sql_commas(text)
+    if len(comma_parts) > 1:
+        return _wrap_segments(comma_parts, width=width, continuation_indent="  ")
+    return _wrap_text_line(text, width=width, continuation_indent="  ")
+
+
+def _split_sql_commas(line: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    for char in line:
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            current.append(char)
+            continue
+        if quote is None and char == ",":
+            parts.append("".join(current).strip() + ",")
+            current = []
+            continue
+        current.append(char)
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return [part for part in parts if part]
+
+
+def _wrap_segments(segments: list[str], *, width: int, continuation_indent: str = "") -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for index, segment in enumerate(segments):
+        segment_text = segment.strip()
+        candidate = f"{current} {segment_text}".strip() if current else segment_text
+        if current and len(candidate) > width:
+            lines.append(current)
+            current = f"{continuation_indent}{segment_text}" if index > 0 else segment_text
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _wrap_text_line(line: str, *, width: int, continuation_indent: str = "") -> list[str]:
+    tokens = line.split()
+    if not tokens:
+        return [line]
+    return _wrap_segments(tokens, width=width, continuation_indent=continuation_indent)
+
+
+def _wrap_shell_line(line: str, *, width: int) -> list[str]:
+    tokens = _shell_tokens_preserving_quotes(line)
+    if len(line) <= width or len(tokens) <= 1:
+        return [line]
+    raw_lines = _wrap_segments(tokens, width=width, continuation_indent="  ")
+    if len(raw_lines) <= 1:
+        return raw_lines
+    return [f"{part} \\" if index < len(raw_lines) - 1 else part for index, part in enumerate(raw_lines)]
+
+
+def _shell_tokens_preserving_quotes(command: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in str(command or ""):
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            current.append(char)
+            continue
+        if quote is None and char.isspace():
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        current.append(char)
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def _unique(values: list[str]) -> list[str]:

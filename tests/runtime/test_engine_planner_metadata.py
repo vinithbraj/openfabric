@@ -36,6 +36,37 @@ def _write_plan() -> ExecutionPlan:
     )
 
 
+def test_decorate_final_output_reformats_raw_json_in_user_mode(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    decorated = engine._decorate_final_output(
+        {
+            "goal": "status of the slurm cluster",
+            "history": [
+                {
+                    "step": {"id": 1, "action": "slurm.metrics", "args": {"metric_group": "cluster_summary"}, "output": "cluster"},
+                    "result": {
+                        "metric_group": "cluster_summary",
+                        "payload": {"queue_count": 10, "running_jobs": 2, "pending_jobs": 8},
+                    },
+                    "success": True,
+                }
+            ],
+            "planning_metadata": {},
+        },
+        {
+            "content": json.dumps({"metric_group": "cluster_summary", "payload": {"queue_count": 10, "running_jobs": 2, "pending_jobs": 8}}),
+            "artifacts": [],
+            "metadata": {},
+        },
+        status="completed",
+        metrics={"llm_calls": 0},
+    )
+
+    assert not decorated["content"].lstrip().startswith("{")
+    assert "SLURM" in decorated["content"]
+    assert "queue" in decorated["content"].lower()
+
+
 def test_successful_planner_run_persists_policies_and_logs_event(tmp_path: Path, monkeypatch) -> None:
     engine = _engine(tmp_path)
     session = _session(engine, "Create notes.txt with hello")
@@ -292,7 +323,7 @@ def test_planner_connection_failure_is_normalized_to_llm_error(tmp_path: Path, m
     engine._run_planner(session)
 
     assert session.state["final_output"]["content"].startswith("LLM connection error.")
-    assert "Suggested prompts:" in session.state["final_output"]["content"]
+    assert "Suggested prompts:" not in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["planner_error_type"] == "APIConnectionError"
     assert metadata["error_source"] == "llm"
@@ -326,7 +357,7 @@ def test_planner_timeout_failure_is_normalized_to_llm_timeout(tmp_path: Path, mo
     engine._run_planner(session)
 
     assert session.state["final_output"]["content"].startswith("LLM timeout error.")
-    assert "Suggested prompts:" in session.state["final_output"]["content"]
+    assert "Suggested prompts:" not in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "llm"
     assert metadata["error_kind"] == "timeout"
@@ -356,7 +387,7 @@ def test_terminal_sql_auth_failure_is_normalized_and_redacted(tmp_path: Path) ->
     )
 
     assert session.state["final_output"]["content"].startswith("Database authentication error for 'dicom'.")
-    assert "Suggested prompts:" in session.state["final_output"]["content"]
+    assert "Suggested prompts:" not in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "sql"
     assert metadata["error_kind"] == "authentication"
@@ -393,7 +424,7 @@ def test_terminal_sql_connection_failure_is_normalized(tmp_path: Path) -> None:
     )
 
     assert session.state["final_output"]["content"].startswith("Database connection error for 'dicom'.")
-    assert "Suggested prompts:" in session.state["final_output"]["content"]
+    assert "Suggested prompts:" not in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "sql"
     assert metadata["error_kind"] == "connection"
@@ -416,7 +447,7 @@ def test_terminal_gateway_request_failure_is_normalized(tmp_path: Path) -> None:
     )
 
     assert session.state["final_output"]["content"].startswith("Gateway connection error for node 'local'.")
-    assert "Suggested prompts:" in session.state["final_output"]["content"]
+    assert "Suggested prompts:" not in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "gateway"
     assert metadata["error_kind"] == "connection"
@@ -440,7 +471,7 @@ def test_terminal_gateway_response_failure_is_normalized(tmp_path: Path) -> None
     )
 
     assert session.state["final_output"]["content"].startswith("Gateway response error for node 'local'.")
-    assert "Suggested prompts:" in session.state["final_output"]["content"]
+    assert "Suggested prompts:" not in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert metadata["error_source"] == "gateway"
     assert metadata["error_kind"] == "response"
@@ -469,7 +500,7 @@ def test_unclassified_sql_error_message_is_preserved(tmp_path: Path) -> None:
     )
 
     assert session.state["final_output"]["content"].startswith("Unsafe query")
-    assert "Suggested prompts:" in session.state["final_output"]["content"]
+    assert "Suggested prompts:" not in session.state["final_output"]["content"]
     metadata = session.state["final_output"]["metadata"]
     assert "error_source" not in metadata
     assert metadata["failure_type"] == "execution_failure"
@@ -498,7 +529,7 @@ def test_unsafe_query_failure_is_non_retryable(tmp_path: Path) -> None:
 
     assert session.state["status"] == "failed"
     assert session.state["final_output"]["content"].startswith("Unsafe query")
-    assert "Suggested prompts:" in session.state["final_output"]["content"]
+    assert "Suggested prompts:" not in session.state["final_output"]["content"]
     assert session.state["failure_context"]["retryable"] is False
     assert session.state["final_output"]["metadata"]["retryable"] is False
     assert session.state["final_output"]["metadata"]["failure_type"] == "unsupported_mutating_operation"

@@ -31,6 +31,7 @@ from aor_runtime.tools.slurm import (
     SlurmQueueTool,
 )
 from aor_runtime.tools.sql import SQLQueryTool, SQLSchemaTool
+from aor_runtime.tools.text_format import TextFormatTool
 
 
 def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
@@ -62,6 +63,7 @@ def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
             PythonExecTool(configured),
             SQLQueryTool(configured),
             SQLSchemaTool(configured),
+            TextFormatTool(),
             RuntimeReturnTool(),
         ]
     )
