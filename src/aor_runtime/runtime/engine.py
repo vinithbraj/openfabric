@@ -796,7 +796,19 @@ class ExecutionEngine:
         )
 
         if validation.success:
-            shape_validation = validate_result_shape(str(state.get("goal", "")), attempt_history)
+            final_output = self._apply_final_presentation_boundary(
+                goal=str(state.get("goal", "")),
+                history=attempt_history,
+                final_output=state.get("final_output"),
+                metadata=dict(state.get("planning_metadata") or {}),
+            )
+            state["final_output"] = final_output
+            shape_validation = validate_result_shape(
+                str(state.get("goal", "")),
+                attempt_history,
+                final_content=str(final_output.get("content") or ""),
+                allow_raw_json=self.settings.response_render_mode == "raw",
+            )
             self.store.append_event(
                 session_id=session.id,
                 node_name="validator",
@@ -821,7 +833,6 @@ class ExecutionEngine:
                     },
                 )
                 return
-            final_output = state.get("final_output") or FinalOutput(metadata={"goal": state.get("goal", "")}).model_dump()
             artifact_result = AutoArtifactMaterializer(self.settings).maybe_materialize(
                 goal=str(state.get("goal", "")),
                 history=attempt_history,
@@ -869,6 +880,43 @@ class ExecutionEngine:
                 "history": state.get("attempt_history", []),
             },
         )
+
+    def _apply_final_presentation_boundary(
+        self,
+        *,
+        goal: str,
+        history: list[Any],
+        final_output: dict[str, Any] | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        output = dict(final_output or FinalOutput(metadata={"goal": goal}).model_dump())
+        if self.settings.response_render_mode == "raw":
+            return output
+        rendered = summarize_final_output(
+            goal,
+            history,
+            settings=self.settings,
+            metadata={**dict(metadata or {}), **dict(output.get("metadata") or {})},
+        )
+        if str(rendered.get("content") or "").strip():
+            merged_metadata = {
+                **dict(output.get("metadata") or {}),
+                **dict(rendered.get("metadata") or {}),
+                "goal": dict(output.get("metadata") or {}).get("goal") or goal,
+            }
+            return {
+                "content": str(rendered.get("content") or "").strip(),
+                "artifacts": list(
+                    dict.fromkeys(
+                        [
+                            *list(output.get("artifacts") or []),
+                            *list(rendered.get("artifacts") or []),
+                        ]
+                    )
+                ),
+                "metadata": merged_metadata,
+            }
+        return output
 
     def _handle_retry_or_failure(
         self,

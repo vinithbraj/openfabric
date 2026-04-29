@@ -20,20 +20,26 @@ class ResultShapeValidation:
     metadata: dict[str, Any] | None = None
 
 
-def validate_result_shape(goal: str, history: list[StepLog]) -> ResultShapeValidation:
+def validate_result_shape(
+    goal: str,
+    history: list[StepLog],
+    final_content: str | None = None,
+    *,
+    allow_raw_json: bool = False,
+) -> ResultShapeValidation:
     goal_text = str(goal or "")
     if not _is_count_goal(goal_text):
-        final_validation = _validate_final_output(goal_text, history)
+        final_validation = _validate_final_output(goal_text, history, final_content=final_content, allow_raw_json=allow_raw_json)
         if not final_validation.success:
             return final_validation
         return ResultShapeValidation(True)
 
     sql_log = _last_successful_sql_query(history)
     if sql_log is None:
-        final_validation = _validate_final_output(goal_text, history)
+        final_validation = _validate_final_output(goal_text, history, final_content=final_content, allow_raw_json=allow_raw_json)
         if not final_validation.success:
             return final_validation
-        contract_validation = validate_final_output_contract(goal_text, history)
+        contract_validation = validate_final_output_contract(goal_text, history, final_content=final_content)
         if not contract_validation.success:
             return ResultShapeValidation(contract_validation.success, contract_validation.reason, contract_validation.metadata)
         return ResultShapeValidation(True)
@@ -75,20 +81,26 @@ def validate_result_shape(goal: str, history: list[StepLog]) -> ResultShapeValid
                 "failed_sql": str(sql_log.step.args.get("query") or ""),
             },
         )
-    final_validation = _validate_final_output(goal_text, history)
+    final_validation = _validate_final_output(goal_text, history, final_content=final_content, allow_raw_json=allow_raw_json)
     if not final_validation.success:
         return final_validation
-    contract_validation = validate_final_output_contract(goal_text, history)
+    contract_validation = validate_final_output_contract(goal_text, history, final_content=final_content)
     if not contract_validation.success:
         return ResultShapeValidation(contract_validation.success, contract_validation.reason, contract_validation.metadata)
     return ResultShapeValidation(True)
 
 
-def _validate_final_output(goal: str, history: list[StepLog]) -> ResultShapeValidation:
+def _validate_final_output(
+    goal: str,
+    history: list[StepLog],
+    *,
+    final_content: str | None = None,
+    allow_raw_json: bool = False,
+) -> ResultShapeValidation:
     final_log = _last_successful_runtime_return(history)
     if final_log is None:
         return ResultShapeValidation(True)
-    content = str(final_log.result.get("output") or "")
+    content = str(final_content if final_content is not None else final_log.result.get("output") or "")
     aliases = _output_aliases(history)
     normalized_content = _normalize_alias(content)
     if not content.strip() and _has_non_empty_data_result(history):
@@ -119,7 +131,7 @@ def _validate_final_output(goal: str, history: list[StepLog]) -> ResultShapeVali
         )
     if _is_count_goal(goal):
         numbers = re.findall(r"\b-?\d+(?:\.\d+)?\b", content)
-        if content.strip() and len(numbers) != 1:
+        if content.strip() and len(numbers) != 1 and len(set(numbers)) != 1:
             return ResultShapeValidation(
                 False,
                 "Count request final response must include exactly one numeric scalar.",
@@ -131,7 +143,7 @@ def _validate_final_output(goal: str, history: list[StepLog]) -> ResultShapeVali
             "List/table request returned raw shell table text instead of structured local formatting.",
             {"final_output_validation": "raw_parseable_table_output", "expected_shape": "formatted table or artifact"},
         )
-    if _looks_like_raw_json(content):
+    if _looks_like_raw_json(content) and not allow_raw_json:
         return ResultShapeValidation(
             False,
             "Final response returned raw JSON instead of a readable local presentation.",

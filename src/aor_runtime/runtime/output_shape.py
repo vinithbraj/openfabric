@@ -162,7 +162,12 @@ def is_scalar_ref(tool: str, path: str | None) -> bool:
     return bool(root and root in shape.scalar_fields)
 
 
-def validate_final_output_contract(goal: str, history: list[Any]) -> FinalOutputContractResult:
+def validate_final_output_contract(
+    goal: str,
+    history: list[Any],
+    *,
+    final_content: str | None = None,
+) -> FinalOutputContractResult:
     contract = infer_goal_output_contract(goal)
     if contract.kind != "scalar":
         return FinalOutputContractResult(True, metadata={"expected_shape": contract.kind})
@@ -170,7 +175,7 @@ def validate_final_output_contract(goal: str, history: list[Any]) -> FinalOutput
     final_log = _last_successful_action(history, "runtime.return")
     if final_log is None:
         return FinalOutputContractResult(True, metadata={"expected_shape": "scalar"})
-    content = str(getattr(final_log, "result", {}).get("output") or "")
+    content = str(final_content if final_content is not None else getattr(final_log, "result", {}).get("output") or "")
     if not content.strip():
         return FinalOutputContractResult(
             False,
@@ -184,6 +189,18 @@ def validate_final_output_contract(goal: str, history: list[Any]) -> FinalOutput
             {"final_output_validation": "scalar_returned_collection", "expected_shape": "single numeric scalar"},
         )
     numeric_tokens = re.findall(r"-?\d+(?:\.\d+)?", content)
+    if final_content is not None:
+        if numeric_tokens and len(set(numeric_tokens)) == 1:
+            return FinalOutputContractResult(True, metadata={"expected_shape": "single numeric scalar"})
+        return FinalOutputContractResult(
+            False,
+            "Scalar request final response must contain exactly one numeric value.",
+            {
+                "final_output_validation": "count_not_scalar",
+                "expected_shape": "single numeric scalar",
+                "numeric_token_count": len(numeric_tokens),
+            },
+        )
     if len(numeric_tokens) != 1 or not re.fullmatch(r"\s*(?:count\s*[:=]\s*)?-?\d+(?:\.\d+)?\s*\.?\s*", content, re.IGNORECASE):
         return FinalOutputContractResult(
             False,

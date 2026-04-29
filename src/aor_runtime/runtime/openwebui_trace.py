@@ -59,13 +59,13 @@ class OpenWebUITraceRenderer:
         if event_type == "executor.step.completed":
             return self._render_step_completed(payload)
         if event_type == "validator.started":
-            return _trace_section("Checking", ["Checking result..."], code=True)
+            return _trace_progress(["Checking result..."])
         if event_type == "validator.completed":
             return self._render_validation_completed(payload)
         if event_type == "validator.result_shape":
             return self._render_result_shape(payload)
         if event_type == "executor.step.awaiting_confirmation":
-            return _trace_section("Approval", ["Waiting for approval before running a higher-risk step."], code=True)
+            return _trace_progress(["Waiting for approval before running a higher-risk step."])
         if event_type.endswith(".failed"):
             return self._render_failed(event_type, payload)
         return None
@@ -78,8 +78,8 @@ class OpenWebUITraceRenderer:
         self._planner_started_count += 1
         attempt = _to_int(payload.get("attempt")) or self._planner_started_count
         if attempt <= 1:
-            return _trace_section("Thinking", ["Thinking..."], code=True)
-        return _trace_section("Repairing", [f"Repair attempt {attempt - 1}: replanning..."], code=True)
+            return _trace_progress(["Thinking..."])
+        return _trace_progress([f"Repair attempt {attempt - 1}: replanning..."])
 
     def _render_planner_completed(self, payload: dict[str, Any]) -> str:
         steps = _plan_steps(payload)
@@ -88,7 +88,7 @@ class OpenWebUITraceRenderer:
         if signature:
             self._last_plan_signature = signature
 
-        lines = ["**Planning Complete**"]
+        lines = ["`Planning complete.`"]
         if steps and changed:
             lines.extend(["", "**Plan Overview**"])
             lines.append(" -> ".join(f"`{_inline_code(step)}`" for step in steps[:8]))
@@ -98,8 +98,8 @@ class OpenWebUITraceRenderer:
         if self.diagnostic:
             repairs = [sanitize_detail(item, max_chars=self.max_detail_chars) for item in _as_list(payload.get("repair_trace"))]
             if repairs:
-                lines.extend(["", "**Repairs Applied**"])
-                lines.extend(f"- {repair}" for repair in repairs[:5] if repair)
+                lines.extend([""])
+                lines.extend(f"`Repair: {_inline_code(repair)}`" for repair in repairs[:5] if repair)
         return _trace_markdown(lines)
 
     def _render_step_started(self, payload: dict[str, Any]) -> str | None:
@@ -112,13 +112,13 @@ class OpenWebUITraceRenderer:
         self._started_steps.add(marker)
 
         if tool == "runtime.return":
-            return _trace_section("Finalizing", ["Preparing final response..."], code=True)
+            return _trace_progress(["Preparing final response..."])
 
         args = dict(step.get("args") or {})
         detail = _step_detail(tool, args, payload, max_chars=self.max_detail_chars)
         if detail:
-            return _trace_section("Running", [f"Running {tool}: {detail}"], code=True)
-        return _trace_section("Running", [f"Running {tool}..."], code=True)
+            return _trace_progress([f"Running {tool}: {detail}"])
+        return _trace_progress([f"Running {tool}..."])
 
     def _render_step_completed(self, payload: dict[str, Any]) -> str | None:
         step = dict(payload.get("step") or {})
@@ -130,44 +130,37 @@ class OpenWebUITraceRenderer:
         self._completed_steps.add(marker)
 
         if not bool(payload.get("success")):
-            return _trace_section(
-                "Running",
+            return _trace_progress(
                 [f"Step failed: {sanitize_detail(payload.get('error') or 'tool execution failed', max_chars=self.max_detail_chars)}"],
-                code=True,
             )
         if tool == "runtime.return":
             return None
 
         result = dict(payload.get("result") or {})
         summary = _result_summary(tool, result, max_chars=self.max_detail_chars)
-        return _trace_section("Running", [summary], code=True) if summary else None
+        return _trace_progress([summary]) if summary else None
 
     def _render_validation_completed(self, payload: dict[str, Any]) -> str | None:
         result = dict(payload.get("result") or {})
         if bool(result.get("success")):
-            return _trace_section("Checking", ["Checks passed."], code=True) if self.diagnostic else None
+            return _trace_progress(["Checks passed."]) if self.diagnostic else None
         reason = sanitize_detail(result.get("reason") or "validation failed", max_chars=self.max_detail_chars)
-        return _trace_section("Checking", [f"Validation failed: {reason}. Repairing if possible..."], code=True)
+        return _trace_progress([f"Validation failed: {reason}. Repairing if possible..."])
 
     def _render_result_shape(self, payload: dict[str, Any]) -> str | None:
         if bool(payload.get("success")):
-            return _trace_section("Checking", ["Result shape verified."], code=True) if self.diagnostic else None
+            return _trace_progress(["Result shape verified."]) if self.diagnostic else None
         reason = sanitize_detail(payload.get("reason") or "result shape did not match the request", max_chars=self.max_detail_chars)
-        return _trace_section("Checking", [f"Result check failed: {reason}. Repairing if possible..."], code=True)
+        return _trace_progress([f"Result check failed: {reason}. Repairing if possible..."])
 
     def _render_failed(self, event_type: str, payload: dict[str, Any]) -> str:
         phase = event_type.split(".", 1)[0].replace("_", " ").title()
         error = sanitize_detail(payload.get("error") or "Task failed.", max_chars=self.max_detail_chars)
-        return _trace_section("Failed", [f"{phase} failed: {error}"], code=True)
+        return _trace_progress([f"{phase} failed: {error}"])
 
 
-def _trace_section(title: str, body: list[str] | None = None, *, code: bool = False) -> str:
-    lines = [f"**{title}**"]
-    if body:
-        lines.append("")
-        for item in body:
-            text = str(item or "")
-            lines.append(f"`{_inline_code(text)}`" if code and text else text)
+def _trace_progress(body: list[str]) -> str:
+    lines = [f"`{_inline_code(item)}`" for item in body if str(item or "")]
     return _trace_markdown(lines)
 
 

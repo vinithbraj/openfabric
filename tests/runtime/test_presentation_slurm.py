@@ -7,6 +7,7 @@ from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionStep, StepLog
 from aor_runtime.runtime.executor import summarize_final_output
 from aor_runtime.runtime.presentation import PresentationContext, present_result
+from aor_runtime.runtime.result_shape import validate_result_shape
 
 
 def _settings(tmp_path: Path, **overrides) -> Settings:
@@ -130,8 +131,8 @@ def test_raw_render_mode_keeps_json_for_integrations(tmp_path: Path) -> None:
     assert json.loads(output["content"]) == {"queue_count": 10}
 
 
-def test_slurm_multi_metric_accounting_aggregate_renders_table() -> None:
-    payload = {
+def _multi_metric_accounting_payload() -> dict:
+    return {
         "min": {
             "result_kind": "accounting_aggregate",
             "metric": "min_elapsed",
@@ -170,6 +171,10 @@ def test_slurm_multi_metric_accounting_aggregate_renders_table() -> None:
         },
     }
 
+
+def test_slurm_multi_metric_accounting_aggregate_renders_table() -> None:
+    payload = _multi_metric_accounting_payload()
+
     rendered = present_result(payload, PresentationContext(mode="user", source_action="slurm.accounting_aggregate"))
 
     assert not rendered.markdown.lstrip().startswith("{")
@@ -178,3 +183,70 @@ def test_slurm_multi_metric_accounting_aggregate_renders_table() -> None:
     assert "Minimum runtime" in rendered.markdown
     assert "Maximum runtime" in rendered.markdown
     assert "Average runtime" in rendered.markdown
+
+
+def test_final_presentation_boundary_validates_rendered_markdown_not_raw_runtime_json(tmp_path: Path) -> None:
+    goal = "what is the min/max and average time consumed for jobs in the totalseg partition ?"
+    payload = _multi_metric_accounting_payload()
+    raw_json = json.dumps(payload)
+    history = [
+        StepLog(
+            step=ExecutionStep(
+                id=1,
+                action="slurm.accounting_aggregate",
+                args={"metric": "min_elapsed", "partition": "totalseg"},
+                output="min_time",
+            ),
+            result=payload["min"],
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(
+                id=2,
+                action="slurm.accounting_aggregate",
+                args={"metric": "max_elapsed", "partition": "totalseg"},
+                output="max_time",
+            ),
+            result=payload["max"],
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(
+                id=3,
+                action="slurm.accounting_aggregate",
+                args={"metric": "average_elapsed", "partition": "totalseg"},
+                output="avg_time",
+            ),
+            result=payload["avg"],
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(
+                id=4,
+                action="text.format",
+                args={"source": {"$ref": "avg_time"}, "format": "json"},
+                output="formatted_output",
+            ),
+            result={"content": raw_json, "format": "json"},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(
+                id=5,
+                action="runtime.return",
+                args={"value": {"$ref": "formatted_output", "path": "content"}},
+                output="runtime_return_result",
+            ),
+            result={"output": raw_json, "value": raw_json},
+            success=True,
+        ),
+    ]
+
+    raw_validation = validate_result_shape(goal, history)
+    output = summarize_final_output(goal, history, settings=_settings(tmp_path))
+    rendered_validation = validate_result_shape(goal, history, final_content=output["content"])
+
+    assert raw_validation.success is False
+    assert raw_validation.metadata["final_output_validation"] == "raw_json_output"
+    assert "## SLURM Job Runtime Summary" in output["content"]
+    assert rendered_validation.success is True
