@@ -1,4 +1,4 @@
-"""Agent Orchestration Runtime."""
+"""OpenFABRIC runtime."""
 
 from __future__ import annotations
 

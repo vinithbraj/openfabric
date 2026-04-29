@@ -16,18 +16,22 @@ RUN apt-get update && apt-get install -y \
     sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+# Keep the virtualenv outside the bind-mounted source tree so mounting the
+# repository at /opt/src does not hide the installed console scripts.
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH="/opt/src/src"
 
-# Setup a virtual environment for Python dependencies (recommended for Ubuntu 24.04 / PEP 668)
-RUN python3 -m venv /app/.venv
-ENV PATH="/app/.venv/bin:$PATH"
+# Install from pyproject.toml. Editable mode keeps the installed `aor` command
+# pointed at /opt/src, which is the same path used by docker-compose bind mounts.
+WORKDIR /opt/src
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e .
 
-# Copy requirements file and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the rest of the application code
+# Copy the rest of the repository for non-bind-mounted image usage. In compose,
+# the host repository is mounted over /opt/src.
 COPY . .
 
 # Default shell

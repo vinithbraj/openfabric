@@ -6,21 +6,22 @@
 flowchart TD
     A[CLI or API Request] --> B[ExecutionEngine]
     B --> C[TaskPlanner]
-    C --> D[CapabilityRegistry]
-    D --> E{Capability Match?}
-    E -- Yes --> F[Typed Intent]
-    F --> G[Capability Compiler]
+    C --> D[LLMActionPlanner]
+    D --> E[ActionPlan JSON]
+    E --> F[Canonicalizer]
+    F --> G[Validator]
     G --> H[ExecutionPlan]
-    E -- No --> I[Direct or Hierarchical Planner]
-    I --> H
-    H --> J[PlanExecutor]
-    J --> K[Tools]
-    K --> L[RuntimeValidator]
-    L --> M[runtime.return or Final Output Summary]
-    M --> N[Session State / Final Output]
+    H --> I[PlanExecutor]
+    I --> J[Tools]
+    J --> K[RuntimeValidator]
+    K --> L[runtime.return or Final Output Summary]
+    L --> M[Session State / Final Output]
 ```
 
 ## Capability-Pack Lifecycle
+
+Capability packs are retained for compatibility helpers and tests. They are
+not the default natural-language planning route.
 
 ```mermaid
 flowchart LR

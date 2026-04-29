@@ -1,6 +1,6 @@
 # SQL Capability Design
 
-The SQL capability is deterministic first and schema-aware. It handles configured SQL databases by loading a catalog of schemas, tables, and columns, then compiling safe read-only plans before the raw planner can invent SQL.
+SQL planning is LLM-proposed and schema-aware, then deterministically validated before execution. The action planner receives compact schema metadata when SQL is relevant; runtime validators enforce read-only SQL, known databases, known tables/columns, PostgreSQL quoting rules, and result-shape contracts.
 
 ## Schema Catalog
 

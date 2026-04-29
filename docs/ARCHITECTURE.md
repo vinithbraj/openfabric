@@ -2,21 +2,21 @@
 
 ## Overview
 
-OpenFabric / AOR is a deterministic-first agent runtime for local and gateway-routed execution. The current architecture is centered on `ExecutionEngine`, `TaskPlanner`, the `CapabilityRegistry`, deterministic tools, validator re-checks, and final shaping through `runtime.return`.
+OpenFabric / AOR is a validator-enforced LLM action-planning runtime for local and gateway-routed execution. The current architecture is centered on `ExecutionEngine`, `TaskPlanner`, `LLMActionPlanner`, deterministic validators, tool execution, local formatting, and final shaping through `runtime.return`.
 
 The important top-level rule is:
 
-- try deterministic capability matching first
-- only use the raw direct or hierarchical planner when no capability pack can safely handle the request
+- use the LLM action planner for every natural-language request
+- never route through legacy direct, hierarchical, raw `ExecutionPlan`, or deterministic classifier planner paths
 - treat `runtime.return` plus `OutputContract` as the final deterministic output boundary
 
-The runtime also supports an optional typed LLM intent extractor for fuzzy SLURM inspection prompts, but that path is constrained to validated intent JSON only and is disabled by default.
+Capability-pack and typed-intent modules remain in the repository as helper libraries, fixtures, and compatibility test surfaces. They are no longer the top-level semantic router.
 
 ## Core Design Principles
 
-- Deterministic-first: most supported requests compile to a typed intent and a fixed `ExecutionPlan` without planner-generated tool calls.
-- Typed intent planning: capability packs classify user requests into Pydantic intent models and then compile them into plans.
-- Safe fallback: raw LLM planning remains available, but only after deterministic packs miss.
+- LLM-first action planning: the model proposes structured tool actions, not raw executable sessions.
+- Deterministic safety boundary: validators decide tool availability, SQL safety, shell safety, filesystem roots, SLURM read-only behavior, dataflow, and result shape.
+- No legacy fallback: direct/hierarchical/raw planner modes are retired.
 - Deterministic execution and shaping: tool execution, validation, dataflow, and final rendering are explicit and code-driven.
 - Persisted observability: sessions, events, and snapshots are stored in SQLite and power CLI/API progress streaming.
 
@@ -25,58 +25,29 @@ The runtime also supports an optional typed LLM intent extractor for fuzzy SLURM
 ```mermaid
 flowchart TD
     A[User Natural Language Request] --> B[TaskPlanner]
-    B --> C[CapabilityRegistry]
-    C --> D{Deterministic Capability Match?}
-    D -- Yes --> E[Typed Intent]
-    D -- No --> F[Existing Fallback Planner / Unsupported Handling]
-    E --> G[Capability Compiler]
-    G --> H[ExecutionPlan]
-    H --> I[Validator]
-    I --> J[Executor]
-    J --> K[Tool Runtime]
-    K --> L[runtime.return]
-    L --> M[Final User Output]
+    B --> C[LLMActionPlanner]
+    C --> D[Raw ActionPlan JSON]
+    D --> E[Canonicalize Dataflow / Temporal Args / Output Contract]
+    E --> F[Validate Safety, Schema, Domain, Shape]
+    F --> G[ExecutionPlan]
+    G --> H[Executor]
+    H --> I[Tool Runtime]
+    I --> J[Local Formatting / Presentation Boundary]
+    J --> K[Final User Output]
 ```
 
 ## Current Planning Modes
 
-The planner currently distinguishes three practical paths:
+The active planning mode is `validator_enforced_action_planner`.
 
-### 1. Deterministic capability-pack path
-
-`TaskPlanner` asks `CapabilityRegistry` to classify the goal. If a pack matches, the intent is compiled to a concrete `ExecutionPlan` through that pack.
-
-This is the normal path for supported filesystem, SQL, shell, fetch, compound, and SLURM prompts.
-
-### 2. Optional typed LLM-intent extraction path
-
-If deterministic classification misses and `AOR_ENABLE_LLM_INTENT_EXTRACTION=true`, packs that opt in may attempt a second-pass typed extraction. Today that is limited to SLURM.
-
-This path is still capability-driven:
-
-- the LLM may only emit JSON for an allowed intent schema
-- the result is validated and safety-checked
-- the pack compiler still produces the plan
-
-The LLM does not get to emit tool calls, shell commands, gateway commands, `python.exec`, or an `ExecutionPlan`.
-
-### 3. Raw planner fallback
-
-If capability matching and optional typed intent extraction both miss, `TaskPlanner` falls back to the existing direct or hierarchical planner flow.
-
-This fallback is still guarded by:
-
-- planner policies
-- plan canonicalization
-- contract validation
-- executor and validator re-checks
+Deprecated config flags such as `AOR_ACTION_PLANNER_ENABLED`, `AOR_LEGACY_EXECUTION_PLANNER_ENABLED`, `planner.prompt`, and `planner.decomposer_prompt` may still parse for one release, but they do not reactivate old planner routes.
 
 ## Execution Pipeline
 
 The runtime flow from compiled plan to final user output is:
 
 1. `ExecutionEngine` creates or resumes a session.
-2. `TaskPlanner` builds an `ExecutionPlan`.
+2. `TaskPlanner` calls `LLMActionPlanner` and compiles a validated `ExecutionPlan`.
 3. `PlanExecutor` executes steps in order.
 4. `runtime/dataflow.py` resolves `$ref` inputs between steps.
 5. `RuntimeValidator` re-checks tool outputs against deterministic expectations or fixture-backed truth.
@@ -105,7 +76,8 @@ Important engine events include:
 
 ### Planning and capabilities
 
-- `src/aor_runtime/runtime/planner.py`: `TaskPlanner`, planner mode tracking, deterministic-first routing, raw planner fallback.
+- `src/aor_runtime/runtime/planner.py`: `TaskPlanner`, active planning mode tracking, and final `ExecutionPlan` validation.
+- `src/aor_runtime/runtime/action_planner.py`: LLM action planning, normalization, canonicalization, and action validation.
 - `src/aor_runtime/runtime/capabilities/base.py`: capability interfaces and compile context types.
 - `src/aor_runtime/runtime/capabilities/registry.py`: pack ordering, classification, and compilation dispatch.
 - `src/aor_runtime/runtime/intents.py`: shared typed intents and `IntentResult`.

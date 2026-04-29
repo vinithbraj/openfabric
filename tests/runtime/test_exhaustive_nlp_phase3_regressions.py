@@ -61,6 +61,7 @@ def test_phase3_regression_prompts_classify_deterministically(case: CaseSpec) ->
 
 
 @pytest.mark.parametrize("case", load_cases(REGRESSION_CASE_IDS), ids=lambda case: case.case_id)
+@pytest.mark.skip(reason="LLM-exclusive runtime no longer supports zero-LLM natural-language execution")
 def test_phase3_regression_prompts_run_without_llm(case: CaseSpec, phase3_settings: Settings) -> None:
     state = _run_case(phase3_settings, case.prompt)
     assert state["metrics"]["llm_calls"] == 0

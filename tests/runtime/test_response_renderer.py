@@ -161,12 +161,12 @@ def test_debug_mode_includes_compact_debug_metadata() -> None:
     rendered = render_agent_response(
         28102,
         execution_events=_sql_history(),
-        metadata={"planning_mode": "deterministic_intent"},
+        metadata={"planning_mode": "validator_enforced_action_planner"},
         context=ResponseRenderContext(mode="debug", source_action="sql.query", output_mode="count", show_debug_metadata=True),
     )
 
     assert "## Debug Metadata" in rendered.markdown
-    assert "deterministic_intent" in rendered.markdown
+    assert "validator_enforced_action_planner" in rendered.markdown
 
 
 def test_slurm_response_includes_clean_commands() -> None:

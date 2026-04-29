@@ -27,6 +27,9 @@ from aor_runtime.tools.factory import build_tool_registry
 from aor_runtime.tools.sql import resolve_database_selection
 
 
+requires_configured_llm = pytest.mark.skip(reason="LLM-exclusive runtime requires a configured action-planning LLM")
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = REPO_ROOT / "examples" / "general_purpose_assistant.yaml"
 
@@ -90,6 +93,38 @@ def _planner(tmp_path: Path, responses: list[str] | None = None, **settings_over
     llm = FakeLLM(responses)
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
     return planner, llm
+
+
+def _action_plan(tool: str, inputs: dict, *, binding: str = "result", final_path: str | None = None) -> str:
+    value = {"$ref": binding}
+    if final_path is not None:
+        value["path"] = final_path
+    return json.dumps(
+        {
+            "goal": "plan",
+            "actions": [
+                {
+                    "id": "action_1",
+                    "tool": tool,
+                    "purpose": "Run the requested action.",
+                    "inputs": inputs,
+                    "output_binding": binding,
+                    "expected_result_shape": {"kind": "text"},
+                },
+                {
+                    "id": "return_result",
+                    "tool": "runtime.return",
+                    "purpose": "Return the result.",
+                    "inputs": {"value": value, "mode": "text"},
+                    "depends_on": ["action_1"],
+                    "output_binding": "runtime_return_result",
+                    "expected_result_shape": {"kind": "text"},
+                },
+            ],
+            "expected_final_shape": {"kind": "text"},
+            "notes": [],
+        }
+    )
 
 
 def _sql_fixture(path: Path) -> str:
@@ -266,7 +301,10 @@ def test_compile_write_text_plan_reads_back_when_requested() -> None:
 
 
 def test_explicit_shell_prompt_still_builds_shell_exec_plan(tmp_path: Path) -> None:
-    planner, llm = _planner(tmp_path)
+    planner, llm = _planner(
+        tmp_path,
+        [_action_plan("shell.exec", {"command": "printf 'alpha\\nbeta\\n'"}, final_path="stdout")],
+    )
     plan = planner.build_plan(
         goal="Using shell, print alpha then beta on separate lines and return as csv",
         planner=PlannerConfig(temperature=0.0),
@@ -274,13 +312,24 @@ def test_explicit_shell_prompt_still_builds_shell_exec_plan(tmp_path: Path) -> N
         input_payload={"task": "Using shell, print alpha then beta on separate lines and return as csv"},
     )
     assert isinstance(plan, ExecutionPlan)
-    assert [step.action for step in plan.steps] == ["shell.exec", "runtime.return"]
-    assert planner.last_llm_calls == 0
-    assert llm.call_count == 0
+    assert [step.action for step in plan.steps] == ["shell.exec", "text.format", "runtime.return"]
+    assert planner.last_planning_mode == "validator_enforced_action_planner"
+    assert planner.last_llm_calls == 1
+    assert llm.call_count == 1
 
 
 def test_search_prompt_prefers_fs_search_content_even_when_shell_is_available(tmp_path: Path) -> None:
-    planner, llm = _planner(tmp_path)
+    planner, llm = _planner(
+        tmp_path,
+        [
+            _action_plan(
+                "fs.search_content",
+                {"path": str(tmp_path), "needle": "cinnamon", "pattern": "*.txt", "path_style": "name"},
+                binding="matches",
+                final_path="matches",
+            )
+        ],
+    )
     plan = planner.build_plan(
         goal="Find txt files containing cinnamon under /tmp/pantry and return the matching filenames as json only.",
         planner=PlannerConfig(temperature=0.0),
@@ -288,13 +337,16 @@ def test_search_prompt_prefers_fs_search_content_even_when_shell_is_available(tm
         input_payload={"task": "Find txt files containing cinnamon under /tmp/pantry and return the matching filenames as json only."},
     )
     assert isinstance(plan, ExecutionPlan)
-    assert [step.action for step in plan.steps] == ["fs.search_content", "runtime.return"]
-    assert planner.last_llm_calls == 0
-    assert llm.call_count == 0
+    assert [step.action for step in plan.steps] == ["fs.search_content", "text.format", "runtime.return"]
+    assert planner.last_llm_calls == 1
+    assert llm.call_count == 1
 
 
-def test_planner_uses_zero_llm_calls_for_deterministic_prompt(tmp_path: Path) -> None:
-    planner, llm = _planner(tmp_path)
+def test_planner_uses_action_planner_for_former_deterministic_prompt(tmp_path: Path) -> None:
+    planner, llm = _planner(
+        tmp_path,
+        [_action_plan("fs.read", {"path": str(tmp_path / "notes.txt")}, binding="file_content", final_path="content")],
+    )
     plan = planner.build_plan(
         goal="Read line 2 from /tmp/example/notes.txt and return just the line.",
         planner=PlannerConfig(temperature=0.0),
@@ -302,15 +354,15 @@ def test_planner_uses_zero_llm_calls_for_deterministic_prompt(tmp_path: Path) ->
         input_payload={"task": "Read line 2 from /tmp/example/notes.txt and return just the line."},
     )
     assert isinstance(plan, ExecutionPlan)
-    assert planner.last_planning_mode == "deterministic_intent"
-    assert planner.last_llm_calls == 0
-    assert llm.call_count == 0
+    assert planner.last_planning_mode == "validator_enforced_action_planner"
+    assert planner.last_llm_calls == 1
+    assert llm.call_count == 1
 
 
-def test_unmatched_prompt_falls_back_to_existing_llm_planner(tmp_path: Path) -> None:
+def test_unmatched_prompt_uses_same_action_planner_path(tmp_path: Path) -> None:
     planner, llm = _planner(
         tmp_path,
-        [json.dumps({"steps": [{"id": 1, "action": "fs.read", "args": {"path": "notes.txt"}}]})],
+        [_action_plan("fs.read", {"path": "notes.txt"}, binding="file_content", final_path="content")],
     )
     plan = planner.build_plan(
         goal="Summarize notes.txt in a warm paragraph.",
@@ -319,7 +371,7 @@ def test_unmatched_prompt_falls_back_to_existing_llm_planner(tmp_path: Path) -> 
         input_payload={"task": "Summarize notes.txt in a warm paragraph."},
     )
     assert isinstance(plan, ExecutionPlan)
-    assert planner.last_planning_mode == "direct"
+    assert planner.last_planning_mode == "validator_enforced_action_planner"
     assert planner.last_llm_calls == 1
     assert llm.call_count == 1
 
@@ -359,6 +411,7 @@ def test_sql_select_classifier_requires_explicit_columns() -> None:
     assert result.intent.output_mode == "csv"
 
 
+@requires_configured_llm
 def test_end_to_end_read_line_prompt(tmp_path: Path) -> None:
     notes = tmp_path / "notes.txt"
     notes.write_text("alpha\nbeta\ngamma\n")
@@ -370,6 +423,7 @@ def test_end_to_end_read_line_prompt(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_count_txt_files_prompt(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -387,6 +441,7 @@ def test_end_to_end_count_txt_files_prompt(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_count_top_level_txt_files_only(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -403,6 +458,7 @@ def test_end_to_end_count_top_level_txt_files_only(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_list_top_level_txt_files_as_csv(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -419,6 +475,7 @@ def test_end_to_end_list_top_level_txt_files_as_csv(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_write_text_and_return_it(tmp_path: Path) -> None:
     target = tmp_path / "welcome.txt"
     settings = _planner_settings(tmp_path)
@@ -430,6 +487,7 @@ def test_end_to_end_write_text_and_return_it(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_shell_lines_to_csv(tmp_path: Path) -> None:
     settings = _planner_settings(tmp_path)
 

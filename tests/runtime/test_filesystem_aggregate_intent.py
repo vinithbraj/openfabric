@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from aor_runtime.config import Settings
 from aor_runtime.runtime.engine import ExecutionEngine
 from aor_runtime.runtime.intent_classifier import classify_intent
@@ -101,6 +103,7 @@ def test_compile_count_and_total_size_json_keeps_matches() -> None:
     assert "shell.exec" not in [step.action for step in plan.steps]
 
 
+@pytest.mark.skip(reason="LLM-exclusive runtime no longer supports zero-LLM natural-language execution")
 def test_supported_prompt_uses_zero_llm_calls(tmp_path: Path) -> None:
     (tmp_path / "clip1.mp4").write_text("aaaa")
     (tmp_path / "clip2.mp4").write_text("bb")

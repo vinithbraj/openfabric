@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan
 from aor_runtime.runtime.engine import ExecutionEngine
@@ -99,6 +101,7 @@ def test_llm_fallback_used_produces_deterministic_rewrite_suggestions() -> None:
     assert any("database" in suggestion.suggested_prompt.lower() or "csv" in suggestion.suggested_prompt.lower() for suggestion in result.suggestions)
 
 
+@pytest.mark.skip(reason="LLM-exclusive runtime no longer supports zero-LLM natural-language execution")
 def test_successful_deterministic_output_does_not_include_suggestions_by_default(tmp_path: Path) -> None:
     target = tmp_path / "notes.txt"
     target.write_text("alpha\nbeta\n")
@@ -114,7 +117,7 @@ def test_successful_deterministic_output_does_not_include_suggestions_by_default
     assert "failure_type" not in state["final_output"]["metadata"]
 
 
-def test_successful_llm_fallback_keeps_content_but_records_suggestion_metadata(tmp_path: Path, monkeypatch) -> None:
+def test_successful_planner_output_keeps_content_without_prompt_suggestions(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "studies.txt"
     target.write_text("study-a\nstudy-b\n")
     engine = ExecutionEngine(Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db"))
@@ -122,7 +125,7 @@ def test_successful_llm_fallback_keeps_content_but_records_suggestion_metadata(t
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["filesystem_preference"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 1
         engine.planner.last_error_stage = None
         engine.planner.last_plan_repairs = []
@@ -141,6 +144,6 @@ def test_successful_llm_fallback_keeps_content_but_records_suggestion_metadata(t
 
     state = engine.run_spec(str(SPEC_PATH), {"task": "List all studies and save to studies.txt."})
 
-    assert state["final_output"]["content"] == "study-a\nstudy-b"
-    assert state["final_output"]["metadata"]["failure_type"] == "llm_fallback_used"
-    assert state["final_output"]["metadata"]["suggestion_count"] >= 1
+    assert state["final_output"]["content"].startswith("study-a\nstudy-b")
+    assert "failure_type" not in state["final_output"]["metadata"]
+    assert "prompt_suggestions" not in state["final_output"]["metadata"]

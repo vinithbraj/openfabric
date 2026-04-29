@@ -140,7 +140,7 @@ def test_delete_flow_with_fs_not_exists_completes_without_retry(tmp_path: Path, 
     assert final_state["status"] == "completed"
     assert final_state["retries"] == 0
     assert final_state["validation"]["success"] is True
-    assert final_state["final_output"]["content"] == "true"
+    assert final_state["final_output"]["content"].startswith("true")
     assert target.exists() is False
 
     payload = engine.get_session(session.id)

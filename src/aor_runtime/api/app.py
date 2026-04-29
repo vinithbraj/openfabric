@@ -130,7 +130,7 @@ def _is_openwebui_meta_prompt(text: str) -> bool:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    app = FastAPI(title="Agent Orchestration Runtime", version=__version__)
+    app = FastAPI(title="OpenFABRIC", version=__version__)
     configured_settings = settings or get_settings(config_path=os.getenv(APP_CONFIG_PATH_ENV) or None)
     engine = ExecutionEngine(configured_settings)
     app.state.engine = engine

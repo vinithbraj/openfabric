@@ -80,7 +80,7 @@ def _patch_shell_plan(engine, monkeypatch) -> None:
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["efficiency"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 0
         engine.planner.last_error_stage = None
         engine.planner.last_plan_repairs = []
@@ -106,7 +106,7 @@ def _patch_planner_failure(engine, monkeypatch) -> None:
     def failing_build_plan(**kwargs):
         engine.planner.last_policies_used = ["filesystem_preference"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 0
         engine.planner.last_error_stage = "direct"
         engine.planner.last_plan_repairs = []

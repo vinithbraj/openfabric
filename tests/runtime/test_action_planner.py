@@ -213,7 +213,7 @@ def test_task_planner_uses_action_planner_for_sql_count(tmp_path: Path, monkeypa
         input_payload={"task": "count the number of patients in dicom"},
     )
 
-    assert planner.last_planning_mode == "validator_enforced_action_plan"
+    assert planner.last_planning_mode == "validator_enforced_action_planner"
     assert [step.action for step in plan.steps] == ["sql.query", "text.format", "runtime.return"]
     assert plan.steps[0].args["query"] == 'SELECT COUNT(DISTINCT "PatientID") AS patient_count FROM flathr."Patient"'
     context = json.loads(llm.user_prompts[0])

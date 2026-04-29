@@ -62,7 +62,7 @@ Today only `SlurmCapabilityPack` uses this path.
    - or no match
 4. The SLURM pack applies additional safety validation.
 5. If valid, the same SLURM compiler path builds a deterministic `ExecutionPlan`.
-6. If no valid intent is produced, normal raw planner fallback behavior remains available.
+6. If no valid intent is produced, callers that use this helper receive no match. `TaskPlanner` itself does not use this path for top-level routing.
 
 ## Hard Safety Rule
 
@@ -121,7 +121,7 @@ This second validation pass is required because schema-valid JSON is not automat
 
 ## Planner Metadata
 
-Successful typed intent extraction is tracked distinctly from raw planner fallback.
+Successful typed intent extraction is tracked distinctly in helper/eval metadata. It is not a top-level `TaskPlanner` mode.
 
 Current metadata fields include:
 
@@ -134,11 +134,11 @@ Current metadata fields include:
 - `llm_intent_confidence`
 - `llm_intent_reason`
 
-This is why evals can distinguish:
+This is why helper/eval code can distinguish:
 
-- deterministic capability matches
-- typed LLM intent extraction
-- raw planner usage
+- deterministic capability matches in compatibility tests
+- typed LLM intent extraction in compatibility tests
+- validator-enforced action-planner runtime usage
 
 ## Why This Design Exists
 

@@ -17,11 +17,10 @@ from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.compiler import GraphCompiler
 from aor_runtime.runtime.auto_artifact import AutoArtifactMaterializer
 from aor_runtime.runtime.dataflow import resolve_execution_step
-from aor_runtime.runtime.decomposer import is_complex_goal
 from aor_runtime.runtime.error_normalization import normalize_planner_error, normalize_runtime_failure
 from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
 from aor_runtime.runtime.failure_classifier import classify_failure, generate_prompt_suggestions
-from aor_runtime.runtime.planner import TaskPlanner, summarize_plan, summarize_planner_raw_output
+from aor_runtime.runtime.planner import ACTIVE_PLANNING_MODE, TaskPlanner, summarize_plan, summarize_planner_raw_output
 from aor_runtime.runtime.policies import PlanContractViolation
 from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
 from aor_runtime.runtime.response_renderer import ResponseRenderContext, render_agent_response
@@ -49,15 +48,17 @@ NON_RETRYABLE_FAILURE_MESSAGES = {
     "Empty SQL query.",
 }
 STARTUP_BANNER = r"""
-   ___   ____  ____
-  / _ | / __ \/ __/
- / __ |/ /_/ / /_
-/_/ |_|\____/\__/
+   ____                  ______      __         _
+  / __ \____  ___  ____ / ____/___ _/ /_  _____(_)____
+ / / / / __ \/ _ \/ __ `/ /_  / __ `/ __ \/ ___/ / ___/
+/ /_/ / /_/ /  __/ / / / __/ / /_/ / /_/ / /  / / /__
+\____/ .___/\___/_/ /_/_/    \__,_/_.___/_/  /_/\___/
+    /_/
 """.strip("\n")
 
 
 def render_startup_banner() -> str:
-    return f"{STARTUP_BANNER}\naor-runtime v{__version__}"
+    return f"{STARTUP_BANNER}\nOpenFABRIC v{__version__}"
 
 
 def _safe_execution_plan(plan_data: Any) -> ExecutionPlan | None:
@@ -370,7 +371,7 @@ class ExecutionEngine:
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
         self._configure_runtime_for_compiled(compiled)
         goal = str(state.get("goal", ""))
-        planning_mode = "hierarchical" if is_complex_goal(goal) else "direct"
+        planning_mode = ACTIVE_PLANNING_MODE
         self.store.append_event(
             session_id=session.id,
             node_name="planner",
@@ -402,7 +403,7 @@ class ExecutionEngine:
             repair_trace = list(self.planner.last_plan_repairs)
             canonicalized = bool(self.planner.last_plan_canonicalized)
             original_execution_plan = self.planner.last_original_execution_plan if canonicalized else None
-            resolved_planning_mode = str(self.planner.last_planning_mode or planning_mode)
+            resolved_planning_mode = ACTIVE_PLANNING_MODE
             planning_metadata = {
                 "planning_mode": resolved_planning_mode,
                 "capability": self.planner.last_capability_name,
@@ -482,7 +483,7 @@ class ExecutionEngine:
             state["metrics"] = metrics
             failed_policies = list(self.planner.last_policies_used)
             planner_error_type = str(self.planner.last_error_type or type(exc).__name__)
-            planner_error_stage = str(self.planner.last_error_stage or planning_mode)
+            planner_error_stage = str(self.planner.last_error_stage or "action_planner")
             raw_output_preview = summarize_planner_raw_output(self.planner.last_raw_output)
             normalized_error = normalize_planner_error(
                 error_type=planner_error_type,
@@ -493,7 +494,7 @@ class ExecutionEngine:
             final_output_metadata = {"goal": state.get("goal", ""), "planner_error_type": planner_error_type}
             final_output_metadata.update(
                 {
-                    "planning_mode": str(self.planner.last_planning_mode or planning_mode),
+                    "planning_mode": ACTIVE_PLANNING_MODE,
                     "capability": self.planner.last_capability_name,
                     "llm_intent_type": self.planner.last_llm_intent_type,
                     "llm_intent_confidence": self.planner.last_llm_intent_confidence,
@@ -539,7 +540,7 @@ class ExecutionEngine:
                 "error": final_error,
                 "error_type": planner_error_type,
                 "stage": planner_error_stage,
-                "planning_mode": str(self.planner.last_planning_mode or planning_mode),
+                "planning_mode": ACTIVE_PLANNING_MODE,
                 "capability": self.planner.last_capability_name,
                 "llm_intent_type": self.planner.last_llm_intent_type,
                 "llm_intent_confidence": self.planner.last_llm_intent_confidence,

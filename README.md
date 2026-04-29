@@ -1,20 +1,20 @@
 # Agent Orchestration Runtime
 
-Agent Orchestration Runtime (AOR) is a deterministic-first local agent runtime for turning natural-language tasks into validated execution plans. The current implementation routes supported prompts through a capability registry, compiles typed intents into explicit plans, executes tools deterministically, validates results, and shapes final output through `runtime.return` and `OutputContract`.
+Agent Orchestration Runtime (AOR) is an LLM action-planning runtime for turning natural-language tasks into validated execution plans. The LLM proposes structured tool actions; deterministic runtime layers canonicalize dataflow, validate safety and schemas, execute tools, and shape final output through `runtime.return` and `OutputContract`.
 
 Major runtime properties:
 
-- deterministic capability planning through `TaskPlanner` and `CapabilityRegistry`
-- shared typed-intent infrastructure for filesystem, SQL, shell, fetch, and compound workflows
+- validator-enforced LLM action planning through `TaskPlanner`
+- deterministic validators and local formatters for filesystem, SQL, shell, SLURM, fetch, and text workflows
 - native content search via `fs.search_content`
 - gateway-routed shell and SLURM execution
 - SQLite-backed sessions, events, and snapshots
 - capability eval gates plus a global exhaustive regression suite
-- optional SLURM-only typed LLM-intent fallback, disabled by default
+- capability-pack helpers retained for validators, fixtures, and compatibility tests, not top-level routing
 
 ## Architecture Snapshot
 
-At runtime, the CLI or API hands a request to `ExecutionEngine`. The engine invokes `TaskPlanner`, which first asks `CapabilityRegistry` whether any capability pack can classify the prompt into a typed intent. If a pack matches, that pack compiles the intent into an explicit `ExecutionPlan`; only when capability matching misses does the runtime fall back to the raw planner path. The executor resolves step-to-step dataflow, runs tools, and streams progress/events when requested. The validator re-checks deterministic expectations against tool outputs. Final user-facing output is shaped through `runtime.return`, which applies an `OutputContract` to normalize and render results consistently.
+At runtime, the CLI or API hands a request to `ExecutionEngine`. The engine invokes `TaskPlanner`, which always uses the validator-enforced LLM action planner for natural-language requests. The action planner emits structured tool actions, the runtime canonicalizes and validates them, the executor resolves step-to-step dataflow and runs tools, and final user-facing output is shaped locally through `runtime.return` and response renderers.
 
 ## Quick Start
 
@@ -106,8 +106,8 @@ So once the agent is running, `examples/general_purpose_assistant.yaml` can use 
 
 ## Major Features
 
-- Deterministic capability planning:
-  - supported prompts route through capability packs before raw planner fallback
+- LLM action planning:
+  - natural-language prompts route through the validator-enforced action planner
 - Native filesystem and content-search tooling:
   - including `fs.search_content`
 - Output contracts:
@@ -116,8 +116,8 @@ So once the agent is running, `examples/general_purpose_assistant.yaml` can use 
   - exhaustive NLP regression plus capability-pack evals
 - Read-only SLURM support:
   - queue, accounting, nodes, partitions, metrics, and slurmdbd health
-- Optional typed LLM-intent fallback:
-  - implemented for fuzzy SLURM inspection prompts only, and disabled by default
+- Local formatting and output contracts:
+  - raw rows and large payloads are rendered or artifacted locally
 
 ## Usage Entrypoints
 
@@ -138,10 +138,10 @@ So once the agent is running, `examples/general_purpose_assistant.yaml` can use 
 
 ## Safety Principles
 
-- Deterministic-first:
-  - capability packs are tried before raw planner fallback
-- No raw LLM tool plans where avoidable:
-  - supported behavior should compile from typed intents
+- Validator-enforced planning:
+  - the LLM may propose actions, but validators decide what can execute
+- No legacy planner routes:
+  - direct, hierarchical, raw `ExecutionPlan`, and deterministic router paths are not runtime planning modes
 - No arbitrary shell planning for domain capabilities:
   - domain packs such as SLURM should use native tools, not raw shell prompts
 - Final output is explicit:
@@ -165,7 +165,7 @@ So once the agent is running, `examples/general_purpose_assistant.yaml` can use 
 - `src/aor_runtime/` core package
 - `docs/` technical documentation
 - `examples/` example runtime specs
-- `prompts/` prompt templates used by the planner
+- `prompts/` retired legacy prompt notes retained for config compatibility
 - `scripts/` convenience scripts
 
 ## Main Components
@@ -173,8 +173,9 @@ So once the agent is running, `examples/general_purpose_assistant.yaml` can use 
 - `src/aor_runtime/dsl/` normalized DSL models and loader
 - `src/aor_runtime/runtime/compiler.py` DSL -> compiled runtime spec
 - `src/aor_runtime/runtime/engine.py` execution orchestration, persistence, and events
-- `src/aor_runtime/runtime/planner.py` deterministic-first planner with fallback modes
-- `src/aor_runtime/runtime/capabilities/` capability-pack routing and pack implementations
+- `src/aor_runtime/runtime/planner.py` validator-enforced action-planner wrapper
+- `src/aor_runtime/runtime/action_planner.py` LLM action planning, canonicalization, and validation boundary
+- `src/aor_runtime/runtime/capabilities/` legacy/helper capability-pack implementations and fixtures
 - `src/aor_runtime/runtime/executor.py` deterministic tool executor
 - `src/aor_runtime/runtime/validator.py` deterministic validation layer
 - `src/aor_runtime/runtime/output_contract.py` normalization and final output shaping rules

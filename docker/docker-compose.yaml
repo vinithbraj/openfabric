@@ -4,8 +4,11 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: openfabric-gateway
+    working_dir: /opt/src
     volumes:
       - ..:/opt/src
+    environment:
+      PYTHONPATH: /opt/src/src
     network_mode: host
     tty: true
     stdin_open: true

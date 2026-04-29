@@ -51,7 +51,7 @@ def _patch_sql_plan(engine, monkeypatch) -> None:
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["sql_preference"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "deterministic_intent"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 0
         engine.planner.last_llm_intent_calls = 0
         engine.planner.last_raw_planner_llm_calls = 0

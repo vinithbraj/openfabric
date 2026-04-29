@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
 from aor_runtime.runtime.capabilities.base import ClassificationContext, CompileContext
@@ -158,6 +160,7 @@ def test_compile_plans_use_slurm_tools_and_runtime_return(tmp_path: Path) -> Non
     assert plan.plan.steps[0].args["gateway_node"] == "edge-2"
 
 
+@pytest.mark.skip(reason="LLM-exclusive runtime no longer supports zero-LLM natural-language execution")
 def test_supported_prompts_use_zero_llm_calls(monkeypatch, tmp_path: Path) -> None:
     fixtures = rebuild_eval_workspace(tmp_path / "fixtures")
     monkeypatch.setenv(SLURM_FIXTURE_DIR_ENV, fixtures.variables["slurm_fixture_dir"])
@@ -189,6 +192,7 @@ def test_mutating_prompts_do_not_compile_to_a_mutating_tool(tmp_path: Path) -> N
     assert [step.action for step in plan.plan.steps] == ["runtime.return"]
 
 
+@pytest.mark.skip(reason="LLM-exclusive runtime no longer supports zero-LLM natural-language execution")
 def test_engine_runs_supported_slurm_prompt_without_live_cluster(monkeypatch, tmp_path: Path) -> None:
     fixtures = rebuild_eval_workspace(tmp_path / "fixtures")
     monkeypatch.setenv(SLURM_FIXTURE_DIR_ENV, fixtures.variables["slurm_fixture_dir"])

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The runtime is designed so new behavior is usually added as a capability pack plus one or more tools. The extension path is deterministic-first by default.
+The runtime is designed so new behavior is usually added as a tool plus deterministic validators/formatters. Capability packs may still be useful for compatibility helpers and tests, but top-level natural-language planning is handled by the validator-enforced LLM action planner.
 
 The first design question is:
 
@@ -142,11 +142,11 @@ The capability should be able to pass its own pack without relying on unstable e
 
 Before considering a capability complete:
 
-- deterministic prompts use the capability path, not raw planner fallback
+- natural-language prompts can be planned by the action planner using the new tool manifest
 - tool set is minimal and explicit
 - `runtime.return` shapes the final output
 - no arbitrary shell planning is introduced when a native tool path exists
-- any optional LLM participation stops at validated typed intent JSON
+- any LLM participation stops at validated structured action JSON
 - validator and eval coverage exist
 
 ## Good Patterns in This Repo

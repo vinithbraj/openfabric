@@ -55,9 +55,9 @@ def test_build_engine_prints_startup_banner(tmp_path: Path, capsys) -> None:
     cli._build_engine(config_path)
     captured = capsys.readouterr()
 
-    assert "aor-runtime" in captured.err
+    assert "OpenFABRIC" in captured.err
     assert f"v{__version__}" in captured.err
-    assert "___" in captured.err
+    assert "____" in captured.err
 
 
 def test_api_app_uses_runtime_version(tmp_path: Path) -> None:

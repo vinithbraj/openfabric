@@ -17,7 +17,7 @@ from aor_runtime.dsl.loader import load_runtime_spec
 from aor_runtime.runtime.engine import ExecutionEngine
 from aor_runtime.runtime.capabilities.registry import build_default_capability_registry
 
-app = typer.Typer(help="Agent Orchestration Runtime CLI")
+app = typer.Typer(help="OpenFABRIC CLI")
 runs_app = typer.Typer(help="Inspect persisted runs")
 sessions_app = typer.Typer(help="Manage long-running agent sessions")
 app.add_typer(runs_app, name="runs")

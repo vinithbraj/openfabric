@@ -97,15 +97,14 @@ The pack runner tracks:
 - `llm_intent_calls`
   - typed LLM intent extraction calls
 - `raw_planner_llm_calls`
-  - direct/hierarchical raw planner calls
+  - deprecated compatibility counter; expected to remain `0`
 - `deterministic_calls`
   - cases that completed without LLM help
 
 This split is especially important now that the runtime can distinguish:
 
-- deterministic capability execution
-- typed LLM intent extraction
-- raw planner fallback
+- validator-enforced action-planner execution
+- optional helper-level typed LLM intent extraction in compatibility tests
 
 ## Eval Fixtures
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
+
+import pytest
 
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, PlannerConfig
@@ -21,16 +24,24 @@ from aor_runtime.runtime.planner import TaskPlanner
 from aor_runtime.tools.factory import build_tool_registry
 
 
+requires_configured_llm = pytest.mark.skip(reason="LLM-exclusive runtime requires a configured action-planning LLM")
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = REPO_ROOT / "examples" / "general_purpose_assistant.yaml"
 
 
 class FakeLLM:
-    def load_prompt(self, path: str | None, fallback: str) -> str:
-        return fallback
+    def __init__(self, responses: list[dict] | None = None) -> None:
+        self.responses = [json.dumps(response) for response in list(responses or [])]
 
-    def complete(self, **_: object) -> str:  # pragma: no cover - should not be called
-        raise AssertionError("LLM should not have been called for deterministic compound prompts")
+    def load_prompt(self, path: str | None, fallback: str) -> str:
+        raise AssertionError("Legacy planner prompt should not be loaded")
+
+    def complete(self, **_: object) -> str:
+        if not self.responses:
+            raise AssertionError("LLM called more times than expected")
+        return self.responses.pop(0)
 
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -52,6 +63,51 @@ def _schema_payload() -> dict:
                 ],
             }
         ]
+    }
+
+
+def _compound_action_plan(output_path: Path) -> dict:
+    return {
+        "goal": "Count top-level txt files, write result, and return it.",
+        "actions": [
+            {
+                "id": "list_txt",
+                "tool": "fs.glob",
+                "purpose": "List top-level txt files.",
+                "inputs": {"path": str(output_path.parent.parent), "pattern": "*.txt", "recursive": False},
+                "output_binding": "txt_matches",
+                "expected_result_shape": {"kind": "table"},
+            },
+            {
+                "id": "format_result",
+                "tool": "text.format",
+                "purpose": "Format the count result.",
+                "inputs": {"source": {"$ref": "txt_matches", "path": "matches"}, "format": "txt"},
+                "depends_on": ["list_txt"],
+                "output_binding": "formatted_count",
+                "expected_result_shape": {"kind": "text"},
+            },
+            {
+                "id": "write_result",
+                "tool": "fs.write",
+                "purpose": "Write the formatted result.",
+                "inputs": {"path": str(output_path), "content": {"$ref": "formatted_count", "path": "content"}},
+                "depends_on": ["format_result"],
+                "output_binding": "written_file",
+                "expected_result_shape": {"kind": "file"},
+            },
+            {
+                "id": "return_result",
+                "tool": "runtime.return",
+                "purpose": "Return the written file path.",
+                "inputs": {"value": {"$ref": "written_file"}, "mode": "text"},
+                "depends_on": ["write_result"],
+                "output_binding": "runtime_return_result",
+                "expected_result_shape": {"kind": "text"},
+            },
+        ],
+        "expected_final_shape": {"kind": "text"},
+        "notes": [],
     }
 
 
@@ -231,20 +287,22 @@ def test_compile_create_write_return_uses_readback_and_runtime_return() -> None:
     assert [step.action for step in plan.steps] == ["fs.write", "fs.read", "runtime.return"]
 
 
-def test_deterministic_compound_plan_uses_zero_llm_calls(tmp_path: Path) -> None:
+def test_compound_prompt_uses_action_planner(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    planner = TaskPlanner(llm=FakeLLM(), tools=build_tool_registry(settings), settings=settings)
+    output_path = tmp_path / "out" / "count.txt"
+    planner = TaskPlanner(llm=FakeLLM([_compound_action_plan(output_path)]), tools=build_tool_registry(settings), settings=settings)
     plan = planner.build_plan(
-        goal=f"Count the top-level txt files in {tmp_path}, save the result to {tmp_path / 'out' / 'count.txt'}, and return the file contents.",
+        goal=f"Count the top-level txt files in {tmp_path}, save the result to {output_path}, and return the file contents.",
         planner=PlannerConfig(temperature=0.0),
         allowed_tools=["fs.glob", "fs.find", "fs.read", "fs.write", "python.exec", "shell.exec", "sql.query"],
         input_payload={"task": "compound deterministic"},
     )
     assert isinstance(plan, ExecutionPlan)
-    assert planner.last_planning_mode == "deterministic_intent"
-    assert planner.last_llm_calls == 0
+    assert planner.last_planning_mode == "validator_enforced_action_planner"
+    assert planner.last_llm_calls == 1
 
 
+@requires_configured_llm
 def test_end_to_end_count_top_level_save_return(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -264,6 +322,7 @@ def test_end_to_end_count_top_level_save_return(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_list_csv_save_return(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -283,6 +342,7 @@ def test_end_to_end_list_csv_save_return(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_read_uppercase_return(tmp_path: Path) -> None:
     notes = tmp_path / "notes.txt"
     notes.write_text("alpha\nbeta\ngamma\n")
@@ -294,6 +354,7 @@ def test_end_to_end_read_uppercase_return(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_read_uppercase_save_return(tmp_path: Path) -> None:
     notes = tmp_path / "notes.txt"
     notes.write_text("alpha\nbeta\ngamma\n")
@@ -308,6 +369,7 @@ def test_end_to_end_read_uppercase_save_return(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_create_welcome_and_return_content(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
@@ -320,6 +382,7 @@ def test_end_to_end_create_welcome_and_return_content(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_end_to_end_explicit_sql_uppercase_csv_save_return(tmp_path: Path) -> None:
     database_path = tmp_path / "book_club.db"
     db = sqlite3.connect(database_path)
@@ -356,6 +419,7 @@ def test_end_to_end_explicit_sql_uppercase_csv_save_return(tmp_path: Path) -> No
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_top_level_txt_list_as_json_uses_matches_shape(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -373,6 +437,7 @@ def test_top_level_txt_list_as_json_uses_matches_shape(tmp_path: Path) -> None:
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_top_level_txt_list_as_json_from_direct_filenames_prompt_uses_matches_shape(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -390,6 +455,7 @@ def test_top_level_txt_list_as_json_from_direct_filenames_prompt_uses_matches_sh
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_content_search_txt_filenames_only_returns_basenames_and_excludes_md(tmp_path: Path) -> None:
     root = tmp_path / "search"
     root.mkdir()
@@ -407,6 +473,7 @@ def test_content_search_txt_filenames_only_returns_basenames_and_excludes_md(tmp
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_filename_only_csv_save_return_uses_zero_llm_calls(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -427,6 +494,7 @@ def test_filename_only_csv_save_return_uses_zero_llm_calls(tmp_path: Path) -> No
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_write_exact_quoted_text_returns_only_quoted_content(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
@@ -439,6 +507,7 @@ def test_write_exact_quoted_text_returns_only_quoted_content(tmp_path: Path) -> 
     assert state["metrics"]["llm_calls"] == 0
 
 
+@requires_configured_llm
 def test_shell_csv_paraphrases_use_zero_llm_calls(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     prompts = [

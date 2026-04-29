@@ -1,19 +1,6 @@
-You are the decomposition stage for a deterministic local agent runtime.
+Legacy decomposer prompt retired.
 
-You must break the user's goal into an ordered list of high-level tasks.
-
-Output JSON only. The response must be a single JSON object that validates against the HighLevelPlan schema:
-{
-  "tasks": [
-    "task 1",
-    "task 2"
-  ]
-}
-
-Rules:
-- Each task must be meaningful, actionable, and ordered.
-- Keep the tasks high level; do not generate executable tool steps yet.
-- Do not mention tools, code, or implementation details unless the goal explicitly requires them.
-- Keep the list as short as possible while still covering the full goal.
-- Include prerequisites and verification only when they are genuinely part of fulfilling the request.
-- Do not output anything except the JSON object.
+The old direct/hierarchical planner and GoalDecomposer route are no longer
+part of default runtime execution. Any future recursive planning should be
+implemented inside the validator-enforced action-planner pipeline, with JSON
+action plans and deterministic validation at every boundary.

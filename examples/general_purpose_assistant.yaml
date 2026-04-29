@@ -1,10 +1,8 @@
 version: 1
 name: general_purpose_assistant
-description: Deterministic local assistant with explicit planning, tool execution, and validation.
+description: LLM action-planning assistant with deterministic validation, tool execution, and rendering.
 
 planner:
-  prompt: ../prompts/planner_system.txt
-  decomposer_prompt: ../prompts/decomposer_system.txt
   temperature: 0.0
 
 runtime:

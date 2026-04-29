@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from aor_runtime.config import Settings
@@ -12,8 +13,8 @@ from aor_runtime.tools.factory import build_tool_registry
 
 
 class FakeLLM:
-    def __init__(self, responses: list[str] | None = None) -> None:
-        self.responses = list(responses or [])
+    def __init__(self, responses: list[str | dict] | None = None) -> None:
+        self.responses = [json.dumps(response) if isinstance(response, dict) else response for response in list(responses or [])]
         self.user_prompts: list[str] = []
 
     def load_prompt(self, path: str | None, fallback: str) -> str:
@@ -60,6 +61,33 @@ def _schema_payload() -> dict:
                 "tables": [{"name": "members", "columns": [{"name": "name", "type": "TEXT"}]}],
             }
         ]
+    }
+
+
+def _read_action_plan(path: str = "notes.txt") -> dict:
+    return {
+        "goal": f"Read {path}",
+        "actions": [
+            {
+                "id": "read_file",
+                "tool": "fs.read",
+                "purpose": "Read the requested file.",
+                "inputs": {"path": path},
+                "output_binding": "file_content",
+                "expected_result_shape": {"kind": "text"},
+            },
+            {
+                "id": "return_result",
+                "tool": "runtime.return",
+                "purpose": "Return the file content.",
+                "inputs": {"value": {"$ref": "file_content", "path": "content"}, "mode": "text"},
+                "depends_on": ["read_file"],
+                "output_binding": "runtime_return_result",
+                "expected_result_shape": {"kind": "text"},
+            },
+        ],
+        "expected_final_shape": {"kind": "text"},
+        "notes": [],
     }
 
 
@@ -153,9 +181,9 @@ def test_registry_compile_returns_execution_plan(tmp_path: Path) -> None:
     assert [step.action for step in plan.steps] == ["fs.read", "python.exec"]
 
 
-def test_deterministic_planner_path_still_reports_zero_llm_calls(tmp_path: Path) -> None:
+def test_task_planner_no_longer_uses_deterministic_registry_route(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    llm = FakeLLM()
+    llm = FakeLLM([_read_action_plan()])
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
     plan = planner.build_plan(
         goal="read line 2 from notes.txt",
@@ -164,14 +192,14 @@ def test_deterministic_planner_path_still_reports_zero_llm_calls(tmp_path: Path)
         input_payload={"task": "read line 2 from notes.txt"},
     )
     assert isinstance(plan, ExecutionPlan)
-    assert planner.last_planning_mode == "deterministic_intent"
-    assert planner.last_llm_calls == 0
-    assert llm.call_count == 0
+    assert planner.last_planning_mode == "validator_enforced_action_planner"
+    assert planner.last_llm_calls == 1
+    assert llm.call_count == 1
 
 
-def test_unmatched_prompt_still_falls_back_to_llm_path(tmp_path: Path) -> None:
+def test_unmatched_prompt_uses_same_action_planner_path(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    llm = FakeLLM(['{"steps":[{"id":1,"action":"fs.read","args":{"path":"notes.txt"}}]}'])
+    llm = FakeLLM([_read_action_plan()])
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
     plan = planner.build_plan(
         goal="Summarize the tone of notes.txt in one sentence",
@@ -180,14 +208,14 @@ def test_unmatched_prompt_still_falls_back_to_llm_path(tmp_path: Path) -> None:
         input_payload={"task": "Summarize the tone of notes.txt in one sentence"},
     )
     assert isinstance(plan, ExecutionPlan)
-    assert planner.last_planning_mode == "direct"
+    assert planner.last_planning_mode == "validator_enforced_action_planner"
     assert planner.last_llm_calls == 1
     assert llm.call_count == 1
 
 
-def test_planner_uses_injected_capability_registry(tmp_path: Path) -> None:
+def test_injected_capability_registry_is_ignored_by_task_planner(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    llm = FakeLLM()
+    llm = FakeLLM([_read_action_plan()])
     registry = StubRegistry()
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings, capability_registry=registry)
     plan = planner.build_plan(
@@ -197,6 +225,7 @@ def test_planner_uses_injected_capability_registry(tmp_path: Path) -> None:
         input_payload={"task": "read line 2 from notes.txt"},
     )
     assert isinstance(plan, ExecutionPlan)
-    assert len(registry.classify_calls) == 1
-    assert len(registry.compile_calls) == 1
-    assert planner.last_llm_calls == 0
+    assert registry.classify_calls == []
+    assert registry.compile_calls == []
+    assert planner.last_planning_mode == "validator_enforced_action_planner"
+    assert planner.last_llm_calls == 1

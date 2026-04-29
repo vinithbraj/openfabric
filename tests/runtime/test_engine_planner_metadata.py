@@ -74,7 +74,7 @@ def test_successful_planner_run_persists_policies_and_logs_event(tmp_path: Path,
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["filesystem_preference", "efficiency"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 1
         engine.planner.last_error_stage = None
         return _write_plan()
@@ -92,9 +92,9 @@ def test_successful_planner_run_persists_policies_and_logs_event(tmp_path: Path,
     events = engine.store.get_events(session.id)
     planner_started = next(event for event in events if event["event_type"] == "planner.started")
     planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
-    assert planner_started["payload"]["planning_mode"] == "direct"
+    assert planner_started["payload"]["planning_mode"] == "validator_enforced_action_planner"
     assert planner_completed["payload"]["policies"] == ["filesystem_preference", "efficiency"]
-    assert planner_completed["payload"]["planning_mode"] == "direct"
+    assert planner_completed["payload"]["planning_mode"] == "validator_enforced_action_planner"
     assert planner_completed["payload"]["high_level_plan"] is None
     assert planner_completed["payload"]["goal"] == "Create notes.txt with hello"
     assert planner_completed["payload"]["execution_plan"]["steps"] == session.state["plan"]["steps"]
@@ -111,7 +111,7 @@ def test_hierarchical_planner_run_persists_high_level_plan_and_metrics(tmp_path:
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["sql_preference", "filesystem_preference", "efficiency"]
         engine.planner.last_high_level_plan = ["query patients", "save the top 10 to a file"]
-        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 2
         engine.planner.last_error_stage = None
         return ExecutionPlan.model_validate(
@@ -133,8 +133,8 @@ def test_hierarchical_planner_run_persists_high_level_plan_and_metrics(tmp_path:
     events = engine.store.get_events(session.id)
     planner_started = next(event for event in events if event["event_type"] == "planner.started")
     planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
-    assert planner_started["payload"]["planning_mode"] == "hierarchical"
-    assert planner_completed["payload"]["planning_mode"] == "hierarchical"
+    assert planner_started["payload"]["planning_mode"] == "validator_enforced_action_planner"
+    assert planner_completed["payload"]["planning_mode"] == "validator_enforced_action_planner"
     assert planner_completed["payload"]["high_level_plan"] == ["query patients", "save the top 10 to a file"]
 
 
@@ -163,7 +163,7 @@ def test_successful_planner_run_logs_canonicalization_trace(tmp_path: Path, monk
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["sql_preference", "filesystem_preference", "efficiency"]
         engine.planner.last_high_level_plan = ["query patients", "save them"]
-        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 2
         engine.planner.last_error_stage = None
         engine.planner.last_original_execution_plan = {
@@ -207,7 +207,7 @@ def test_successful_planner_run_persists_llm_intent_metadata(tmp_path: Path, mon
     def fake_build_plan(**kwargs):
         engine.planner.last_policies_used = ["efficiency", "llm_intent_extractor"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "llm_intent_extractor"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 1
         engine.planner.last_llm_intent_calls = 1
         engine.planner.last_raw_planner_llm_calls = 0
@@ -232,11 +232,11 @@ def test_successful_planner_run_persists_llm_intent_metadata(tmp_path: Path, mon
     assert session.state["metrics"]["llm_calls"] == 1
     assert session.state["metrics"]["llm_intent_calls"] == 1
     assert session.state["metrics"]["raw_planner_llm_calls"] == 0
-    assert session.state["planning_metadata"]["planning_mode"] == "llm_intent_extractor"
+    assert session.state["planning_metadata"]["planning_mode"] == "validator_enforced_action_planner"
     assert session.state["planning_metadata"]["llm_intent_type"] == "SlurmMetricsIntent"
     events = engine.store.get_events(session.id)
     planner_completed = next(event for event in events if event["event_type"] == "planner.completed")
-    assert planner_completed["payload"]["planning_mode"] == "llm_intent_extractor"
+    assert planner_completed["payload"]["planning_mode"] == "validator_enforced_action_planner"
     assert planner_completed["payload"]["capability"] == "slurm"
     assert planner_completed["payload"]["llm_intent_type"] == "SlurmMetricsIntent"
     assert planner_completed["payload"]["llm_intent_calls"] == 1
@@ -251,7 +251,7 @@ def test_planner_failure_clears_stale_policies_used_and_logs_stage(tmp_path: Pat
     def failing_build_plan(**kwargs):
         engine.planner.last_policies_used = ["efficiency"]
         engine.planner.last_high_level_plan = ["find files", "format as csv"]
-        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 2
         engine.planner.last_error_stage = "refine"
         engine.planner.last_raw_output = '{"steps":[{"id":1,"action":"fs.write","args":{"content":"hello" + "world"}}]}'
@@ -273,7 +273,7 @@ def test_planner_failure_clears_stale_policies_used_and_logs_stage(tmp_path: Pat
     planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
     assert planner_failed["payload"]["error_type"] == "JSONDecodeError"
     assert planner_failed["payload"]["stage"] == "refine"
-    assert planner_failed["payload"]["planning_mode"] == "hierarchical"
+    assert planner_failed["payload"]["planning_mode"] == "validator_enforced_action_planner"
     assert planner_failed["payload"]["policies"] == ["efficiency"]
     assert '"content":"hello" + "world"' in planner_failed["payload"]["raw_output_preview"]
 
@@ -285,7 +285,7 @@ def test_decomposition_failure_logs_decompose_stage(tmp_path: Path, monkeypatch)
     def failing_build_plan(**kwargs):
         engine.planner.last_policies_used = ["sql_preference", "efficiency"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 1
         engine.planner.last_error_stage = "decompose"
         engine.planner.last_raw_output = '{"tasks":[]}'
@@ -299,7 +299,7 @@ def test_decomposition_failure_logs_decompose_stage(tmp_path: Path, monkeypatch)
     events = engine.store.get_events(session.id)
     planner_failed = next(event for event in events if event["event_type"] == "planner.failed")
     assert planner_failed["payload"]["stage"] == "decompose"
-    assert planner_failed["payload"]["planning_mode"] == "hierarchical"
+    assert planner_failed["payload"]["planning_mode"] == "validator_enforced_action_planner"
     assert session.state["high_level_plan"] is None
     assert session.state["metrics"]["llm_calls"] == 1
 
@@ -311,7 +311,7 @@ def test_planner_connection_failure_is_normalized_to_llm_error(tmp_path: Path, m
     def failing_build_plan(**kwargs):
         engine.planner.last_policies_used = ["sql_preference"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 1
         engine.planner.last_error_stage = "direct"
         engine.planner.last_raw_output = None
@@ -345,7 +345,7 @@ def test_planner_timeout_failure_is_normalized_to_llm_timeout(tmp_path: Path, mo
     def failing_build_plan(**kwargs):
         engine.planner.last_policies_used = ["sql_preference"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "hierarchical"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 2
         engine.planner.last_error_stage = "refine"
         engine.planner.last_raw_output = None
@@ -542,7 +542,7 @@ def test_planner_contract_failure_metadata_is_preserved(tmp_path: Path, monkeypa
     def failing_build_plan(**kwargs):
         engine.planner.last_policies_used = ["sql_preference"]
         engine.planner.last_high_level_plan = None
-        engine.planner.last_planning_mode = "direct"
+        engine.planner.last_planning_mode = "validator_enforced_action_planner"
         engine.planner.last_llm_calls = 1
         engine.planner.last_error_stage = "direct"
         raise PlanContractViolation(

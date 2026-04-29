@@ -55,18 +55,18 @@ Important event types:
 
 ## Common Failure Types
 
-### Deterministic miss
+### Action planner failure
 
 Symptoms:
 
-- planner metadata shows `planning_mode` as `direct` or `hierarchical`
-- `raw_planner_llm_calls` is non-zero
+- planner metadata shows `planning_mode` as `validator_enforced_action_planner`
+- action-plan metadata includes validation or canonicalization errors
 
 Look at:
 
-- capability-pack classification rules
-- pack ordering in `CapabilityRegistry`
-- prompt wording compared to existing deterministic tests and evals
+- `raw_action_plan`, `normalized_action_plan`, and `canonicalized_action_plan`
+- action validation errors
+- tool/domain/result-shape contract failures
 
 ### Dataflow reference error
 
@@ -162,7 +162,7 @@ Look at:
 
 - failure classification
 - prompt suggestion generation
-- whether the failure was deterministic, raw planner, or typed LLM intent related
+- whether the failure happened during action planning, validation, execution, or final presentation
 
 ## Planner Metadata
 
@@ -180,9 +180,9 @@ Key fields:
 
 Use this to answer:
 
-- was the request handled deterministically?
-- did it use typed LLM intent extraction?
-- did it fall all the way back to the raw planner?
+- did the action planner produce usable structured actions?
+- did canonicalization repair dataflow or temporal arguments?
+- did validators refuse a tool, schema reference, path, command, or output shape?
 
 ## Gateway Tracing
 

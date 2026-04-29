@@ -2,7 +2,7 @@
 
 ## Overview
 
-Capability packs are the runtime’s top-level deterministic routing mechanism. `TaskPlanner` delegates supported natural-language requests to `CapabilityRegistry`, and the registry asks each registered `CapabilityPack` whether it can classify the request into a typed intent.
+Capability packs are retained as legacy/helper components for typed intents, fixtures, evaluator support, and domain-specific compiler tests. They are no longer the runtime’s top-level natural-language router. `TaskPlanner` now always uses the validator-enforced LLM action planner for user prompts.
 
 If a pack matches:
 
@@ -10,7 +10,7 @@ If a pack matches:
 - the registry sends the intent back to the matching pack for compilation
 - the pack returns a `CompiledIntentPlan`
 
-This keeps intent selection and plan generation close to the capability that owns the behavior.
+This keeps historical intent/compiler behavior available for tests and compatibility utilities without allowing it to override the active action-planner path.
 
 ## Core Types
 
@@ -63,7 +63,7 @@ Today only SLURM opts into those hooks.
 
 ## Registry Order
 
-The default registry is built in `src/aor_runtime/runtime/capabilities/registry.py`.
+The default registry is built in `src/aor_runtime/runtime/capabilities/registry.py`, but it is no longer called by `TaskPlanner.build_plan`.
 
 Current order:
 
@@ -75,21 +75,21 @@ Current order:
 6. `shell`
 7. `fetch`
 
-This order matters. More specific or higher-priority capabilities should appear before broader ones. For example, SLURM is placed before shell so SLURM inspection prompts do not accidentally become shell prompts.
+This order matters only for registry unit tests and compatibility tools that still call the registry directly.
 
 ## Classification Lifecycle
 
-The registry does three things:
+When used directly by tests or compatibility utilities, the registry does three things:
 
 1. Try deterministic pack classification in order
 2. If enabled, try pack-scoped typed LLM intent extraction for packs that opt in
-3. If nothing matches, return an unmatched result so `TaskPlanner` can fall back to the raw planner path
+3. If nothing matches, return an unmatched result
 
 In other words:
 
-- capability packs are the first deterministic routing layer
-- typed LLM intent extraction is a capability-owned second chance, not a raw planner shortcut
-- the generic planner is the last resort
+- capability packs are helper/compatibility surfaces
+- typed LLM intent extraction remains pack-owned and schema-bound
+- the generic runtime planner is not the registry fallback; it is always the action planner
 
 ## Two Pack Patterns in the Current Repo
 

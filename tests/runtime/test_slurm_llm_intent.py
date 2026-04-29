@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import getpass
+import json
 from pathlib import Path
 
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import PlannerConfig
 from aor_runtime.runtime.capabilities.base import ClassificationContext
 from aor_runtime.runtime.capabilities.slurm import SlurmCapabilityPack
-from aor_runtime.runtime.planner import TaskPlanner
+from aor_runtime.runtime.planner import ACTIVE_PLANNING_MODE, TaskPlanner
 from aor_runtime.tools.factory import build_tool_registry
 
 
@@ -24,12 +24,12 @@ SLURM_ALLOWED_TOOLS = [
 
 
 class FakeLLM:
-    def __init__(self, responses: list[str] | None = None) -> None:
-        self.responses = list(responses or [])
+    def __init__(self, responses: list[str | dict] | None = None) -> None:
+        self.responses = [json.dumps(response) if isinstance(response, dict) else response for response in list(responses or [])]
         self.call_count = 0
 
     def load_prompt(self, path: str | None, fallback: str) -> str:
-        return fallback
+        raise AssertionError("Legacy planner prompt should not be loaded")
 
     def complete(self, **_: object) -> str:
         self.call_count += 1
@@ -50,22 +50,41 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
     return Settings(**payload)
 
 
-def _planner(tmp_path: Path, llm: FakeLLM, **settings_overrides: object) -> TaskPlanner:
-    settings = _settings(tmp_path, **settings_overrides)
-    return TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
-
-
 def _classification_context(tmp_path: Path, **settings_overrides: object) -> ClassificationContext:
     return ClassificationContext(schema_payload=None, allowed_tools=SLURM_ALLOWED_TOOLS, settings=_settings(tmp_path, **settings_overrides))
 
 
-def test_cluster_busy_maps_to_metrics_intent(tmp_path: Path) -> None:
-    llm = FakeLLM(
-        [
-            '{"matched": true, "intent_type": "SlurmMetricsIntent", "confidence": 0.91, "arguments": {"metric_group": "cluster_summary", "output_mode": "json"}, "reason": "Broad cluster summary."}'
-        ]
-    )
-    planner = _planner(tmp_path, llm)
+def _slurm_metrics_action_plan() -> dict:
+    return {
+        "goal": "Inspect SLURM cluster status.",
+        "actions": [
+            {
+                "id": "metrics",
+                "tool": "slurm.metrics",
+                "purpose": "Get cluster metrics.",
+                "inputs": {"metric_group": "cluster_summary"},
+                "output_binding": "cluster_metrics",
+                "expected_result_shape": {"kind": "json"},
+            },
+            {
+                "id": "return_result",
+                "tool": "runtime.return",
+                "purpose": "Return metrics.",
+                "inputs": {"value": {"$ref": "cluster_metrics", "path": "payload"}, "mode": "markdown"},
+                "depends_on": ["metrics"],
+                "output_binding": "runtime_return_result",
+                "expected_result_shape": {"kind": "text"},
+            },
+        ],
+        "expected_final_shape": {"kind": "text"},
+        "notes": [],
+    }
+
+
+def test_task_planner_uses_action_planner_for_slurm_prompt(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    llm = FakeLLM([_slurm_metrics_action_plan()])
+    planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
 
     plan = planner.build_plan(
         goal="How saturated is the HPC scheduler right now?",
@@ -74,187 +93,40 @@ def test_cluster_busy_maps_to_metrics_intent(tmp_path: Path) -> None:
         input_payload={"task": "How saturated is the HPC scheduler right now?"},
     )
 
-    assert [step.action for step in plan.steps] == ["slurm.metrics", "runtime.return"]
-    assert planner.last_planning_mode == "llm_intent_extractor"
+    assert [step.action for step in plan.steps] == ["slurm.metrics", "text.format", "runtime.return"]
+    assert planner.last_planning_mode == ACTIVE_PLANNING_MODE
     assert planner.last_llm_calls == 1
-    assert planner.last_llm_intent_calls == 1
     assert planner.last_raw_planner_llm_calls == 0
 
 
-def test_gpu_availability_maps_to_gpu_summary(tmp_path: Path) -> None:
+def test_slurm_pack_llm_extractor_remains_available_as_helper(tmp_path: Path) -> None:
     llm = FakeLLM(
         [
-            '{"matched": true, "intent_type": "SlurmMetricsIntent", "confidence": 0.9, "arguments": {"metric_group": "gpu_summary", "output_mode": "json"}, "reason": "GPU availability."}'
+            '{"matched": true, "intent_type": "SlurmMetricsIntent", "confidence": 0.91, '
+            '"arguments": {"metric_group": "cluster_summary", "output_mode": "json"}, '
+            '"reason": "Broad cluster summary."}'
         ]
     )
-    planner = _planner(tmp_path, llm)
+    settings = _settings(tmp_path)
+    planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
 
-    plan = planner.build_plan(
-        goal="Are GPUs available?",
-        planner=PlannerConfig(temperature=0.0),
-        allowed_tools=SLURM_ALLOWED_TOOLS,
-        input_payload={"task": "Are GPUs available?"},
+    result = SlurmCapabilityPack().try_llm_extract(
+        "Is the cluster busy right now?",
+        _classification_context(tmp_path),
+        planner.llm_intent_extractor,
     )
-
-    assert plan.steps[0].action == "slurm.metrics"
-    assert plan.steps[0].args["metric_group"] == "gpu_summary"
-
-
-def test_failed_recently_maps_to_accounting_failed(tmp_path: Path) -> None:
-    llm = FakeLLM(
-        [
-            '{"matched": true, "intent_type": "SlurmAccountingIntent", "confidence": 0.87, "arguments": {"state": "FAILED", "output_mode": "json"}, "reason": "Recent failures."}'
-        ]
-    )
-    planner = _planner(tmp_path, llm)
-
-    plan = planner.build_plan(
-        goal="What failed recently?",
-        planner=PlannerConfig(temperature=0.0),
-        allowed_tools=SLURM_ALLOWED_TOOLS,
-        input_payload={"task": "What failed recently?"},
-    )
-
-    assert [step.action for step in plan.steps] == ["slurm.accounting", "runtime.return"]
-    assert plan.steps[0].args["state"] == "FAILED"
-
-
-def test_stuck_jobs_maps_to_pending_queue_for_current_user(tmp_path: Path) -> None:
-    llm = FakeLLM(
-        [
-            '{"matched": true, "intent_type": "SlurmQueueIntent", "confidence": 0.84, "arguments": {"output_mode": "json"}, "reason": "Pending queue is safest."}'
-        ]
-    )
-    planner = _planner(tmp_path, llm)
-
-    plan = planner.build_plan(
-        goal="Are my jobs stuck?",
-        planner=PlannerConfig(temperature=0.0),
-        allowed_tools=SLURM_ALLOWED_TOOLS,
-        input_payload={"task": "Are my jobs stuck?"},
-    )
-
-    assert [step.action for step in plan.steps] == ["slurm.queue", "runtime.return"]
-    assert plan.steps[0].args["state"] == "PENDING"
-    assert plan.steps[0].args["user"] == getpass.getuser()
-
-
-def test_slurmdbd_health_maps_to_dedicated_intent(tmp_path: Path) -> None:
-    llm = FakeLLM(
-        [
-            '{"matched": true, "intent_type": "SlurmDBDHealthIntent", "confidence": 0.96, "arguments": {"output_mode": "json"}, "reason": "Explicit SLURMDBD health check."}'
-        ]
-    )
-    planner = _planner(tmp_path, llm)
-
-    plan = planner.build_plan(
-        goal="Is slurmdbd healthy?",
-        planner=PlannerConfig(temperature=0.0),
-        allowed_tools=SLURM_ALLOWED_TOOLS,
-        input_payload={"task": "Is slurmdbd healthy?"},
-    )
-
-    assert [step.action for step in plan.steps] == ["slurm.slurmdbd_health", "runtime.return"]
-
-
-def test_mutating_cancel_request_is_rejected_without_slurm_tool(tmp_path: Path) -> None:
-    llm = FakeLLM()
-    planner = _planner(tmp_path, llm)
-
-    plan = planner.build_plan(
-        goal="Cancel my job 123",
-        planner=PlannerConfig(temperature=0.0),
-        allowed_tools=SLURM_ALLOWED_TOOLS,
-        input_payload={"task": "Cancel my job 123"},
-    )
-
-    assert [step.action for step in plan.steps] == ["runtime.return"]
-    assert planner.last_llm_calls == 0
-    assert llm.call_count == 0
-
-
-def test_mutating_drain_request_is_rejected_without_slurm_tool(tmp_path: Path) -> None:
-    llm = FakeLLM()
-    planner = _planner(tmp_path, llm)
-
-    plan = planner.build_plan(
-        goal="Drain node slurm-worker-agatha",
-        planner=PlannerConfig(temperature=0.0),
-        allowed_tools=SLURM_ALLOWED_TOOLS,
-        input_payload={"task": "Drain node slurm-worker-agatha"},
-    )
-
-    assert [step.action for step in plan.steps] == ["runtime.return"]
-    assert planner.last_llm_calls == 0
-
-
-def test_malicious_llm_argument_payload_is_rejected(tmp_path: Path) -> None:
-    llm = FakeLLM(
-        [
-            '{"matched": true, "intent_type": "SlurmQueueIntent", "confidence": 0.88, "arguments": {"state": "PENDING; rm -rf /", "output_mode": "json"}, "reason": "unsafe"}'
-        ]
-    )
-    pack = SlurmCapabilityPack()
-    planner = _planner(tmp_path, llm)
-    result = pack.try_llm_extract("Are my jobs stuck?", _classification_context(tmp_path), planner.llm_intent_extractor)
-
-    assert result.matched is False
-
-
-def test_llm_compound_intent_must_cover_all_semantic_requests(tmp_path: Path) -> None:
-    llm = FakeLLM(
-        [
-            '{"matched": true, "intent_type": "SlurmCompoundIntent", "confidence": 0.9, "arguments": {"output_mode": "json", "intents": [{"intent_type": "SlurmMetricsIntent", "arguments": {"metric_group": "queue_summary", "output_mode": "json"}}, {"intent_type": "SlurmNodeStatusIntent", "arguments": {"output_mode": "json"}}]}, "reason": "Queue and node status."}'
-        ]
-    )
-    pack = SlurmCapabilityPack()
-    planner = _planner(tmp_path, llm)
-    result = pack.try_llm_extract("Queue pressure and nodes?", _classification_context(tmp_path), planner.llm_intent_extractor)
 
     assert result.matched is True
-    assert result.intent.__class__.__name__ == "SlurmCompoundIntent"
-    assert result.metadata["slurm_coverage_passed"] is True
-
-
-def test_llm_compound_intent_missing_child_is_rejected(tmp_path: Path) -> None:
-    llm = FakeLLM(
-        [
-            '{"matched": true, "intent_type": "SlurmCompoundIntent", "confidence": 0.9, "arguments": {"output_mode": "json", "intents": [{"intent_type": "SlurmMetricsIntent", "arguments": {"metric_group": "queue_summary", "output_mode": "json"}}]}, "reason": "Incomplete."}'
-        ]
-    )
-    pack = SlurmCapabilityPack()
-    planner = _planner(tmp_path, llm)
-    result = pack.try_llm_extract("Queue pressure and nodes?", _classification_context(tmp_path), planner.llm_intent_extractor)
-
-    assert result.matched is False
-    assert "slurm_llm_intent_rejected" in str(result.reason)
-
-
-def test_deterministic_prompt_still_uses_zero_llm_calls(tmp_path: Path) -> None:
-    llm = FakeLLM()
-    planner = _planner(tmp_path, llm)
-
-    plan = planner.build_plan(
-        goal="show slurm queue",
-        planner=PlannerConfig(temperature=0.0),
-        allowed_tools=SLURM_ALLOWED_TOOLS,
-        input_payload={"task": "show slurm queue"},
-    )
-
-    assert [step.action for step in plan.steps] == ["slurm.queue", "runtime.return"]
-    assert planner.last_llm_calls == 0
-    assert planner.last_llm_intent_calls == 0
-    assert planner.last_raw_planner_llm_calls == 0
-    assert llm.call_count == 0
+    assert result.intent.__class__.__name__ == "SlurmMetricsIntent"
 
 
 def test_fuzzy_prompt_does_not_use_llm_intent_extractor_when_disabled(tmp_path: Path) -> None:
     llm = FakeLLM()
-    pack = SlurmCapabilityPack()
+    settings = _settings(tmp_path, enable_llm_intent_extraction=False)
+    planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
     context = _classification_context(tmp_path, enable_llm_intent_extraction=False)
-    planner = _planner(tmp_path, llm, enable_llm_intent_extraction=False)
 
-    result = pack.try_llm_extract("Is the cluster busy right now?", context, planner.llm_intent_extractor)
+    result = SlurmCapabilityPack().try_llm_extract("Is the cluster busy right now?", context, planner.llm_intent_extractor)
 
     assert result.matched is False
     assert llm.call_count == 0

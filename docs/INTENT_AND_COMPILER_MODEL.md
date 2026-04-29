@@ -2,7 +2,7 @@
 
 ## Overview
 
-The runtime is built around typed intents. A user request is first interpreted as an intent object, then compiled into an `ExecutionPlan`.
+Typed intents are retained as helper and compatibility models. The active runtime first asks the LLM action planner for structured tool actions, then canonicalizes and validates those actions before compiling an `ExecutionPlan`.
 
 This model separates:
 
@@ -10,7 +10,7 @@ This model separates:
 - deterministic plan construction
 - tool execution
 
-That separation is why many supported requests run with `0` LLM calls.
+That separation still matters for tests and helper compilers, but natural-language runtime requests now use the action-planning LLM.
 
 ## Shared Intents
 
@@ -38,13 +38,13 @@ Current shared intent families include:
 - compound
   - `CompoundIntent`
 
-These intents are still actively used by the current runtime.
+These intents are still used by compatibility helpers, capability-pack unit tests, and some evaluator fixtures.
 
-## Shared Classifier and Compiler Are Still Active
+## Shared Classifier and Compiler Are Helper Infrastructure
 
 `src/aor_runtime/runtime/intent_classifier.py` and `src/aor_runtime/runtime/intent_compiler.py` are not dead code.
 
-They are still the shared deterministic infrastructure used by:
+They remain shared deterministic infrastructure used by:
 
 - filesystem
 - SQL
@@ -56,13 +56,13 @@ The architecture changed at the top level, not by removing those modules.
 
 Today the real stack is:
 
-- `TaskPlanner` asks `CapabilityRegistry`
+- `TaskPlanner` always calls the validator-enforced action planner
+- compatibility tools and tests may call capability packs directly
 - many packs call the shared classifier/compiler underneath
-- some packs, like SLURM, implement pack-local logic instead
 
 So the correct way to think about the shared modules is:
 
-- not the top-level routing layer anymore
+- not the top-level routing layer
 - still core deterministic infrastructure for several capability packs
 
 ## Shared Deterministic Compilation
@@ -133,13 +133,13 @@ The `metadata` field is important in the current architecture because it carries
 Important fields:
 
 - `planning_mode`
-  - usually `deterministic_intent`, `llm_intent_extractor`, `direct`, or `hierarchical`
+  - normally `validator_enforced_action_planner`
 - `llm_calls`
   - total planner-related LLM calls for the request
 - `llm_intent_calls`
   - typed LLM intent extraction calls
 - `raw_planner_llm_calls`
-  - calls made by the raw direct or hierarchical planner path
+  - deprecated compatibility counter; normally `0`
 - `capability`
   - matched capability pack name when applicable
 
