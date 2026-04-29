@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from aor_runtime.runtime.facts import build_sanitized_facts
 from aor_runtime.runtime.insights import InsightContext, InsightResult, generate_insights, summarize_insights_with_llm
+from aor_runtime.runtime.intelligent_output import render_intelligent_output
 from aor_runtime.runtime.markdown import add_section_breaks
 from aor_runtime.runtime.markdown import code_block as md_code_block
 from aor_runtime.runtime.markdown import section as md_section
@@ -81,6 +82,8 @@ class ResponseRenderContext:
     source_action: str | None = None
     goal: str = ""
     llm_settings: Any | None = None
+    intelligent_output_mode: str = "off"
+    intelligent_output_max_fields: int = 8
 
 
 @dataclass
@@ -107,8 +110,8 @@ def render_agent_response(
         raw = final_result if isinstance(final_result, str) else json.dumps(final_result, ensure_ascii=False, sort_keys=True, default=str)
         return RenderedResponse(markdown=str(raw).strip(), title="Raw Output", sections=[{"title": "Raw Output"}])
 
-    source_action = ctx.source_action or _last_visible_action(actions)
-    source_args = _last_visible_args(actions)
+    source_action = _presentation_source_action(ctx.source_action, actions)
+    source_args = _presentation_source_args(source_action, actions)
     presentation_context = PresentationContext(
         mode=ctx.mode,
         enable_llm_summary=ctx.enable_llm_summary,
@@ -122,6 +125,14 @@ def render_agent_response(
         goal=ctx.goal,
     )
     presented = present_result(presentation_result, presentation_context)
+    intelligent = render_intelligent_output(
+        presentation_result,
+        actions,
+        presentation_context,
+        ctx.llm_settings,
+        mode=ctx.intelligent_output_mode,
+        max_fields=ctx.intelligent_output_max_fields,
+    )
 
     sections: list[dict[str, Any]] = []
     lines: list[str] = []
@@ -166,10 +177,16 @@ def render_agent_response(
             lines.append("")
             sections.append({"title": "Summary"})
 
-    result_markdown = _result_section_markdown(presented.markdown)
+    if ctx.intelligent_output_mode == "replace" and intelligent is not None:
+        result_markdown = intelligent.markdown
+    else:
+        result_markdown = _result_section_markdown(presented.markdown)
     if result_markdown:
         lines.append(result_markdown)
         sections.append({"title": "Result"})
+    if ctx.intelligent_output_mode == "compare" and intelligent is not None:
+        lines.extend(["", intelligent.markdown])
+        sections.append({"title": "Intelligent Output"})
 
     if ctx.show_executed_commands:
         action_markdown = _executed_actions_markdown(actions, ctx)
@@ -181,6 +198,11 @@ def render_agent_response(
         debug_payload = _compact_debug_metadata(meta, actions)
         if insight_result is not None:
             debug_payload["insights"] = insight_result.to_dict()
+        if intelligent is not None:
+            debug_payload["intelligent_output"] = {
+                "selected_fields": intelligent.selected_fields,
+                "llm_used": intelligent.llm_used,
+            }
         if debug_payload:
             lines.extend(["", *md_section("Debug Metadata")])
             lines.extend(md_code_block("json", json.dumps(debug_payload, ensure_ascii=False, sort_keys=True, default=str)))
@@ -385,7 +407,7 @@ def _result_section_markdown(markdown: str) -> str:
 
 
 def _execution_table(rows: list[tuple[str, Any]]) -> list[str]:
-    return md_table(["Field", "Value"], [[key, value] for key, value in rows if value is not None and value != ""])
+    return md_table(["Field", "Value"], [[_code_cell(key), _code_cell(value)] for key, value in rows if value is not None and value != ""])
 
 
 class _InsightFactContext:
@@ -479,12 +501,26 @@ def _result_for_presentation(final_result: Any, actions: list[ExecutedAction]) -
         return final_result
     if isinstance(final_result, dict) and "results" in final_result:
         return final_result
+    if _looks_like_multi_metric_slurm(final_result):
+        return final_result
     last = slurm_actions[-1]
     if isinstance(final_result, list) or isinstance(final_result, (int, float, str)):
         return last.result or final_result
     if isinstance(final_result, dict) and not any(key in final_result for key in ("jobs", "nodes", "partitions", "metric_group", "payload")):
         return last.result or final_result
     return final_result
+
+
+def _looks_like_multi_metric_slurm(value: Any) -> bool:
+    if not isinstance(value, dict) or "result_kind" in value:
+        return False
+    children = [
+        item
+        for item in value.values()
+        if isinstance(item, dict)
+        and (item.get("result_kind") == "accounting_aggregate" or {"average_elapsed_seconds", "min_elapsed_seconds", "max_elapsed_seconds"} & set(item))
+    ]
+    return len(children) >= 2 and len(children) == len(value)
 
 
 def _iter_plan_steps(plan: Any | None) -> list[Any]:
@@ -504,7 +540,21 @@ def _last_visible_action(actions: list[ExecutedAction]) -> str | None:
     return None
 
 
-def _last_visible_args(actions: list[ExecutedAction]) -> dict[str, Any]:
+def _presentation_source_action(requested: str | None, actions: list[ExecutedAction]) -> str | None:
+    requested_value = str(requested or "").strip()
+    if requested_value and requested_value not in {"runtime.return", "text.format"}:
+        return requested_value
+    for action in reversed(actions):
+        if action.tool not in {"runtime.return", "text.format"}:
+            return action.tool
+    return requested_value or None
+
+
+def _presentation_source_args(source_action: str | None, actions: list[ExecutedAction]) -> dict[str, Any]:
+    if source_action:
+        for action in reversed(actions):
+            if action.tool == source_action:
+                return dict(action.args_summary or {})
     for action in reversed(actions):
         if action.tool != "runtime.return":
             return dict(action.args_summary or {})
@@ -526,6 +576,11 @@ def _tool_label(tool: str) -> str:
 
 def _title(value: Any) -> str:
     return str(value).replace("_", " ").title()
+
+
+def _code_cell(value: Any) -> str:
+    text = str(value if value is not None else "").replace("`", "'").strip()
+    return f"`{text or '-'}`"
 
 
 def _join_argv(argv: list[str]) -> str:

@@ -228,11 +228,17 @@ def test_openwebui_summary_trace_streams_compact_progress_without_raw_payloads(t
 
     assert response.status_code == 200
     assert "Thinking..." in body
-    assert "Planning complete." in body
+    assert "Planning Complete" in body
     assert "Plan Overview" in body
-    assert "Running sql.query: dicom / SELECT COUNT(*) AS count_value FROM patients;" in body
+    assert "> **Thinking**" in body
+    assert "> **Plan Overview**" in body
+    assert "`Query dicom` -> `Return answer`" in body
+    assert "> **Running**" in body
+    assert "`Running sql.query: dicom / SELECT COUNT(*) AS count_value FROM patients;`" in body
     assert "Rows returned: 1" in body
-    assert "Checking result..." in body
+    assert "`Rows returned: 1`" in body
+    assert "> **Checking**" in body
+    assert "`Checking result...`" in body
     assert "Query Used" in body
     assert "SELECT COUNT(*) AS count_value\\nFROM patients;" in body
     assert "raw_action_plan" not in body

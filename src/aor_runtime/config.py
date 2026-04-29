@@ -32,7 +32,7 @@ class Settings(BaseModel):
     sql_database_url: str | None = None
     sql_databases: dict[str, str] = Field(default_factory=dict)
     sql_default_database: str | None = None
-    sql_row_limit: int = 500
+    sql_row_limit: int = 0
     sql_timeout_seconds: int = 10
     llm_base_url: str = "http://127.0.0.1:8000/v1"
     llm_api_key: str = "local"
@@ -78,6 +78,8 @@ class Settings(BaseModel):
     presentation_llm_max_output_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_PRESENTATION_LLM_MAX_OUTPUT_CHARS", "1500")))
     presentation_llm_include_row_samples: bool = Field(default_factory=lambda: _env_bool("AOR_PRESENTATION_LLM_INCLUDE_ROW_SAMPLES"))
     presentation_llm_include_paths: bool = Field(default_factory=lambda: _env_bool("AOR_PRESENTATION_LLM_INCLUDE_PATHS"))
+    intelligent_output_mode: str = Field(default_factory=lambda: os.getenv("AOR_INTELLIGENT_OUTPUT_MODE", "off").strip().lower())
+    intelligent_output_max_fields: int = Field(default_factory=lambda: int(os.getenv("AOR_INTELLIGENT_OUTPUT_MAX_FIELDS", "8")))
     enable_insight_layer: bool = Field(default_factory=lambda: _env_bool("AOR_ENABLE_INSIGHT_LAYER", True))
     enable_llm_insights: bool = Field(default_factory=lambda: _env_bool("AOR_ENABLE_LLM_INSIGHTS"))
     insight_max_facts: int = Field(default_factory=lambda: int(os.getenv("AOR_INSIGHT_MAX_FACTS", "50")))
@@ -184,8 +186,8 @@ class Settings(BaseModel):
             raise ValueError("default_temperature must be zero or greater.")
         if self.llm_timeout_seconds <= 0:
             raise ValueError("llm_timeout_seconds must be greater than zero.")
-        if self.sql_row_limit <= 0:
-            raise ValueError("sql_row_limit must be greater than zero.")
+        if self.sql_row_limit < 0:
+            raise ValueError("sql_row_limit must be zero or greater.")
         if self.sql_timeout_seconds <= 0:
             raise ValueError("sql_timeout_seconds must be greater than zero.")
         self.shell_mode = str(self.shell_mode or "read_only").strip().lower() or "read_only"
@@ -212,6 +214,11 @@ class Settings(BaseModel):
             raise ValueError("presentation_llm_max_input_chars must be greater than zero.")
         if self.presentation_llm_max_output_chars <= 0:
             raise ValueError("presentation_llm_max_output_chars must be greater than zero.")
+        self.intelligent_output_mode = str(self.intelligent_output_mode or "off").strip().lower() or "off"
+        if self.intelligent_output_mode not in {"off", "compare", "replace"}:
+            raise ValueError("intelligent_output_mode must be one of: off, compare, replace.")
+        if self.intelligent_output_max_fields <= 0:
+            raise ValueError("intelligent_output_max_fields must be greater than zero.")
         if self.insight_max_facts <= 0:
             raise ValueError("insight_max_facts must be greater than zero.")
         if self.insight_max_input_chars <= 0:
@@ -325,6 +332,13 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
             "AOR_PRESENTATION_LLM_INCLUDE_ROW_SAMPLES", app_config.runtime.presentation_llm_include_row_samples
         ),
         presentation_llm_include_paths=_env_bool("AOR_PRESENTATION_LLM_INCLUDE_PATHS", app_config.runtime.presentation_llm_include_paths),
+        intelligent_output_mode=(
+            os.getenv("AOR_INTELLIGENT_OUTPUT_MODE", "").strip().lower()
+            or app_config.runtime.intelligent_output_mode
+        ),
+        intelligent_output_max_fields=int(
+            os.getenv("AOR_INTELLIGENT_OUTPUT_MAX_FIELDS", str(app_config.runtime.intelligent_output_max_fields))
+        ),
         enable_insight_layer=_env_bool("AOR_ENABLE_INSIGHT_LAYER", app_config.runtime.enable_insight_layer),
         enable_llm_insights=_env_bool("AOR_ENABLE_LLM_INSIGHTS", app_config.runtime.enable_llm_insights),
         insight_max_facts=int(os.getenv("AOR_INSIGHT_MAX_FACTS", str(app_config.runtime.insight_max_facts))),

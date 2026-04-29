@@ -86,6 +86,8 @@ class RuntimeAppConfig(BaseModel):
     presentation_llm_max_output_chars: int = 1500
     presentation_llm_include_row_samples: bool = False
     presentation_llm_include_paths: bool = False
+    intelligent_output_mode: str = "off"
+    intelligent_output_max_fields: int = 8
     enable_insight_layer: bool = True
     enable_llm_insights: bool = False
     insight_max_facts: int = 50
@@ -115,6 +117,11 @@ class RuntimeAppConfig(BaseModel):
             raise ValueError("runtime.presentation_llm_max_input_chars must be greater than zero.")
         if self.presentation_llm_max_output_chars <= 0:
             raise ValueError("runtime.presentation_llm_max_output_chars must be greater than zero.")
+        self.intelligent_output_mode = str(self.intelligent_output_mode or "off").strip().lower() or "off"
+        if self.intelligent_output_mode not in {"off", "compare", "replace"}:
+            raise ValueError("runtime.intelligent_output_mode must be one of: off, compare, replace.")
+        if self.intelligent_output_max_fields <= 0:
+            raise ValueError("runtime.intelligent_output_max_fields must be greater than zero.")
         if self.insight_max_facts <= 0:
             raise ValueError("runtime.insight_max_facts must be greater than zero.")
         if self.insight_max_input_chars <= 0:
@@ -147,7 +154,7 @@ class SQLConfig(BaseModel):
     database_url: str | None = None
     databases: dict[str, str] = Field(default_factory=dict)
     default_database: str | None = None
-    row_limit: int = 500
+    row_limit: int = 0
     timeout_seconds: int = 10
 
     @model_validator(mode="after")
@@ -171,8 +178,8 @@ class SQLConfig(BaseModel):
         if self.default_database and self.databases and self.default_database not in self.databases:
             available = ", ".join(sorted(self.databases))
             raise ValueError(f"sql.default_database must be one of: {available}.")
-        if self.row_limit <= 0:
-            raise ValueError("sql.row_limit must be greater than zero.")
+        if self.row_limit < 0:
+            raise ValueError("sql.row_limit must be zero or greater.")
         if self.timeout_seconds <= 0:
             raise ValueError("sql.timeout_seconds must be greater than zero.")
         return self

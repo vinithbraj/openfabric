@@ -380,7 +380,7 @@ class LLMActionPlanner:
             "runtime_date": temporal_runtime.runtime_date_context(self.settings, now=now),
             "available_tools": manifest,
             "runtime_rules": {
-                "sql": "SELECT-only. Use exact schema identifiers. Use an outer COUNT(*) for count prompts over grouped/HAVING sets.",
+                "sql": "SELECT-only. Use exact schema identifiers. Use an outer COUNT(*) for count prompts over grouped/HAVING sets. Do not add LIMIT/FETCH row caps when the user asks for all/list/show rows unless they explicitly requested top/first/sample/a limit.",
                 "formatting": "Use text.format. Do not ask the LLM to format row data. Do not put placeholder strings like {rows}; use structured $refs or one SQL query.",
                 "filesystem": "Use fs.write only for explicit save/write/export file goals.",
                 "shell": "Use shell.exec only for explicit commands or system inspection; commands are safety-classified. Do not add head/tail/row limits when the user asks for all/list/show rows unless they requested top/first/sample/a limit.",
@@ -477,6 +477,8 @@ class ActionPlanValidator:
             safe_query = ensure_read_only_sql(query)
         except ValueError as exc:
             return [str(exc)]
+        if _goal_requires_unlimited_rows(goal) and _sql_query_has_unrequested_limit(safe_query):
+            return ["SQL query adds an unrequested row limit; the user asked for all rows."]
         database = action.inputs.get("database")
         configured = resolve_sql_databases(self.settings)
         if configured and database:
@@ -1392,6 +1394,16 @@ def _shell_command_has_unrequested_limit(command: str) -> bool:
     if re.search(r"\bawk\b[^|;&]*(?:nr|NR)\s*(?:<=|<)\s*\d+", text):
         return True
     if re.search(r"\blimit\s+\d+\b", lowered):
+        return True
+    return False
+
+
+def _sql_query_has_unrequested_limit(query: str) -> bool:
+    text = str(query or "")
+    lowered = text.lower()
+    if re.search(r"\blimit\s+\d+\b", lowered):
+        return True
+    if re.search(r"\bfetch\s+(?:first|next)\s+\d+\s+rows?\s+only\b", lowered):
         return True
     return False
 

@@ -16,5 +16,5 @@ sql:
   databases:
     dicom: postgresql+psycopg://admin:admin@localhost:5432/dicom
   default_database: dicom
-  row_limit: 500
+  row_limit: 0
   timeout_seconds: 10

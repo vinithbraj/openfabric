@@ -55,10 +55,16 @@ LLM summaries are disabled by default:
 - `AOR_PRESENTATION_LLM_MAX_OUTPUT_CHARS=1500`
 - `AOR_PRESENTATION_LLM_INCLUDE_ROW_SAMPLES=false`
 - `AOR_PRESENTATION_LLM_INCLUDE_PATHS=false`
+- `AOR_INTELLIGENT_OUTPUT_MODE=off|compare|replace`
+- `AOR_INTELLIGENT_OUTPUT_MAX_FIELDS=8`
 
 When enabled, the LLM receives only deterministic sanitized facts, never raw tool output. Allowed facts are compact aggregates such as counts, status booleans, database names, safe tool names, and capped summaries. Raw SQL rows, SLURM payloads, filesystem contents, stdout/stderr, semantic frames, coverage metadata, telemetry, credentials, environment variables, and gateway internals are rejected or stripped before any LLM call.
 
 The deterministic result and execution details remain authoritative. If LLM summarization fails or the sanitized facts fail validation, the renderer falls back to deterministic Markdown.
+
+`AOR_INTELLIGENT_OUTPUT_MODE=compare` adds an `Intelligent Output` section that asks the LLM which fields best satisfy the user request. The LLM receives only field metadata such as field ids, labels, types, descriptions, source tools, and record count. It never receives SQL rows, SLURM job payloads, shell stdout/stderr, filesystem contents, raw JSON payloads, or PHI-bearing values. The runtime validates selected field ids, caps the selected field count, and fills all displayed values locally from the already-normalized result.
+
+`replace` is intended for later evaluation once compare mode is trusted. If the LLM field-selection response is invalid or unavailable, deterministic Markdown remains the fallback.
 
 ## Adding A Presenter
 

@@ -367,6 +367,43 @@ def test_action_planner_rejects_unrequested_shell_row_limit_for_all_processes(tm
         )
 
 
+def test_action_planner_rejects_unrequested_sql_row_limit_for_all_rows(tmp_path: Path, monkeypatch) -> None:
+    _patch_catalog(monkeypatch)
+    settings = _settings(tmp_path)
+    planner = LLMActionPlanner(
+        llm=FakeLLM(
+            [
+                {
+                    "goal": "list all patients in dicom",
+                    "actions": [
+                        {
+                            "id": "patients",
+                            "tool": "sql.query",
+                            "inputs": {
+                                "database": "dicom",
+                                "query": 'SELECT "PatientID" FROM flathr."Patient" LIMIT 500',
+                            },
+                            "output_binding": "patients",
+                            "expected_result_shape": {"kind": "table"},
+                        }
+                    ],
+                    "expected_final_shape": {"kind": "table"},
+                }
+            ]
+        ),
+        tools=build_tool_registry(settings),
+        settings=settings,
+    )
+
+    with pytest.raises(ValueError, match="unrequested row limit"):
+        planner.build_plan(
+            goal="list all patients in dicom",
+            planner=PlannerConfig(),
+            allowed_tools=["sql.query"],
+            input_payload={},
+        )
+
+
 def test_action_planner_allows_requested_top_shell_limit(tmp_path: Path) -> None:
     settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
     planner = LLMActionPlanner(

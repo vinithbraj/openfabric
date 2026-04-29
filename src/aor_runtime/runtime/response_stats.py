@@ -53,7 +53,7 @@ def _stats_table(steps: list[dict[str, Any]], metrics: dict[str, Any], status: s
         ("Tokens Out", _token_value(completion_tokens, llm_calls)),
         ("Steps", str(len(steps))),
     ]
-    return md_table(["Field", "Value"], rows)
+    return md_table(["Field", "Value"], [[_code_cell(key), _code_cell(value)] for key, value in rows])
 
 
 def _dag_lines(steps: list[dict[str, Any]]) -> list[str]:
@@ -159,6 +159,11 @@ def _token_value(value: int, llm_calls: int) -> str:
 def _title(value: Any) -> str:
     text = str(value or "").strip().replace("_", " ")
     return text.title() if text else "Unknown"
+
+
+def _code_cell(value: Any) -> str:
+    text = str(value if value is not None else "").replace("`", "'").strip()
+    return f"`{text or '-'}`"
 
 
 def _unique(values: list[str]) -> list[str]:

@@ -284,12 +284,14 @@ def _render_final_result(
         insight_max_facts=settings.insight_max_facts,
         insight_max_input_chars=settings.insight_max_input_chars,
         insight_max_output_chars=settings.insight_max_output_chars,
-        max_rows=settings.sql_row_limit if settings.sql_row_limit < 50 else 20,
+        max_rows=max(1, int(settings.auto_artifact_row_threshold or 50)),
         max_command_length=settings.presentation_llm_max_input_chars,
         source_action=previous_action if action == "runtime.return" else action,
         output_mode=output_mode,
         goal=goal,
         llm_settings=settings,
+        intelligent_output_mode=settings.intelligent_output_mode,
+        intelligent_output_max_fields=settings.intelligent_output_max_fields,
     )
     if action == "runtime.return":
         value = _coerce_structured_user_value(last.result.get("value"), fallback=last.result.get("output"))

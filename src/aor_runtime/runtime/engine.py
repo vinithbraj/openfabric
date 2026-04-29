@@ -1172,11 +1172,13 @@ class ExecutionEngine:
                 insight_max_facts=self.settings.insight_max_facts,
                 insight_max_input_chars=self.settings.insight_max_input_chars,
                 insight_max_output_chars=self.settings.insight_max_output_chars,
-                max_rows=20,
+                max_rows=max(1, int(self.settings.auto_artifact_row_threshold or 50)),
                 max_command_length=self.settings.presentation_llm_max_input_chars,
                 output_mode="text",
                 goal=str(state.get("goal", "")),
                 llm_settings=self.settings,
+                intelligent_output_mode=self.settings.intelligent_output_mode,
+                intelligent_output_max_fields=self.settings.intelligent_output_max_fields,
             ),
         )
         return rendered.markdown.strip() or content

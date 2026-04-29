@@ -88,6 +88,20 @@ server:
         load_app_config(config_path)
 
 
+def test_sql_row_limit_zero_is_allowed_for_unbounded_reads(tmp_path: Path) -> None:
+    config_path = tmp_path / APP_CONFIG_FILENAME
+    config_path.write_text(
+        """
+sql:
+  row_limit: 0
+""".strip()
+    )
+
+    app_config, _ = load_app_config(config_path)
+
+    assert app_config.sql.row_limit == 0
+
+
 def test_resolve_sql_databases_uses_yaml_mapping(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / APP_CONFIG_FILENAME
     config_path.write_text(CONFIG_TEXT)

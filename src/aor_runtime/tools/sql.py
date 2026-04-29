@@ -349,7 +349,7 @@ def prune_schema(
     return SchemaInfo(databases=pruned_databases)
 
 
-def _sql_query_worker(queue: mp.Queue, database_url: str, query: str, row_limit: int) -> None:
+def _sql_query_worker(queue: mp.Queue, database_url: str, query: str, row_limit: int | None = None) -> None:
     try:
         engine = create_engine(database_url, future=True, pool_pre_ping=True)
         with engine.connect() as connection:
@@ -357,11 +357,22 @@ def _sql_query_worker(queue: mp.Queue, database_url: str, query: str, row_limit:
             if not result.returns_rows:
                 raise ToolExecutionError("SQL query did not return rows.")
             rows: list[dict[str, Any]] = []
+            truncated = False
             for index, row in enumerate(result):
-                if index >= row_limit:
+                if row_limit is not None and index >= row_limit:
+                    truncated = True
                     break
                 rows.append({str(key): _coerce_value(value) for key, value in row._mapping.items()})
-        queue.put({"ok": True, "rows": rows, "row_count": len(rows)})
+        queue.put(
+            {
+                "ok": True,
+                "rows": rows,
+                "row_count": len(rows),
+                "returned_count": len(rows),
+                "limit": row_limit,
+                "truncated": truncated,
+            }
+        )
     except Exception as exc:  # noqa: BLE001
         queue.put({"ok": False, "error": str(exc)})
 
@@ -372,7 +383,10 @@ def sql_query(settings: Settings, query: str, database: str | None = None) -> di
     queue: mp.Queue = mp.Queue()
     process = mp.Process(
         target=_sql_query_worker,
-        args=(queue, database_url, safe_query, max(1, int(settings.sql_row_limit))),
+        # SQL reads intentionally do not impose a row cap. Large result presentation is handled
+        # downstream by the auto-artifact policy, which writes full returned collections to files
+        # and keeps only small results inline in the UI.
+        args=(queue, database_url, safe_query, None),
     )
     process.start()
     process.join(max(1, int(settings.sql_timeout_seconds)))
@@ -387,7 +401,14 @@ def sql_query(settings: Settings, query: str, database: str | None = None) -> di
         raise ToolExecutionError(str(payload.get("error") or "SQL query failed."))
     rows = payload.get("rows", [])
     row_count = payload.get("row_count", len(rows) if isinstance(rows, list) else 0)
-    return {"database": database_name, "rows": rows, "row_count": row_count}
+    return {
+        "database": database_name,
+        "rows": rows,
+        "row_count": row_count,
+        "returned_count": payload.get("returned_count", row_count),
+        "limit": payload.get("limit"),
+        "truncated": bool(payload.get("truncated")),
+    }
 
 
 def explain_sql_query(settings: Settings, query: str, database: str | None = None) -> None:
@@ -423,6 +444,9 @@ class SQLQueryTool(BaseTool):
         database: str
         rows: list[dict[str, Any]]
         row_count: int
+        returned_count: int
+        limit: int | None = None
+        truncated: bool = False
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()

@@ -62,8 +62,8 @@ def test_sql_count_response_includes_result_query_and_execution_table() -> None:
     assert "\n\n```sql\n" in rendered.markdown
     assert 'FROM flathr."Patient"' in rendered.markdown
     assert 'SELECT COUNT(*) AS count_value\nFROM flathr."Patient";' in rendered.markdown
-    assert "| Tool | sql.query |" in rendered.markdown
-    assert "| Database | dicom |" in rendered.markdown
+    assert "| `Tool` | `sql.query` |" in rendered.markdown
+    assert "| `Database` | `dicom` |" in rendered.markdown
     assert "runtime.return" not in rendered.markdown
 
 
@@ -293,8 +293,8 @@ def test_filesystem_aggregate_response_includes_operation_details() -> None:
 
     assert "Found 12 files totaling 4.2 GB." in rendered.markdown
     assert "## Operation" in rendered.markdown
-    assert "| Path | /tmp/workspace |" in rendered.markdown
-    assert "| Pattern | *.mp4 |" in rendered.markdown
+    assert "| `Path` | `/tmp/workspace` |" in rendered.markdown
+    assert "| `Pattern` | `*.mp4` |" in rendered.markdown
 
 
 def test_large_json_is_not_dumped_in_user_mode() -> None:

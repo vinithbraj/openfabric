@@ -16,5 +16,5 @@ sql:
   databases:
     dicom: postgresql+psycopg://airflow:airflow@10.44.102.204:9501/CANONICAL_v1
   default_database: dicom
-  row_limit: 500
+  row_limit: 0
   timeout_seconds: 10
