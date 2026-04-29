@@ -27,6 +27,7 @@ from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
 from aor_runtime.runtime.response_renderer import ResponseRenderContext, render_agent_response
 from aor_runtime.runtime.response_stats import append_response_stats
 from aor_runtime.runtime.result_shape import validate_result_shape
+from aor_runtime.runtime.semantic_obligations import maybe_apply_semantic_fallback
 from aor_runtime.runtime.sessions import SessionManager
 from aor_runtime.runtime.state import RuntimeState
 from aor_runtime.runtime.store import SQLiteRunStore
@@ -707,6 +708,19 @@ class ExecutionEngine:
             )
 
         log = self.executor.execute_step(resolved_step, event_sink=emit_step_output if stream_shell_output else None)
+        fallback_result = maybe_apply_semantic_fallback(self.settings, goal=str(state.get("goal", "")), log=log)
+        if fallback_result.applied:
+            log = fallback_result.log
+            self.store.append_event(
+                session_id=session.id,
+                node_name="executor",
+                event_type="executor.step.semantic_fallback",
+                payload={
+                    "step_id": resolved_step.id,
+                    "step_index": step_index,
+                    **dict(fallback_result.metadata or {}),
+                },
+            )
         log_payload = log.model_dump()
 
         history = list(state.get("history", []))

@@ -15,6 +15,7 @@ from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.dataflow import collect_step_references, normalize_execution_plan_dataflow
 from aor_runtime.runtime.output_shape import infer_goal_output_contract, is_shell_status_goal, scalar_field_for_tool
+from aor_runtime.runtime.semantic_obligations import apply_semantic_obligations_to_actions
 from aor_runtime.runtime.shell_safety import classify_shell_command
 from aor_runtime.runtime.sql_safety import ensure_read_only_sql, normalize_pg_relation_quoting, validate_read_only_sql
 from aor_runtime.runtime.temporal import TemporalArgumentCanonicalizer, TemporalNormalizationError
@@ -614,6 +615,7 @@ class ActionPlanCanonicalizer:
         actions = [action for action in actions if action["tool"] != "runtime.return"]
         self._propagate_sql_database(actions)
         self._normalize_temporal_arguments(actions)
+        self._apply_semantic_obligations(actions)
         self._rewrite_schema_introspection_queries(actions)
         self._rewrite_bare_data_refs(actions)
         export_path = _extract_export_path(self.goal)
@@ -869,6 +871,20 @@ class ActionPlanCanonicalizer:
             )
         if result.llm_calls:
             self.metadata["temporal_llm_calls"] = result.llm_calls
+
+    def _apply_semantic_obligations(self, actions: list[dict[str, Any]]) -> None:
+        result = apply_semantic_obligations_to_actions(self.goal, actions)
+        if result.metadata["obligations"]:
+            self.metadata["semantic_obligations"] = result.metadata
+            self.issues.append(
+                PlanIssue(
+                    code="semantic_obligations",
+                    message=json.dumps(result.metadata, sort_keys=True, default=str),
+                    severity="info",
+                )
+            )
+        for repair in result.repairs:
+            self._repair("applied_semantic_obligation", repair)
 
     def _rewrite_schema_introspection_queries(self, actions: list[dict[str, Any]]) -> None:
         if not _schema_question_goal(self.goal):

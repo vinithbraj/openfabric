@@ -593,6 +593,44 @@ def test_action_planner_completes_slurm_status_plan_with_markdown_formatter(tmp_
     assert plan.steps[1].args["format"] == "markdown"
 
 
+def test_action_planner_applies_slurm_completed_state_obligation(tmp_path: Path) -> None:
+    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+    planner = LLMActionPlanner(
+        llm=FakeLLM(
+            [
+                {
+                    "goal": "average runtime in the totalseg partition for completed jobs",
+                    "actions": [
+                        {
+                            "id": "avg_time",
+                            "tool": "slurm.accounting_aggregate",
+                            "inputs": {"partition": "totalseg", "metric": "average_elapsed"},
+                            "output_binding": "avg_time_result",
+                            "expected_result_shape": {"kind": "table"},
+                        }
+                    ],
+                    "expected_final_shape": {"kind": "table"},
+                }
+            ]
+        ),
+        tools=build_tool_registry(settings),
+        settings=settings,
+    )
+
+    plan = planner.build_plan(
+        goal="average runtime in the totalseg partition for completed jobs",
+        planner=PlannerConfig(),
+        allowed_tools=["slurm.accounting_aggregate"],
+        input_payload={},
+    )
+
+    assert plan.steps[0].action == "slurm.accounting_aggregate"
+    assert plan.steps[0].args["state"] == "COMPLETED"
+    assert plan.steps[0].args["include_all_states"] is False
+    assert plan.steps[0].args["partition"] == "totalseg"
+    assert any("state=COMPLETED" in repair for repair in planner.last_canonicalization_repairs)
+
+
 def test_action_planner_repairs_slurm_count_plan_to_scalar_count_field(tmp_path: Path) -> None:
     settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
     planner = LLMActionPlanner(
