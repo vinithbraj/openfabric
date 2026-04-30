@@ -218,6 +218,8 @@ def test_runs_stream_and_openai_compat_stream(tmp_path: Path, monkeypatch) -> No
     assert "hello" in body
     assert "[stderr] warn\\n" not in body
     assert "data: [DONE]" in body
+    assert app.state.active_runs.active_run_count() == 0
+    assert app.state.active_runs.active_process_count() == 0
 
 
 def test_failed_run_and_openai_surfaces_hide_prompt_suggestions_by_default(tmp_path: Path, monkeypatch) -> None:

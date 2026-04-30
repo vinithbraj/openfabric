@@ -14,9 +14,10 @@ from aor_runtime.core.contracts import ToolSpec
 from aor_runtime.runtime.sql_catalog import SqlColumnRef, SqlSchemaCatalog, SqlTableRef
 from aor_runtime.runtime.sql_safety import (
     ensure_read_only_sql,
-    normalize_pg_relation_quoting,
     validate_read_only_sql,
 )
+from aor_runtime.runtime.sql_ast_validation import normalize_and_validate_sql_ast
+from aor_runtime.runtime.lifecycle import CancellationError, ToolInvocationContext, run_process_with_queue
 from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
 
 
@@ -378,25 +379,36 @@ def _sql_query_worker(queue: mp.Queue, database_url: str, query: str, row_limit:
 
 
 def sql_query(settings: Settings, query: str, database: str | None = None) -> dict[str, Any]:
+    return _sql_query(settings, query, database=database, context=None)
+
+
+def _sql_query(
+    settings: Settings,
+    query: str,
+    *,
+    database: str | None = None,
+    context: ToolInvocationContext | None = None,
+) -> dict[str, Any]:
     database_name, database_url = resolve_database_selection(settings, database)
     safe_query = _normalize_and_validate_query(settings, database_name, query)
-    queue: mp.Queue = mp.Queue()
-    process = mp.Process(
-        target=_sql_query_worker,
-        # SQL reads intentionally do not impose a row cap. Large result presentation is handled
-        # downstream by the auto-artifact policy, which writes full returned collections to files
-        # and keeps only small results inline in the UI.
-        args=(queue, database_url, safe_query, None),
-    )
-    process.start()
-    process.join(max(1, int(settings.sql_timeout_seconds)))
-    if process.is_alive():
-        process.terminate()
-        process.join()
-        raise ToolExecutionError(f"SQL query timed out after {settings.sql_timeout_seconds} seconds.")
-    if queue.empty():
-        raise ToolExecutionError("SQL query did not return a result.")
-    payload = queue.get()
+    try:
+        payload = run_process_with_queue(
+            target=_sql_query_worker,
+            # SQL reads intentionally do not impose a row cap. Large result presentation is handled
+            # downstream by the auto-artifact policy, which writes full returned collections to files
+            # and keeps only small results inline in the UI.
+            args=(database_url, safe_query, None),
+            timeout_seconds=max(1, int(settings.sql_timeout_seconds)),
+            timeout_message=f"SQL query timed out after {settings.sql_timeout_seconds} seconds.",
+            context=context,
+            process_name="aor-sql-query",
+        )
+    except TimeoutError as exc:
+        raise ToolExecutionError(str(exc)) from exc
+    except RuntimeError as exc:
+        if isinstance(exc, CancellationError):
+            raise
+        raise ToolExecutionError(str(exc)) from exc
     if not payload.get("ok"):
         raise ToolExecutionError(str(payload.get("error") or "SQL query failed."))
     rows = payload.get("rows", [])
@@ -428,7 +440,10 @@ def _normalize_and_validate_query(settings: Settings, database_name: str, query:
     except Exception:  # noqa: BLE001
         catalog = None
     if catalog is not None and catalog.dialect == "postgresql":
-        safe_query = normalize_pg_relation_quoting(safe_query, catalog)
+        ast_validation = normalize_and_validate_sql_ast(safe_query, catalog)
+        if not ast_validation.valid:
+            raise ToolExecutionError("; ".join(ast_validation.messages) or "SQL failed catalog validation.")
+        safe_query = ast_validation.normalized_sql
     validation = validate_read_only_sql(safe_query)
     if not validation.valid:
         raise ToolExecutionError(validation.reason or "SQL query failed read-only validation.")
@@ -467,6 +482,11 @@ class SQLQueryTool(BaseTool):
 
     def run(self, arguments: ToolArgs) -> ToolResult:
         return self.ToolResult.model_validate(sql_query(self.settings, query=arguments.query, database=arguments.database))
+
+    def run_with_context(self, arguments: ToolArgs, context: ToolInvocationContext) -> ToolResult:
+        return self.ToolResult.model_validate(
+            _sql_query(self.settings, arguments.query, database=arguments.database, context=context)
+        )
 
 
 class SQLSchemaTool(BaseTool):

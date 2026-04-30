@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from aor_runtime.runtime.tool_surfaces import friendly_label_for_tool
+
 
 TraceMode = str
 
@@ -115,10 +117,11 @@ class OpenWebUITraceRenderer:
             return _trace_progress(["Preparing final response..."])
 
         args = dict(step.get("args") or {})
+        label = sanitize_detail(friendly_label_for_tool(tool, args), max_chars=120)
         detail = _step_detail(tool, args, payload, max_chars=self.max_detail_chars)
         if detail:
-            return _trace_progress([f"Running {tool}: {detail}"])
-        return _trace_progress([f"Running {tool}..."])
+            return _trace_progress([f"Running {label}: {detail}"])
+        return _trace_progress([f"Running {label}..."])
 
     def _render_step_completed(self, payload: dict[str, Any]) -> str | None:
         step = dict(payload.get("step") or {})
@@ -209,33 +212,11 @@ def _plan_steps(payload: dict[str, Any]) -> list[str]:
 
 
 def _friendly_step(tool: str, args: dict[str, Any]) -> str:
-    if tool == "sql.query":
-        database = str(args.get("database") or "").strip()
-        return f"Query {database}" if database else "Query database"
-    if tool == "sql.schema":
-        database = str(args.get("database") or args.get("domain") or "").strip()
-        return f"Inspect {database} schema" if database else "Inspect database schema"
-    if tool == "text.format":
-        output_format = str(args.get("format") or "output").strip()
-        return f"Format results as {output_format}"
-    if tool == "fs.write":
-        path = sanitize_detail(args.get("path") or "file", max_chars=80)
-        return f"Write {path}"
-    if tool == "fs.read":
-        return f"Read {sanitize_detail(args.get('path') or 'file', max_chars=80)}"
-    if tool.startswith("fs."):
-        return f"Use {tool}"
-    if tool == "shell.exec":
-        return "Run safe shell inspection"
-    if tool.startswith("slurm."):
-        return f"Inspect SLURM with {tool}"
-    if tool == "runtime.return":
-        return "Return answer"
-    return f"Run {tool}"
+    return sanitize_detail(friendly_label_for_tool(tool, args), max_chars=120)
 
 
 def _step_detail(tool: str, args: dict[str, Any], payload: dict[str, Any], *, max_chars: int) -> str:
-    if tool == "sql.query":
+    if tool in {"sql.query", "sql.validate"}:
         database = str(args.get("database") or "").strip()
         sql = sanitize_sql(args.get("query") or payload.get("command") or "", max_chars=max_chars)
         return f"{database} / {sql}" if database and sql else database or sql
@@ -261,6 +242,10 @@ def sanitize_sql(value: Any, *, max_chars: int = 240) -> str:
 
 
 def _result_summary(tool: str, result: dict[str, Any], *, max_chars: int) -> str:
+    if tool == "sql.validate":
+        valid = result.get("valid")
+        if isinstance(valid, bool):
+            return f"SQL validation: {'valid' if valid else 'invalid'}"
     if tool == "sql.query":
         row_count = result.get("row_count")
         if row_count is None and isinstance(result.get("rows"), list):

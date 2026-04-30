@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionStep, StepLog
+from aor_runtime.runtime.executor import summarize_final_output
+from aor_runtime.runtime.result_shape import validate_result_shape
 from aor_runtime.runtime.response_renderer import ResponseRenderContext, render_agent_response
 
 
@@ -82,6 +85,46 @@ def test_short_sql_query_display_pretty_prints_across_logical_lines() -> None:
     assert "## Query Used" in rendered.markdown
     assert "SELECT COUNT(*) AS count_value\nFROM patients" in rendered.markdown
     assert "SELECT COUNT(*) AS count_value FROM patients" not in rendered.markdown
+
+
+def test_final_rendering_uses_upstream_sql_source_through_text_format(tmp_path) -> None:
+    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+    history = [
+        StepLog(
+            step=ExecutionStep(
+                id=1,
+                action="sql.query",
+                args={"database": "dicom", "query": 'SELECT COUNT(*) AS patient_count FROM flathr."Patient";'},
+                output="patient_count",
+            ),
+            result={"database": "dicom", "row_count": 1, "rows": [{"patient_count": 95}]},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(
+                id=2,
+                action="text.format",
+                args={"source": {"$ref": "patient_count", "path": "rows"}, "format": "txt"},
+                input=["patient_count"],
+                output="formatted",
+            ),
+            result={"content": "95", "format": "txt", "row_count": 1},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(id=3, action="runtime.return", args={"value": {"$ref": "formatted", "path": "content"}}),
+            result={"value": "95", "output": "95"},
+            success=True,
+        ),
+    ]
+
+    final = summarize_final_output("give me a count of patients in dicom", history, settings=settings)
+
+    assert "Count: 95" in final["content"]
+    assert "## Query Used" in final["content"]
+    assert 'FROM flathr."Patient";' in final["content"]
+    assert final["content"].strip() != "95"
+    assert validate_result_shape("give me a count of patients in dicom", history, final_content=final["content"]).success is True
 
 
 def test_long_sql_query_display_wraps_readably_and_preserves_postgres_quotes() -> None:

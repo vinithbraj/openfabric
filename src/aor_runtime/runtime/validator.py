@@ -25,6 +25,7 @@ from aor_runtime.tools.slurm import (
     is_problematic_node_state,
 )
 from aor_runtime.tools.sql import resolve_sql_databases
+from aor_runtime.runtime.tool_surfaces import registered_tool_result_valid
 
 
 ALIAS_RE = re.compile(r'\bas\s+("?)([a-zA-Z_][a-zA-Z0-9_]*)\1', re.IGNORECASE)
@@ -100,8 +101,13 @@ def _find_top_level_keyword(text: str, keyword: str, *, start: int = 0) -> int:
 
 
 class RuntimeValidator:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, tools: object | None = None) -> None:
         self.settings = settings or get_settings()
+        if tools is None:
+            from aor_runtime.tools.factory import build_tool_registry
+
+            tools = build_tool_registry(self.settings)
+        self.tools = tools
 
     def validate(self, history: list[StepLog], goal: str | None = None) -> tuple[ValidationResult, list[dict[str, str | bool]]]:
         checks: list[dict[str, str | bool]] = []
@@ -472,6 +478,39 @@ class RuntimeValidator:
                     "detail": f"database={database_name} row_count={row_count}",
                 }
 
+            if step.action == "sql.validate":
+                database_name = item.result.get("database")
+                query = item.result.get("query")
+                valid = item.result.get("valid")
+                explanation = item.result.get("explanation")
+                reason = item.result.get("reason")
+                configured_databases = resolve_sql_databases(self.settings)
+                if not isinstance(database_name, str) or not database_name:
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "invalid database"}
+                if database_name not in configured_databases:
+                    return {
+                        "name": f"step_{step.id}_{step.action}",
+                        "success": False,
+                        "detail": f"unknown database {database_name!r}",
+                    }
+                if not isinstance(query, str) or not query.strip():
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "sql.validate result missing query"}
+                if not isinstance(valid, bool):
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "sql.validate result missing valid flag"}
+                if reason is not None and not isinstance(reason, str):
+                    return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "sql.validate result has invalid reason"}
+                if not isinstance(explanation, str) or not explanation.strip():
+                    return {
+                        "name": f"step_{step.id}_{step.action}",
+                        "success": False,
+                        "detail": "sql.validate result missing explanation",
+                    }
+                return {
+                    "name": f"step_{step.id}_{step.action}",
+                    "success": True,
+                    "detail": f"database={database_name} valid={str(valid).lower()}",
+                }
+
             if step.action == "python.exec":
                 success = bool(item.result.get("success", False))
                 detail = str(item.result.get("error") or "python.exec returned structured result")
@@ -513,6 +552,10 @@ class RuntimeValidator:
                     if expected["output"] == item.result.get("output")
                     else "runtime.return output mismatch",
                 }
+
+            if getattr(self.tools, "contains", lambda _name: False)(step.action):
+                success, detail = registered_tool_result_valid(step.action, item.result, self.tools)
+                return {"name": f"step_{step.id}_{step.action}", "success": success, "detail": detail}
         except Exception as exc:  # noqa: BLE001
             return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": str(exc)}
 

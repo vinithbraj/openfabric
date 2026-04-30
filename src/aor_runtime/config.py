@@ -46,6 +46,9 @@ class Settings(BaseModel):
     shell_default_cwd: str | None = Field(default_factory=lambda: os.getenv("AOR_SHELL_DEFAULT_CWD") or None)
     shell_max_output_chars: int = Field(default_factory=lambda: int(os.getenv("AOR_SHELL_MAX_OUTPUT_CHARS", "20000")))
     shell_command_timeout_seconds: int = Field(default_factory=lambda: int(os.getenv("AOR_SHELL_COMMAND_TIMEOUT_SECONDS", "30")))
+    shutdown_grace_seconds: float = Field(default_factory=lambda: float(os.getenv("AOR_SHUTDOWN_GRACE_SECONDS", "5")))
+    worker_join_timeout_seconds: float = Field(default_factory=lambda: float(os.getenv("AOR_WORKER_JOIN_TIMEOUT_SECONDS", "2")))
+    tool_process_kill_grace_seconds: float = Field(default_factory=lambda: float(os.getenv("AOR_TOOL_PROCESS_KILL_GRACE_SECONDS", "1")))
     runtime_timezone: str = Field(default_factory=lambda: os.getenv("AOR_RUNTIME_TIMEZONE", "").strip())
     enable_llm_intent_extraction: bool = Field(
         default_factory=lambda: os.getenv("AOR_ENABLE_LLM_INTENT_EXTRACTION", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -197,6 +200,12 @@ class Settings(BaseModel):
             raise ValueError("shell_max_output_chars must be greater than zero.")
         if self.shell_command_timeout_seconds <= 0:
             raise ValueError("shell_command_timeout_seconds must be greater than zero.")
+        if self.shutdown_grace_seconds <= 0:
+            raise ValueError("shutdown_grace_seconds must be greater than zero.")
+        if self.worker_join_timeout_seconds <= 0:
+            raise ValueError("worker_join_timeout_seconds must be greater than zero.")
+        if self.tool_process_kill_grace_seconds <= 0:
+            raise ValueError("tool_process_kill_grace_seconds must be greater than zero.")
         self.runtime_timezone = str(self.runtime_timezone or "").strip()
         if self.max_plan_retries < 0:
             raise ValueError("max_plan_retries must be zero or greater.")
@@ -283,6 +292,13 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         shell_max_output_chars=int(os.getenv("AOR_SHELL_MAX_OUTPUT_CHARS", str(app_config.runtime.shell_max_output_chars))),
         shell_command_timeout_seconds=int(
             os.getenv("AOR_SHELL_COMMAND_TIMEOUT_SECONDS", str(app_config.runtime.shell_command_timeout_seconds))
+        ),
+        shutdown_grace_seconds=float(os.getenv("AOR_SHUTDOWN_GRACE_SECONDS", str(app_config.runtime.shutdown_grace_seconds))),
+        worker_join_timeout_seconds=float(
+            os.getenv("AOR_WORKER_JOIN_TIMEOUT_SECONDS", str(app_config.runtime.worker_join_timeout_seconds))
+        ),
+        tool_process_kill_grace_seconds=float(
+            os.getenv("AOR_TOOL_PROCESS_KILL_GRACE_SECONDS", str(app_config.runtime.tool_process_kill_grace_seconds))
         ),
         runtime_timezone=os.getenv("AOR_RUNTIME_TIMEZONE", "").strip() or app_config.runtime.runtime_timezone,
         enable_llm_intent_extraction=app_config.runtime.enable_llm_intent_extraction,

@@ -18,6 +18,7 @@ from aor_runtime.runtime.diagnostic_orchestration import diagnostic_plan_for_goa
 from aor_runtime.runtime.output_shape import infer_goal_output_contract, is_shell_status_goal, scalar_field_for_tool
 from aor_runtime.runtime.semantic_obligations import apply_semantic_obligations_to_actions
 from aor_runtime.runtime.shell_safety import classify_shell_command
+from aor_runtime.runtime.sql_ast_validation import normalize_and_validate_sql_ast
 from aor_runtime.runtime.sql_safety import ensure_read_only_sql, normalize_pg_relation_quoting, validate_read_only_sql
 from aor_runtime.runtime.temporal import TemporalArgumentCanonicalizer, TemporalNormalizationError
 from aor_runtime.runtime.tool_output_contracts import (
@@ -579,12 +580,16 @@ class ActionPlanValidator:
             normalized = _repair_sql_date_year_extraction(normalized, catalog)
             normalized = _repair_sql_age_argument_order(normalized, catalog)
             normalized = _repair_sql_relationship_query_from_goal(normalized, catalog, goal=goal) or normalized
-            validation = validate_read_only_sql(normalized)
-            if not validation.valid:
-                return [validation.reason or "SQL failed validation."]
             concept_errors = _validate_sql_goal_concepts(normalized, catalog, goal=goal)
             if concept_errors:
                 return concept_errors
+            ast_validation = normalize_and_validate_sql_ast(normalized, catalog)
+            if not ast_validation.valid:
+                return ast_validation.messages
+            normalized = ast_validation.normalized_sql
+            validation = validate_read_only_sql(normalized)
+            if not validation.valid:
+                return [validation.reason or "SQL failed validation."]
             reference_errors = _validate_sql_catalog_references(normalized, catalog)
             if reference_errors:
                 return reference_errors

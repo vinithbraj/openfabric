@@ -81,12 +81,15 @@ def validate_result_shape(
                 "failed_sql": str(sql_log.step.args.get("query") or ""),
             },
         )
-    final_validation = _validate_final_output(goal_text, history, final_content=final_content, allow_raw_json=allow_raw_json)
+    final_validation = _validate_final_output(
+        goal_text,
+        history,
+        final_content=final_content,
+        allow_raw_json=allow_raw_json,
+        enforce_scalar_text=False,
+    )
     if not final_validation.success:
         return final_validation
-    contract_validation = validate_final_output_contract(goal_text, history, final_content=final_content)
-    if not contract_validation.success:
-        return ResultShapeValidation(contract_validation.success, contract_validation.reason, contract_validation.metadata)
     return ResultShapeValidation(True)
 
 
@@ -96,6 +99,7 @@ def _validate_final_output(
     *,
     final_content: str | None = None,
     allow_raw_json: bool = False,
+    enforce_scalar_text: bool = True,
 ) -> ResultShapeValidation:
     final_log = _last_successful_runtime_return(history)
     if final_log is None:
@@ -129,7 +133,7 @@ def _validate_final_output(
             f"Final response included unresolved output placeholder: {placeholder_alias}",
             {"final_output_validation": "literal_reference_output", "literal_alias": placeholder_alias},
         )
-    if _is_count_goal(goal):
+    if enforce_scalar_text and _is_count_goal(goal):
         numbers = re.findall(r"\b-?\d+(?:\.\d+)?\b", content)
         if content.strip() and len(numbers) != 1 and len(set(numbers)) != 1:
             return ResultShapeValidation(

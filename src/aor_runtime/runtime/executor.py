@@ -9,6 +9,7 @@ from typing import Any
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, PlanStep, StepLog
 from aor_runtime.runtime.dataflow import resolve_execution_step
+from aor_runtime.runtime.lifecycle import CancellationError, ToolInvocationContext
 from aor_runtime.runtime.policies import infer_output_mode
 from aor_runtime.runtime.presentation import strip_internal_telemetry
 from aor_runtime.runtime.response_renderer import ResponseRenderContext, RenderedResponse, render_agent_response
@@ -47,14 +48,19 @@ class PlanExecutor:
         *,
         step_outputs: dict[str, Any] | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        context: ToolInvocationContext | None = None,
     ) -> StepLog:
         started = datetime.now(timezone.utc).isoformat()
         try:
+            if context is not None:
+                context.throw_if_cancelled()
             resolved_step = resolve_execution_step(step, step_outputs or {})
             if event_sink is not None and self._supports_streaming(resolved_step.action):
-                output = self._invoke_streaming_tool(resolved_step, event_sink)
+                output = self._invoke_streaming_tool(resolved_step, event_sink, context=context)
             else:
-                output = self.tools.invoke(resolved_step.action, resolved_step.args)
+                output = self.tools.invoke(resolved_step.action, resolved_step.args, context=context)
+            if context is not None:
+                context.throw_if_cancelled()
             finished = datetime.now(timezone.utc).isoformat()
             if resolved_step.action == "python.exec" and not bool(output.get("success", False)):
                 raise ToolExecutionError(str(output.get("error") or "python.exec failed."))
@@ -66,6 +72,16 @@ class PlanExecutor:
                 step=resolved_step,
                 result=output,
                 success=True,
+                started_at=started,
+                finished_at=finished,
+            )
+        except CancellationError as exc:
+            finished = datetime.now(timezone.utc).isoformat()
+            return StepLog(
+                step=step,
+                result={},
+                success=False,
+                error=str(exc) or "Request cancelled.",
                 started_at=started,
                 finished_at=finished,
             )
@@ -84,7 +100,13 @@ class PlanExecutor:
         tool = self.tools.get(action)
         return callable(getattr(tool, "stream", None))
 
-    def _invoke_streaming_tool(self, step: PlanStep, event_sink: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    def _invoke_streaming_tool(
+        self,
+        step: PlanStep,
+        event_sink: Callable[[dict[str, Any]], None],
+        *,
+        context: ToolInvocationContext | None = None,
+    ) -> dict[str, Any]:
         tool = self.tools.get(step.action)
         validated_args = tool.args_model.model_validate(step.args)
         stream_method = getattr(tool, "stream", None)
@@ -99,6 +121,8 @@ class PlanExecutor:
         stream_metadata: dict[str, Any] = {}
 
         for chunk in stream_method(validated_args):
+            if context is not None:
+                context.throw_if_cancelled()
             chunk_type = str(chunk.get("type") or "")
             if chunk_type in {"stdout", "stderr"}:
                 text = str(chunk.get("text") or "")
@@ -270,7 +294,7 @@ def _render_final_result(
     raw_mode = settings.response_render_mode == "raw"
     last = history[-1]
     action = last.step.action
-    previous_action = history[-2].step.action if len(history) >= 2 else None
+    source_action = _upstream_presentation_action(history) if action == "runtime.return" else action
     context = ResponseRenderContext(
         mode=settings.response_render_mode,  # type: ignore[arg-type]
         show_executed_commands=settings.show_executed_commands,
@@ -286,7 +310,7 @@ def _render_final_result(
         insight_max_output_chars=settings.insight_max_output_chars,
         max_rows=max(1, int(settings.auto_artifact_row_threshold or 50)),
         max_command_length=settings.presentation_llm_max_input_chars,
-        source_action=previous_action if action == "runtime.return" else action,
+        source_action=source_action,
         output_mode=output_mode,
         goal=goal,
         llm_settings=settings,
@@ -295,7 +319,7 @@ def _render_final_result(
     )
     if action == "runtime.return":
         value = _coerce_structured_user_value(last.result.get("value"), fallback=last.result.get("output"))
-        if not _presentation_source_supported(previous_action) and not _presentation_value_supported(value):
+        if not _presentation_source_supported(source_action) and not _presentation_value_supported(value):
             return None
         if output_mode == "json" and raw_mode:
             clean = strip_internal_telemetry(value) if settings.response_render_mode == "user" else value
@@ -311,10 +335,18 @@ def _render_final_result(
         return None
 
 
+def _upstream_presentation_action(history: list[StepLog]) -> str | None:
+    for item in reversed(history):
+        action = str(item.step.action or "")
+        if action not in {"runtime.return", "text.format"}:
+            return action
+    return None
+
+
 def _presentation_source_supported(action: str | None) -> bool:
     if not action:
         return False
-    return action in {"sql.query", "shell.exec"} or action.startswith("slurm.") or action.startswith("fs.")
+    return action in {"sql.query", "sql.validate", "shell.exec"} or action.startswith("slurm.") or action.startswith("fs.")
 
 
 def _presentation_value_supported(value: Any) -> bool:

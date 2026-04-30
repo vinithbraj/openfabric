@@ -56,6 +56,9 @@ class RuntimeAppConfig(BaseModel):
     shell_default_cwd: str | None = None
     shell_max_output_chars: int = 20000
     shell_command_timeout_seconds: int = 30
+    shutdown_grace_seconds: float = 5.0
+    worker_join_timeout_seconds: float = 2.0
+    tool_process_kill_grace_seconds: float = 1.0
     runtime_timezone: str = ""
     max_plan_retries: int = 2
     action_planner_enabled: bool = True
@@ -108,6 +111,12 @@ class RuntimeAppConfig(BaseModel):
             raise ValueError("runtime.shell_max_output_chars must be greater than zero.")
         if self.shell_command_timeout_seconds <= 0:
             raise ValueError("runtime.shell_command_timeout_seconds must be greater than zero.")
+        if self.shutdown_grace_seconds <= 0:
+            raise ValueError("runtime.shutdown_grace_seconds must be greater than zero.")
+        if self.worker_join_timeout_seconds <= 0:
+            raise ValueError("runtime.worker_join_timeout_seconds must be greater than zero.")
+        if self.tool_process_kill_grace_seconds <= 0:
+            raise ValueError("runtime.tool_process_kill_grace_seconds must be greater than zero.")
         self.runtime_timezone = str(self.runtime_timezone or "").strip()
         if self.llm_summary_max_facts <= 0:
             raise ValueError("runtime.llm_summary_max_facts must be greater than zero.")

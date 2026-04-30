@@ -14,6 +14,7 @@ from pydantic import Field
 
 from aor_runtime.config import Settings, get_settings
 from aor_runtime.core.contracts import ToolSpec
+from aor_runtime.runtime.lifecycle import CancellationError, ToolInvocationContext, run_process_with_queue
 from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, ToolResultModel
 from aor_runtime.tools.filesystem import fs_copy, fs_exists, fs_find, fs_list, fs_mkdir, fs_read, fs_size, fs_write
 from aor_runtime.tools.shell import run_shell
@@ -391,27 +392,33 @@ class PythonExecTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        return self._run(arguments, context=None)
+
+    def run_with_context(self, arguments: ToolArgs, context: ToolInvocationContext) -> ToolResult:
+        return self._run(arguments, context=context)
+
+    def _run(self, arguments: ToolArgs, *, context: ToolInvocationContext | None) -> ToolResult:
         code = arguments.code
         inputs = dict(arguments.inputs or {})
         timeout = arguments.timeout
         _, normalized_code = _validate_code(code)
 
-        queue: mp.Queue = mp.Queue()
-        process = mp.Process(
-            target=_python_exec_worker,
-            args=(queue, normalized_code, {**self.settings.model_dump(mode="json"), "__python_inputs__": inputs}),
-        )
-        process.start()
-        process.join(timeout)
-        if process.is_alive():
-            process.terminate()
-            process.join()
+        try:
+            payload = run_process_with_queue(
+                target=_python_exec_worker,
+                args=(normalized_code, {**self.settings.model_dump(mode="json"), "__python_inputs__": inputs}),
+                timeout_seconds=timeout,
+                timeout_message="python.exec timed out.",
+                context=context,
+                process_name="aor-python-exec",
+            )
+        except TimeoutError:
             return self.ToolResult(success=False, output=None, result=None, error="python.exec timed out.")
-
-        if queue.empty():
+        except RuntimeError as exc:
+            if isinstance(exc, CancellationError):
+                raise
             return self.ToolResult(success=False, output=None, result=None, error="python.exec did not return a result.")
 
-        payload = queue.get()
         if not payload.get("ok"):
             return self.ToolResult(
                 success=False,

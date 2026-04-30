@@ -232,7 +232,7 @@ def test_openwebui_summary_trace_streams_compact_progress_without_raw_payloads(t
     assert "Plan Overview" in body
     assert "> **Plan Overview**" in body
     assert "`Query dicom` -> `Return answer`" in body
-    assert "`Running sql.query: dicom / SELECT COUNT(*) AS count_value FROM patients;`" in body
+    assert "`Running Query dicom: dicom / SELECT COUNT(*) AS count_value FROM patients;`" in body
     assert "Rows returned: 1" in body
     assert "`Rows returned: 1`" in body
     assert "`Checking result...`" in body

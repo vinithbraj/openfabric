@@ -82,6 +82,8 @@ def present_result(result: Any, context: PresentationContext | None = None) -> P
         return PresentationResult(markdown=_render_raw(result), summary={"raw": True}, redacted=False, raw_available=True)
     if _is_slurm_result(result, ctx):
         return present_slurm_result(_as_dict(result), ctx)
+    if _is_sql_validation_result(result, ctx):
+        return present_sql_validation_result(_as_dict(result), ctx)
     if _is_sql_result(result, ctx):
         return present_sql_result(result, ctx)
     if _is_filesystem_result(result, ctx):
@@ -543,6 +545,39 @@ def present_sql_result(result: Any, context: PresentationContext) -> Presentatio
     return PresentationResult(markdown="\n".join(lines).strip(), summary={"database": database, "row_count": row_count}, raw_available=True)
 
 
+def present_sql_validation_result(result: dict[str, Any], context: PresentationContext) -> PresentationResult:
+    clean = strip_internal_telemetry(result) if context.mode == "user" else dict(result)
+    database = str(clean.get("database") or "").strip()
+    query = str(clean.get("query") or "").strip()
+    valid = bool(clean.get("valid"))
+    reason = str(clean.get("reason") or "").strip()
+    explanation = str(clean.get("explanation") or "").strip()
+
+    rows: list[tuple[str, Any]] = [
+        ("Status", "Valid" if valid else "Invalid"),
+        ("Database", database),
+        ("Explanation", explanation),
+    ]
+    if reason:
+        rows.append(("Reason", reason))
+
+    lines = md_section("SQL Validation")
+    lines.extend(["", *md_table(["Field", "Value"], rows, alignments=["left", "left"])])
+    if query:
+        lines.extend(["", *md_section("Query Validated")])
+        lines.extend(md_code_block("sql", query))
+    return PresentationResult(
+        markdown="\n".join(lines).strip(),
+        summary={
+            "domain": "sql",
+            "database": database,
+            "valid": valid,
+            "reason": reason or None,
+        },
+        raw_available=True,
+    )
+
+
 def present_filesystem_result(result: Any, context: PresentationContext) -> PresentationResult:
     payload = _as_dict(result)
     if {"file_count", "total_size_bytes"} <= set(payload):
@@ -621,6 +656,20 @@ def build_sanitized_presentation_facts(
     clean = strip_internal_telemetry(result)
     action_tools = [_action_attr(action, "tool") for action in actions if _action_attr(action, "tool") and _action_attr(action, "tool") != "runtime.return"]
     source_action = str(context.source_action or (action_tools[-1] if action_tools else ""))
+
+    if source_action == "sql.validate" or isinstance(clean, dict) and {"database", "query", "valid", "explanation"} <= set(clean):
+        payload = _as_dict(clean)
+        return _drop_empty(
+            {
+                "domain": "sql",
+                "operation": "validate",
+                "database": payload.get("database"),
+                "valid": payload.get("valid"),
+                "reason": payload.get("reason"),
+                "explanation": payload.get("explanation"),
+                "tools": action_tools,
+            }
+        )
 
     if source_action == "sql.query" or isinstance(clean, dict) and "database" in clean and "rows" in clean:
         rows = list(clean.get("rows") or []) if isinstance(clean, dict) else []
@@ -757,6 +806,12 @@ def _is_sql_result(result: Any, context: PresentationContext) -> bool:
     if context.source_action == "sql.query":
         return True
     return isinstance(result, dict) and "rows" in result and "database" in result
+
+
+def _is_sql_validation_result(result: Any, context: PresentationContext) -> bool:
+    if context.source_action == "sql.validate":
+        return True
+    return isinstance(result, dict) and {"database", "query", "valid", "explanation"} <= set(result)
 
 
 def _is_filesystem_result(result: Any, context: PresentationContext) -> bool:

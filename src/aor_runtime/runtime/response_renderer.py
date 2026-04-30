@@ -20,6 +20,7 @@ from aor_runtime.runtime.presentation import (
     strip_internal_telemetry,
     summarize_presented_facts_with_llm,
 )
+from aor_runtime.runtime.tool_surfaces import friendly_label_for_tool
 from aor_runtime.tools.slurm import SACCT_FORMAT, SINFO_NODE_FORMAT, SINFO_PARTITION_FORMAT, SQUEUE_FORMAT
 
 
@@ -285,6 +286,16 @@ def _action_from_step(step: Any, *, result: dict[str, Any], success: bool) -> Ex
 
     if tool == "runtime.return":
         return ExecutedAction(tool=tool, label="Return", status=status)
+    if tool == "sql.validate":
+        sql = str(result.get("query") or args.get("query") or "").strip()
+        return ExecutedAction(
+            tool=tool,
+            label="SQL validation",
+            sql=sql or None,
+            database=str(result.get("database") or args.get("database") or "").strip() or None,
+            result=dict(result or {}),
+            status=status,
+        )
     if tool == "sql.query":
         sql = str(result.get("sql_final") or result.get("sql_normalized") or args.get("query") or "").strip()
         return ExecutedAction(
@@ -326,17 +337,34 @@ def _executed_actions_markdown(actions: list[ExecutedAction], context: ResponseR
     if not visible:
         return ""
 
-    sql_actions = [action for action in visible if action.sql]
+    validation_actions = [action for action in visible if action.tool == "sql.validate" and action.sql]
+    sql_actions = [action for action in visible if action.tool == "sql.query" and action.sql]
     slurm_actions = [action for action in visible if action.tool.startswith("slurm.") and action.command]
     fs_actions = [action for action in visible if action.tool.startswith("fs.")]
     shell_actions = [action for action in visible if action.tool == "shell.exec" and action.command]
     other_actions = [
         action
         for action in visible
-        if action not in sql_actions and action not in slurm_actions and action not in fs_actions and action not in shell_actions and action.tool != "runtime.return"
+        if action not in validation_actions
+        and action not in sql_actions
+        and action not in slurm_actions
+        and action not in fs_actions
+        and action not in shell_actions
+        and action.tool != "runtime.return"
     ]
 
     lines: list[str] = []
+    if validation_actions:
+        action = validation_actions[-1]
+        lines.extend(md_section("Query Validated"))
+        lines.extend(md_code_block("sql", _format_sql_for_display(action.sql or "", context.max_command_length)))
+        status = "Valid" if bool((action.result or {}).get("valid")) else "Invalid"
+        rows: list[tuple[str, Any]] = [("Tool", action.tool), ("Database", action.database or ""), ("Validation", status)]
+        reason = str((action.result or {}).get("reason") or "").strip()
+        if reason and context.mode != "user":
+            rows.append(("Reason", reason))
+        rows.append(("Status", _title(action.status)))
+        lines.extend(_execution_table(rows))
     if sql_actions:
         action = sql_actions[-1]
         lines.extend(md_section("Query Used"))
@@ -496,6 +524,11 @@ def _hidden_event_names(events: list[Any], context: ResponseRenderContext) -> li
 
 
 def _result_for_presentation(final_result: Any, actions: list[ExecutedAction]) -> Any:
+    validation_actions = [action for action in actions if action.tool == "sql.validate" and isinstance(action.result, dict)]
+    if validation_actions and not (
+        isinstance(final_result, dict) and {"database", "query", "valid", "explanation"} <= set(final_result)
+    ):
+        return validation_actions[-1].result or final_result
     slurm_actions = [action for action in actions if action.tool.startswith("slurm.") and isinstance(action.result, dict)]
     if not slurm_actions:
         return final_result
@@ -571,7 +604,7 @@ def _overall_status(actions: list[ExecutedAction]) -> str:
 
 
 def _tool_label(tool: str) -> str:
-    return tool.replace(".", " ").replace("_", " ").title()
+    return friendly_label_for_tool(tool)
 
 
 def _title(value: Any) -> str:

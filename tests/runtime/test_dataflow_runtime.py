@@ -8,8 +8,10 @@ from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, ExecutionStep
 from aor_runtime.runtime.dataflow import normalize_execution_plan_dataflow, resolve_execution_step
 from aor_runtime.runtime.executor import PlanExecutor
+from aor_runtime.runtime.lifecycle import ActiveRunRegistry, CancellationToken, ToolInvocationContext
 from aor_runtime.runtime.plan_canonicalizer import canonicalize_plan
 from aor_runtime.tools.factory import build_tool_registry
+from aor_runtime.tools.python_exec import PythonExecTool
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -421,3 +423,22 @@ def test_python_exec_supports_safe_json_serialization_fallback(tmp_path: Path) -
 
     assert log.success is True
     assert log.result["result"] == '{"value": "(1+2j)"}'
+
+
+def test_python_exec_tool_unregisters_managed_worker_after_result(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    registry = ActiveRunRegistry(shutdown_grace_seconds=0.5, process_kill_grace_seconds=0.1)
+    context = ToolInvocationContext(
+        cancellation=CancellationToken(),
+        process_registry=registry,
+        worker_join_timeout_seconds=0.5,
+        tool_process_kill_grace_seconds=0.1,
+    )
+
+    result = PythonExecTool(settings).invoke(
+        {"code": "result = {'items': list(range(1000))}"},
+        context=context,
+    )
+
+    assert result["success"] is True
+    assert registry.active_process_count() == 0

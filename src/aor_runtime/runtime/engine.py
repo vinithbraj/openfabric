@@ -20,6 +20,7 @@ from aor_runtime.runtime.dataflow import resolve_execution_step
 from aor_runtime.runtime.error_normalization import normalize_planner_error, normalize_runtime_failure
 from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
 from aor_runtime.runtime.failure_classifier import classify_failure, generate_prompt_suggestions
+from aor_runtime.runtime.lifecycle import ActiveRunRegistry, CancellationError, CancellationToken, ToolInvocationContext
 from aor_runtime.runtime.planner import ACTIVE_PLANNING_MODE, TaskPlanner, summarize_plan, summarize_planner_raw_output
 from aor_runtime.runtime.policies import PlanContractViolation
 from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
@@ -215,7 +216,11 @@ class ExecutionEngine:
         self.compiler = GraphCompiler()
         self.planner = TaskPlanner(llm=self.llm, tools=self.tool_registry, settings=self.settings)
         self.executor = PlanExecutor(self.tool_registry)
-        self.validator = RuntimeValidator(self.settings)
+        self.validator = RuntimeValidator(self.settings, tools=self.tool_registry)
+        self.active_runs = ActiveRunRegistry(
+            shutdown_grace_seconds=self.settings.shutdown_grace_seconds,
+            process_kill_grace_seconds=self.settings.tool_process_kill_grace_seconds,
+        )
 
     def _emit_startup_banner(self) -> None:
         sys.stderr.write(f"{render_startup_banner()}\n")
@@ -266,10 +271,12 @@ class ExecutionEngine:
         max_cycles: int | None = None,
         approve_dangerous: bool = False,
         stream_shell_output: bool = False,
+        runtime_context: ToolInvocationContext | None = None,
     ) -> dict[str, Any]:
         session = self._get_required_session(session_id)
         if self._is_done(session.state):
             return ensure_jsonable(session.state)
+        context = runtime_context or self.create_invocation_context()
 
         approved_dangerous_step_id: int | None = None
         if bool(session.state.get("awaiting_confirmation")):
@@ -296,24 +303,38 @@ class ExecutionEngine:
 
         cycles = 0
         while not self._is_done(session.state):
+            try:
+                context.throw_if_cancelled()
+            except CancellationError as exc:
+                self._mark_session_cancelled(session, str(exc) or "Request cancelled.")
+                break
             if max_cycles is not None and cycles >= max_cycles:
                 break
             action = self._decide_next_action(session.state)
-            if action == "planner":
-                self._run_planner(session)
-            elif action == "executor":
-                self._run_executor_step(session, approved_dangerous_step_id=approved_dangerous_step_id)
-                approved_dangerous_step_id = None
-            elif action == "validator":
-                self._run_validator(session)
-            else:
-                session.state["status"] = "failed"
-                session.state["error"] = f"Unknown next action: {action}"
-                session.state["done"] = True
+            try:
+                if action == "planner":
+                    self._run_planner(session, runtime_context=context)
+                elif action == "executor":
+                    self._run_executor_step(session, approved_dangerous_step_id=approved_dangerous_step_id, runtime_context=context)
+                    approved_dangerous_step_id = None
+                elif action == "validator":
+                    self._run_validator(session)
+                else:
+                    session.state["status"] = "failed"
+                    session.state["error"] = f"Unknown next action: {action}"
+                    session.state["done"] = True
+                    break
+            except CancellationError as exc:
+                self._mark_session_cancelled(session, str(exc) or "Request cancelled.")
                 break
             if bool(session.state.get("awaiting_confirmation")):
                 break
             cycles += 1
+            try:
+                context.throw_if_cancelled()
+            except CancellationError as exc:
+                self._mark_session_cancelled(session, str(exc) or "Request cancelled.")
+                break
 
         if self._is_done(session.state):
             self._finalize_session(session)
@@ -366,7 +387,17 @@ class ExecutionEngine:
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.list_sessions(limit=limit)
 
-    def _run_planner(self, session: AgentSession) -> None:
+    def create_invocation_context(self, token: CancellationToken | None = None) -> ToolInvocationContext:
+        return ToolInvocationContext(
+            cancellation=token or CancellationToken(),
+            process_registry=self.active_runs,
+            worker_join_timeout_seconds=self.settings.worker_join_timeout_seconds,
+            tool_process_kill_grace_seconds=self.settings.tool_process_kill_grace_seconds,
+        )
+
+    def _run_planner(self, session: AgentSession, runtime_context: ToolInvocationContext | None = None) -> None:
+        if runtime_context is not None:
+            runtime_context.throw_if_cancelled()
         state = session.state
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
         self._configure_runtime_for_compiled(compiled)
@@ -632,7 +663,14 @@ class ExecutionEngine:
                 return
         self._persist(session, node_name="planner")
 
-    def _run_executor_step(self, session: AgentSession, approved_dangerous_step_id: int | None = None) -> None:
+    def _run_executor_step(
+        self,
+        session: AgentSession,
+        approved_dangerous_step_id: int | None = None,
+        runtime_context: ToolInvocationContext | None = None,
+    ) -> None:
+        if runtime_context is not None:
+            runtime_context.throw_if_cancelled()
         state = session.state
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
         self._configure_runtime_for_compiled(compiled)
@@ -708,7 +746,14 @@ class ExecutionEngine:
                 },
             )
 
-        log = self.executor.execute_step(resolved_step, event_sink=emit_step_output if stream_shell_output else None)
+        log = self.executor.execute_step(
+            resolved_step,
+            event_sink=emit_step_output if stream_shell_output else None,
+            context=runtime_context,
+        )
+        if runtime_context is not None and runtime_context.cancellation is not None and runtime_context.cancellation.cancelled:
+            self._mark_session_cancelled(session, runtime_context.cancellation.reason)
+            return
         fallback_result = maybe_apply_semantic_fallback(self.settings, goal=str(state.get("goal", "")), log=log)
         if fallback_result.applied:
             log = fallback_result.log
@@ -1119,6 +1164,36 @@ class ExecutionEngine:
             payload={"status": status, "final_output": final_output, "metrics": metrics},
         )
         self._persist(session, node_name="finalize")
+
+    def _mark_session_cancelled(self, session: AgentSession, reason: str = "Request cancelled.") -> None:
+        message = str(reason or "Request cancelled.").strip() or "Request cancelled."
+        if message == "cancelled":
+            message = "Request cancelled."
+        session.state.update(
+            {
+                "current_node": "runtime",
+                "next_action": "",
+                "status": "failed",
+                "done": True,
+                "error": message,
+                "awaiting_confirmation": False,
+                "confirmation_kind": None,
+                "confirmation_step": None,
+                "confirmation_message": None,
+                "final_output": {
+                    "content": "Request cancelled.",
+                    "artifacts": list((session.state.get("final_output") or {}).get("artifacts", [])),
+                    "metadata": {"failure_type": "cancelled", "reason": message},
+                },
+            }
+        )
+        self.store.append_event(
+            session_id=session.id,
+            node_name="runtime",
+            event_type="runtime.cancelled",
+            payload={"reason": message},
+        )
+        self._persist(session, node_name="runtime")
 
     def _decorate_final_output(
         self,

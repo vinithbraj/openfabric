@@ -1211,7 +1211,7 @@ def test_result_shape_rejects_raw_json_even_when_user_asks_for_json_inline() -> 
 
 
 def test_sql_validator_rejects_unknown_catalog_column_before_execution(tmp_path: Path, monkeypatch) -> None:
-    _patch_catalog(monkeypatch)
+    _patch_relationship_catalog(monkeypatch)
     settings = _settings(tmp_path)
     validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
     plan = ActionPlan.model_validate(
@@ -1262,7 +1262,7 @@ def test_sql_validator_repairs_study_modality_to_series_join(tmp_path: Path, mon
 
     assert result.valid is True
     repaired = plan.actions[0].inputs["query"]
-    assert 'JOIN "flathr"."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"' in repaired
+    assert 'JOIN flathr."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"' in repaired
     assert 'se."Modality" AS modality' in repaired
     assert 'COUNT(DISTINCT st."StudyInstanceUID") AS study_count' in repaired
 
@@ -1359,7 +1359,7 @@ def test_sql_validator_repairs_min_max_avg_studies_per_patient_to_cte(tmp_path: 
     assert result.valid is True
     repaired = plan.actions[0].inputs["query"]
     assert repaired.startswith("WITH grouped_counts AS")
-    assert 'LEFT JOIN "flathr"."Study" r ON r."PatientID" = b."PatientID"' in repaired
+    assert 'LEFT JOIN flathr."Study" r ON r."PatientID" = b."PatientID"' in repaired
     assert "MIN(related_count) AS min_studies_per_patient" in repaired
     assert "AVG(related_count) AS average_studies_per_patient" in repaired
 
@@ -1428,8 +1428,8 @@ def test_sql_validator_repairs_study_instance_count_through_series(tmp_path: Pat
 
     assert result.valid is True
     repaired = plan.actions[0].inputs["query"]
-    assert 'JOIN "flathr"."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"' in repaired
-    assert 'JOIN "flathr"."Instance" i ON i."SeriesInstanceUID" = se."SeriesInstanceUID"' in repaired
+    assert 'JOIN flathr."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"' in repaired
+    assert 'JOIN flathr."Instance" i ON i."SeriesInstanceUID" = se."SeriesInstanceUID"' in repaired
     assert 'i."StudyInstanceUID"' not in repaired
     assert "LIMIT 10" in repaired
 

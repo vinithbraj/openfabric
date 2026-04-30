@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -56,20 +56,6 @@ def json_dumps(payload: Any) -> str:
     import json
 
     return json.dumps(payload, default=str)
-
-
-def _start_background(target):
-    outcome: dict[str, Any] = {}
-
-    def runner() -> None:
-        try:
-            outcome["result"] = target()
-        except Exception as exc:  # noqa: BLE001
-            outcome["error"] = exc
-
-    thread = threading.Thread(target=runner, daemon=True)
-    thread.start()
-    return thread, outcome
 
 
 def _latest_session_status(engine: ExecutionEngine, session_id: str) -> tuple[str | None, dict[str, Any] | None]:
@@ -130,11 +116,20 @@ def _is_openwebui_meta_prompt(text: str) -> bool:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    app = FastAPI(title="OpenFABRIC", version=__version__)
     configured_settings = settings or get_settings(config_path=os.getenv(APP_CONFIG_PATH_ENV) or None)
     engine = ExecutionEngine(configured_settings)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            yield
+        finally:
+            engine.active_runs.cancel_all("server shutdown", wait_seconds=configured_settings.shutdown_grace_seconds)
+
+    app = FastAPI(title="OpenFABRIC", version=__version__, lifespan=lifespan)
     app.state.engine = engine
     app.state.settings = configured_settings
+    app.state.active_runs = engine.active_runs
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -231,29 +226,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             stream_shell_output=True,
         )
         session_id = str(session["id"])
-        worker, outcome = _start_background(
-            lambda: engine.resume_session(session_id, trigger="manual", stream_shell_output=True)
+        handle = engine.active_runs.start_background(
+            session_id,
+            lambda token: engine.resume_session(
+                session_id,
+                trigger="manual",
+                stream_shell_output=True,
+                runtime_context=engine.create_invocation_context(token),
+            ),
         )
+        worker = handle.thread
+        outcome = handle.outcome
 
         def event_stream():
             cursor: int | None = None
-            while True:
-                emitted = False
-                for event in engine.store.get_events_after(session_id, after_id=cursor):
-                    emitted = True
-                    cursor = int(event["id"])
-                    yield _format_sse(str(event["event_type"]), event)
-                    if str(event.get("event_type") or "") == "finalize.completed":
-                        worker.join(timeout=0)
-                        return
-                if not worker.is_alive():
-                    if "error" in outcome:
-                        payload = {"error": str(outcome["error"])}
-                        yield _format_sse("stream.error", payload)
-                    status, _ = _latest_session_status(engine, session_id)
-                    if status in {"completed", "failed"} and not emitted:
-                        return
-                time.sleep(0.05)
+            completed = False
+            try:
+                while True:
+                    emitted = False
+                    for event in engine.store.get_events_after(session_id, after_id=cursor):
+                        emitted = True
+                        cursor = int(event["id"])
+                        yield _format_sse(str(event["event_type"]), event)
+                        if str(event.get("event_type") or "") == "finalize.completed":
+                            completed = True
+                            if worker is not None:
+                                worker.join(timeout=0)
+                            return
+                    if not handle.is_alive:
+                        if "error" in outcome:
+                            payload = {"error": str(outcome["error"])}
+                            yield _format_sse("stream.error", payload)
+                        status, _ = _latest_session_status(engine, session_id)
+                        if status in {"completed", "failed"} and not emitted:
+                            completed = True
+                            return
+                    time.sleep(0.05)
+            finally:
+                if not completed and handle.is_alive:
+                    handle.cancel("client disconnected")
+                    handle.join(timeout=configured_settings.worker_join_timeout_seconds)
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -324,9 +336,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             stream_shell_output=True,
         )
         session_id = str(session["id"])
-        worker, outcome = _start_background(
-            lambda: engine.resume_session(session_id, trigger="manual", stream_shell_output=True)
+        handle = engine.active_runs.start_background(
+            session_id,
+            lambda token: engine.resume_session(
+                session_id,
+                trigger="manual",
+                stream_shell_output=True,
+                runtime_context=engine.create_invocation_context(token),
+            ),
         )
+        worker = handle.thread
+        outcome = handle.outcome
         created = int(time.time())
         response_id = f"chatcmpl-{session_id}"
 
@@ -344,42 +364,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cursor: int | None = None
             visible_output: list[str] = []
             trace_renderer = OpenWebUITraceRenderer.from_settings(configured_settings)
-            yield chunk({"role": "assistant"})
-            while True:
-                emitted = False
-                for event in engine.store.get_events_after(session_id, after_id=cursor):
-                    emitted = True
-                    cursor = int(event["id"])
-                    text = trace_renderer.render(event)
-                    if text:
-                        yield chunk({"content": text})
-                    if str(event.get("event_type") or "") == "finalize.completed":
-                        payload = engine.get_session(session_id) or {}
-                        latest = dict(payload.get("latest_snapshot") or {})
-                        final_output = dict(latest.get("final_output") or {})
-                        final_content = str(final_output.get("content") or "")
-                        if final_content.strip() and final_content.strip() != "".join(visible_output).strip():
-                            yield chunk({"content": final_content})
-                        yield chunk({}, finish_reason="stop")
-                        yield "data: [DONE]\n\n"
-                        worker.join(timeout=0)
-                        return
-                if not worker.is_alive():
-                    if "error" in outcome:
-                        yield chunk({"content": f"Failed: {outcome['error']}"}, finish_reason="stop")
-                        yield "data: [DONE]\n\n"
-                        return
-                    status, payload = _latest_session_status(engine, session_id)
-                    if status in {"completed", "failed"} and not emitted:
-                        latest = dict((payload or {}).get("latest_snapshot") or {})
-                        final_output = dict(latest.get("final_output") or {})
-                        final_content = str(final_output.get("content") or "")
-                        if final_content.strip() and final_content.strip() != "".join(visible_output).strip():
-                            yield chunk({"content": final_content})
-                        yield chunk({}, finish_reason="stop")
-                        yield "data: [DONE]\n\n"
-                        return
-                time.sleep(0.05)
+            completed = False
+            try:
+                yield chunk({"role": "assistant"})
+                while True:
+                    emitted = False
+                    for event in engine.store.get_events_after(session_id, after_id=cursor):
+                        emitted = True
+                        cursor = int(event["id"])
+                        text = trace_renderer.render(event)
+                        if text:
+                            visible_output.append(text)
+                            yield chunk({"content": text})
+                        if str(event.get("event_type") or "") == "finalize.completed":
+                            payload = engine.get_session(session_id) or {}
+                            latest = dict(payload.get("latest_snapshot") or {})
+                            final_output = dict(latest.get("final_output") or {})
+                            final_content = str(final_output.get("content") or "")
+                            if final_content.strip() and final_content.strip() != "".join(visible_output).strip():
+                                yield chunk({"content": final_content})
+                            yield chunk({}, finish_reason="stop")
+                            yield "data: [DONE]\n\n"
+                            completed = True
+                            if worker is not None:
+                                worker.join(timeout=0)
+                            return
+                    if not handle.is_alive:
+                        if "error" in outcome:
+                            yield chunk({"content": f"Failed: {outcome['error']}"}, finish_reason="stop")
+                            yield "data: [DONE]\n\n"
+                            completed = True
+                            return
+                        status, payload = _latest_session_status(engine, session_id)
+                        if status in {"completed", "failed"} and not emitted:
+                            latest = dict((payload or {}).get("latest_snapshot") or {})
+                            final_output = dict(latest.get("final_output") or {})
+                            final_content = str(final_output.get("content") or "")
+                            if final_content.strip() and final_content.strip() != "".join(visible_output).strip():
+                                yield chunk({"content": final_content})
+                            yield chunk({}, finish_reason="stop")
+                            yield "data: [DONE]\n\n"
+                            completed = True
+                            return
+                    time.sleep(0.05)
+            finally:
+                if not completed and handle.is_alive:
+                    handle.cancel("client disconnected")
+                    handle.join(timeout=configured_settings.worker_join_timeout_seconds)
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
