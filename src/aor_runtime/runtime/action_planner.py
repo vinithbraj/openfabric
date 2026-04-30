@@ -566,15 +566,16 @@ class ActionPlanValidator:
             normalized = _repair_sql_empty_date_comparisons(normalized, catalog)
             normalized = _repair_sql_date_year_extraction(normalized, catalog)
             normalized = _repair_sql_age_argument_order(normalized, catalog)
+            normalized = _repair_sql_relationship_query_from_goal(normalized, catalog, goal=goal) or normalized
             validation = validate_read_only_sql(normalized)
             if not validation.valid:
                 return [validation.reason or "SQL failed validation."]
-            reference_errors = _validate_sql_catalog_references(normalized, catalog)
-            if reference_errors:
-                return reference_errors
             concept_errors = _validate_sql_goal_concepts(normalized, catalog, goal=goal)
             if concept_errors:
                 return concept_errors
+            reference_errors = _validate_sql_catalog_references(normalized, catalog)
+            if reference_errors:
+                return reference_errors
             action.inputs["query"] = normalized
         else:
             action.inputs["query"] = safe_query
@@ -1819,11 +1820,170 @@ def _schema_question_goal(goal: str) -> bool:
     return bool(re.search(r"\b(?:schema|schemas|table|tables|column|columns|describe|identify|link|links|related)\b", str(goal or ""), re.IGNORECASE))
 
 
+@dataclass(frozen=True)
+class SqlRelationshipEdge:
+    left_table: str
+    right_table: str
+    left_column: str
+    right_column: str
+
+
+class SqlRelationshipGraph:
+    def __init__(self, catalog: Any) -> None:
+        self.catalog = catalog
+        self.edges = self._build_edges(catalog)
+
+    def join_columns(self, left_table: Any, right_table: Any) -> tuple[str, str] | None:
+        left_name = left_table.qualified_name
+        right_name = right_table.qualified_name
+        for edge in self.edges:
+            if edge.left_table == left_name and edge.right_table == right_name:
+                return edge.left_column, edge.right_column
+            if edge.left_table == right_name and edge.right_table == left_name:
+                return edge.right_column, edge.left_column
+        shared = _shared_join_column(left_table, right_table)
+        if shared:
+            return shared, shared
+        return None
+
+    @staticmethod
+    def _build_edges(catalog: Any) -> list[SqlRelationshipEdge]:
+        edges: list[SqlRelationshipEdge] = []
+        tables_by_qualified = {table.qualified_name.lower(): table for table in catalog.tables}
+        for table in catalog.tables:
+            for fk in table.foreign_keys:
+                constrained = list(fk.get("constrained_columns") or [])
+                referred = list(fk.get("referred_columns") or [])
+                referred_schema = str(fk.get("referred_schema") or table.schema_name)
+                referred_table = str(fk.get("referred_table") or "")
+                target = tables_by_qualified.get(f"{referred_schema}.{referred_table}".lower())
+                if target is None:
+                    continue
+                for left_column, right_column in zip(constrained, referred):
+                    edges.append(
+                        SqlRelationshipEdge(
+                            left_table=table.qualified_name,
+                            right_table=target.qualified_name,
+                            left_column=str(left_column),
+                            right_column=str(right_column),
+                        )
+                    )
+        for left_name, right_name, column in (
+            ("Study", "Series", "StudyInstanceUID"),
+            ("Series", "Instance", "SeriesInstanceUID"),
+            ("Patient", "Study", "PatientID"),
+        ):
+            left = catalog.table_by_name(None, left_name)
+            right = catalog.table_by_name(None, right_name)
+            if left is not None and right is not None and left.column_by_name(column) and right.column_by_name(column):
+                edge = SqlRelationshipEdge(left.qualified_name, right.qualified_name, column, column)
+                if edge not in edges:
+                    edges.append(edge)
+        return edges
+
+
+def _repair_sql_relationship_query_from_goal(query: str, catalog: Any, *, goal: str) -> str | None:
+    goal_text = str(goal or "").lower()
+    if _is_study_count_by_modality_goal(goal_text):
+        repaired = _study_count_by_modality_query(catalog, goal=goal)
+        if repaired:
+            return repaired
+    if re.search(r"\binstances?\b", goal_text) and re.search(r"\bstud(?:y|ies)\b", goal_text):
+        repaired = _study_instance_count_query(catalog, goal=goal)
+        if repaired:
+            return repaired
+    return None
+
+
+def _is_study_count_by_modality_goal(goal_text: str) -> bool:
+    if not (re.search(r"\bmodalit(?:y|ies)\b", goal_text) and re.search(r"\bstud(?:y|ies)\b", goal_text)):
+        return False
+    return bool(
+        re.search(r"\bgroup(?:ed)?\s+by\s+modalit", goal_text)
+        or re.search(r"\bby\s+modalit", goal_text)
+        or re.search(r"\bnumber\s+of\s+stud(?:y|ies)\b", goal_text)
+        or re.search(r"\bstud(?:y|ies)\s+per\s+modalit", goal_text)
+    )
+
+
+def _study_count_by_modality_query(catalog: Any, *, goal: str) -> str | None:
+    study = catalog.table_by_name(None, "Study")
+    series = catalog.table_by_name(None, "Series")
+    if study is None or series is None:
+        return None
+    graph = SqlRelationshipGraph(catalog)
+    join = graph.join_columns(study, series)
+    study_uid = join[0] if join else _first_existing_column(study, ["StudyInstanceUID", "StudyUID"])
+    series_study_uid = join[1] if join else _first_existing_column(series, ["StudyInstanceUID", "StudyUID"])
+    modality = _first_existing_column(series, ["Modality"])
+    if not study_uid or not series_study_uid or not modality:
+        return None
+    study_relation = _quote_sql_relation(study.schema_name, study.table_name, dialect=catalog.dialect)
+    series_relation = _quote_sql_relation(series.schema_name, series.table_name, dialect=catalog.dialect)
+    study_uid_q = _quote_sql_identifier(study_uid, dialect=catalog.dialect)
+    series_study_uid_q = _quote_sql_identifier(series_study_uid, dialect=catalog.dialect)
+    modality_q = _quote_sql_identifier(modality, dialect=catalog.dialect)
+    count_alias = "study_count" if re.search(r"\bstud(?:y|ies)\b", str(goal or ""), re.IGNORECASE) else "count_value"
+    return (
+        f"SELECT se.{modality_q} AS modality, COUNT(DISTINCT st.{study_uid_q}) AS {count_alias}\n"
+        f"FROM {study_relation} st\n"
+        f"JOIN {series_relation} se ON se.{series_study_uid_q} = st.{study_uid_q}\n"
+        f"GROUP BY se.{modality_q}\n"
+        f"ORDER BY {count_alias} DESC"
+    )
+
+
+def _study_instance_count_query(catalog: Any, *, goal: str) -> str | None:
+    study = catalog.table_by_name(None, "Study")
+    series = catalog.table_by_name(None, "Series")
+    instance = catalog.table_by_name(None, "Instance")
+    if study is None or series is None or instance is None:
+        return None
+    graph = SqlRelationshipGraph(catalog)
+    study_series_join = graph.join_columns(study, series)
+    series_instance_join = graph.join_columns(series, instance)
+    study_uid = study_series_join[0] if study_series_join else _first_existing_column(study, ["StudyInstanceUID", "StudyUID"])
+    series_study_uid = study_series_join[1] if study_series_join else _first_existing_column(series, ["StudyInstanceUID", "StudyUID"])
+    series_uid = series_instance_join[0] if series_instance_join else _first_existing_column(series, ["SeriesInstanceUID", "SeriesUID"])
+    instance_series_uid = series_instance_join[1] if series_instance_join else _first_existing_column(instance, ["SeriesInstanceUID", "SeriesUID"])
+    if not all((study_uid, series_study_uid, series_uid, instance_series_uid)):
+        return None
+    limit_match = re.search(r"\btop\s+(\d+)|\bfirst\s+(\d+)|\blimit\s+(\d+)", str(goal or ""), re.IGNORECASE)
+    limit = next((int(item) for item in (limit_match.groups() if limit_match else ()) if item), None)
+    study_relation = _quote_sql_relation(study.schema_name, study.table_name, dialect=catalog.dialect)
+    series_relation = _quote_sql_relation(series.schema_name, series.table_name, dialect=catalog.dialect)
+    instance_relation = _quote_sql_relation(instance.schema_name, instance.table_name, dialect=catalog.dialect)
+    study_uid_q = _quote_sql_identifier(str(study_uid), dialect=catalog.dialect)
+    series_study_uid_q = _quote_sql_identifier(str(series_study_uid), dialect=catalog.dialect)
+    series_uid_q = _quote_sql_identifier(str(series_uid), dialect=catalog.dialect)
+    instance_series_uid_q = _quote_sql_identifier(str(instance_series_uid), dialect=catalog.dialect)
+    query = (
+        f"SELECT st.{study_uid_q} AS study_instance_uid, COUNT(*) AS instance_count\n"
+        f"FROM {study_relation} st\n"
+        f"JOIN {series_relation} se ON se.{series_study_uid_q} = st.{study_uid_q}\n"
+        f"JOIN {instance_relation} i ON i.{instance_series_uid_q} = se.{series_uid_q}\n"
+        f"GROUP BY st.{study_uid_q}\n"
+        "ORDER BY instance_count DESC"
+    )
+    if limit is not None:
+        query = f"{query}\nLIMIT {limit}"
+    return query
+
+
+def _first_existing_column(table: Any, candidates: list[str]) -> str | None:
+    for candidate in candidates:
+        column = table.column_by_name(candidate)
+        if column is not None:
+            return column.column_name
+    return None
+
+
 def _validate_sql_catalog_references(query: str, catalog: Any) -> list[str]:
     if re.search(r"(?i)\binformation_schema\b|\bpg_catalog\b", query):
         return ["Use sql.schema for schema/catalog questions instead of querying system catalog tables directly."]
 
     alias_columns = _sql_alias_columns(query, catalog)
+    alias_tables = _sql_alias_tables(query, catalog)
     referenced_tables = list(alias_columns.values())
     all_referenced_columns = {column for columns in alias_columns.values() for column in columns}
     all_catalog_columns = {column.column_name for table in catalog.tables for column in table.columns}
@@ -1834,6 +1994,28 @@ def _validate_sql_catalog_references(query: str, catalog: Any) -> list[str]:
         columns = alias_columns.get(alias.lower())
         if columns is not None and column not in columns:
             errors.append(_unknown_column_error(column, columns, alias=alias))
+
+    for alias, column in re.findall(r'(?<!")\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()', query):
+        if alias.lower() not in alias_tables:
+            continue
+        columns = alias_columns.get(alias.lower())
+        if columns is not None and column not in columns:
+            errors.append(_unknown_column_error(column, columns, alias=alias))
+
+    for alias, table in alias_tables.items():
+        table_columns = {column.column_name for column in table.columns}
+        referenced = re.findall(rf'(?<!")\b{re.escape(alias)}\s*\.\s*"([^"]+)"', query, flags=re.IGNORECASE)
+        referenced.extend(
+            re.findall(rf'(?<!")\b{re.escape(alias)}\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()', query, flags=re.IGNORECASE)
+        )
+        for column in referenced:
+            if column not in table_columns:
+                candidate = _nearest_column_match(column, table_columns)
+                if candidate:
+                    errors.append(
+                        f"Column {column} is not on table {table.qualified_name}; "
+                        f"use {alias}.{_quote_sql_identifier(candidate, dialect=catalog.dialect)} or join the table that owns it."
+                    )
 
     for column in re.findall(r'"([^"]+)"', query):
         if "." in column:
@@ -1865,6 +2047,8 @@ def _validate_sql_goal_concepts(query: str, catalog: Any, *, goal: str) -> list[
         or ("body" in column.lower() and "part" in column.lower())
     ]
     if not body_part_columns:
+        if re.search(r"\bif\s+such\s+a\s+column\s+exists\b|\bif\s+available\b|\bif\s+present\b", goal_text):
+            return ["Requested optional schema concept body part/anatomical region is not present in the SQL catalog."]
         series_table = catalog.table_by_name(None, "Series")
         candidates = {column.column_name for column in series_table.columns} if series_table is not None else all_columns
         return [_unknown_column_error("BodyPartExamined", candidates)]
@@ -2015,6 +2199,25 @@ def _sql_alias_columns(query: str, catalog: Any) -> dict[str, set[str]]:
     return aliases
 
 
+def _sql_alias_tables(query: str, catalog: Any) -> dict[str, Any]:
+    aliases: dict[str, Any] = {}
+    relation_re = re.compile(
+        r'(?is)\b(?:from|join)\s+(?!\()((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*))?)(?:\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?'
+    )
+    for match in relation_re.finditer(query):
+        relation = match.group(1)
+        alias = match.group(2)
+        schema, table = _split_sql_relation(relation)
+        table_ref = catalog.table_by_name(schema, table)
+        if table_ref is None:
+            continue
+        aliases[table_ref.table_name.lower()] = table_ref
+        aliases[table.lower()] = table_ref
+        if alias and alias.lower() not in CLAUSE_ALIAS_STOP_WORDS:
+            aliases[alias.lower()] = table_ref
+    return aliases
+
+
 CLAUSE_ALIAS_STOP_WORDS = {
     "where",
     "join",
@@ -2082,6 +2285,11 @@ def _rank_column_candidates(column: str, candidates: set[str]) -> list[str]:
             scored.append((score, candidate))
     scored.sort(key=lambda item: (-item[0], item[1].lower()))
     return [candidate for _, candidate in scored] or sorted(candidates)[:8]
+
+
+def _nearest_column_match(column: str, candidates: set[str]) -> str | None:
+    ranked = _rank_column_candidates(column, candidates)
+    return ranked[0] if ranked else None
 
 
 def _validate_sql_literal_type_mismatches(query: str, catalog: Any) -> list[str]:

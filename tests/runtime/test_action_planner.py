@@ -98,6 +98,50 @@ def _patch_catalog(monkeypatch) -> None:
     monkeypatch.setattr("aor_runtime.runtime.action_planner.get_sql_catalog", lambda settings, database=None: catalog)
 
 
+def _dicom_relationship_catalog() -> SqlSchemaCatalog:
+    return SqlSchemaCatalog(
+        database="dicom",
+        dialect="postgresql",
+        tables=[
+            SqlTableRef(
+                schema_name="flathr",
+                table_name="Study",
+                columns=[
+                    SqlColumnRef(schema_name="flathr", table_name="Study", column_name="StudyInstanceUID", primary_key=True),
+                    SqlColumnRef(schema_name="flathr", table_name="Study", column_name="StudyDescription"),
+                ],
+                primary_key_columns=["StudyInstanceUID"],
+            ),
+            SqlTableRef(
+                schema_name="flathr",
+                table_name="Series",
+                columns=[
+                    SqlColumnRef(schema_name="flathr", table_name="Series", column_name="SeriesInstanceUID", primary_key=True),
+                    SqlColumnRef(schema_name="flathr", table_name="Series", column_name="StudyInstanceUID"),
+                    SqlColumnRef(schema_name="flathr", table_name="Series", column_name="Modality"),
+                    SqlColumnRef(schema_name="flathr", table_name="Series", column_name="SeriesDescription"),
+                ],
+                primary_key_columns=["SeriesInstanceUID"],
+            ),
+            SqlTableRef(
+                schema_name="flathr",
+                table_name="Instance",
+                columns=[
+                    SqlColumnRef(schema_name="flathr", table_name="Instance", column_name="SOPInstanceUID", primary_key=True),
+                    SqlColumnRef(schema_name="flathr", table_name="Instance", column_name="SeriesInstanceUID"),
+                ],
+                primary_key_columns=["SOPInstanceUID"],
+            ),
+        ],
+    )
+
+
+def _patch_relationship_catalog(monkeypatch) -> None:
+    catalog = _dicom_relationship_catalog()
+    monkeypatch.setattr("aor_runtime.runtime.action_planner.get_all_sql_catalogs", lambda settings: [catalog])
+    monkeypatch.setattr("aor_runtime.runtime.action_planner.get_sql_catalog", lambda settings, database=None: catalog)
+
+
 def test_shell_scalar_field_uses_stdout_for_count_goals() -> None:
     assert scalar_field_for_tool("shell.exec", goal="How many processes are running on this machine?") == "stdout"
     assert scalar_field_for_tool("shell.exec", goal="What exit code did the command return?") == "returncode"
@@ -1189,6 +1233,154 @@ def test_sql_validator_rejects_unknown_catalog_column_before_execution(tmp_path:
 
     assert result.valid is False
     assert "SQL references unknown column: BodyPartExamined" in "; ".join(result.errors)
+
+
+def test_sql_validator_repairs_study_modality_to_series_join(tmp_path: Path, monkeypatch) -> None:
+    _patch_relationship_catalog(monkeypatch)
+    settings = _settings(tmp_path)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "Show the number of studies grouped by modality in dicom.",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "inputs": {
+                        "database": "dicom",
+                        "query": 'SELECT s."Modality", COUNT(*) AS study_count FROM flathr."Study" s GROUP BY s."Modality"',
+                    },
+                    "output_binding": "rows",
+                },
+                {"id": "format", "tool": "text.format", "inputs": {"source": "$query.rows"}, "depends_on": ["query"]},
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$format.content"}, "depends_on": ["format"]},
+            ],
+        }
+    )
+
+    result = validator.validate(plan, goal="Show the number of studies grouped by modality in dicom.")
+
+    assert result.valid is True
+    repaired = plan.actions[0].inputs["query"]
+    assert 'JOIN "flathr"."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"' in repaired
+    assert 'se."Modality" AS modality' in repaired
+    assert 'COUNT(DISTINCT st."StudyInstanceUID") AS study_count' in repaired
+
+
+def test_sql_modality_relationship_repair_is_limited_to_grouping_goals(tmp_path: Path, monkeypatch) -> None:
+    _patch_relationship_catalog(monkeypatch)
+    settings = _settings(tmp_path)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
+    original_query = (
+        'SELECT st."StudyInstanceUID", COUNT(DISTINCT se."Modality") AS modality_count '
+        'FROM flathr."Study" st JOIN flathr."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID" '
+        'GROUP BY st."StudyInstanceUID" ORDER BY modality_count DESC LIMIT 10'
+    )
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "Show the top 10 studies with the highest number of distinct modalities in dicom.",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "inputs": {"database": "dicom", "query": original_query},
+                    "output_binding": "rows",
+                },
+                {"id": "format", "tool": "text.format", "inputs": {"source": "$query.rows"}, "depends_on": ["query"]},
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$format.content"}, "depends_on": ["format"]},
+            ],
+        }
+    )
+
+    result = validator.validate(plan, goal="Show the top 10 studies with the highest number of distinct modalities in dicom.")
+
+    assert result.valid is True
+    assert "COUNT(DISTINCT se.\"Modality\") AS modality_count" in plan.actions[0].inputs["query"]
+
+
+def test_sql_validator_repairs_study_instance_count_through_series(tmp_path: Path, monkeypatch) -> None:
+    _patch_relationship_catalog(monkeypatch)
+    settings = _settings(tmp_path)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "Show the top 10 studies by total number of DICOM instances in dicom.",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "inputs": {
+                        "database": "dicom",
+                        "query": 'SELECT i."StudyInstanceUID", COUNT(*) AS instance_count FROM flathr."Instance" i GROUP BY i."StudyInstanceUID" ORDER BY instance_count DESC LIMIT 10',
+                    },
+                    "output_binding": "rows",
+                },
+                {"id": "format", "tool": "text.format", "inputs": {"source": "$query.rows"}, "depends_on": ["query"]},
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$format.content"}, "depends_on": ["format"]},
+            ],
+        }
+    )
+
+    result = validator.validate(plan, goal="Show the top 10 studies by total number of DICOM instances in dicom.")
+
+    assert result.valid is True
+    repaired = plan.actions[0].inputs["query"]
+    assert 'JOIN "flathr"."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"' in repaired
+    assert 'JOIN "flathr"."Instance" i ON i."SeriesInstanceUID" = se."SeriesInstanceUID"' in repaired
+    assert 'i."StudyInstanceUID"' not in repaired
+    assert "LIMIT 10" in repaired
+
+
+def test_sql_validator_rejects_column_on_wrong_alias_before_execution(tmp_path: Path, monkeypatch) -> None:
+    _patch_relationship_catalog(monkeypatch)
+    settings = _settings(tmp_path)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "Show instance rows in dicom.",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "inputs": {"database": "dicom", "query": 'SELECT i."StudyInstanceUID" FROM flathr."Instance" i'},
+                    "output_binding": "rows",
+                },
+                {"id": "format", "tool": "text.format", "inputs": {"source": "$query.rows"}, "depends_on": ["query"]},
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$format.content"}, "depends_on": ["format"]},
+            ],
+        }
+    )
+
+    result = validator.validate(plan, goal="Show instance rows in dicom.")
+
+    assert result.valid is False
+    assert "Column StudyInstanceUID is not on table flathr.Instance" in "; ".join(result.errors)
+
+
+def test_sql_validator_reports_optional_missing_schema_concept_cleanly(tmp_path: Path, monkeypatch) -> None:
+    _patch_relationship_catalog(monkeypatch)
+    settings = _settings(tmp_path)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "Show all distinct body parts or anatomical regions if such a column exists in dicom, with counts.",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "inputs": {"database": "dicom", "query": 'SELECT "BodyPartExamined", COUNT(*) FROM flathr."Series" GROUP BY "BodyPartExamined"'},
+                    "output_binding": "rows",
+                },
+                {"id": "format", "tool": "text.format", "inputs": {"source": "$query.rows"}, "depends_on": ["query"]},
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$format.content"}, "depends_on": ["format"]},
+            ],
+        }
+    )
+
+    result = validator.validate(plan, goal="Show all distinct body parts or anatomical regions if such a column exists in dicom, with counts.")
+
+    assert result.valid is False
+    assert "optional schema concept body part/anatomical region is not present" in "; ".join(result.errors)
 
 
 def test_text_format_outputs_csv_and_markdown() -> None:
