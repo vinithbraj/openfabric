@@ -784,6 +784,80 @@ def test_action_planner_repairs_slurm_count_plan_to_scalar_count_field(tmp_path:
     assert "Repaired scalar final output" in " ".join(planner.last_canonicalization_repairs)
 
 
+def test_action_planner_repairs_slurm_grouped_count_by_partition(tmp_path: Path) -> None:
+    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+    planner = LLMActionPlanner(
+        llm=FakeLLM(
+            [
+                {
+                    "goal": "count of jobs in each slurm partition",
+                    "actions": [
+                        {
+                            "id": "query_jobs",
+                            "tool": "slurm.queue",
+                            "inputs": {},
+                            "output_binding": "jobs",
+                            "expected_result_shape": {"kind": "scalar"},
+                        }
+                    ],
+                    "expected_final_shape": {"kind": "count"},
+                }
+            ]
+        ),
+        tools=build_tool_registry(settings),
+        settings=settings,
+    )
+
+    plan = planner.build_plan(
+        goal="count of jobs in each slurm partition ? give me the answer for each slurm partition separately.",
+        planner=PlannerConfig(),
+        allowed_tools=["slurm.queue"],
+        input_payload={},
+    )
+
+    assert [step.action for step in plan.steps] == ["slurm.queue", "text.format", "runtime.return"]
+    assert plan.steps[0].args["group_by"] == "partition"
+    assert plan.steps[0].args["limit"] is None
+    assert "group_by=partition" in " ".join(planner.last_canonicalization_repairs)
+
+
+def test_action_planner_keeps_filtered_slurm_count_scalar(tmp_path: Path) -> None:
+    settings = Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")
+    planner = LLMActionPlanner(
+        llm=FakeLLM(
+            [
+                {
+                    "goal": "count of jobs in totalseg partition",
+                    "actions": [
+                        {
+                            "id": "query_jobs",
+                            "tool": "slurm.queue",
+                            "inputs": {"partition": "totalseg"},
+                            "output_binding": "jobs",
+                            "expected_result_shape": {"kind": "table"},
+                        }
+                    ],
+                    "expected_final_shape": {"kind": "count"},
+                }
+            ]
+        ),
+        tools=build_tool_registry(settings),
+        settings=settings,
+    )
+
+    plan = planner.build_plan(
+        goal="count of jobs in totalseg partition",
+        planner=PlannerConfig(),
+        allowed_tools=["slurm.queue"],
+        input_payload={},
+    )
+
+    assert [step.action for step in plan.steps] == ["slurm.queue", "runtime.return"]
+    assert plan.steps[0].args["partition"] == "totalseg"
+    assert "group_by" not in plan.steps[0].args
+    assert plan.steps[1].args["value"] == {"$ref": "jobs", "path": "count"}
+
+
 def test_action_planner_completes_sql_export_plan(tmp_path: Path, monkeypatch) -> None:
     _patch_catalog(monkeypatch)
     llm = FakeLLM(
@@ -980,6 +1054,103 @@ def test_result_shape_validator_accepts_single_numeric_count() -> None:
     ]
 
     assert validate_result_shape("count the number of patients", history).success is True
+
+
+def test_result_shape_validator_accepts_slurm_queue_count_with_verbose_final_content() -> None:
+    history = [
+        StepLog(
+            step=ExecutionStep(
+                id=1,
+                action="slurm.queue",
+                args={"partition": "totalseg"},
+                output="totalseg_jobs",
+            ),
+            result={"jobs": [{"job_id": "1", "partition": "totalseg"}], "count": 259, "total_count": 259, "returned_count": 1},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(
+                id=2,
+                action="runtime.return",
+                args={"value": {"$ref": "totalseg_jobs", "path": "count"}, "mode": "count"},
+                output="final",
+            ),
+            result={"output": "259", "value": 259},
+            success=True,
+        ),
+    ]
+    final_content = "Count: 259\n\nStats\nTime Taken: 7.80 s\nLLM Passes: 1\nSteps: 2"
+
+    result = validate_result_shape("count of jobs in totalseg partition in the slurm cluster", history, final_content=final_content)
+
+    assert result.success is True
+
+
+def test_result_shape_validator_rejects_slurm_collection_formatted_for_count() -> None:
+    history = [
+        StepLog(
+            step=ExecutionStep(id=1, action="slurm.queue", args={"partition": "totalseg"}, output="totalseg_jobs"),
+            result={"jobs": [{"job_id": "1", "partition": "totalseg"}], "count": 259, "total_count": 259, "returned_count": 1},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(
+                id=2,
+                action="text.format",
+                args={"source": {"$ref": "totalseg_jobs", "path": "jobs"}, "format": "markdown"},
+                output="formatted_jobs",
+            ),
+            result={"content": "| job_id | partition |\n| --- | --- |\n| 1 | totalseg |", "format": "markdown"},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(
+                id=3,
+                action="runtime.return",
+                args={"value": {"$ref": "formatted_jobs", "path": "content"}},
+                output="final",
+            ),
+            result={"output": "| job_id | partition |\n| --- | --- |\n| 1 | totalseg |", "value": "| job_id | partition |"},
+            success=True,
+        ),
+    ]
+
+    result = validate_result_shape("count of jobs in totalseg partition in the slurm cluster", history)
+
+    assert result.success is False
+    assert result.metadata is not None
+    assert result.metadata["final_output_validation"] == "scalar_returned_collection"
+
+
+def test_result_shape_validator_accepts_shell_and_filesystem_scalar_counts_with_verbose_final_content() -> None:
+    shell_history = [
+        StepLog(
+            step=ExecutionStep(id=1, action="shell.exec", args={"command": "ps -eo pid= | wc -l"}, output="process_count"),
+            result={"stdout": "42\n", "stderr": "", "returncode": 0},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(id=2, action="runtime.return", args={"value": "$process_count.stdout"}, output="final"),
+            result={"output": "42", "value": "42"},
+            success=True,
+        ),
+    ]
+    fs_history = [
+        StepLog(
+            step=ExecutionStep(id=1, action="fs.aggregate", args={"path": ".", "pattern": "*.txt"}, output="txt_summary"),
+            result={"file_count": 17, "total_size_bytes": 1234, "summary_text": "17 files"},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(id=2, action="runtime.return", args={"value": "$txt_summary.file_count"}, output="final"),
+            result={"output": "17", "value": 17},
+            success=True,
+        ),
+    ]
+    verbose = "Result: {value}\n\nStats\nTime Taken: 2.71 s\nLLM Passes: 3\nSteps: 2"
+
+    assert validate_result_shape("How many processes are running on this machine?", shell_history, final_content=verbose).success is True
+    assert validate_result_shape("count txt files here", fs_history, final_content=verbose).success is True
 
 
 def test_result_shape_validator_rejects_json_collection_for_non_sql_count() -> None:

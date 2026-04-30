@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aor_runtime.runtime.output_contract import OutputContract, normalize_output, render_output
+from aor_runtime.runtime.output_shape import infer_goal_output_contract
 
 
 def test_list_to_csv_output_contract() -> None:
@@ -52,3 +53,13 @@ def test_rows_render_to_text_table_when_explicitly_requested() -> None:
     assert value == rows
     assert "job_id | user " in render_output(value, contract)
     assert "12345  | alice" in render_output(value, contract)
+
+
+def test_grouped_count_goals_infer_table_contract() -> None:
+    assert infer_goal_output_contract("count of jobs in each slurm partition").kind == "table"
+    assert infer_goal_output_contract("count jobs by state").kind == "table"
+    assert infer_goal_output_contract("count jobs per user").kind == "table"
+
+
+def test_filtered_count_goal_stays_scalar_contract() -> None:
+    assert infer_goal_output_contract("count of jobs in totalseg partition").kind == "scalar"

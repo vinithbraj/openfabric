@@ -128,6 +128,77 @@ def test_slurm_collection_is_materialized_without_raw_json_final(tmp_path: Path)
     assert "job_id,state" in Path(result.artifact.path).read_text()
 
 
+def test_small_slurm_grouped_queue_counts_use_group_count_not_job_count(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    history = [
+        StepLog(
+            step=ExecutionStep(id=1, action="slurm.queue", args={"group_by": "partition", "limit": None}, output="jobs_by_partition"),
+            result={
+                "jobs": [],
+                "count": 292,
+                "total_count": 292,
+                "returned_count": 292,
+                "limit": None,
+                "truncated": False,
+                "filters": {"partition": None},
+                "group_by": "partition",
+                "grouped": {"slicer": 33, "totalseg": 259},
+            },
+            success=True,
+        )
+    ]
+
+    result = AutoArtifactMaterializer(settings).maybe_materialize(
+        goal="count of jobs in each slurm partition",
+        history=history,
+        final_output={"content": "inline grouped table", "artifacts": [], "metadata": {}},
+    )
+
+    assert result.applied is False
+    assert result.reason == "below_threshold"
+    assert result.metadata == {"row_count": 2}
+
+
+def test_large_slurm_grouped_queue_counts_materialize_by_group_count(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    grouped = {f"partition_{index}": index for index in range(51)}
+    history = [
+        StepLog(
+            step=ExecutionStep(id=1, action="slurm.queue", args={"group_by": "partition", "limit": None}, output="jobs_by_partition"),
+            result={
+                "jobs": [],
+                "count": 1000,
+                "total_count": 1000,
+                "returned_count": 1000,
+                "limit": None,
+                "truncated": False,
+                "filters": {"partition": None},
+                "group_by": "partition",
+                "grouped": grouped,
+            },
+            success=True,
+        )
+    ]
+
+    result = AutoArtifactMaterializer(settings).maybe_materialize(
+        goal="count jobs by partition in slurm",
+        history=history,
+        final_output={"content": "inline grouped table", "artifacts": [], "metadata": {}},
+    )
+
+    assert result.applied is True
+    assert result.artifact is not None
+    assert result.artifact.rows_written == 51
+    assert result.artifact.presentation_count == 51
+    assert result.artifact.source_count == 1000
+    assert result.artifact.source_tool == "slurm.queue"
+    assert result.artifact.source_field == "grouped"
+    assert "Source: **SLURM queue grouped counts**" in result.final_output["content"]
+    content = Path(result.artifact.path).read_text()
+    assert "group,count" in content
+    assert "partition_50,50" in content
+
+
 def test_large_parseable_shell_table_is_materialized_to_csv_artifact(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     stdout = "USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND\n" + "\n".join(

@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
+from aor_runtime.runtime.output_shape import grouped_count_field_for_goal
+
 
 SlurmRequestKind = Literal[
     "queue_status",
@@ -651,7 +653,9 @@ def _detect_job_id(prompt: str) -> str | None:
 
 def _detect_group_by(prompt: str) -> str | None:
     match = _GROUP_BY_RE.search(prompt)
-    return match.group(1).lower().replace(" ", "_") if match else None
+    if match:
+        return match.group(1).lower().replace(" ", "_")
+    return grouped_count_field_for_goal(prompt)
 
 
 def _detect_limit(prompt: str) -> int | None:

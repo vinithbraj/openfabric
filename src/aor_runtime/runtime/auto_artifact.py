@@ -221,8 +221,12 @@ def _artifact_source_label(source_tool: str, source_field: str) -> str:
     field = str(source_field or "").strip()
     if tool == "shell.exec" and field == "stdout":
         return "system shell output"
+    if tool == "slurm.queue" and field == "grouped":
+        return "SLURM queue grouped counts"
     if tool == "slurm.queue" and field == "jobs":
         return "SLURM queue jobs"
+    if tool == "slurm.accounting" and field == "grouped":
+        return "SLURM accounting grouped counts"
     if tool == "slurm.accounting" and field == "jobs":
         return "SLURM accounting jobs"
     if tool == "slurm.nodes" and field == "nodes":

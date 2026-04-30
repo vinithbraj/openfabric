@@ -57,7 +57,7 @@ def normalize_tool_output(tool: str, result: dict[str, Any] | Any) -> OutputEnve
     if shape is not None:
         for field_name in shape.collection_fields:
             value = result.get(field_name)
-            rows = _coerce_rows(value)
+            rows = _coerce_collection_rows(tool, field_name, value)
             if rows:
                 presentation_count, source_count = _collection_counts(tool, result, field_name, rows)
                 return OutputEnvelope(
@@ -161,6 +161,12 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _coerce_collection_rows(tool: str, field_name: str, value: Any) -> list[dict[str, Any]]:
+    if tool in {"slurm.queue", "slurm.accounting"} and field_name == "grouped" and isinstance(value, dict):
+        return [{"group": key, "count": count} for key, count in sorted(value.items(), key=lambda item: str(item[0]))]
+    return _coerce_rows(value)
+
+
 def _collection_counts(
     tool: str,
     result: dict[str, Any],
@@ -170,6 +176,8 @@ def _collection_counts(
     fallback = len(rows)
     if tool == "slurm.accounting_aggregate" and field_name == "groups":
         return fallback, _int_field(result, "job_count", "total_count", "count")
+    if tool in {"slurm.queue", "slurm.accounting"} and field_name == "grouped":
+        return fallback, _int_field(result, "total_count", "count", "returned_count")
     if tool == "slurm.nodes" and field_name == "nodes":
         return fallback, _int_field(result, "partition_row_count", "count", "total_count")
     if tool in {"slurm.queue", "slurm.accounting"} and field_name == "jobs":

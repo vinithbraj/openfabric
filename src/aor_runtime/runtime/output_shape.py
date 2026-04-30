@@ -80,7 +80,9 @@ def normalize_shape_kind(value: Any) -> GoalOutputKind:
 def infer_goal_output_contract(goal: str, expected_kind: Any = None, *, output_format: str | None = None) -> GoalOutputContract:
     expected = normalize_shape_kind(expected_kind)
     goal_text = str(goal or "")
-    if _is_scalar_count_goal(goal_text):
+    if is_grouped_count_goal(goal_text):
+        return GoalOutputContract(kind="table", format=output_format, reason="grouped_count_goal")
+    if is_scalar_count_goal(goal_text):
         return GoalOutputContract(kind="scalar", format=output_format, reason="count_goal")
     if EXPORT_GOAL_RE.search(goal_text):
         return GoalOutputContract(kind="file", format=output_format, reason="export_goal")
@@ -190,9 +192,42 @@ def validate_final_output_contract(
     return FinalOutputContractResult(True, metadata={"expected_shape": "single numeric scalar"})
 
 
-def _is_scalar_count_goal(goal: str) -> bool:
+def grouped_count_field_for_goal(goal: str) -> str | None:
     text = str(goal or "").lower()
     if not COUNT_GOAL_RE.search(text):
+        return None
+    field_patterns = {
+        "partition": r"(?:slurm\s+)?partitions?",
+        "state": r"states?",
+        "user": r"users?",
+        "node": r"nodes?",
+        "job_name": r"job\s+names?",
+    }
+    for field, pattern in field_patterns.items():
+        if re.search(rf"\b(?:by|per)\s+{pattern}\b", text):
+            return field
+        if re.search(rf"\b(?:in|for|across)?\s*(?:each|every)\s+{pattern}\b", text):
+            return field
+        if re.search(rf"\bfor\s+each\s+{pattern}\b", text):
+            return field
+        if re.search(rf"\b{pattern}\s+separately\b", text):
+            return field
+    if "separately" in text:
+        for field, pattern in field_patterns.items():
+            if re.search(rf"\b{pattern}\b", text):
+                return field
+    return None
+
+
+def is_grouped_count_goal(goal: str) -> bool:
+    return grouped_count_field_for_goal(goal) is not None
+
+
+def is_scalar_count_goal(goal: str) -> bool:
+    text = str(goal or "").lower()
+    if not COUNT_GOAL_RE.search(text):
+        return False
+    if is_grouped_count_goal(text):
         return False
     if re.search(r"\bcount\b[^.?!]*\b(?:by|per)\b|\b(?:count|counts?)\s+(?:by|per)\b|\bgroup(?:ed)?\s+by\b|\bby\s+number\s+of\b", text):
         return False
@@ -211,6 +246,10 @@ def _is_scalar_count_goal(goal: str) -> bool:
     if re.search(r"\b(?:show|list|display|return)\b", text) and re.search(r"\b(?:counts|study counts|series counts)\b", text):
         return False
     return True
+
+
+def _is_scalar_count_goal(goal: str) -> bool:
+    return is_scalar_count_goal(goal)
 
 
 def _last_successful_action(history: list[Any], action: str) -> Any | None:

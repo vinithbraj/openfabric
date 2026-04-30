@@ -88,6 +88,25 @@ def test_zero_queue_rows_are_readable() -> None:
     assert "No matching SLURM jobs were found." in rendered.markdown
 
 
+def test_zero_grouped_queue_counts_are_readable() -> None:
+    result = {
+        "jobs": [],
+        "count": 0,
+        "total_count": 0,
+        "returned_count": 0,
+        "limit": 100,
+        "truncated": False,
+        "filters": {},
+        "group_by": "partition",
+        "grouped": {},
+    }
+
+    rendered = present_result(result, PresentationContext(mode="user", source_action="slurm.queue"))
+
+    assert rendered.markdown.startswith("## Jobs by Partition")
+    assert "No matching SLURM jobs were found." in rendered.markdown
+
+
 def test_zero_duration_accounting_rows_are_readable() -> None:
     result = {
         "jobs": [],

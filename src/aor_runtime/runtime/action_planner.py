@@ -15,7 +15,13 @@ from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.dataflow import collect_step_references, normalize_execution_plan_dataflow
 from aor_runtime.runtime.diagnostic_orchestration import diagnostic_plan_for_goal
-from aor_runtime.runtime.output_shape import infer_goal_output_contract, is_shell_status_goal, scalar_field_for_tool
+from aor_runtime.runtime.output_shape import (
+    grouped_count_field_for_goal,
+    infer_goal_output_contract,
+    is_scalar_count_goal as _shared_is_scalar_count_goal,
+    is_shell_status_goal,
+    scalar_field_for_tool,
+)
 from aor_runtime.runtime.semantic_obligations import apply_semantic_obligations_to_actions
 from aor_runtime.runtime.shell_safety import classify_shell_command
 from aor_runtime.runtime.sql_ast_validation import normalize_and_validate_sql_ast
@@ -73,7 +79,6 @@ Output JSON only."""
 
 
 REFERENCE_RE = re.compile(r"^\$([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_.-]+))?$")
-COUNT_GOAL_RE = re.compile(r"\b(?:count|how\s+many|number\s+of|total\s+number\s+of)\b", re.IGNORECASE)
 EXPORT_GOAL_RE = re.compile(r"\b(?:save|write|export)\b.+\b[\w.-]+\.(?:txt|csv|json|md|markdown)\b", re.IGNORECASE)
 SQL_GOAL_RE = re.compile(r"\b(?:sql|database|table|tables|row|rows|patient|patients|study|studies|series|dicom)\b", re.IGNORECASE)
 DATABASE_NAME_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_]*_db\b")
@@ -703,6 +708,7 @@ class ActionPlanCanonicalizer:
         self._normalize_temporal_arguments(actions)
         self._apply_semantic_obligations(actions)
         self._canonicalize_tool_arguments(actions)
+        self._repair_grouped_slurm_queue_counts(actions)
         self._bound_broad_diagnostic_actions(actions)
         self._rewrite_schema_introspection_queries(actions)
         self._rewrite_explain_only_sql(actions)
@@ -983,6 +989,30 @@ class ActionPlanCanonicalizer:
             self.metadata["tool_argument_canonicalization"] = result.metadata
         for repair in result.repairs:
             self._repair("canonicalized_tool_arguments", repair)
+
+    def _repair_grouped_slurm_queue_counts(self, actions: list[dict[str, Any]]) -> None:
+        group_by = grouped_count_field_for_goal(self.goal)
+        if group_by is None:
+            return
+        for action in actions:
+            if action.get("tool") != "slurm.queue":
+                continue
+            inputs = action.setdefault("inputs", {})
+            current = str(inputs.get("group_by") or "").strip().lower().replace(" ", "_")
+            if current != group_by:
+                inputs["group_by"] = group_by
+                self._repair("repaired_slurm_grouped_count", f"Set slurm.queue group_by={group_by} for grouped count request.")
+            if "limit" not in inputs:
+                inputs["limit"] = None
+                self._repair("repaired_slurm_grouped_count", "Removed default queue limit for grouped count request.")
+            if group_by == "partition" and str(inputs.get("partition") or "").strip():
+                inputs.pop("partition", None)
+                self._repair("repaired_slurm_grouped_count", "Removed single-partition filter from grouped partition count.")
+            expected_shape = dict(action.get("expected_result_shape") or {})
+            if _normalize_shape_kind(expected_shape.get("kind")) == "scalar":
+                expected_shape["kind"] = "table"
+                action["expected_result_shape"] = expected_shape
+                self._repair("repaired_grouped_count_shape", "Repaired grouped count expected shape to table.")
 
     def _bound_broad_diagnostic_actions(self, actions: list[dict[str, Any]]) -> None:
         diagnostic_plan = diagnostic_plan_for_goal(self.goal)
@@ -1622,26 +1652,7 @@ def _looks_like_outer_count_query(query: str) -> bool:
 
 
 def _is_scalar_count_goal(goal: str) -> bool:
-    text = str(goal or "").lower()
-    if not COUNT_GOAL_RE.search(text):
-        return False
-    if re.search(r"\bcount\b[^.?!]*\b(?:by|per)\b|\b(?:count|counts?)\s+(?:by|per)\b|\bgroup(?:ed)?\s+by\b|\bby\s+number\s+of\b", text):
-        return False
-    if re.search(r"\b(?:show|list|display)\b", text) and re.search(
-        r"\b(?:ids?|identifiers?)\b.*\bnumber\s+of\b|\bnumber\s+of\b.*\b(?:for|per)\b",
-        text,
-    ):
-        return False
-    if re.search(r"\b(?:show|list|display)\b", text) and re.search(
-        r"\b[a-z0-9_]+\s+count\s+(?:greater|less|more|fewer|over|under|above|below|>=|<=|>|<)\b",
-        text,
-    ):
-        return False
-    if re.search(r"\b(?:top|rank|ranked|most|highest|largest)\b", text) and re.search(r"\b(?:show|list|display|return)\b", text):
-        return False
-    if re.search(r"\b(?:show|list|display|return)\b", text) and re.search(r"\b(?:counts|study counts|series counts)\b", text):
-        return False
-    return True
+    return _shared_is_scalar_count_goal(goal)
 
 
 def _looks_like_sql_goal(goal: str) -> bool:

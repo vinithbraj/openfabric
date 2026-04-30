@@ -6,10 +6,18 @@ from typing import Any
 
 from aor_runtime.core.contracts import StepLog
 from aor_runtime.runtime.output_envelope import parse_shell_table
-from aor_runtime.runtime.output_shape import validate_final_output_contract
+from aor_runtime.runtime.output_shape import (
+    TOOL_RESULT_SHAPES,
+    grouped_count_field_for_goal,
+    is_collection_ref,
+    is_grouped_count_goal,
+    is_scalar_count_goal,
+    scalar_field_for_tool,
+    validate_final_output_contract,
+)
+from aor_runtime.runtime.tool_output_contracts import normalize_tool_ref_path
 
 
-COUNT_GOAL_RE = re.compile(r"\b(?:count|how\s+many|number\s+of|total\s+number\s+of)\b", re.IGNORECASE)
 LIST_GOAL_RE = re.compile(r"\b(?:list|show|display|return)\b", re.IGNORECASE)
 
 
@@ -28,14 +36,33 @@ def validate_result_shape(
     allow_raw_json: bool = False,
 ) -> ResultShapeValidation:
     goal_text = str(goal or "")
+    if is_grouped_count_goal(goal_text):
+        grouped_validation = _validate_grouped_count_result(goal_text, history)
+        if not grouped_validation.success:
+            return grouped_validation
+        final_validation = _validate_final_output(
+            goal_text,
+            history,
+            final_content=final_content,
+            allow_raw_json=allow_raw_json,
+            enforce_scalar_text=False,
+        )
+        if not final_validation.success:
+            return final_validation
+        return ResultShapeValidation(True)
+
     if not _is_count_goal(goal_text):
         final_validation = _validate_final_output(goal_text, history, final_content=final_content, allow_raw_json=allow_raw_json)
         if not final_validation.success:
             return final_validation
         return ResultShapeValidation(True)
 
-    sql_log = _last_successful_sql_query(history)
-    if sql_log is None:
+    collection_validation = _validate_count_final_dataflow(history)
+    if not collection_validation.success:
+        return collection_validation
+
+    primary_validation = _validate_count_primary_result(goal_text, history)
+    if primary_validation is None:
         final_validation = _validate_final_output(goal_text, history, final_content=final_content, allow_raw_json=allow_raw_json)
         if not final_validation.success:
             return final_validation
@@ -43,6 +70,62 @@ def validate_result_shape(
         if not contract_validation.success:
             return ResultShapeValidation(contract_validation.success, contract_validation.reason, contract_validation.metadata)
         return ResultShapeValidation(True)
+    if not primary_validation.success:
+        return primary_validation
+
+    final_validation = _validate_final_output(
+        goal_text,
+        history,
+        final_content=final_content,
+        allow_raw_json=allow_raw_json,
+        enforce_scalar_text=False,
+    )
+    if not final_validation.success:
+        return final_validation
+    return ResultShapeValidation(True)
+
+
+def _validate_count_primary_result(goal: str, history: list[StepLog]) -> ResultShapeValidation | None:
+    sql_log = _last_successful_sql_query(history)
+    if sql_log is not None:
+        return _validate_sql_count_result(sql_log)
+
+    final_log = _last_successful_runtime_return(history)
+    if final_log is not None:
+        value = final_log.result.get("value")
+        if _is_numeric_scalar(value):
+            return ResultShapeValidation(
+                True,
+                metadata={"primary_result_validation": "runtime_return_scalar", "expected_shape": "single numeric scalar"},
+            )
+
+    producer_log, field, value = _last_successful_scalar_producer(goal, history)
+    if producer_log is None:
+        return None
+    if _is_numeric_scalar(value):
+        return ResultShapeValidation(
+            True,
+            metadata={
+                "primary_result_validation": "tool_scalar_field",
+                "tool": producer_log.step.action,
+                "field": field,
+                "expected_shape": "single numeric scalar",
+            },
+        )
+    return ResultShapeValidation(
+        False,
+        f"Count request expected numeric scalar from {producer_log.step.action}.{field}.",
+        {
+            "primary_result_validation": "tool_scalar_not_numeric",
+            "tool": producer_log.step.action,
+            "field": field,
+            "value_type": type(value).__name__,
+            "expected_shape": "single numeric scalar",
+        },
+    )
+
+
+def _validate_sql_count_result(sql_log: StepLog) -> ResultShapeValidation:
     rows = sql_log.result.get("rows")
     if not isinstance(rows, list):
         return ResultShapeValidation(False, "Count request did not return SQL rows.", {"expected_shape": "single numeric scalar"})
@@ -81,16 +164,7 @@ def validate_result_shape(
                 "failed_sql": str(sql_log.step.args.get("query") or ""),
             },
         )
-    final_validation = _validate_final_output(
-        goal_text,
-        history,
-        final_content=final_content,
-        allow_raw_json=allow_raw_json,
-        enforce_scalar_text=False,
-    )
-    if not final_validation.success:
-        return final_validation
-    return ResultShapeValidation(True)
+    return ResultShapeValidation(True, metadata={"primary_result_validation": "sql_single_numeric_scalar"})
 
 
 def _validate_final_output(
@@ -157,30 +231,7 @@ def _validate_final_output(
 
 
 def _is_count_goal(goal: str) -> bool:
-    text = str(goal or "").lower()
-    if not COUNT_GOAL_RE.search(text):
-        return False
-    if re.search(r"\bcount\b.+\bby\b|\b(?:count|counts?)\s+(?:by|per)\b|\bgroup(?:ed)?\s+by\b|\bby\s+number\s+of\b", text):
-        return False
-    if re.search(r"\b(?:show|list|display)\b", text) and re.search(
-        r"\b(?:ids?|identifiers?)\b.*\bnumber\s+of\b|\bnumber\s+of\b.*\b(?:for|per)\b",
-        text,
-    ):
-        return False
-    if re.search(r"\b(?:show|list|display)\b", text) and re.search(
-        r"\b[a-z0-9_]+\s+count\s+(?:greater|less|more|fewer|over|under|above|below|>=|<=|>|<)\b",
-        text,
-    ):
-        return False
-    if re.search(r"\b(?:top|rank|ranked|most|highest|largest)\b", text) and re.search(
-        r"\b(?:show|list|display|return)\b", text
-    ):
-        return False
-    if re.search(r"\b(?:show|list|display|return)\b", text) and re.search(
-        r"\b(?:counts|study counts|series counts)\b", text
-    ):
-        return False
-    return True
+    return is_scalar_count_goal(goal)
 
 
 def _is_list_or_table_goal(goal: str) -> bool:
@@ -217,6 +268,181 @@ def _raw_parseable_shell_table_returned(content: str) -> bool:
         return False
     rows = parse_shell_table(text)
     return len(rows) > 0
+
+
+def _validate_grouped_count_result(goal: str, history: list[StepLog]) -> ResultShapeValidation:
+    expected_group = grouped_count_field_for_goal(goal)
+    for item in reversed(history):
+        if not item.success or item.step.action in {"runtime.return", "text.format", "fs.write"}:
+            continue
+        if not isinstance(item.result, dict):
+            continue
+        grouped = item.result.get("grouped")
+        if isinstance(grouped, dict):
+            group_by = str(item.result.get("group_by") or item.step.args.get("group_by") or "").strip().lower().replace(" ", "_")
+            if expected_group and group_by and group_by != expected_group:
+                return ResultShapeValidation(
+                    False,
+                    f"Grouped count request expected grouping by {expected_group}, got {group_by}.",
+                    {
+                        "expected_shape": "grouped count table",
+                        "expected_group_by": expected_group,
+                        "actual_group_by": group_by,
+                    },
+                )
+            return ResultShapeValidation(
+                True,
+                metadata={
+                    "primary_result_validation": "grouped_count_table",
+                    "tool": item.step.action,
+                    "group_by": group_by or expected_group,
+                    "group_count": len(grouped),
+                    "expected_shape": "grouped count table",
+                },
+            )
+        groups = item.result.get("groups")
+        if isinstance(groups, list):
+            return ResultShapeValidation(
+                True,
+                metadata={
+                    "primary_result_validation": "grouped_count_table",
+                    "tool": item.step.action,
+                    "group_count": len(groups),
+                    "expected_shape": "grouped count table",
+                },
+            )
+    return ResultShapeValidation(
+        False,
+        "Grouped count request did not return grouped results.",
+        {
+            "final_output_validation": "grouped_count_missing",
+            "expected_group_by": expected_group,
+            "expected_shape": "grouped count table",
+        },
+    )
+
+
+def _validate_count_final_dataflow(history: list[StepLog]) -> ResultShapeValidation:
+    final_log = _last_successful_runtime_return(history)
+    if final_log is None:
+        return ResultShapeValidation(True)
+    value = final_log.result.get("value")
+    if _is_collection_like(value):
+        return ResultShapeValidation(
+            False,
+            "Scalar request returned a collection instead of one numeric value.",
+            {"final_output_validation": "scalar_returned_collection", "expected_shape": "single numeric scalar"},
+        )
+    if _ref_points_to_collection(final_log.step.args.get("value"), history):
+        return ResultShapeValidation(
+            False,
+            "Scalar request final dataflow points to a collection output.",
+            {"final_output_validation": "scalar_returned_collection", "expected_shape": "single numeric scalar"},
+        )
+    return ResultShapeValidation(True)
+
+
+def _ref_points_to_collection(value: Any, history: list[StepLog]) -> bool:
+    if isinstance(value, list):
+        return True
+    if isinstance(value, dict) and "$ref" not in value:
+        return True
+    ref = _parse_ref(value)
+    if ref is None:
+        return False
+    alias, path = ref
+    producer = _producer_for_alias(history, alias)
+    if producer is None:
+        return False
+    normalized_path = normalize_tool_ref_path(producer.step.action, path)
+    if (
+        producer.step.action == "sql.query"
+        and str(normalized_path or "").split(".", 1)[0] == "rows"
+        and _validate_sql_count_result(producer).success
+    ):
+        return False
+    if is_collection_ref(producer.step.action, normalized_path):
+        return True
+    if producer.step.action == "text.format" and (normalized_root := normalized_path):
+        if normalized_root.split(".", 1)[0] == "content":
+            return _ref_points_to_collection(producer.step.args.get("source"), history)
+    return False
+
+
+def _parse_ref(value: Any) -> tuple[str, str | None] | None:
+    if isinstance(value, dict) and "$ref" in value:
+        alias = str(value.get("$ref") or "").strip().lstrip("$")
+        path = value.get("path")
+        return (alias, None if path is None else str(path).strip() or None) if alias else None
+    if isinstance(value, str) and value.strip().startswith("$"):
+        text = value.strip()[1:]
+        alias, _separator, path = text.partition(".")
+        alias = alias.strip()
+        return (alias, path.strip() or None) if alias else None
+    return None
+
+
+def _producer_for_alias(history: list[StepLog], alias: str) -> StepLog | None:
+    normalized = _normalize_alias(alias)
+    for item in reversed(history):
+        if not item.success:
+            continue
+        output = str(item.step.output or "").strip()
+        candidates = {_normalize_alias(output), _normalize_alias(str(item.step.id))}
+        if normalized in candidates:
+            return item
+    return None
+
+
+def _last_successful_scalar_producer(goal: str, history: list[StepLog]) -> tuple[StepLog | None, str | None, Any]:
+    for item in reversed(history):
+        if not item.success or item.step.action in {"runtime.return", "text.format"}:
+            continue
+        if not isinstance(item.result, dict):
+            continue
+        fields = _scalar_candidate_fields(item.step.action, goal=goal)
+        for field in fields:
+            value = _value_at_path(item.result, field)
+            if value is not None:
+                return item, field, value
+    return None, None, None
+
+
+def _scalar_candidate_fields(tool: str, *, goal: str) -> list[str]:
+    fields: list[str] = []
+    preferred = scalar_field_for_tool(tool, goal=goal)
+    if preferred:
+        fields.append(preferred)
+    shape = TOOL_RESULT_SHAPES.get(tool)
+    if shape is not None:
+        for field in shape.scalar_fields:
+            if field not in fields and field != "returned_count":
+                fields.append(field)
+    return fields
+
+
+def _value_at_path(value: Any, path: str | None) -> Any:
+    current = value
+    if not path:
+        return current
+    for part in str(path).split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+            continue
+        if isinstance(current, list) and part.isdigit():
+            index = int(part)
+            current = current[index] if 0 <= index < len(current) else None
+            continue
+        return None
+    return current
+
+
+def _is_collection_like(value: Any) -> bool:
+    if isinstance(value, (list, tuple, set)):
+        return True
+    if isinstance(value, dict):
+        return True
+    return False
 
 
 def _last_successful_sql_query(history: list[StepLog]) -> StepLog | None:

@@ -108,7 +108,7 @@ TOOL_OUTPUT_CONTRACTS: dict[str, ToolOutputContract] = {
     ),
     "slurm.queue": ToolOutputContract(
         default_path="jobs",
-        collection_paths=("jobs",),
+        collection_paths=("grouped", "jobs"),
         scalar_paths=("count", "total_count", "returned_count"),
     ),
     "sql.query": ToolOutputContract(default_path="rows", collection_paths=("rows",)),
