@@ -149,6 +149,7 @@ def resolve_execution_step(step: ExecutionStep, step_outputs: dict[str, Any]) ->
         Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow.resolve_execution_step.
     """
     resolved_args = resolve_step_value(step.args, step_outputs)
+    resolved_args, metadata = _separate_internal_metadata(resolved_args, step.metadata)
     if step.action == "fs.write":
         resolved_args = _normalize_fs_write_args(resolved_args)
     return ExecutionStep.model_validate(
@@ -158,8 +159,34 @@ def resolve_execution_step(step: ExecutionStep, step_outputs: dict[str, Any]) ->
             "args": resolved_args,
             "input": list(step.input),
             "output": step.output,
+            "metadata": metadata,
         }
     )
+
+
+def _separate_internal_metadata(args: dict[str, Any], metadata: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Move internal semantic keys out of executable tool arguments.
+
+    Inputs:
+        Receives resolved tool arguments and existing execution-step metadata.
+
+    Returns:
+        Sanitized tool arguments plus metadata safe for runtime-only use.
+
+    Used by:
+        resolve_execution_step before tool invocation.
+    """
+    if not isinstance(args, dict):
+        return args, dict(metadata or {})
+    clean_args = dict(args)
+    clean_metadata = dict(metadata or {})
+    projection = clean_args.pop("__semantic_projection", None)
+    for key in list(clean_args):
+        if str(key).startswith("__semantic_"):
+            clean_args.pop(key, None)
+    if projection is not None and "semantic_projection" not in clean_metadata:
+        clean_metadata["semantic_projection"] = projection
+    return clean_args, clean_metadata
 
 
 def _resolve_output_path(value: Any, path: str) -> Any:

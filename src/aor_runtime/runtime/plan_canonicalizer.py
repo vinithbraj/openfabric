@@ -239,6 +239,7 @@ def canonicalize_plan(
                 "args": repaired_path_args,
                 "input": rewritten_inputs,
                 "output": step.output,
+                "metadata": deepcopy(step.metadata),
             }
         )
         repaired_steps.append(repaired_step)

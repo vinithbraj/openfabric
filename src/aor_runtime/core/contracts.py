@@ -53,6 +53,34 @@ class ExecutionStep(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
     input: list[str] = Field(default_factory=list)
     output: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def separate_internal_metadata(self) -> "ExecutionStep":
+        """Move runtime-internal semantic keys out of executable tool args.
+
+        Inputs:
+            Uses this step's args and metadata fields after normal model validation.
+
+        Returns:
+            The same step with sanitized args and runtime-only metadata preserved.
+
+        Used by:
+            ExecutionPlan creation, dataflow resolution, and tests that load old plans with legacy internal args.
+        """
+        if not any(str(key).startswith("__semantic_") for key in self.args):
+            return self
+        clean_args = dict(self.args)
+        clean_metadata = dict(self.metadata)
+        projection = clean_args.pop("__semantic_projection", None)
+        for key in list(clean_args):
+            if str(key).startswith("__semantic_"):
+                clean_args.pop(key, None)
+        if projection is not None and "semantic_projection" not in clean_metadata:
+            clean_metadata["semantic_projection"] = projection
+        self.args = clean_args
+        self.metadata = clean_metadata
+        return self
 
 
 class ExecutionPlan(BaseModel):

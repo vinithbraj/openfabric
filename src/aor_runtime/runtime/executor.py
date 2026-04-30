@@ -119,7 +119,7 @@ class PlanExecutor:
                 output = self._invoke_streaming_tool(resolved_step, event_sink, context=context)
             else:
                 output = self.tools.invoke(resolved_step.action, resolved_step.args, context=context)
-            output = project_semantic_result(resolved_step.action, resolved_step.args, output)
+            output = project_semantic_result(resolved_step.action, resolved_step.args, output, metadata=resolved_step.metadata)
             if context is not None:
                 context.throw_if_cancelled()
             finished = datetime.now(timezone.utc).isoformat()
