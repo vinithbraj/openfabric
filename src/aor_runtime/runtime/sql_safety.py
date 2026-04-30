@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.sql_safety
+
+Purpose:
+    Enforce SQL read-only safety and mutation blocking.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -89,6 +104,17 @@ CLAUSE_END_KEYWORDS = {
 
 @dataclass(frozen=True)
 class SqlValidationResult:
+    """Represent sql validation result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlValidationResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_safety.SqlValidationResult and related tests.
+    """
     valid: bool
     reason: str | None = None
     normalized_sql: str | None = None
@@ -96,12 +122,34 @@ class SqlValidationResult:
 
 @dataclass
 class _Token:
+    """Represent token within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _Token.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_safety._Token and related tests.
+    """
     kind: str
     text: str
     value: str | None = None
 
 
 def quote_pg_identifier(name: str) -> str:
+    """Quote pg identifier for the surrounding runtime workflow.
+
+    Inputs:
+        Receives name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety.quote_pg_identifier.
+    """
     text = str(name or "")
     if re.fullmatch(r"[a-z_][a-z0-9_]*", text) and text not in RESERVED_WORDS:
         return text
@@ -109,12 +157,34 @@ def quote_pg_identifier(name: str) -> str:
 
 
 def quote_pg_relation(schema: str | None, table: str) -> str:
+    """Quote pg relation for the surrounding runtime workflow.
+
+    Inputs:
+        Receives schema, table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety.quote_pg_relation.
+    """
     if schema:
         return f"{quote_pg_identifier(schema)}.{quote_pg_identifier(table)}"
     return quote_pg_identifier(table)
 
 
 def validate_read_only_sql(sql: str) -> SqlValidationResult:
+    """Validate read only sql for the surrounding runtime workflow.
+
+    Inputs:
+        Receives sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety.validate_read_only_sql.
+    """
     normalized = str(sql or "").strip()
     if not normalized:
         return SqlValidationResult(False, "Empty SQL query.")
@@ -147,6 +217,17 @@ def validate_read_only_sql(sql: str) -> SqlValidationResult:
 
 
 def ensure_read_only_sql(sql: str) -> str:
+    """Ensure read only sql for the surrounding runtime workflow.
+
+    Inputs:
+        Receives sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety.ensure_read_only_sql.
+    """
     result = validate_read_only_sql(sql)
     if not result.valid:
         raise ValueError(result.reason or "SQL query failed read-only validation.")
@@ -154,6 +235,17 @@ def ensure_read_only_sql(sql: str) -> str:
 
 
 def normalize_pg_relation_quoting(sql: str, catalog: SqlSchemaCatalog | None = None) -> str:
+    """Normalize pg relation quoting for the surrounding runtime workflow.
+
+    Inputs:
+        Receives sql, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety.normalize_pg_relation_quoting.
+    """
     tokens = _tokenize_sql(str(sql or ""))
     normalized_tokens, alias_columns = _normalize_relation_tokens(tokens, catalog)
     if catalog is not None:
@@ -165,6 +257,17 @@ def _normalize_relation_tokens(
     tokens: list[_Token],
     catalog: SqlSchemaCatalog | None,
 ) -> tuple[list[_Token], dict[str, set[str]]]:
+    """Handle the internal normalize relation tokens helper path for this module.
+
+    Inputs:
+        Receives tokens, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._normalize_relation_tokens.
+    """
     output: list[_Token] = []
     alias_columns: dict[str, set[str]] = {}
     index = 0
@@ -212,6 +315,17 @@ def _normalize_column_reference_tokens(
     catalog: SqlSchemaCatalog,
     alias_columns: dict[str, set[str]],
 ) -> list[_Token]:
+    """Handle the internal normalize column reference tokens helper path for this module.
+
+    Inputs:
+        Receives tokens, catalog, alias_columns for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._normalize_column_reference_tokens.
+    """
     output: list[_Token] = []
     all_columns = _catalog_column_names(catalog)
     index = 0
@@ -253,6 +367,17 @@ def _parse_relation_at(
     index: int,
     catalog: SqlSchemaCatalog | None,
 ) -> tuple[str, int, SqlTableRef | None] | None:
+    """Handle the internal parse relation at helper path for this module.
+
+    Inputs:
+        Receives tokens, index, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._parse_relation_at.
+    """
     token = tokens[index]
     if token.text == "(":
         return None
@@ -283,6 +408,17 @@ def _parse_relation_at(
 
 
 def _parse_alias_after_relation(tokens: list[_Token], index: int) -> tuple[str | None, int]:
+    """Handle the internal parse alias after relation helper path for this module.
+
+    Inputs:
+        Receives tokens, index for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._parse_alias_after_relation.
+    """
     start = index
     while index < len(tokens) and tokens[index].kind == "ws":
         index += 1
@@ -300,14 +436,47 @@ def _parse_alias_after_relation(tokens: list[_Token], index: int) -> tuple[str |
 
 
 def _register_alias_columns(alias_columns: dict[str, set[str]], alias: str, table_ref: SqlTableRef) -> None:
+    """Handle the internal register alias columns helper path for this module.
+
+    Inputs:
+        Receives alias_columns, alias, table_ref for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._register_alias_columns.
+    """
     alias_columns[alias.lower()] = {column.column_name for column in table_ref.columns}
 
 
 def _catalog_column_names(catalog: SqlSchemaCatalog) -> set[str]:
+    """Handle the internal catalog column names helper path for this module.
+
+    Inputs:
+        Receives catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._catalog_column_names.
+    """
     return {column.column_name for table in catalog.tables for column in table.columns}
 
 
 def _canonical_case_match(value: str, candidates: Iterable[str]) -> str | None:
+    """Handle the internal canonical case match helper path for this module.
+
+    Inputs:
+        Receives value, candidates for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._canonical_case_match.
+    """
     if value in candidates:
         return value
     lowered = value.lower()
@@ -316,12 +485,34 @@ def _canonical_case_match(value: str, candidates: Iterable[str]) -> str | None:
 
 
 def _unique_canonical_case_match(value: str, candidates: Iterable[str]) -> str | None:
+    """Handle the internal unique canonical case match helper path for this module.
+
+    Inputs:
+        Receives value, candidates for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._unique_canonical_case_match.
+    """
     lowered = value.lower()
     matches = sorted({candidate for candidate in candidates if candidate.lower() == lowered})
     return matches[0] if len(matches) == 1 else None
 
 
 def _previous_word_value(tokens: list[_Token], index: int) -> str:
+    """Handle the internal previous word value helper path for this module.
+
+    Inputs:
+        Receives tokens, index for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._previous_word_value.
+    """
     cursor = index - 1
     while cursor >= 0:
         token = tokens[cursor]
@@ -333,6 +524,17 @@ def _previous_word_value(tokens: list[_Token], index: int) -> str:
 
 
 def _next_non_ws_token(tokens: list[_Token], index: int) -> _Token | None:
+    """Handle the internal next non ws token helper path for this module.
+
+    Inputs:
+        Receives tokens, index for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._next_non_ws_token.
+    """
     cursor = index + 1
     while cursor < len(tokens):
         token = tokens[cursor]
@@ -344,12 +546,34 @@ def _next_non_ws_token(tokens: list[_Token], index: int) -> _Token | None:
 
 
 def _word_value(token: _Token) -> str:
+    """Handle the internal word value helper path for this module.
+
+    Inputs:
+        Receives token for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._word_value.
+    """
     if token.kind not in {"word", "quoted_identifier"}:
         return ""
     return str(token.value or token.text).lower()
 
 
 def _split_statements(tokens: list[_Token]) -> list[list[_Token]]:
+    """Handle the internal split statements helper path for this module.
+
+    Inputs:
+        Receives tokens for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._split_statements.
+    """
     statements: list[list[_Token]] = []
     current: list[_Token] = []
     for token in tokens:
@@ -365,6 +589,17 @@ def _split_statements(tokens: list[_Token]) -> list[list[_Token]]:
 
 
 def _tokenize_sql(sql: str) -> list[_Token]:
+    """Handle the internal tokenize sql helper path for this module.
+
+    Inputs:
+        Receives sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_safety._tokenize_sql.
+    """
     tokens: list[_Token] = []
     index = 0
     length = len(sql)

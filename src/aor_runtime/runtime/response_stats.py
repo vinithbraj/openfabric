@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.response_stats
+
+Purpose:
+    Build compact runtime statistics and DAG summaries for final responses.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -19,6 +34,17 @@ def append_response_stats(
     status: str,
     enabled: bool = True,
 ) -> str:
+    """Append response stats for the surrounding runtime workflow.
+
+    Inputs:
+        Receives content, state, metrics, status, enabled for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats.append_response_stats.
+    """
     body = str(content or "")
     if not enabled or not body.strip() or STATS_HEADING_RE.search(body):
         return body
@@ -35,6 +61,17 @@ def append_response_stats(
 
 
 def _stats_table(steps: list[dict[str, Any]], metrics: dict[str, Any], status: str) -> list[str]:
+    """Handle the internal stats table helper path for this module.
+
+    Inputs:
+        Receives steps, metrics, status for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._stats_table.
+    """
     tools = _unique([step["action"] for step in steps if step.get("action")])
     primary_tools = [tool for tool in tools if tool not in INTERNAL_TOOLS | FORMATTER_TOOLS]
     displayed_tools = primary_tools or [tool for tool in tools if tool not in INTERNAL_TOOLS] or tools
@@ -57,6 +94,17 @@ def _stats_table(steps: list[dict[str, Any]], metrics: dict[str, Any], status: s
 
 
 def _dag_lines(steps: list[dict[str, Any]]) -> list[str]:
+    """Handle the internal dag lines helper path for this module.
+
+    Inputs:
+        Receives steps for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._dag_lines.
+    """
     lines: list[str] = []
     for index, step in enumerate(steps, start=1):
         action = str(step.get("action") or "unknown")
@@ -67,6 +115,17 @@ def _dag_lines(steps: list[dict[str, Any]]) -> list[str]:
 
 
 def _plan_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Handle the internal plan steps helper path for this module.
+
+    Inputs:
+        Receives state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._plan_steps.
+    """
     plan = state.get("plan")
     if not isinstance(plan, dict):
         return []
@@ -91,6 +150,17 @@ def _plan_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _history_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Handle the internal history steps helper path for this module.
+
+    Inputs:
+        Receives state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._history_steps.
+    """
     raw_history = state.get("attempt_history") or state.get("history") or []
     if not isinstance(raw_history, list):
         return []
@@ -115,6 +185,17 @@ def _history_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _backend_label(tools: list[str]) -> str:
+    """Handle the internal backend label helper path for this module.
+
+    Inputs:
+        Receives tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._backend_label.
+    """
     labels: list[str] = []
     if any(tool.startswith("sql.") for tool in tools):
         labels.append("SQL database")
@@ -134,6 +215,17 @@ def _backend_label(tools: list[str]) -> str:
 
 
 def _format_duration_ms(value: Any) -> str:
+    """Handle the internal format duration ms helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._format_duration_ms.
+    """
     try:
         milliseconds = float(value or 0)
     except Exception:  # noqa: BLE001
@@ -151,22 +243,66 @@ def _format_duration_ms(value: Any) -> str:
 
 
 def _token_value(value: int, llm_calls: int) -> str:
+    """Handle the internal token value helper path for this module.
+
+    Inputs:
+        Receives value, llm_calls for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._token_value.
+    """
     if value > 0:
         return f"{value:,}"
     return "Unavailable" if llm_calls > 0 else "0"
 
 
 def _title(value: Any) -> str:
+    """Handle the internal title helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._title.
+    """
     text = str(value or "").strip().replace("_", " ")
     return text.title() if text else "Unknown"
 
 
 def _code_cell(value: Any) -> str:
+    """Handle the internal code cell helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._code_cell.
+    """
     text = str(value if value is not None else "").replace("`", "'").strip()
     return f"`{text or '-'}`"
 
 
 def _unique(values: list[str]) -> list[str]:
+    """Handle the internal unique helper path for this module.
+
+    Inputs:
+        Receives values for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._unique.
+    """
     seen: set[str] = set()
     unique_values: list[str] = []
     for value in values:
@@ -179,6 +315,17 @@ def _unique(values: list[str]) -> list[str]:
 
 
 def _coerce_int(value: Any) -> int:
+    """Handle the internal coerce int helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.response_stats._coerce_int.
+    """
     try:
         return max(0, int(value or 0))
     except Exception:  # noqa: BLE001

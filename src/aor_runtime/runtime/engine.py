@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.engine
+
+Purpose:
+    Orchestrate request execution from planning through final response.
+
+Responsibilities:
+    Manage sessions, active run handles, planning, execution, validation, auto-artifacts, final presentation, and persistence.
+
+Data flow / Interfaces:
+    Receives user tasks from CLI/API surfaces and emits session state, events, final outputs, and OpenWebUI-compatible results.
+
+Boundaries:
+    Owns lifecycle cancellation and the final user-mode boundary where raw payloads must be rendered, artifacted, or rejected.
+"""
+
 from __future__ import annotations
 
 import json
@@ -59,10 +74,32 @@ STARTUP_BANNER = r"""
 
 
 def render_startup_banner() -> str:
+    """Render startup banner for the surrounding runtime workflow.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine.render_startup_banner.
+    """
     return f"{STARTUP_BANNER}\nOpenFABRIC v{__version__}"
 
 
 def _safe_execution_plan(plan_data: Any) -> ExecutionPlan | None:
+    """Handle the internal safe execution plan helper path for this module.
+
+    Inputs:
+        Receives plan_data for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._safe_execution_plan.
+    """
     if not isinstance(plan_data, dict) or not plan_data:
         return None
     try:
@@ -72,6 +109,17 @@ def _safe_execution_plan(plan_data: Any) -> ExecutionPlan | None:
 
 
 def _strip_prompt_suggestions(content: str) -> str:
+    """Handle the internal strip prompt suggestions helper path for this module.
+
+    Inputs:
+        Receives content for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._strip_prompt_suggestions.
+    """
     text = str(content or "")
     if "Suggested prompts:" not in text:
         return text
@@ -79,6 +127,17 @@ def _strip_prompt_suggestions(content: str) -> str:
 
 
 def summarize_failure_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Summarize failure history for the surrounding runtime workflow.
+
+    Inputs:
+        Receives history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine.summarize_failure_history.
+    """
     summary: list[dict[str, Any]] = []
     for item in list(history or [])[-FAILURE_SUMMARY_MAX_STEPS:]:
         payload = dict(item or {})
@@ -99,6 +158,17 @@ def summarize_failure_history(history: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _value_size_hint(value: Any) -> int | None:
+    """Handle the internal value size hint helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._value_size_hint.
+    """
     if value is None:
         return None
     try:
@@ -108,6 +178,17 @@ def _value_size_hint(value: Any) -> int | None:
 
 
 def _truncate_string(value: Any, limit: int = FAILURE_SUMMARY_MAX_STRING) -> str | None:
+    """Handle the internal truncate string helper path for this module.
+
+    Inputs:
+        Receives value, limit for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._truncate_string.
+    """
     text = str(value or "").strip()
     if not text:
         return None
@@ -117,6 +198,17 @@ def _truncate_string(value: Any, limit: int = FAILURE_SUMMARY_MAX_STRING) -> str
 
 
 def _summarize_step_payload(step_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Handle the internal summarize step payload helper path for this module.
+
+    Inputs:
+        Receives step_payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._summarize_step_payload.
+    """
     if not isinstance(step_payload, dict) or not step_payload:
         return None
     summary: dict[str, Any] = {}
@@ -144,10 +236,32 @@ def _summarize_step_payload(step_payload: dict[str, Any] | None) -> dict[str, An
 
 
 def _serialized_size(value: Any) -> int:
+    """Handle the internal serialized size helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._serialized_size.
+    """
     return len(json.dumps(value, default=str, ensure_ascii=False, sort_keys=True))
 
 
 def _cap_failure_context_size(failure_context: dict[str, Any], *, limit: int = FAILURE_SUMMARY_MAX_BYTES) -> dict[str, Any]:
+    """Handle the internal cap failure context size helper path for this module.
+
+    Inputs:
+        Receives failure_context, limit for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._cap_failure_context_size.
+    """
     capped = dict(failure_context)
     if _serialized_size(capped) <= limit:
         return capped
@@ -184,6 +298,17 @@ def _cap_failure_context_size(failure_context: dict[str, Any], *, limit: int = F
 
 
 def _truncate_failure_context_strings(value: Any) -> Any:
+    """Handle the internal truncate failure context strings helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._truncate_failure_context_strings.
+    """
     if isinstance(value, dict):
         return {key: _truncate_failure_context_strings(nested) for key, nested in value.items()}
     if isinstance(value, list):
@@ -194,6 +319,17 @@ def _truncate_failure_context_strings(value: Any) -> Any:
 
 
 def _is_non_retryable_failure(reason: str, detail: str, extra_context: dict[str, Any]) -> bool:
+    """Handle the internal is non retryable failure helper path for this module.
+
+    Inputs:
+        Receives reason, detail, extra_context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._is_non_retryable_failure.
+    """
     if str(extra_context.get("violation_tier") or "").strip().lower() == "hard":
         return True
     normalized = str(detail or "").strip()
@@ -205,7 +341,29 @@ def _is_non_retryable_failure(reason: str, detail: str, extra_context: dict[str,
 
 
 class ExecutionEngine:
+    """Represent execution engine within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ExecutionEngine.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.engine.ExecutionEngine and related tests.
+    """
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.__init__ calls and related tests.
+        """
         self._emit_startup_banner()
         self.base_settings = settings or get_settings()
         self.settings = self.base_settings
@@ -223,10 +381,32 @@ class ExecutionEngine:
         )
 
     def _emit_startup_banner(self) -> None:
+        """Handle the internal emit startup banner helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._emit_startup_banner calls and related tests.
+        """
         sys.stderr.write(f"{render_startup_banner()}\n")
         sys.stderr.flush()
 
     def run_spec(self, spec_path: str, input_payload: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
+        """Run spec for ExecutionEngine instances.
+
+        Inputs:
+            Receives spec_path, input_payload, dry_run for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.run_spec calls and related tests.
+        """
         session = self.create_session(spec_path, input_payload, trigger="manual", dry_run=dry_run)
         return self.resume_session(session["id"], trigger="manual")
 
@@ -238,6 +418,17 @@ class ExecutionEngine:
         dry_run: bool = False,
         stream_shell_output: bool = False,
     ) -> dict[str, Any]:
+        """Create session for ExecutionEngine instances.
+
+        Inputs:
+            Receives spec_path, input_payload, trigger, dry_run, stream_shell_output for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.create_session calls and related tests.
+        """
         spec = load_runtime_spec(spec_path)
         compiled = self.compiler.compile(spec)
         session_id = self._new_session_id()
@@ -273,6 +464,17 @@ class ExecutionEngine:
         stream_shell_output: bool = False,
         runtime_context: ToolInvocationContext | None = None,
     ) -> dict[str, Any]:
+        """Resume session for ExecutionEngine instances.
+
+        Inputs:
+            Receives session_id, trigger, max_cycles, approve_dangerous, stream_shell_output, runtime_context for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.resume_session calls and related tests.
+        """
         session = self._get_required_session(session_id)
         if self._is_done(session.state):
             return ensure_jsonable(session.state)
@@ -352,6 +554,17 @@ class ExecutionEngine:
         approve_dangerous: bool = False,
         stream_shell_output: bool = False,
     ) -> dict[str, Any]:
+        """Trigger session for ExecutionEngine instances.
+
+        Inputs:
+            Receives session_id, trigger, max_cycles, approve_dangerous, stream_shell_output for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.trigger_session calls and related tests.
+        """
         return self.resume_session(
             session_id,
             trigger=trigger,
@@ -361,6 +574,17 @@ class ExecutionEngine:
         )
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """Get session for ExecutionEngine instances.
+
+        Inputs:
+            Receives session_id for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.get_session calls and related tests.
+        """
         session = self.session_manager.get_session(session_id)
         if session is None:
             return None
@@ -371,9 +595,31 @@ class ExecutionEngine:
         }
 
     def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List sessions for ExecutionEngine instances.
+
+        Inputs:
+            Receives limit for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.list_sessions calls and related tests.
+        """
         return [session.model_dump() for session in self.session_manager.list_sessions(limit=limit)]
 
     def validate_spec(self, spec_path: str) -> CompiledRuntimeSpec:
+        """Validate spec for ExecutionEngine instances.
+
+        Inputs:
+            Receives spec_path for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.validate_spec calls and related tests.
+        """
         spec = load_runtime_spec(spec_path)
         compiled = self.compiler.compile(spec)
         for tool_name in compiled.tools:
@@ -382,12 +628,45 @@ class ExecutionEngine:
 
     # Backward-compatible run-centric accessors.
     def get_run(self, run_id: str) -> dict[str, Any] | None:
+        """Get run for ExecutionEngine instances.
+
+        Inputs:
+            Receives run_id for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.get_run calls and related tests.
+        """
         return self.get_session(run_id)
 
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List runs for ExecutionEngine instances.
+
+        Inputs:
+            Receives limit for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.list_runs calls and related tests.
+        """
         return self.list_sessions(limit=limit)
 
     def create_invocation_context(self, token: CancellationToken | None = None) -> ToolInvocationContext:
+        """Create invocation context for ExecutionEngine instances.
+
+        Inputs:
+            Receives token for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.create_invocation_context calls and related tests.
+        """
         return ToolInvocationContext(
             cancellation=token or CancellationToken(),
             process_registry=self.active_runs,
@@ -396,6 +675,17 @@ class ExecutionEngine:
         )
 
     def _run_planner(self, session: AgentSession, runtime_context: ToolInvocationContext | None = None) -> None:
+        """Handle the internal run planner helper path for this module.
+
+        Inputs:
+            Receives session, runtime_context for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._run_planner calls and related tests.
+        """
         if runtime_context is not None:
             runtime_context.throw_if_cancelled()
         state = session.state
@@ -669,6 +959,17 @@ class ExecutionEngine:
         approved_dangerous_step_id: int | None = None,
         runtime_context: ToolInvocationContext | None = None,
     ) -> None:
+        """Handle the internal run executor step helper path for this module.
+
+        Inputs:
+            Receives session, approved_dangerous_step_id, runtime_context for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._run_executor_step calls and related tests.
+        """
         if runtime_context is not None:
             runtime_context.throw_if_cancelled()
         state = session.state
@@ -731,6 +1032,17 @@ class ExecutionEngine:
         stream_shell_output = bool(state.get("stream_shell_output", False))
 
         def emit_step_output(payload: dict[str, Any]) -> None:
+            """Emit step output for the surrounding runtime workflow.
+
+            Inputs:
+                Receives payload for this function; type hints and validators define accepted shapes.
+
+            Returns:
+                Returns None; side effects are limited to the local runtime operation described above.
+
+            Used by:
+                Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine.emit_step_output.
+            """
             self.store.append_event(
                 session_id=session.id,
                 node_name="executor",
@@ -836,6 +1148,17 @@ class ExecutionEngine:
         self._persist(session, node_name="executor")
 
     def _run_validator(self, session: AgentSession) -> None:
+        """Handle the internal run validator helper path for this module.
+
+        Inputs:
+            Receives session for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._run_validator calls and related tests.
+        """
         state = session.state
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
         self._configure_runtime_for_compiled(compiled)
@@ -949,6 +1272,17 @@ class ExecutionEngine:
         final_output: dict[str, Any] | None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Handle the internal apply final presentation boundary helper path for this module.
+
+        Inputs:
+            Receives goal, history, final_output, metadata for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._apply_final_presentation_boundary calls and related tests.
+        """
         output = dict(final_output or FinalOutput(metadata={"goal": goal}).model_dump())
         if self.settings.response_render_mode == "raw":
             return output
@@ -987,6 +1321,17 @@ class ExecutionEngine:
         detail: str,
         extra_context: dict[str, Any],
     ) -> None:
+        """Handle the internal handle retry or failure helper path for this module.
+
+        Inputs:
+            Receives session, node_name, reason, detail, extra_context for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._handle_retry_or_failure calls and related tests.
+        """
         state = session.state
         compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
         self._configure_runtime_for_compiled(compiled)
@@ -1120,6 +1465,17 @@ class ExecutionEngine:
         self._persist(session, node_name=node_name)
 
     def _finalize_session(self, session: AgentSession) -> None:
+        """Handle the internal finalize session helper path for this module.
+
+        Inputs:
+            Receives session for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._finalize_session calls and related tests.
+        """
         state = session.state
         metrics = RunMetrics.model_validate(state.get("metrics", {})).model_dump()
         metrics["retries"] = int(state.get("retries", 0))
@@ -1166,6 +1522,17 @@ class ExecutionEngine:
         self._persist(session, node_name="finalize")
 
     def _mark_session_cancelled(self, session: AgentSession, reason: str = "Request cancelled.") -> None:
+        """Handle the internal mark session cancelled helper path for this module.
+
+        Inputs:
+            Receives session, reason for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._mark_session_cancelled calls and related tests.
+        """
         message = str(reason or "Request cancelled.").strip() or "Request cancelled."
         if message == "cancelled":
             message = "Request cancelled."
@@ -1203,6 +1570,17 @@ class ExecutionEngine:
         status: str,
         metrics: dict[str, Any],
     ) -> dict[str, Any]:
+        """Handle the internal decorate final output helper path for this module.
+
+        Inputs:
+            Receives state, final_output, status, metrics for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._decorate_final_output calls and related tests.
+        """
         metadata = dict(final_output.get("metadata") or {})
         content = str(final_output.get("content") or "")
         goal = str(state.get("goal", ""))
@@ -1283,6 +1661,17 @@ class ExecutionEngine:
         }
 
     def _sanitize_user_final_content(self, content: str, *, state: RuntimeState, metadata: dict[str, Any]) -> str:
+        """Handle the internal sanitize user final content helper path for this module.
+
+        Inputs:
+            Receives content, state, metadata for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._sanitize_user_final_content calls and related tests.
+        """
         if self.settings.response_render_mode == "raw":
             return content
         text = str(content or "").strip()
@@ -1330,6 +1719,17 @@ class ExecutionEngine:
         error: Exception | None = None,
         plan: ExecutionPlan | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        """Handle the internal failure output with suggestions helper path for this module.
+
+        Inputs:
+            Receives goal, message, metadata, error, plan for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._failure_output_with_suggestions calls and related tests.
+        """
         suggestion_result = generate_prompt_suggestions(
             goal,
             classify_failure(goal, error=error, plan=plan, metadata=metadata),
@@ -1343,6 +1743,17 @@ class ExecutionEngine:
         return append_prompt_suggestions(message, suggestion_result), enriched_metadata
 
     def _prompt_suggestion_context(self, state: RuntimeState | None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Handle the internal prompt suggestion context helper path for this module.
+
+        Inputs:
+            Receives state, metadata for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._prompt_suggestion_context calls and related tests.
+        """
         context: dict[str, Any] = {
             "workspace_root": str(self.settings.workspace_root),
             "outputs_dir": str(self.settings.workspace_root / "outputs"),
@@ -1354,6 +1765,17 @@ class ExecutionEngine:
         return context
 
     def _persist(self, session: AgentSession, *, node_name: str) -> None:
+        """Handle the internal persist helper path for this module.
+
+        Inputs:
+            Receives session, node_name for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._persist calls and related tests.
+        """
         self._touch_state(session.state)
         session.status = str(session.state.get("status", session.status))
         session.current_trigger = str(session.state.get("trigger", session.current_trigger))
@@ -1361,6 +1783,17 @@ class ExecutionEngine:
         self.session_manager.persist_session(session, node_name=node_name)
 
     def _settings_for_compiled(self, compiled: CompiledRuntimeSpec) -> Settings:
+        """Handle the internal settings for compiled helper path for this module.
+
+        Inputs:
+            Receives compiled for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._settings_for_compiled calls and related tests.
+        """
         payload = self.base_settings.model_dump()
         endpoints = {endpoint.name: endpoint.url for endpoint in compiled.nodes.endpoints}
         if endpoints:
@@ -1371,6 +1804,17 @@ class ExecutionEngine:
         return Settings.model_validate(payload)
 
     def _configure_runtime_for_compiled(self, compiled: CompiledRuntimeSpec) -> None:
+        """Handle the internal configure runtime for compiled helper path for this module.
+
+        Inputs:
+            Receives compiled for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._configure_runtime_for_compiled calls and related tests.
+        """
         effective_settings = self._settings_for_compiled(compiled)
         self.settings = effective_settings
         self.llm.settings = effective_settings
@@ -1382,21 +1826,65 @@ class ExecutionEngine:
 
     @staticmethod
     def _step_log_from_dict(payload: dict[str, Any]):
+        """Handle the internal step log from dict helper path for this module.
+
+        Inputs:
+            Receives payload for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._step_log_from_dict calls and related tests.
+        """
         from aor_runtime.core.contracts import StepLog
 
         return StepLog.model_validate(payload)
 
     @staticmethod
     def _new_session_id() -> str:
+        """Handle the internal new session id helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._new_session_id calls and related tests.
+        """
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return f"{timestamp}_{uuid.uuid4().hex[:10]}"
 
     @staticmethod
     def _is_done(state: dict[str, Any]) -> bool:
+        """Handle the internal is done helper path for this module.
+
+        Inputs:
+            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._is_done calls and related tests.
+        """
         return bool(state.get("done")) or str(state.get("status", "")) in TERMINAL_STATUSES
 
     @staticmethod
     def _decide_next_action(state: RuntimeState) -> str:
+        """Handle the internal decide next action helper path for this module.
+
+        Inputs:
+            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._decide_next_action calls and related tests.
+        """
         next_action = str(state.get("next_action", "")).strip()
         if next_action:
             return next_action
@@ -1411,6 +1899,17 @@ class ExecutionEngine:
 
     @staticmethod
     def _touch_state(state: dict[str, Any]) -> None:
+        """Handle the internal touch state helper path for this module.
+
+        Inputs:
+            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._touch_state calls and related tests.
+        """
         now = datetime.now(timezone.utc)
         state["updated_at"] = now.isoformat()
         started_at = str(state.get("started_at", state["updated_at"]))
@@ -1425,6 +1924,17 @@ class ExecutionEngine:
         state["metrics"] = metrics
 
     def _llm_usage_snapshot(self) -> dict[str, int]:
+        """Handle the internal llm usage snapshot helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._llm_usage_snapshot calls and related tests.
+        """
         return {
             "prompt_tokens": int(getattr(self.llm, "total_prompt_tokens", 0) or 0),
             "completion_tokens": int(getattr(self.llm, "total_completion_tokens", 0) or 0),
@@ -1432,6 +1942,17 @@ class ExecutionEngine:
         }
 
     def _merge_llm_token_metrics(self, metrics: dict[str, Any], before: dict[str, int]) -> None:
+        """Handle the internal merge llm token metrics helper path for this module.
+
+        Inputs:
+            Receives metrics, before for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._merge_llm_token_metrics calls and related tests.
+        """
         after = self._llm_usage_snapshot()
         prompt_delta = max(0, int(after.get("prompt_tokens", 0)) - int(before.get("prompt_tokens", 0)))
         completion_delta = max(0, int(after.get("completion_tokens", 0)) - int(before.get("completion_tokens", 0)))
@@ -1443,6 +1964,17 @@ class ExecutionEngine:
         metrics["llm_total_tokens"] = int(metrics.get("llm_total_tokens", 0) or 0) + total_delta
 
     def _get_required_session(self, session_id: str) -> AgentSession:
+        """Handle the internal get required session helper path for this module.
+
+        Inputs:
+            Receives session_id for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._get_required_session calls and related tests.
+        """
         session = self.session_manager.get_session(session_id)
         if session is None:
             raise KeyError(f"Unknown session: {session_id}")
@@ -1450,15 +1982,48 @@ class ExecutionEngine:
 
     @staticmethod
     def _clear_confirmation_state(state: RuntimeState) -> None:
+        """Handle the internal clear confirmation state helper path for this module.
+
+        Inputs:
+            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._clear_confirmation_state calls and related tests.
+        """
         state["awaiting_confirmation"] = False
         state["confirmation_kind"] = None
         state["confirmation_step"] = None
         state["confirmation_message"] = None
 
     def is_dangerous(self, step: ExecutionStep) -> bool:
+        """Is dangerous for ExecutionEngine instances.
+
+        Inputs:
+            Receives step for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine.is_dangerous calls and related tests.
+        """
         return self._dangerous_step_message(step) is not None
 
     def _dangerous_step_message(self, step: ExecutionStep) -> str | None:
+        """Handle the internal dangerous step message helper path for this module.
+
+        Inputs:
+            Receives step for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._dangerous_step_message calls and related tests.
+        """
         args = dict(step.args)
 
         if step.action == "fs.write":
@@ -1491,6 +2056,17 @@ class ExecutionEngine:
 
     @staticmethod
     def _dry_run_preview(state: RuntimeState) -> dict[str, Any]:
+        """Handle the internal dry run preview helper path for this module.
+
+        Inputs:
+            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExecutionEngine._dry_run_preview calls and related tests.
+        """
         return {
             "session_id": str(state.get("session_id", "")),
             "plan": state.get("plan", {}),

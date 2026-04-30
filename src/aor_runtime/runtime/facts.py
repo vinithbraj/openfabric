@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.facts
+
+Purpose:
+    Collect sanitized runtime facts that can be used by presenters and optional LLM summaries.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import json
@@ -38,6 +53,17 @@ FORBIDDEN_EXACT_KEYS = {
 
 @dataclass
 class FactBuildContext:
+    """Represent fact build context within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FactBuildContext.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.facts.FactBuildContext and related tests.
+    """
     max_facts: int = 50
     max_string_length: int = 4000
     include_row_samples: bool = False
@@ -53,6 +79,17 @@ def build_sanitized_facts(
     domain: str | None = None,
     context: Any | None = None,
 ) -> dict[str, Any]:
+    """Build sanitized facts for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, actions, domain, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts.build_sanitized_facts.
+    """
     ctx = _context(context)
     clean = strip_internal_telemetry(result)
     tools = _action_tools(actions)
@@ -85,6 +122,17 @@ def validate_facts_for_llm(
     max_string_length: int = 4000,
     max_depth: int = 6,
 ) -> bool:
+    """Validate facts for llm for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts, max_items, max_string_length, max_depth for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts.validate_facts_for_llm.
+    """
     try:
         _validate_node(facts, max_items=max_items, max_string_length=max_string_length, max_depth=max_depth, depth=0)
     except ValueError:
@@ -93,6 +141,17 @@ def validate_facts_for_llm(
 
 
 def _build_slurm_facts(result: Any, actions: list[Any], context: FactBuildContext) -> dict[str, Any]:
+    """Handle the internal build slurm facts helper path for this module.
+
+    Inputs:
+        Receives result, actions, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._build_slurm_facts.
+    """
     normalized = normalize_slurm_result(result, _SourceContext(context.source_action, context.source_args or {}))
     facts: dict[str, Any] = {
         "domain": "slurm",
@@ -105,6 +164,17 @@ def _build_slurm_facts(result: Any, actions: list[Any], context: FactBuildContex
 
 
 def _merge_normalized_slurm(facts: dict[str, Any], normalized: NormalizedSlurmResult) -> None:
+    """Handle the internal merge normalized slurm helper path for this module.
+
+    Inputs:
+        Receives facts, normalized for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._merge_normalized_slurm.
+    """
     if normalized.kind == SlurmResultKind.COMPOUND:
         for child in normalized.grouped.get("children", []):
             if isinstance(child, NormalizedSlurmResult):
@@ -153,6 +223,17 @@ def _merge_normalized_slurm(facts: dict[str, Any], normalized: NormalizedSlurmRe
 
 
 def _merge_summary_facts(facts: dict[str, Any], summary: dict[str, Any]) -> None:
+    """Handle the internal merge summary facts helper path for this module.
+
+    Inputs:
+        Receives facts, summary for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._merge_summary_facts.
+    """
     queue = dict(facts.get("queue") or {})
     for source, target in (
         ("queue_count", "total_jobs"),
@@ -212,6 +293,17 @@ def _merge_summary_facts(facts: dict[str, Any], summary: dict[str, Any]) -> None
 
 
 def _build_sql_facts(result: Any, actions: list[Any], context: FactBuildContext) -> dict[str, Any]:
+    """Handle the internal build sql facts helper path for this module.
+
+    Inputs:
+        Receives result, actions, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._build_sql_facts.
+    """
     action = _last_action(actions, "sql.query")
     action_result = _action_attr(action, "result")
     payload = result if isinstance(result, dict) else {}
@@ -241,6 +333,17 @@ def _build_sql_facts(result: Any, actions: list[Any], context: FactBuildContext)
 
 
 def _build_filesystem_facts(result: Any, actions: list[Any], context: FactBuildContext) -> dict[str, Any]:
+    """Handle the internal build filesystem facts helper path for this module.
+
+    Inputs:
+        Receives result, actions, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._build_filesystem_facts.
+    """
     payload = result if isinstance(result, dict) else {}
     action = _last_visible_action(actions)
     args = dict(_action_attr(action, "args_summary") or {})
@@ -260,6 +363,17 @@ def _build_filesystem_facts(result: Any, actions: list[Any], context: FactBuildC
 
 
 def _build_generic_facts(result: Any, tools: list[str]) -> dict[str, Any]:
+    """Handle the internal build generic facts helper path for this module.
+
+    Inputs:
+        Receives result, tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._build_generic_facts.
+    """
     clean = _sanitize_node(result, max_items=10, max_string_length=500, depth=0)
     facts: dict[str, Any] = {"domain": "generic", "type": type(result).__name__}
     if isinstance(clean, dict):
@@ -273,6 +387,17 @@ def _build_generic_facts(result: Any, tools: list[str]) -> dict[str, Any]:
 
 
 def _infer_domain(result: Any, source_action: str, explicit: str | None) -> str:
+    """Handle the internal infer domain helper path for this module.
+
+    Inputs:
+        Receives result, source_action, explicit for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._infer_domain.
+    """
     if explicit:
         return explicit
     if source_action.startswith("slurm."):
@@ -292,6 +417,17 @@ def _infer_domain(result: Any, source_action: str, explicit: str | None) -> str:
 
 
 def _context(context: Any | None) -> FactBuildContext:
+    """Handle the internal context helper path for this module.
+
+    Inputs:
+        Receives context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._context.
+    """
     return FactBuildContext(
         max_facts=int(getattr(context, "max_facts", getattr(context, "max_items", 50)) or 50),
         max_string_length=int(getattr(context, "max_input_chars", 4000) or 4000),
@@ -304,12 +440,45 @@ def _context(context: Any | None) -> FactBuildContext:
 
 
 class _SourceContext:
+    """Represent source context within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _SourceContext.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.facts._SourceContext and related tests.
+    """
     def __init__(self, source_action: str | None, source_args: dict[str, Any]) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives source_action, source_args for this _SourceContext method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through _SourceContext.__init__ calls and related tests.
+        """
         self.source_action = source_action
         self.source_args = source_args
 
 
 def _action_tools(actions: list[Any]) -> list[str]:
+    """Handle the internal action tools helper path for this module.
+
+    Inputs:
+        Receives actions for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._action_tools.
+    """
     tools: list[str] = []
     for action in actions:
         tool = str(_action_attr(action, "tool") or "")
@@ -319,6 +488,17 @@ def _action_tools(actions: list[Any]) -> list[str]:
 
 
 def _last_visible_action(actions: list[Any]) -> Any | None:
+    """Handle the internal last visible action helper path for this module.
+
+    Inputs:
+        Receives actions for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._last_visible_action.
+    """
     for action in reversed(actions):
         if str(_action_attr(action, "tool") or "") != "runtime.return":
             return action
@@ -326,6 +506,17 @@ def _last_visible_action(actions: list[Any]) -> Any | None:
 
 
 def _last_action(actions: list[Any], tool: str) -> Any | None:
+    """Handle the internal last action helper path for this module.
+
+    Inputs:
+        Receives actions, tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._last_action.
+    """
     for action in reversed(actions):
         if str(_action_attr(action, "tool") or "") == tool:
             return action
@@ -333,6 +524,17 @@ def _last_action(actions: list[Any], tool: str) -> Any | None:
 
 
 def _action_attr(action: Any, key: str) -> Any:
+    """Handle the internal action attr helper path for this module.
+
+    Inputs:
+        Receives action, key for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._action_attr.
+    """
     if action is None:
         return None
     if isinstance(action, dict):
@@ -341,12 +543,34 @@ def _action_attr(action: Any, key: str) -> Any:
 
 
 def _single_row_scalar(rows: list[Any]) -> Any | None:
+    """Handle the internal single row scalar helper path for this module.
+
+    Inputs:
+        Receives rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._single_row_scalar.
+    """
     if len(rows) != 1 or not isinstance(rows[0], dict) or len(rows[0]) != 1:
         return None
     return next(iter(rows[0].values()))
 
 
 def _safe_list(value: Any) -> list[Any]:
+    """Handle the internal safe list helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._safe_list.
+    """
     if value is None:
         return []
     if isinstance(value, list):
@@ -357,10 +581,32 @@ def _safe_list(value: Any) -> list[Any]:
 
 
 def _drop_empty(value: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal drop empty helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._drop_empty.
+    """
     return {key: item for key, item in value.items() if item not in (None, {}, [])}
 
 
 def _cap_facts(value: Any, *, max_items: int, max_string_length: int) -> Any:
+    """Handle the internal cap facts helper path for this module.
+
+    Inputs:
+        Receives value, max_items, max_string_length for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._cap_facts.
+    """
     clean = _sanitize_node(value, max_items=max_items, max_string_length=max_string_length, depth=0)
     encoded = json.dumps(clean, ensure_ascii=False, sort_keys=True, default=str)
     if len(encoded) > max_string_length:
@@ -369,6 +615,17 @@ def _cap_facts(value: Any, *, max_items: int, max_string_length: int) -> Any:
 
 
 def _sanitize_node(value: Any, *, max_items: int, max_string_length: int, depth: int) -> Any:
+    """Handle the internal sanitize node helper path for this module.
+
+    Inputs:
+        Receives value, max_items, max_string_length, depth for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._sanitize_node.
+    """
     if depth > 6:
         return "<redacted>"
     if isinstance(value, dict):
@@ -392,6 +649,17 @@ def _sanitize_node(value: Any, *, max_items: int, max_string_length: int, depth:
 
 
 def _validate_node(value: Any, *, max_items: int, max_string_length: int, max_depth: int, depth: int) -> None:
+    """Handle the internal validate node helper path for this module.
+
+    Inputs:
+        Receives value, max_items, max_string_length, max_depth, depth for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.facts._validate_node.
+    """
     if depth > max_depth:
         raise ValueError("facts exceed max depth")
     if isinstance(value, dict):

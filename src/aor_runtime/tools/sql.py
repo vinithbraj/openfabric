@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.tools.sql
+
+Purpose:
+    Implement read-only SQL schema, query, and validation tools.
+
+Responsibilities:
+    Execute validated SQL through bounded workers, expose schema catalogs, and return structured row/validation results.
+
+Data flow / Interfaces:
+    Receives tool arguments from PlanExecutor and Settings-defined database connections.
+
+Boundaries:
+    Enforces read-only SQL, timeout/lifecycle controls, and result-shape contracts before data reaches presentation.
+"""
+
 from __future__ import annotations
 
 import json
@@ -27,21 +42,65 @@ _SCHEMA_CATALOG_CACHE: dict[tuple[str, str], SqlSchemaCatalog] = {}
 
 
 def _normalize_name(value: str) -> str:
+    """Handle the internal normalize name helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._normalize_name.
+    """
     return re.sub(r"[^a-z0-9_]+", "_", value.strip().lower()).strip("_")
 
 
 def _tokenize(value: str) -> set[str]:
+    """Handle the internal tokenize helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._tokenize.
+    """
     normalized = _normalize_name(value)
     return set(TOKEN_RE.findall(normalized))
 
 
 def _coerce_value(value: Any) -> Any:
+    """Handle the internal coerce value helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._coerce_value.
+    """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return str(value)
 
 
 def validate_safe_query(query: str) -> str:
+    """Validate safe query for the surrounding runtime workflow.
+
+    Inputs:
+        Receives query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.validate_safe_query.
+    """
     try:
         return ensure_read_only_sql(query)
     except ValueError as exc:
@@ -52,16 +111,49 @@ _validate_safe_query = validate_safe_query
 
 
 class ColumnSchema(ToolResultModel):
+    """Represent column schema within the OpenFABRIC runtime. It extends ToolResultModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ColumnSchema.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.sql.ColumnSchema and related tests.
+    """
     name: str
     type: str
 
 
 class TableSchema(ToolResultModel):
+    """Represent table schema within the OpenFABRIC runtime. It extends ToolResultModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by TableSchema.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.sql.TableSchema and related tests.
+    """
     name: str
     columns: list[ColumnSchema]
 
 
 class DatabaseSchema(ToolResultModel):
+    """Represent database schema within the OpenFABRIC runtime. It extends ToolResultModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by DatabaseSchema.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.sql.DatabaseSchema and related tests.
+    """
     name: str
     dialect: str | None = None
     tables: list[TableSchema]
@@ -69,10 +161,32 @@ class DatabaseSchema(ToolResultModel):
 
 
 class SchemaInfo(ToolResultModel):
+    """Represent schema info within the OpenFABRIC runtime. It extends ToolResultModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SchemaInfo.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.sql.SchemaInfo and related tests.
+    """
     databases: list[DatabaseSchema]
 
 
 def resolve_sql_databases(settings: Settings) -> dict[str, str]:
+    """Resolve sql databases for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.resolve_sql_databases.
+    """
     mapping: dict[str, str] = {}
 
     if settings.sql_databases:
@@ -94,6 +208,17 @@ def resolve_sql_databases(settings: Settings) -> dict[str, str]:
 
 
 def resolve_default_database(settings: Settings, databases: dict[str, str]) -> str | None:
+    """Resolve default database for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, databases for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.resolve_default_database.
+    """
     if not databases:
         return None
     if settings.sql_default_database:
@@ -107,6 +232,17 @@ def resolve_default_database(settings: Settings, databases: dict[str, str]) -> s
 
 
 def resolve_database_selection(settings: Settings, requested_database: str | None) -> tuple[str, str]:
+    """Resolve database selection for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, requested_database for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.resolve_database_selection.
+    """
     databases = resolve_sql_databases(settings)
     if not databases:
         raise ToolExecutionError("SQL tool is not configured. Add sql.database_url or sql.databases to config.yaml.")
@@ -129,15 +265,48 @@ def resolve_database_selection(settings: Settings, requested_database: str | Non
 
 @lru_cache(maxsize=32)
 def _engine_for_url(database_url: str) -> Engine:
+    """Handle the internal engine for url helper path for this module.
+
+    Inputs:
+        Receives database_url for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._engine_for_url.
+    """
     return create_engine(database_url, future=True, pool_pre_ping=True)
 
 
 def _is_system_schema(schema_name: str) -> bool:
+    """Handle the internal is system schema helper path for this module.
+
+    Inputs:
+        Receives schema_name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._is_system_schema.
+    """
     lowered = str(schema_name or "").lower()
     return lowered in SYSTEM_SCHEMAS or lowered.startswith("pg_toast") or lowered.startswith("pg_temp")
 
 
 def refresh_schema_cache(settings: Settings | None = None, database: str | None = None) -> None:
+    """Refresh schema cache for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, database for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.refresh_schema_cache.
+    """
     configured = settings or get_settings()
     if database:
         database_name, database_url = resolve_database_selection(configured, database)
@@ -148,6 +317,17 @@ def refresh_schema_cache(settings: Settings | None = None, database: str | None 
 
 
 def get_sql_catalog(settings: Settings | None = None, database: str | None = None, *, refresh: bool = False) -> SqlSchemaCatalog:
+    """Get sql catalog for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, database, refresh for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.get_sql_catalog.
+    """
     configured = settings or get_settings()
     database_name, database_url = resolve_database_selection(configured, database)
     cache_key = (database_name, database_url)
@@ -164,6 +344,17 @@ def get_sql_catalog(settings: Settings | None = None, database: str | None = Non
 
 
 def get_all_sql_catalogs(settings: Settings | None = None, *, refresh: bool = False) -> list[SqlSchemaCatalog]:
+    """Get all sql catalogs for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, refresh for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.get_all_sql_catalogs.
+    """
     configured = settings or get_settings()
     catalogs: list[SqlSchemaCatalog] = []
     for database_name, database_url in sorted(resolve_sql_databases(configured).items()):
@@ -182,6 +373,17 @@ def get_all_sql_catalogs(settings: Settings | None = None, *, refresh: bool = Fa
 
 
 def _inspect_catalog_for_engine(engine: Engine, database_name: str) -> SqlSchemaCatalog:
+    """Handle the internal inspect catalog for engine helper path for this module.
+
+    Inputs:
+        Receives engine, database_name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._inspect_catalog_for_engine.
+    """
     inspector = inspect(engine)
     tables: list[SqlTableRef] = []
 
@@ -201,6 +403,17 @@ def _inspect_catalog_for_engine(engine: Engine, database_name: str) -> SqlSchema
 
 
 def _inspect_table_ref(inspector: Any, *, schema_name: str, table_name: str) -> SqlTableRef:
+    """Handle the internal inspect table ref helper path for this module.
+
+    Inputs:
+        Receives inspector, schema_name, table_name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._inspect_table_ref.
+    """
     try:
         raw_pk = inspector.get_pk_constraint(table_name, schema=schema_name if schema_name != "main" else None) or {}
     except Exception:  # noqa: BLE001
@@ -260,6 +473,17 @@ def _inspect_table_ref(inspector: Any, *, schema_name: str, table_name: str) -> 
 
 
 def _catalog_table_to_schema(table: SqlTableRef, dialect: str | None) -> TableSchema:
+    """Handle the internal catalog table to schema helper path for this module.
+
+    Inputs:
+        Receives table, dialect for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._catalog_table_to_schema.
+    """
     display_name = table.table_name if table.schema_name in {"main", "public"} and dialect != "postgresql" else table.qualified_name
     if dialect == "postgresql":
         display_name = table.qualified_name
@@ -270,6 +494,17 @@ def _catalog_table_to_schema(table: SqlTableRef, dialect: str | None) -> TableSc
 
 
 def get_schema(settings: Settings | None = None) -> SchemaInfo:
+    """Get schema for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.get_schema.
+    """
     configured = settings or get_settings()
     if not resolve_sql_databases(configured):
         return SchemaInfo(databases=[])
@@ -282,6 +517,17 @@ def get_schema(settings: Settings | None = None) -> SchemaInfo:
 
 
 def _database_score(database: DatabaseSchema, goal_tokens: set[str], goal_text: str, default_database: str | None) -> int:
+    """Handle the internal database score helper path for this module.
+
+    Inputs:
+        Receives database, goal_tokens, goal_text, default_database for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._database_score.
+    """
     score = 0
     name_tokens = _tokenize(database.name)
     if database.name.lower() in goal_text:
@@ -293,6 +539,17 @@ def _database_score(database: DatabaseSchema, goal_tokens: set[str], goal_text: 
 
 
 def _table_score(table: TableSchema, goal_tokens: set[str]) -> int:
+    """Handle the internal table score helper path for this module.
+
+    Inputs:
+        Receives table, goal_tokens for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._table_score.
+    """
     score = len(goal_tokens & _tokenize(table.name)) * 6
     for column in table.columns:
         overlap = len(goal_tokens & _tokenize(column.name))
@@ -309,6 +566,17 @@ def prune_schema(
     max_databases: int = 3,
     max_tables_per_database: int = 4,
 ) -> SchemaInfo:
+    """Prune schema for the surrounding runtime workflow.
+
+    Inputs:
+        Receives schema, goal, settings, max_databases, max_tables_per_database for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.prune_schema.
+    """
     if not schema.databases:
         return schema
 
@@ -351,6 +619,17 @@ def prune_schema(
 
 
 def _sql_query_worker(queue: mp.Queue, database_url: str, query: str, row_limit: int | None = None) -> None:
+    """Handle the internal sql query worker helper path for this module.
+
+    Inputs:
+        Receives queue, database_url, query, row_limit for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._sql_query_worker.
+    """
     try:
         engine = create_engine(database_url, future=True, pool_pre_ping=True)
         with engine.connect() as connection:
@@ -379,6 +658,17 @@ def _sql_query_worker(queue: mp.Queue, database_url: str, query: str, row_limit:
 
 
 def sql_query(settings: Settings, query: str, database: str | None = None) -> dict[str, Any]:
+    """Sql query for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, query, database for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.sql_query.
+    """
     return _sql_query(settings, query, database=database, context=None)
 
 
@@ -389,6 +679,17 @@ def _sql_query(
     database: str | None = None,
     context: ToolInvocationContext | None = None,
 ) -> dict[str, Any]:
+    """Handle the internal sql query helper path for this module.
+
+    Inputs:
+        Receives settings, query, database, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._sql_query.
+    """
     database_name, database_url = resolve_database_selection(settings, database)
     safe_query = _normalize_and_validate_query(settings, database_name, query)
     try:
@@ -424,6 +725,17 @@ def _sql_query(
 
 
 def explain_sql_query(settings: Settings, query: str, database: str | None = None) -> None:
+    """Explain sql query for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, query, database for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql.explain_sql_query.
+    """
     database_name, database_url = resolve_database_selection(settings, database)
     safe_query = _normalize_and_validate_query(settings, database_name, query)
     engine = _engine_for_url(database_url)
@@ -434,6 +746,17 @@ def explain_sql_query(settings: Settings, query: str, database: str | None = Non
 
 
 def _normalize_and_validate_query(settings: Settings, database_name: str, query: str) -> str:
+    """Handle the internal normalize and validate query helper path for this module.
+
+    Inputs:
+        Receives settings, database_name, query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._normalize_and_validate_query.
+    """
     safe_query = _validate_safe_query(query)
     try:
         catalog = get_sql_catalog(settings, database_name)
@@ -451,11 +774,44 @@ def _normalize_and_validate_query(settings: Settings, database_name: str, query:
 
 
 class SQLQueryTool(BaseTool):
+    """Represent s q l query tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SQLQueryTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.sql.SQLQueryTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.sql.ToolArgs and related tests.
+        """
         database: str | None = None
         query: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.sql.ToolResult and related tests.
+        """
         database: str
         rows: list[dict[str, Any]]
         row_count: int
@@ -464,6 +820,17 @@ class SQLQueryTool(BaseTool):
         truncated: bool = False
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this SQLQueryTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through SQLQueryTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -481,23 +848,89 @@ class SQLQueryTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for SQLQueryTool instances.
+
+        Inputs:
+            Receives arguments for this SQLQueryTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through SQLQueryTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(sql_query(self.settings, query=arguments.query, database=arguments.database))
 
     def run_with_context(self, arguments: ToolArgs, context: ToolInvocationContext) -> ToolResult:
+        """Run with context for SQLQueryTool instances.
+
+        Inputs:
+            Receives arguments, context for this SQLQueryTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through SQLQueryTool.run_with_context calls and related tests.
+        """
         return self.ToolResult.model_validate(
             _sql_query(self.settings, arguments.query, database=arguments.database, context=context)
         )
 
 
 class SQLSchemaTool(BaseTool):
+    """Represent s q l schema tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SQLSchemaTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.sql.SQLSchemaTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.sql.ToolArgs and related tests.
+        """
         database: str | None = None
         refresh: bool = False
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.sql.ToolResult and related tests.
+        """
         catalog: dict[str, Any]
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this SQLSchemaTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through SQLSchemaTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -514,16 +947,60 @@ class SQLSchemaTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for SQLSchemaTool instances.
+
+        Inputs:
+            Receives arguments for this SQLSchemaTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through SQLSchemaTool.run calls and related tests.
+        """
         catalog = get_sql_catalog(self.settings, arguments.database, refresh=arguments.refresh)
         return self.ToolResult.model_validate({"catalog": catalog.model_dump()})
 
 
 class SQLValidateTool(BaseTool):
+    """Represent s q l validate tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SQLValidateTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.sql.SQLValidateTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.sql.ToolArgs and related tests.
+        """
         database: str | None = None
         query: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.sql.ToolResult and related tests.
+        """
         database: str
         query: str
         valid: bool
@@ -531,6 +1008,17 @@ class SQLValidateTool(BaseTool):
         explanation: str
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this SQLValidateTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through SQLValidateTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -548,6 +1036,17 @@ class SQLValidateTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for SQLValidateTool instances.
+
+        Inputs:
+            Receives arguments for this SQLValidateTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through SQLValidateTool.run calls and related tests.
+        """
         database_name, _database_url = resolve_database_selection(self.settings, arguments.database)
         safe_query = _normalize_and_validate_query(self.settings, database_name, arguments.query)
         validation = validate_read_only_sql(safe_query)
@@ -566,6 +1065,17 @@ class SQLValidateTool(BaseTool):
 
 
 def _explain_validated_sql(query: str, *, valid: bool, reason: str | None = None) -> str:
+    """Handle the internal explain validated sql helper path for this module.
+
+    Inputs:
+        Receives query, valid, reason for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.sql._explain_validated_sql.
+    """
     if not valid:
         return f"The SQL was not executed. Validation failed: {reason or 'unknown reason'}"
     summary = "The SQL was validated as a single read-only SELECT/WITH statement and was not executed."

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.capabilities.slurm
+
+Purpose:
+    Provide compatibility capability-pack helpers and fixtures for domain-specific tests and utilities.
+
+Responsibilities:
+    Classify or compile typed intents when called directly by tests or compatibility surfaces.
+
+Data flow / Interfaces:
+    Consumes compile contexts, allowed tools, and typed intents; returns execution-plan fragments or eval metadata.
+
+Boundaries:
+    These modules are not the active top-level natural-language planner; user prompts route through LLMActionPlanner.
+"""
+
 from __future__ import annotations
 
 import getpass
@@ -68,6 +83,17 @@ ALLOWED_METRIC_GROUPS = {
 
 
 class SlurmQueueIntent(BaseModel):
+    """Represent slurm queue intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmQueueIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmQueueIntent and related tests.
+    """
     user: str | None = None
     state: str | None = None
     partition: str | None = None
@@ -77,6 +103,17 @@ class SlurmQueueIntent(BaseModel):
 
 
 class SlurmJobDetailIntent(BaseModel):
+    """Represent slurm job detail intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmJobDetailIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmJobDetailIntent and related tests.
+    """
     job_id: str | None = None
     user: str | None = None
     state: str | None = None
@@ -87,6 +124,17 @@ class SlurmJobDetailIntent(BaseModel):
 
 
 class SlurmAccountingIntent(BaseModel):
+    """Represent slurm accounting intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmAccountingIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmAccountingIntent and related tests.
+    """
     user: str | None = None
     state: str | None = None
     partition: str | None = None
@@ -100,6 +148,17 @@ class SlurmAccountingIntent(BaseModel):
 
 
 class SlurmAccountingAggregateIntent(BaseModel):
+    """Represent slurm accounting aggregate intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmAccountingAggregateIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmAccountingAggregateIntent and related tests.
+    """
     user: str | None = None
     state: str | None = None
     include_all_states: bool = False
@@ -126,6 +185,17 @@ class SlurmAccountingAggregateIntent(BaseModel):
 
 
 class SlurmJobCountIntent(BaseModel):
+    """Represent slurm job count intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmJobCountIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmJobCountIntent and related tests.
+    """
     user: str | None = None
     state: str | None = None
     partition: str | None = None
@@ -138,6 +208,17 @@ class SlurmJobCountIntent(BaseModel):
 
 
 class SlurmNodeStatusIntent(BaseModel):
+    """Represent slurm node status intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmNodeStatusIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmNodeStatusIntent and related tests.
+    """
     node: str | None = None
     partition: str | None = None
     state: str | None = None
@@ -148,18 +229,51 @@ class SlurmNodeStatusIntent(BaseModel):
 
 
 class SlurmNodeDetailIntent(BaseModel):
+    """Represent slurm node detail intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmNodeDetailIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmNodeDetailIntent and related tests.
+    """
     node: str | None = None
     gateway_node: str | None = None
     output_mode: Literal["text", "csv", "json"] = "text"
 
 
 class SlurmPartitionSummaryIntent(BaseModel):
+    """Represent slurm partition summary intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmPartitionSummaryIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmPartitionSummaryIntent and related tests.
+    """
     partition: str | None = None
     gateway_node: str | None = None
     output_mode: Literal["text", "csv", "json"] = "text"
 
 
 class SlurmMetricsIntent(BaseModel):
+    """Represent slurm metrics intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmMetricsIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmMetricsIntent and related tests.
+    """
     metric_group: Literal[
         "cluster_summary",
         "queue_summary",
@@ -179,16 +293,49 @@ class SlurmMetricsIntent(BaseModel):
 
 
 class SlurmDBDHealthIntent(BaseModel):
+    """Represent slurm d b d health intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmDBDHealthIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmDBDHealthIntent and related tests.
+    """
     gateway_node: str | None = None
     output_mode: Literal["text", "json"] = "json"
 
 
 class SlurmUnsupportedMutationIntent(BaseModel):
+    """Represent slurm unsupported mutation intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmUnsupportedMutationIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmUnsupportedMutationIntent and related tests.
+    """
     operation: str
     reason: str
 
 
 class SlurmCompoundIntent(BaseModel):
+    """Represent slurm compound intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmCompoundIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmCompoundIntent and related tests.
+    """
     intents: list[Any] = Field(default_factory=list)
     output_mode: Literal["text", "json"] = "json"
     return_policy: Literal["combined_summary", "all_results"] = "combined_summary"
@@ -197,6 +344,17 @@ class SlurmCompoundIntent(BaseModel):
 
 
 class SlurmFailureIntent(BaseModel):
+    """Represent slurm failure intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmFailureIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmFailureIntent and related tests.
+    """
     message: str
     error_type: str = "slurm_request_uncovered"
     suggestions: list[str] = Field(default_factory=list)
@@ -204,6 +362,17 @@ class SlurmFailureIntent(BaseModel):
 
 
 class SlurmCapabilityPack(CapabilityPack):
+    """Represent slurm capability pack within the OpenFABRIC runtime. It extends CapabilityPack.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmCapabilityPack.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.slurm.SlurmCapabilityPack and related tests.
+    """
     name = "slurm"
     supports_llm_intent_extraction = True
     intent_types = (
@@ -223,6 +392,17 @@ class SlurmCapabilityPack(CapabilityPack):
     )
 
     def classify(self, goal: str, context: ClassificationContext) -> IntentResult:
+        """Classify for SlurmCapabilityPack instances.
+
+        Inputs:
+            Receives goal, context for this SlurmCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SlurmCapabilityPack.classify calls and related tests.
+        """
         prompt = str(goal or "").strip()
         if not prompt:
             return IntentResult(matched=False, reason="slurm_no_match")
@@ -496,6 +676,17 @@ class SlurmCapabilityPack(CapabilityPack):
         return IntentResult(matched=False, reason="slurm_no_match")
 
     def is_llm_intent_domain(self, goal: str, context: ClassificationContext) -> bool:
+        """Is llm intent domain for SlurmCapabilityPack instances.
+
+        Inputs:
+            Receives goal, context for this SlurmCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SlurmCapabilityPack.is_llm_intent_domain calls and related tests.
+        """
         if not context.settings.enable_llm_intent_extraction:
             return False
         prompt = str(goal or "").strip()
@@ -525,6 +716,17 @@ class SlurmCapabilityPack(CapabilityPack):
         )
 
     def try_llm_extract(self, goal: str, context: ClassificationContext, extractor: LLMIntentExtractor) -> IntentResult:
+        """Try llm extract for SlurmCapabilityPack instances.
+
+        Inputs:
+            Receives goal, context, extractor for this SlurmCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SlurmCapabilityPack.try_llm_extract calls and related tests.
+        """
         if not context.settings.enable_llm_intent_extraction:
             return IntentResult(matched=False, reason="slurm_llm_intent_disabled")
         prompt = str(goal or "").strip()
@@ -621,6 +823,17 @@ class SlurmCapabilityPack(CapabilityPack):
         )
 
     def compile(self, intent: Any, context: CompileContext) -> CompiledIntentPlan | None:
+        """Compile for SlurmCapabilityPack instances.
+
+        Inputs:
+            Receives intent, context for this SlurmCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SlurmCapabilityPack.compile calls and related tests.
+        """
         if not isinstance(intent, self.intent_types):
             return None
 
@@ -688,6 +901,17 @@ class SlurmCapabilityPack(CapabilityPack):
 
 
 def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[str, Any]]:
+    """Handle the internal compile slurm intent helper path for this module.
+
+    Inputs:
+        Receives intent, allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._compile_slurm_intent.
+    """
     if isinstance(intent, SlurmQueueIntent):
         _require_tools(allowed_tools, "slurm.queue")
         return [
@@ -1000,6 +1224,17 @@ def _compile_slurm_intent(intent: Any, allowed_tools: list[str]) -> list[dict[st
 
 
 def _compile_slurm_compound_intent(intent: SlurmCompoundIntent, allowed_tools: list[str]) -> list[dict[str, Any]]:
+    """Handle the internal compile slurm compound intent helper path for this module.
+
+    Inputs:
+        Receives intent, allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._compile_slurm_compound_intent.
+    """
     steps: list[dict[str, Any]] = []
     inputs: list[str] = []
     result_refs: dict[str, Any] = {}
@@ -1034,6 +1269,17 @@ def _compile_slurm_compound_intent(intent: SlurmCompoundIntent, allowed_tools: l
 
 
 def _compile_slurm_tool_step(intent: Any, *, step_id: int, alias: str, allowed_tools: list[str]) -> dict[str, Any]:
+    """Handle the internal compile slurm tool step helper path for this module.
+
+    Inputs:
+        Receives intent, step_id, alias, allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._compile_slurm_tool_step.
+    """
     if isinstance(intent, SlurmQueueIntent):
         _require_tools(allowed_tools, "slurm.queue")
         return {
@@ -1172,6 +1418,17 @@ def _compile_slurm_tool_step(intent: Any, *, step_id: int, alias: str, allowed_t
 
 
 def _compound_alias(intent: Any, index: int, used_labels: set[str]) -> str:
+    """Handle the internal compound alias helper path for this module.
+
+    Inputs:
+        Receives intent, index, used_labels for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._compound_alias.
+    """
     base = "slurm_result"
     if isinstance(intent, SlurmJobCountIntent):
         state = str(intent.state or "jobs").lower()
@@ -1198,6 +1455,17 @@ def _compound_alias(intent: Any, index: int, used_labels: set[str]) -> str:
 
 
 def _rows_return_step(*, step_id: int, alias: str, collection_path: str, mode: str, wrapper_key: str) -> dict[str, Any]:
+    """Handle the internal rows return step helper path for this module.
+
+    Inputs:
+        Receives step_id, alias, collection_path, mode, wrapper_key for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._rows_return_step.
+    """
     if mode == "json":
         value = {wrapper_key: {"$ref": alias, "path": collection_path}}
         contract = build_output_contract(mode="json")
@@ -1217,6 +1485,17 @@ def _rows_return_step(*, step_id: int, alias: str, collection_path: str, mode: s
 
 
 def _resolve_slurm_semantic_frame(frame: SlurmSemanticFrame, prompt: str, *, gateway_node: str | None) -> Any:
+    """Handle the internal resolve slurm semantic frame helper path for this module.
+
+    Inputs:
+        Receives frame, prompt, gateway_node for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._resolve_slurm_semantic_frame.
+    """
     intents: list[Any] = []
     for request in frame.requests:
         intents.extend(_intents_for_slurm_request(request, prompt, gateway_node=gateway_node, frame_output_mode=frame.output_mode))
@@ -1241,6 +1520,17 @@ def _intents_for_slurm_request(
     gateway_node: str | None,
     frame_output_mode: str,
 ) -> list[Any]:
+    """Handle the internal intents for slurm request helper path for this module.
+
+    Inputs:
+        Receives request, prompt, gateway_node, frame_output_mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._intents_for_slurm_request.
+    """
     filters = dict(request.filters or {})
     output_mode = _output_mode_for_request(request, frame_output_mode)
     metrics_output = "json" if output_mode == "json" else "text"
@@ -1365,6 +1655,17 @@ def _intents_for_slurm_request(
 
 
 def _output_mode_for_request(request: SlurmRequest, frame_output_mode: str) -> str:
+    """Handle the internal output mode for request helper path for this module.
+
+    Inputs:
+        Receives request, frame_output_mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._output_mode_for_request.
+    """
     if frame_output_mode in {"json", "csv", "count"}:
         return frame_output_mode
     if request.output == "json":
@@ -1375,6 +1676,17 @@ def _output_mode_for_request(request: SlurmRequest, frame_output_mode: str) -> s
 
 
 def _dedupe_slurm_intents(intents: list[Any]) -> list[Any]:
+    """Handle the internal dedupe slurm intents helper path for this module.
+
+    Inputs:
+        Receives intents for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._dedupe_slurm_intents.
+    """
     deduped: list[Any] = []
     seen: set[tuple[str, str]] = set()
     for intent in intents:
@@ -1388,6 +1700,17 @@ def _dedupe_slurm_intents(intents: list[Any]) -> list[Any]:
 
 
 def _attach_compound_coverage(intent: Any, frame: SlurmSemanticFrame, coverage: SlurmCoverageResult) -> Any:
+    """Handle the internal attach compound coverage helper path for this module.
+
+    Inputs:
+        Receives intent, frame, coverage for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._attach_compound_coverage.
+    """
     coverage_payload = _semantic_metadata(frame, generation_mode="deterministic", coverage=coverage, intent=intent)
     if isinstance(intent, SlurmCompoundIntent):
         return intent.model_copy(update={"coverage": coverage_payload})
@@ -1402,6 +1725,17 @@ def _semantic_metadata(
     intent: Any | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Handle the internal semantic metadata helper path for this module.
+
+    Inputs:
+        Receives frame, generation_mode, coverage, intent, extra for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._semantic_metadata.
+    """
     covered_requests = list(coverage.covered_requests) if coverage else []
     missing_requests = [request.id for request in coverage.missing_requests] if coverage else []
     covered_constraints = list(coverage.covered_constraints) if coverage else []
@@ -1427,6 +1761,17 @@ def _semantic_metadata(
 
 
 def _slurm_tools_for_intent(intent: Any | None) -> list[str]:
+    """Handle the internal slurm tools for intent helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._slurm_tools_for_intent.
+    """
     if intent is None:
         return []
     if isinstance(intent, SlurmCompoundIntent):
@@ -1458,6 +1803,17 @@ def _slurm_tools_for_intent(intent: Any | None) -> list[str]:
 
 
 def _slurm_metric_groups_for_intent(intent: Any | None) -> list[str]:
+    """Handle the internal slurm metric groups for intent helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._slurm_metric_groups_for_intent.
+    """
     if intent is None:
         return []
     if isinstance(intent, SlurmCompoundIntent):
@@ -1471,6 +1827,17 @@ def _slurm_metric_groups_for_intent(intent: Any | None) -> list[str]:
 
 
 def _failure_message(intent: SlurmFailureIntent) -> str:
+    """Handle the internal failure message helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._failure_message.
+    """
     lines = [intent.message]
     if intent.suggestions:
         lines.append("")
@@ -1481,6 +1848,17 @@ def _failure_message(intent: SlurmFailureIntent) -> str:
 
 
 def _slurm_failure_suggestions() -> list[str]:
+    """Handle the internal slurm failure suggestions helper path for this module.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._slurm_failure_suggestions.
+    """
     return [
         "Show SLURM queue as JSON.",
         "Count running and pending SLURM jobs.",
@@ -1491,6 +1869,17 @@ def _slurm_failure_suggestions() -> list[str]:
 
 
 def _slurm_llm_intent_system_prompt() -> str:
+    """Handle the internal slurm llm intent system prompt helper path for this module.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._slurm_llm_intent_system_prompt.
+    """
     return """You convert user requests into one typed SLURM read-only intent.
 You must output JSON only.
 You may only choose one of the allowed intent types.
@@ -1525,6 +1914,17 @@ def _finalize_llm_slurm_intent(
     gateway_node: str | None,
     available_nodes: list[str],
 ) -> Any:
+    """Handle the internal finalize llm slurm intent helper path for this module.
+
+    Inputs:
+        Receives intent, prompt, gateway_node, available_nodes for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._finalize_llm_slurm_intent.
+    """
     if isinstance(intent, SlurmCompoundIntent):
         finalized_children = [
             _finalize_llm_slurm_intent(
@@ -1564,6 +1964,17 @@ def _finalize_llm_slurm_intent(
 
 
 def _validate_llm_slurm_intent(intent: Any) -> Any:
+    """Handle the internal validate llm slurm intent helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._validate_llm_slurm_intent.
+    """
     _reject_suspicious_strings(intent.model_dump())
 
     if isinstance(intent, SlurmCompoundIntent):
@@ -1683,6 +2094,17 @@ def _validate_llm_slurm_intent(intent: Any) -> Any:
 
 
 def _coerce_slurm_child_intent(child: Any) -> Any:
+    """Handle the internal coerce slurm child intent helper path for this module.
+
+    Inputs:
+        Receives child for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._coerce_slurm_child_intent.
+    """
     if isinstance(child, self_intent_types()):
         return child
     if not isinstance(child, dict):
@@ -1698,6 +2120,17 @@ def _coerce_slurm_child_intent(child: Any) -> Any:
 
 
 def self_intent_types() -> tuple[type, ...]:
+    """Self intent types for the surrounding runtime workflow.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm.self_intent_types.
+    """
     return (
         SlurmQueueIntent,
         SlurmJobDetailIntent,
@@ -1716,6 +2149,17 @@ def self_intent_types() -> tuple[type, ...]:
 
 
 def _reject_suspicious_strings(value: Any) -> None:
+    """Handle the internal reject suspicious strings helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._reject_suspicious_strings.
+    """
     if isinstance(value, dict):
         for item in value.values():
             _reject_suspicious_strings(item)
@@ -1730,6 +2174,17 @@ def _reject_suspicious_strings(value: Any) -> None:
 
 
 def _validate_job_state(state: str | None) -> str | None:
+    """Handle the internal validate job state helper path for this module.
+
+    Inputs:
+        Receives state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._validate_job_state.
+    """
     if state is None:
         return None
     normalized = str(state).strip().upper()
@@ -1739,6 +2194,17 @@ def _validate_job_state(state: str | None) -> str | None:
 
 
 def _validate_node_state(state: str | None) -> str | None:
+    """Handle the internal validate node state helper path for this module.
+
+    Inputs:
+        Receives state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._validate_node_state.
+    """
     if state is None:
         return None
     normalized = str(state).strip().lower()
@@ -1748,12 +2214,34 @@ def _validate_node_state(state: str | None) -> str | None:
 
 
 def _require_tools(allowed_tools: list[str], *required: str) -> None:
+    """Handle the internal require tools helper path for this module.
+
+    Inputs:
+        Receives allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._require_tools.
+    """
     missing = [tool for tool in required if tool not in allowed_tools]
     if missing:
         raise ValueError(f"Deterministic intent requires unavailable tools: {', '.join(missing)}")
 
 
 def _detect_output_mode(prompt: str) -> Literal["text", "csv", "json"]:
+    """Handle the internal detect output mode helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_output_mode.
+    """
     if OUTPUT_JSON_RE.search(prompt):
         return "json"
     if OUTPUT_CSV_RE.search(prompt):
@@ -1762,14 +2250,47 @@ def _detect_output_mode(prompt: str) -> Literal["text", "csv", "json"]:
 
 
 def _detect_metrics_output_mode(prompt: str) -> Literal["text", "json"]:
+    """Handle the internal detect metrics output mode helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_metrics_output_mode.
+    """
     return "json" if OUTPUT_JSON_RE.search(prompt) else "text"
 
 
 def _detect_count_mode(prompt: str) -> bool:
+    """Handle the internal detect count mode helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_count_mode.
+    """
     return OUTPUT_COUNT_RE.search(prompt) is not None
 
 
 def _detect_user(prompt: str) -> str | None:
+    """Handle the internal detect user helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_user.
+    """
     if re.search(r"\bmy\b", prompt, re.IGNORECASE):
         return getpass.getuser()
     for pattern in (USER_FOR_RE, USER_RE):
@@ -1780,6 +2301,17 @@ def _detect_user(prompt: str) -> str | None:
 
 
 def _detect_partition(prompt: str) -> str | None:
+    """Handle the internal detect partition helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_partition.
+    """
     match = PARTITION_RE.search(prompt)
     if match is None:
         return None
@@ -1790,6 +2322,17 @@ def _detect_partition(prompt: str) -> str | None:
 
 
 def _extract_gateway_node(prompt: str, available_nodes: list[str]) -> tuple[str, str | None]:
+    """Handle the internal extract gateway node helper path for this module.
+
+    Inputs:
+        Receives prompt, available_nodes for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._extract_gateway_node.
+    """
     explicit_match = CLUSTER_ROUTE_RE.search(prompt)
     if explicit_match is not None:
         gateway_node = explicit_match.group(1)
@@ -1807,6 +2350,17 @@ def _extract_gateway_node(prompt: str, available_nodes: list[str]) -> tuple[str,
 
 
 def _detect_node_name(prompt: str) -> str | None:
+    """Handle the internal detect node name helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_node_name.
+    """
     for pattern in (NODE_DETAIL_RE, NODE_STATUS_FOR_RE, NODE_NAME_RE):
         match = pattern.search(prompt)
         if match is not None:
@@ -1818,6 +2372,17 @@ def _detect_node_name(prompt: str) -> str | None:
 
 
 def _detect_job_state(prompt: str) -> str | None:
+    """Handle the internal detect job state helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_job_state.
+    """
     lower = prompt.lower()
     if "running" in lower:
         return "RUNNING"
@@ -1835,6 +2400,17 @@ def _detect_job_state(prompt: str) -> str | None:
 
 
 def _detect_node_state(prompt: str) -> str | None:
+    """Handle the internal detect node state helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_node_state.
+    """
     lower = prompt.lower()
     if "idle" in lower:
         return "idle"
@@ -1850,6 +2426,17 @@ def _detect_node_state(prompt: str) -> str | None:
 
 
 def _looks_like_accounting_prompt(prompt: str) -> bool:
+    """Handle the internal looks like accounting prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._looks_like_accounting_prompt.
+    """
     lower = prompt.lower()
     return _looks_like_runtime_aggregate_prompt(prompt) or any(
         token in lower
@@ -1870,6 +2457,17 @@ def _looks_like_accounting_prompt(prompt: str) -> bool:
 
 
 def _looks_like_runtime_aggregate_prompt(prompt: str) -> bool:
+    """Handle the internal looks like runtime aggregate prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._looks_like_runtime_aggregate_prompt.
+    """
     lower = prompt.lower()
     return re.search(
         r"\b(?:how\s+long|average\s+(?:run\s*time|runtime|elapsed|duration)|avg\s+elapsed|mean\s+runtime|"
@@ -1881,11 +2479,33 @@ def _looks_like_runtime_aggregate_prompt(prompt: str) -> bool:
 
 
 def _is_unsupported_runtime_metric(prompt: str) -> bool:
+    """Handle the internal is unsupported runtime metric helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._is_unsupported_runtime_metric.
+    """
     lower = prompt.lower()
     return "median" in lower and re.search(r"\b(?:runtime|run\s*time|elapsed|duration|jobs?)\b", lower) is not None
 
 
 def _detect_time_range(prompt: str) -> tuple[str | None, str | None]:
+    """Handle the internal detect time range helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._detect_time_range.
+    """
     lower = prompt.lower()
     now = datetime.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1907,4 +2527,15 @@ def _detect_time_range(prompt: str) -> tuple[str | None, str | None]:
 
 
 def _collapse_spaces(value: str) -> str:
+    """Handle the internal collapse spaces helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.slurm._collapse_spaces.
+    """
     return re.sub(r"\s+", " ", value).strip()

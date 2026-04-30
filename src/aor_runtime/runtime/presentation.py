@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.presentation
+
+Purpose:
+    Render structured tool results into deterministic Markdown sections.
+
+Responsibilities:
+    Provide capability-aware presenters for SQL, SLURM, filesystem, shell, metrics, and generic structures.
+
+Data flow / Interfaces:
+    Consumes normalized tool results and presentation context; returns Markdown plus sanitized facts.
+
+Boundaries:
+    User mode must avoid raw JSON, raw rows beyond limits, and unsafe payload exposure.
+"""
+
 from __future__ import annotations
 
 import json
@@ -53,6 +68,17 @@ LLM_FORBIDDEN_KEY_PARTS = {
 
 @dataclass
 class PresentationContext:
+    """Represent presentation context within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PresentationContext.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.presentation.PresentationContext and related tests.
+    """
     mode: PresentationMode = "user"
     enable_llm_summary: bool = False
     max_rows: int = 20
@@ -69,6 +95,17 @@ class PresentationContext:
 
 @dataclass
 class PresentationResult:
+    """Represent presentation result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PresentationResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.presentation.PresentationResult and related tests.
+    """
     markdown: str
     summary: dict[str, Any] = field(default_factory=dict)
     redacted: bool = True
@@ -77,6 +114,17 @@ class PresentationResult:
 
 
 def present_result(result: Any, context: PresentationContext | None = None) -> PresentationResult:
+    """Present result for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.present_result.
+    """
     ctx = context or PresentationContext()
     if ctx.mode == "raw":
         return PresentationResult(markdown=_render_raw(result), summary={"raw": True}, redacted=False, raw_available=True)
@@ -92,6 +140,17 @@ def present_result(result: Any, context: PresentationContext | None = None) -> P
 
 
 def present_slurm_result(result: dict[str, Any], context: PresentationContext) -> PresentationResult:
+    """Present slurm result for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.present_slurm_result.
+    """
     clean = strip_internal_telemetry(result) if context.mode == "user" else dict(result)
     normalized = normalize_slurm_result(clean, context)
     lines = _render_normalized_slurm(normalized, context)
@@ -110,6 +169,17 @@ def present_slurm_result(result: dict[str, Any], context: PresentationContext) -
 
 
 def _render_normalized_slurm(normalized: NormalizedSlurmResult, context: PresentationContext) -> list[str]:
+    """Handle the internal render normalized slurm helper path for this module.
+
+    Inputs:
+        Receives normalized, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_normalized_slurm.
+    """
     if normalized.kind == SlurmResultKind.COMPOUND:
         return _render_slurm_compound(normalized, context)
     if normalized.kind == SlurmResultKind.QUEUE_JOBS:
@@ -136,6 +206,17 @@ def _render_normalized_slurm(normalized: NormalizedSlurmResult, context: Present
 
 
 def _render_slurm_compound(normalized: NormalizedSlurmResult, context: PresentationContext) -> list[str]:
+    """Handle the internal render slurm compound helper path for this module.
+
+    Inputs:
+        Receives normalized, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_compound.
+    """
     lines = md_section(normalized.title)
     overall = _slurm_overall_rows(normalized.summary)
     if overall:
@@ -151,6 +232,17 @@ def _render_slurm_compound(normalized: NormalizedSlurmResult, context: Presentat
 
 
 def _render_slurm_queue_jobs(normalized: NormalizedSlurmResult, context: PresentationContext) -> list[str]:
+    """Handle the internal render slurm queue jobs helper path for this module.
+
+    Inputs:
+        Receives normalized, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_queue_jobs.
+    """
     total = normalized.total_count if normalized.total_count is not None else len(normalized.rows)
     returned = normalized.returned_count if normalized.returned_count is not None else len(normalized.rows)
     state = str(normalized.summary.get("state") or "").lower()
@@ -191,6 +283,17 @@ def _render_slurm_queue_jobs(normalized: NormalizedSlurmResult, context: Present
 
 
 def _render_slurm_grouped_counts(normalized: NormalizedSlurmResult) -> list[str]:
+    """Handle the internal render slurm grouped counts helper path for this module.
+
+    Inputs:
+        Receives normalized for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_grouped_counts.
+    """
     lines = md_section(normalized.title)
     if not normalized.grouped:
         lines.extend(["", "No matching SLURM jobs were found."])
@@ -205,6 +308,17 @@ def _render_slurm_grouped_counts(normalized: NormalizedSlurmResult) -> list[str]
 
 
 def _render_slurm_nodes(normalized: NormalizedSlurmResult, context: PresentationContext) -> list[str]:
+    """Handle the internal render slurm nodes helper path for this module.
+
+    Inputs:
+        Receives normalized, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_nodes.
+    """
     lines = md_section(normalized.title)
     summary = normalized.summary
     if normalized.kind == SlurmResultKind.PROBLEMATIC_NODES:
@@ -234,6 +348,17 @@ def _render_slurm_nodes(normalized: NormalizedSlurmResult, context: Presentation
 
 
 def _render_slurm_partitions(normalized: NormalizedSlurmResult, context: PresentationContext) -> list[str]:
+    """Handle the internal render slurm partitions helper path for this module.
+
+    Inputs:
+        Receives normalized, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_partitions.
+    """
     lines = md_section(normalized.title)
     grouped_items = list(normalized.grouped.items())
     rows, truncated = _limit_rows(grouped_items, context.max_rows)
@@ -261,6 +386,17 @@ def _render_slurm_partitions(normalized: NormalizedSlurmResult, context: Present
 
 
 def _render_slurm_accounting_jobs(normalized: NormalizedSlurmResult, context: PresentationContext) -> list[str]:
+    """Handle the internal render slurm accounting jobs helper path for this module.
+
+    Inputs:
+        Receives normalized, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_accounting_jobs.
+    """
     lines = md_section(normalized.title)
     total = normalized.total_count if normalized.total_count is not None else len(normalized.rows)
     if total == 0:
@@ -299,6 +435,17 @@ def _render_slurm_accounting_jobs(normalized: NormalizedSlurmResult, context: Pr
 
 
 def _render_slurm_accounting_aggregate(normalized: NormalizedSlurmResult, context: PresentationContext) -> list[str]:
+    """Handle the internal render slurm accounting aggregate helper path for this module.
+
+    Inputs:
+        Receives normalized, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_accounting_aggregate.
+    """
     del context
     metric_rows = [row for row in list(normalized.grouped.get("metrics") or []) if isinstance(row, dict)]
     if metric_rows:
@@ -364,6 +511,17 @@ def _render_slurm_accounting_aggregate(normalized: NormalizedSlurmResult, contex
 
 
 def _render_slurm_accounting_metric_table(normalized: NormalizedSlurmResult, metric_rows: list[dict[str, Any]]) -> list[str]:
+    """Handle the internal render slurm accounting metric table helper path for this module.
+
+    Inputs:
+        Receives normalized, metric_rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_accounting_metric_table.
+    """
     summary = normalized.summary
     lines = md_section(normalized.title)
     lines.append("")
@@ -404,6 +562,17 @@ def _render_slurm_accounting_metric_table(normalized: NormalizedSlurmResult, met
 
 
 def _render_slurm_gpu(normalized: NormalizedSlurmResult) -> list[str]:
+    """Handle the internal render slurm gpu helper path for this module.
+
+    Inputs:
+        Receives normalized for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_gpu.
+    """
     summary = normalized.summary
     lines = md_section(normalized.title)
     lines.append("")
@@ -418,6 +587,17 @@ def _render_slurm_gpu(normalized: NormalizedSlurmResult) -> list[str]:
 
 
 def _render_slurmdbd(normalized: NormalizedSlurmResult) -> list[str]:
+    """Handle the internal render slurmdbd helper path for this module.
+
+    Inputs:
+        Receives normalized for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurmdbd.
+    """
     summary = normalized.summary
     lines = md_section(normalized.title)
     lines.append("")
@@ -429,6 +609,17 @@ def _render_slurmdbd(normalized: NormalizedSlurmResult) -> list[str]:
 
 
 def _render_slurm_refusal(normalized: NormalizedSlurmResult) -> list[str]:
+    """Handle the internal render slurm refusal helper path for this module.
+
+    Inputs:
+        Receives normalized for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_refusal.
+    """
     return [
         *md_section("Request Not Allowed"),
         "",
@@ -442,6 +633,17 @@ def _render_slurm_refusal(normalized: NormalizedSlurmResult) -> list[str]:
 
 
 def _render_slurm_summary(normalized: NormalizedSlurmResult) -> list[str]:
+    """Handle the internal render slurm summary helper path for this module.
+
+    Inputs:
+        Receives normalized for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_slurm_summary.
+    """
     lines = md_section(normalized.title)
     overall = _slurm_overall_rows(normalized.summary)
     if overall:
@@ -452,6 +654,17 @@ def _render_slurm_summary(normalized: NormalizedSlurmResult) -> list[str]:
 
 
 def _append_slurm_notes(lines: list[str], warnings: list[str]) -> None:
+    """Handle the internal append slurm notes helper path for this module.
+
+    Inputs:
+        Receives lines, warnings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._append_slurm_notes.
+    """
     if not warnings:
         return
     lines.extend(["", *md_section("Notes")])
@@ -459,6 +672,17 @@ def _append_slurm_notes(lines: list[str], warnings: list[str]) -> None:
 
 
 def _runtime_metric_label(metric: str) -> str:
+    """Handle the internal runtime metric label helper path for this module.
+
+    Inputs:
+        Receives metric for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._runtime_metric_label.
+    """
     return {
         "average_elapsed": "Average runtime",
         "min_elapsed": "Minimum runtime",
@@ -471,6 +695,17 @@ def _runtime_metric_label(metric: str) -> str:
 
 
 def _runtime_metric_value(metric: str, summary: dict[str, Any]) -> str:
+    """Handle the internal runtime metric value helper path for this module.
+
+    Inputs:
+        Receives metric, summary for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._runtime_metric_value.
+    """
     if metric in {"count", "count_longer_than"}:
         return _format_number(summary.get("job_count"))
     if metric == "min_elapsed":
@@ -483,6 +718,17 @@ def _runtime_metric_value(metric: str, summary: dict[str, Any]) -> str:
 
 
 def _slurm_runtime_state_label(state: Any, include_all_states: bool, default_state_applied: bool) -> str:
+    """Handle the internal slurm runtime state label helper path for this module.
+
+    Inputs:
+        Receives state, include_all_states, default_state_applied for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._slurm_runtime_state_label.
+    """
     if include_all_states:
         return "All states"
     normalized = str(state or "").strip()
@@ -494,6 +740,17 @@ def _slurm_runtime_state_label(state: Any, include_all_states: bool, default_sta
 
 
 def _time_window_text(summary: dict[str, Any]) -> str:
+    """Handle the internal time window text helper path for this module.
+
+    Inputs:
+        Receives summary for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._time_window_text.
+    """
     start = summary.get("start")
     end = summary.get("end")
     if start and end:
@@ -506,6 +763,17 @@ def _time_window_text(summary: dict[str, Any]) -> str:
 
 
 def present_sql_result(result: Any, context: PresentationContext) -> PresentationResult:
+    """Present sql result for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.present_sql_result.
+    """
     rows: list[Any]
     row_count: int
     database = ""
@@ -546,6 +814,17 @@ def present_sql_result(result: Any, context: PresentationContext) -> Presentatio
 
 
 def present_sql_validation_result(result: dict[str, Any], context: PresentationContext) -> PresentationResult:
+    """Present sql validation result for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.present_sql_validation_result.
+    """
     clean = strip_internal_telemetry(result) if context.mode == "user" else dict(result)
     database = str(clean.get("database") or "").strip()
     query = str(clean.get("query") or "").strip()
@@ -579,6 +858,17 @@ def present_sql_validation_result(result: dict[str, Any], context: PresentationC
 
 
 def present_filesystem_result(result: Any, context: PresentationContext) -> PresentationResult:
+    """Present filesystem result for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.present_filesystem_result.
+    """
     payload = _as_dict(result)
     if {"file_count", "total_size_bytes"} <= set(payload):
         file_count = int(payload.get("file_count") or 0)
@@ -612,6 +902,17 @@ def present_filesystem_result(result: Any, context: PresentationContext) -> Pres
 
 
 def present_generic_result(result: Any, context: PresentationContext) -> PresentationResult:
+    """Present generic result for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.present_generic_result.
+    """
     clean = strip_internal_telemetry(result) if context.mode == "user" else result
     if isinstance(clean, (str, int, float, bool)) or clean is None:
         return PresentationResult(markdown=str(clean if clean is not None else ""), summary={"type": type(clean).__name__})
@@ -637,6 +938,17 @@ def present_generic_result(result: Any, context: PresentationContext) -> Present
 
 
 def strip_internal_telemetry(value: Any) -> Any:
+    """Strip internal telemetry for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.strip_internal_telemetry.
+    """
     if isinstance(value, dict):
         return {
             str(key): strip_internal_telemetry(item)
@@ -653,6 +965,17 @@ def build_sanitized_presentation_facts(
     actions: list[Any],
     context: PresentationContext,
 ) -> dict[str, Any]:
+    """Build sanitized presentation facts for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, actions, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.build_sanitized_presentation_facts.
+    """
     clean = strip_internal_telemetry(result)
     action_tools = [_action_attr(action, "tool") for action in actions if _action_attr(action, "tool") and _action_attr(action, "tool") != "runtime.return"]
     source_action = str(context.source_action or (action_tools[-1] if action_tools else ""))
@@ -741,6 +1064,17 @@ def validate_presentation_facts_for_llm(
     max_string_length: int = 4000,
     max_depth: int = 6,
 ) -> bool:
+    """Validate presentation facts for llm for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts, max_items, max_string_length, max_depth for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.validate_presentation_facts_for_llm.
+    """
     try:
         _validate_llm_fact_node(facts, max_items=max_items, max_string_length=max_string_length, max_depth=max_depth, depth=0)
     except ValueError:
@@ -749,6 +1083,17 @@ def validate_presentation_facts_for_llm(
 
 
 def summarize_presented_facts_with_llm(facts: dict[str, Any], context: PresentationContext, settings: Any) -> str | None:
+    """Summarize presented facts with llm for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts, context, settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation.summarize_presented_facts_with_llm.
+    """
     if not context.enable_llm_summary:
         return None
     max_items = max(1, int(getattr(settings, "presentation_llm_max_facts", getattr(settings, "llm_summary_max_facts", 50))))
@@ -780,6 +1125,17 @@ def summarize_presented_facts_with_llm(facts: dict[str, Any], context: Presentat
 
 
 def _is_slurm_result(result: Any, context: PresentationContext) -> bool:
+    """Handle the internal is slurm result helper path for this module.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._is_slurm_result.
+    """
     if str(context.source_action or "").startswith("slurm."):
         return True
     if not isinstance(result, dict):
@@ -803,24 +1159,68 @@ def _is_slurm_result(result: Any, context: PresentationContext) -> bool:
 
 
 def _is_sql_result(result: Any, context: PresentationContext) -> bool:
+    """Handle the internal is sql result helper path for this module.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._is_sql_result.
+    """
     if context.source_action == "sql.query":
         return True
     return isinstance(result, dict) and "rows" in result and "database" in result
 
 
 def _is_sql_validation_result(result: Any, context: PresentationContext) -> bool:
+    """Handle the internal is sql validation result helper path for this module.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._is_sql_validation_result.
+    """
     if context.source_action == "sql.validate":
         return True
     return isinstance(result, dict) and {"database", "query", "valid", "explanation"} <= set(result)
 
 
 def _is_filesystem_result(result: Any, context: PresentationContext) -> bool:
+    """Handle the internal is filesystem result helper path for this module.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._is_filesystem_result.
+    """
     if str(context.source_action or "").startswith("fs."):
         return True
     return isinstance(result, dict) and any(key in result for key in ("file_count", "total_size_bytes", "matches", "entries"))
 
 
 def _collect_slurm_facts(result: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal collect slurm facts helper path for this module.
+
+    Inputs:
+        Receives result for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._collect_slurm_facts.
+    """
     facts: dict[str, Any] = {}
     results = result.get("results")
     if isinstance(results, dict):
@@ -832,6 +1232,17 @@ def _collect_slurm_facts(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _merge_slurm_fact(facts: dict[str, Any], key: str, value: Any) -> None:
+    """Handle the internal merge slurm fact helper path for this module.
+
+    Inputs:
+        Receives facts, key, value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._merge_slurm_fact.
+    """
     if not isinstance(value, dict):
         return
     payload = value.get("payload") if isinstance(value.get("payload"), dict) else value
@@ -889,6 +1300,17 @@ def _merge_slurm_fact(facts: dict[str, Any], key: str, value: Any) -> None:
 
 
 def _slurm_overall_rows(facts: dict[str, Any]) -> list[tuple[str, str]]:
+    """Handle the internal slurm overall rows helper path for this module.
+
+    Inputs:
+        Receives facts for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._slurm_overall_rows.
+    """
     rows: list[tuple[str, str]] = []
     mapping = [
         ("Queue", "queue_count", "jobs total"),
@@ -914,6 +1336,17 @@ def _slurm_overall_rows(facts: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def _slurm_notes(facts: dict[str, Any]) -> list[str]:
+    """Handle the internal slurm notes helper path for this module.
+
+    Inputs:
+        Receives facts for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._slurm_notes.
+    """
     notes = []
     problematic_count = facts.get("problematic_nodes")
     if problematic_count is None and isinstance(facts.get("problematic_nodes"), list):
@@ -927,6 +1360,17 @@ def _slurm_notes(facts: dict[str, Any]) -> list[str]:
 
 
 def _markdown_table(rows: list[Any], max_rows: int) -> str:
+    """Handle the internal markdown table helper path for this module.
+
+    Inputs:
+        Receives rows, max_rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._markdown_table.
+    """
     dict_rows = [row for row in rows if isinstance(row, dict)]
     if not dict_rows:
         return ""
@@ -935,23 +1379,67 @@ def _markdown_table(rows: list[Any], max_rows: int) -> str:
 
 
 def _limit_rows(rows: list[Any], max_rows: int) -> tuple[list[Any], bool]:
+    """Handle the internal limit rows helper path for this module.
+
+    Inputs:
+        Receives rows, max_rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._limit_rows.
+    """
     limit = max(1, int(max_rows))
     return rows[:limit], len(rows) > limit
 
 
 def _single_row_scalar(rows: list[Any]) -> Any | None:
+    """Handle the internal single row scalar helper path for this module.
+
+    Inputs:
+        Receives rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._single_row_scalar.
+    """
     if len(rows) != 1 or not isinstance(rows[0], dict) or len(rows[0]) != 1:
         return None
     return next(iter(rows[0].values()))
 
 
 def _scalar_value(value: Any) -> Any:
+    """Handle the internal scalar value helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._scalar_value.
+    """
     if isinstance(value, dict) and len(value) == 1:
         return next(iter(value.values()))
     return value
 
 
 def _format_number(value: Any) -> str:
+    """Handle the internal format number helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._format_number.
+    """
     if isinstance(value, bool):
         return "1" if value else "0"
     try:
@@ -961,22 +1449,66 @@ def _format_number(value: Any) -> str:
 
 
 def _format_unknown_number(value: Any) -> str:
+    """Handle the internal format unknown number helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._format_unknown_number.
+    """
     if value is None or value == "Unknown":
         return "Unknown"
     return _format_number(value)
 
 
 def _yes_no(value: Any) -> str:
+    """Handle the internal yes no helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._yes_no.
+    """
     if value is None:
         return "Unknown"
     return "Yes" if bool(value) else "No"
 
 
 def _cell(value: Any) -> str:
+    """Handle the internal cell helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._cell.
+    """
     return md_cell(value)
 
 
 def _short_gres(value: Any) -> str:
+    """Handle the internal short gres helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._short_gres.
+    """
     text = _cell(value)
     if len(text) > 60:
         return f"{text[:57]}..."
@@ -984,10 +1516,32 @@ def _short_gres(value: Any) -> str:
 
 
 def _title(value: str) -> str:
+    """Handle the internal title helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._title.
+    """
     return value.replace("_", " ").title()
 
 
 def _compact_debug(value: Any) -> Any:
+    """Handle the internal compact debug helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._compact_debug.
+    """
     clean = strip_internal_telemetry(value)
     if isinstance(clean, dict):
         return {key: _compact_value(item) for key, item in clean.items()}
@@ -995,6 +1549,17 @@ def _compact_debug(value: Any) -> Any:
 
 
 def _compact_value(value: Any) -> Any:
+    """Handle the internal compact value helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._compact_value.
+    """
     if isinstance(value, list):
         return f"{len(value)} items"
     if isinstance(value, dict):
@@ -1003,26 +1568,81 @@ def _compact_value(value: Any) -> Any:
 
 
 def _is_small(value: dict[str, Any]) -> bool:
+    """Handle the internal is small helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._is_small.
+    """
     if len(value) > 12:
         return False
     return all(not isinstance(item, (dict, list)) for item in value.values())
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
+    """Handle the internal as dict helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._as_dict.
+    """
     return value if isinstance(value, dict) else {"value": value}
 
 
 def _render_raw(value: Any) -> str:
+    """Handle the internal render raw helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._render_raw.
+    """
     if isinstance(value, str):
         return value.strip()
     return _json_dumps(value)
 
 
 def _json_dumps(value: Any) -> str:
+    """Handle the internal json dumps helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._json_dumps.
+    """
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _cap_facts(value: Any, *, max_items: int) -> Any:
+    """Handle the internal cap facts helper path for this module.
+
+    Inputs:
+        Receives value, max_items for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._cap_facts.
+    """
     if isinstance(value, dict):
         capped: dict[str, Any] = {}
         for index, (key, item) in enumerate(value.items()):
@@ -1036,12 +1656,34 @@ def _cap_facts(value: Any, *, max_items: int) -> Any:
 
 
 def _action_attr(action: Any, name: str) -> Any:
+    """Handle the internal action attr helper path for this module.
+
+    Inputs:
+        Receives action, name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._action_attr.
+    """
     if isinstance(action, dict):
         return action.get(name)
     return getattr(action, name, None)
 
 
 def _compact_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal compact row helper path for this module.
+
+    Inputs:
+        Receives row for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._compact_row.
+    """
     return {
         str(key): _compact_value(value)
         for key, value in row.items()
@@ -1050,6 +1692,17 @@ def _compact_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _drop_empty(value: Any) -> Any:
+    """Handle the internal drop empty helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._drop_empty.
+    """
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
@@ -1071,6 +1724,17 @@ def _validate_llm_fact_node(
     max_depth: int,
     depth: int,
 ) -> None:
+    """Handle the internal validate llm fact node helper path for this module.
+
+    Inputs:
+        Receives value, max_items, max_string_length, max_depth, depth for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._validate_llm_fact_node.
+    """
     if depth > max_depth:
         raise ValueError("Presentation facts are too deeply nested for LLM summary.")
     if isinstance(value, dict):

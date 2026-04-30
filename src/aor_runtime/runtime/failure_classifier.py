@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.failure_classifier
+
+Purpose:
+    Classify runtime/eval failures into stable issue classes for regression reports.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -77,6 +92,17 @@ def classify_failure(
     plan: ExecutionPlan | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> str:
+    """Classify failure for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, error, plan, metadata for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier.classify_failure.
+    """
     text = str(goal or "").strip()
     lowered_goal = text.lower()
     metadata_payload = dict(metadata or {})
@@ -169,6 +195,17 @@ def classify_failure(
 
 
 def generate_prompt_suggestions(goal: str, error_type: str, context: dict[str, Any] | None = None) -> PromptSuggestionResult:
+    """Generate prompt suggestions for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, error_type, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier.generate_prompt_suggestions.
+    """
     context_payload = dict(context or {})
     workspace_root = _workspace_root(context_payload)
     outputs_dir = _outputs_dir(context_payload)
@@ -560,10 +597,32 @@ def generate_prompt_suggestions(goal: str, error_type: str, context: dict[str, A
 
 
 def _looks_like_file_task(goal: str) -> bool:
+    """Handle the internal looks like file task helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._looks_like_file_task.
+    """
     return bool(FILE_OPERATION_RE.search(goal) and FILE_NOUN_RE.search(goal))
 
 
 def _infer_aggregate_extension(goal: str) -> str | None:
+    """Handle the internal infer aggregate extension helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._infer_aggregate_extension.
+    """
     match = re.search(r"\*\.(?P<ext>[A-Za-z0-9]+)\b", goal)
     if match is not None:
         return f".{match.group('ext').lower()}"
@@ -579,6 +638,17 @@ def _infer_aggregate_extension(goal: str) -> str | None:
 
 
 def _has_explicit_path(goal: str) -> bool:
+    """Handle the internal has explicit path helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._has_explicit_path.
+    """
     if ABSOLUTE_PATH_RE.search(goal) or BARE_FILE_RE.search(goal):
         return True
     for match in PATH_PREPOSITION_RE.finditer(goal):
@@ -597,6 +667,17 @@ def _has_explicit_path(goal: str) -> bool:
 
 
 def _looks_like_sql_task(goal: str, *, plan: ExecutionPlan | None, metadata: dict[str, Any]) -> bool:
+    """Handle the internal looks like sql task helper path for this module.
+
+    Inputs:
+        Receives goal, plan, metadata for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._looks_like_sql_task.
+    """
     if plan is not None and any(step.action == "sql.query" for step in plan.steps):
         return True
     if str(metadata.get("error_source") or "").strip().lower() == "sql":
@@ -610,6 +691,17 @@ def _looks_like_sql_task(goal: str, *, plan: ExecutionPlan | None, metadata: dic
 
 
 def _looks_like_slurm_task(goal: str, *, plan: ExecutionPlan | None, metadata: dict[str, Any]) -> bool:
+    """Handle the internal looks like slurm task helper path for this module.
+
+    Inputs:
+        Receives goal, plan, metadata for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._looks_like_slurm_task.
+    """
     if plan is not None and any(step.action.startswith("slurm.") for step in plan.steps):
         return True
     if str(metadata.get("capability") or metadata.get("capability_pack") or "").strip().lower() == "slurm":
@@ -620,14 +712,47 @@ def _looks_like_slurm_task(goal: str, *, plan: ExecutionPlan | None, metadata: d
 
 
 def _has_explicit_database(goal: str) -> bool:
+    """Handle the internal has explicit database helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._has_explicit_database.
+    """
     return DATABASE_NAME_RE.search(goal) is not None
 
 
 def _plan_has_multi_step_actions(plan: ExecutionPlan | None) -> bool:
+    """Handle the internal plan has multi step actions helper path for this module.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._plan_has_multi_step_actions.
+    """
     return plan is not None and len(plan.steps) > 1
 
 
 def _metadata_text(metadata: dict[str, Any]) -> str:
+    """Handle the internal metadata text helper path for this module.
+
+    Inputs:
+        Receives metadata for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._metadata_text.
+    """
     parts: list[str] = []
     for key in ("error_source", "error_kind", "error_target", "error_detail", "reason", "failed_step"):
         value = metadata.get(key)
@@ -637,16 +762,49 @@ def _metadata_text(metadata: dict[str, Any]) -> str:
 
 
 def _workspace_root(context: dict[str, Any]) -> Path:
+    """Handle the internal workspace root helper path for this module.
+
+    Inputs:
+        Receives context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._workspace_root.
+    """
     value = str(context.get("workspace_root") or "/tmp/work").strip() or "/tmp/work"
     return Path(value)
 
 
 def _outputs_dir(context: dict[str, Any]) -> Path:
+    """Handle the internal outputs dir helper path for this module.
+
+    Inputs:
+        Receives context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._outputs_dir.
+    """
     value = str(context.get("outputs_dir") or (_workspace_root(context) / "outputs")).strip()
     return Path(value)
 
 
 def _infer_named_file(goal: str) -> str:
+    """Handle the internal infer named file helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._infer_named_file.
+    """
     lowered = goal.lower()
     if "meeting notes" in lowered:
         return "meeting_notes.txt"
@@ -663,6 +821,17 @@ def _infer_named_file(goal: str) -> str:
 
 
 def _infer_search_term(goal: str) -> str | None:
+    """Handle the internal infer search term helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._infer_search_term.
+    """
     quoted = extract_quoted_content(goal)
     if quoted:
         return quoted
@@ -674,6 +843,17 @@ def _infer_search_term(goal: str) -> str | None:
 
 
 def _infer_table_name(goal: str) -> str | None:
+    """Handle the internal infer table name helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._infer_table_name.
+    """
     lowered = goal.lower()
     if "studies" in lowered or "study" in lowered:
         return "study"
@@ -688,6 +868,17 @@ def _infer_table_name(goal: str) -> str | None:
 
 
 def _infer_database_name(goal: str) -> str | None:
+    """Handle the internal infer database name helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._infer_database_name.
+    """
     match = DATABASE_NAME_RE.search(goal)
     if match is None:
         return None
@@ -699,6 +890,17 @@ def _infer_database_name(goal: str) -> str | None:
 
 
 def _infer_column_name(goal: str, table: str) -> str:
+    """Handle the internal infer column name helper path for this module.
+
+    Inputs:
+        Receives goal, table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._infer_column_name.
+    """
     lowered = goal.lower()
     if "name" in lowered:
         return "name"
@@ -710,6 +912,17 @@ def _infer_column_name(goal: str, table: str) -> str:
 
 
 def _infer_sql_relation_from_context(context: dict[str, Any]) -> str | None:
+    """Handle the internal infer sql relation from context helper path for this module.
+
+    Inputs:
+        Receives context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._infer_sql_relation_from_context.
+    """
     for key in ("sql_table", "table", "relation"):
         value = str(context.get(key) or "").strip()
         if value:
@@ -726,6 +939,17 @@ def _infer_sql_relation_from_context(context: dict[str, Any]) -> str | None:
 
 
 def _llm_fallback_suggestions(goal: str, workspace_root: Path, outputs_dir: Path) -> list[PromptSuggestion]:
+    """Handle the internal llm fallback suggestions helper path for this module.
+
+    Inputs:
+        Receives goal, workspace_root, outputs_dir for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._llm_fallback_suggestions.
+    """
     lowered = goal.lower()
     if _looks_like_sql_task(goal, plan=None, metadata={}):
         table = _infer_table_name(goal) or "table_name"
@@ -849,4 +1073,15 @@ def _llm_fallback_suggestions(goal: str, workspace_root: Path, outputs_dir: Path
 
 
 def _clean_token(value: str) -> str:
+    """Handle the internal clean token helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.failure_classifier._clean_token.
+    """
     return str(value or "").strip().strip("\"'()[]{}")

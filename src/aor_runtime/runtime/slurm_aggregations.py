@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.slurm_aggregations
+
+Purpose:
+    Compute deterministic SLURM aggregate metrics from accounting rows.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -16,6 +31,17 @@ SlurmAccountingAggregateMetric = Literal[
 
 
 def aggregate_slurm_accounting_jobs(jobs: list[dict[str, Any]], intent: Any) -> dict[str, Any]:
+    """Aggregate slurm accounting jobs for the surrounding runtime workflow.
+
+    Inputs:
+        Receives jobs, intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_aggregations.aggregate_slurm_accounting_jobs.
+    """
     metric = _metric(getattr(intent, "metric", None))
     group_by = _group_by(getattr(intent, "group_by", None))
     threshold_seconds = _optional_int(getattr(intent, "threshold_seconds", None))
@@ -79,6 +105,17 @@ def aggregate_slurm_accounting_jobs(jobs: list[dict[str, Any]], intent: Any) -> 
 
 
 def format_elapsed_seconds(seconds: int | float | None) -> str:
+    """Format elapsed seconds for the surrounding runtime workflow.
+
+    Inputs:
+        Receives seconds for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_aggregations.format_elapsed_seconds.
+    """
     if seconds is None:
         return "Unknown"
     total = int(round(float(seconds)))
@@ -102,6 +139,17 @@ def _aggregate_elapsed(
     metric: SlurmAccountingAggregateMetric,
     threshold_seconds: int | None,
 ) -> dict[str, Any]:
+    """Handle the internal aggregate elapsed helper path for this module.
+
+    Inputs:
+        Receives jobs, metric, threshold_seconds for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_aggregations._aggregate_elapsed.
+    """
     elapsed_values = [int(job["elapsed_seconds"]) for job in jobs if _optional_int(job.get("elapsed_seconds")) is not None]
     count = len(elapsed_values)
     total = sum(elapsed_values)
@@ -141,6 +189,17 @@ def _aggregate_elapsed(
 
 
 def _group_jobs(jobs: list[dict[str, Any]], group_by: str) -> dict[str, list[dict[str, Any]]]:
+    """Handle the internal group jobs helper path for this module.
+
+    Inputs:
+        Receives jobs, group_by for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_aggregations._group_jobs.
+    """
     field = "name" if group_by == "job_name" else group_by
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for job in jobs:
@@ -149,6 +208,17 @@ def _group_jobs(jobs: list[dict[str, Any]], group_by: str) -> dict[str, list[dic
 
 
 def _metric(value: Any) -> SlurmAccountingAggregateMetric:
+    """Handle the internal metric helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_aggregations._metric.
+    """
     text = str(value or "average_elapsed").strip()
     allowed = {
         "average_elapsed",
@@ -165,6 +235,17 @@ def _metric(value: Any) -> SlurmAccountingAggregateMetric:
 
 
 def _group_by(value: Any) -> str | None:
+    """Handle the internal group by helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_aggregations._group_by.
+    """
     if value is None:
         return None
     text = str(value).strip()
@@ -172,6 +253,17 @@ def _group_by(value: Any) -> str | None:
 
 
 def _optional_int(value: Any) -> int | None:
+    """Handle the internal optional int helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_aggregations._optional_int.
+    """
     if value is None or value == "":
         return None
     try:

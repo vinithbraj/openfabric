@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.store
+
+Purpose:
+    Persist sessions, events, and snapshots in SQLite.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import json
@@ -12,17 +27,61 @@ from aor_runtime.core.utils import ensure_jsonable
 
 
 def utc_now_iso() -> str:
+    """Utc now iso for the surrounding runtime workflow.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.store.utc_now_iso.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 class SQLiteRunStore:
+    """Represent s q lite run store within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SQLiteRunStore.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.store.SQLiteRunStore and related tests.
+    """
     def __init__(self, db_path: str | Path) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives db_path for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.__init__ calls and related tests.
+        """
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Handle the internal connect helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore._connect calls and related tests.
+        """
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         try:
@@ -32,6 +91,17 @@ class SQLiteRunStore:
             connection.close()
 
     def _initialize(self) -> None:
+        """Handle the internal initialize helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore._initialize calls and related tests.
+        """
         with self._connect() as conn:
             conn.executescript(
                 """
@@ -70,6 +140,17 @@ class SQLiteRunStore:
             )
 
     def create_session(self, session: AgentSession) -> None:
+        """Create session for SQLiteRunStore instances.
+
+        Inputs:
+            Receives session for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.create_session calls and related tests.
+        """
         with self._connect() as conn:
             conn.execute(
                 """
@@ -96,6 +177,17 @@ class SQLiteRunStore:
             )
 
     def update_session(self, session: AgentSession) -> None:
+        """Update session for SQLiteRunStore instances.
+
+        Inputs:
+            Receives session for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.update_session calls and related tests.
+        """
         session.updated_at = utc_now_iso()
         with self._connect() as conn:
             conn.execute(
@@ -115,6 +207,17 @@ class SQLiteRunStore:
             )
 
     def get_session(self, session_id: str) -> AgentSession | None:
+        """Get session for SQLiteRunStore instances.
+
+        Inputs:
+            Receives session_id for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.get_session calls and related tests.
+        """
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
         if row is None:
@@ -135,6 +238,17 @@ class SQLiteRunStore:
         )
 
     def list_sessions(self, limit: int = 50) -> list[AgentSession]:
+        """List sessions for SQLiteRunStore instances.
+
+        Inputs:
+            Receives limit for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.list_sessions calls and related tests.
+        """
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [
@@ -156,6 +270,17 @@ class SQLiteRunStore:
         ]
 
     def append_event(self, *, session_id: str, node_name: str, event_type: str, payload: dict[str, Any]) -> None:
+        """Append event for SQLiteRunStore instances.
+
+        Inputs:
+            Receives session_id, node_name, event_type, payload for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.append_event calls and related tests.
+        """
         event = RunEvent(run_id=session_id, node=node_name, event_type=event_type, payload=ensure_jsonable(payload))
         with self._connect() as conn:
             conn.execute(
@@ -165,6 +290,17 @@ class SQLiteRunStore:
             conn.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (event.created_at, session_id))
 
     def save_snapshot(self, *, session_id: str, node_name: str, state: dict[str, Any]) -> None:
+        """Save snapshot for SQLiteRunStore instances.
+
+        Inputs:
+            Receives session_id, node_name, state for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.save_snapshot calls and related tests.
+        """
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO snapshots(run_id, node_name, state_json, created_at) VALUES (?, ?, ?, ?)",
@@ -172,6 +308,17 @@ class SQLiteRunStore:
             )
 
     def get_latest_snapshot(self, session_id: str) -> dict[str, Any] | None:
+        """Get latest snapshot for SQLiteRunStore instances.
+
+        Inputs:
+            Receives session_id for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.get_latest_snapshot calls and related tests.
+        """
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT state_json FROM snapshots WHERE run_id = ? ORDER BY id DESC LIMIT 1",
@@ -182,6 +329,17 @@ class SQLiteRunStore:
         return json.loads(row["state_json"])
 
     def get_events(self, session_id: str) -> list[dict[str, Any]]:
+        """Get events for SQLiteRunStore instances.
+
+        Inputs:
+            Receives session_id for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.get_events calls and related tests.
+        """
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM events WHERE run_id = ? ORDER BY id ASC", (session_id,)).fetchall()
         return [
@@ -197,6 +355,17 @@ class SQLiteRunStore:
         ]
 
     def get_events_after(self, session_id: str, after_id: int | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        """Get events after for SQLiteRunStore instances.
+
+        Inputs:
+            Receives session_id, after_id, limit for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.get_events_after calls and related tests.
+        """
         query = "SELECT * FROM events WHERE run_id = ?"
         params: list[Any] = [session_id]
         if after_id is not None:
@@ -222,7 +391,29 @@ class SQLiteRunStore:
 
     # Backward-compatible helpers for older run-centric callers.
     def get_run(self, run_id: str) -> AgentSession | None:
+        """Get run for SQLiteRunStore instances.
+
+        Inputs:
+            Receives run_id for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.get_run calls and related tests.
+        """
         return self.get_session(run_id)
 
     def list_runs(self, limit: int = 50) -> list[AgentSession]:
+        """List runs for SQLiteRunStore instances.
+
+        Inputs:
+            Receives limit for this SQLiteRunStore method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SQLiteRunStore.list_runs calls and related tests.
+        """
         return self.list_sessions(limit=limit)

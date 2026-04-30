@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.state
+
+Purpose:
+    Define runtime state containers used by sessions and execution progress.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,6 +22,17 @@ from typing_extensions import TypedDict
 
 
 class RuntimeState(TypedDict, total=False):
+    """Represent runtime state within the OpenFABRIC runtime. It extends TypedDict.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by RuntimeState.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.state.RuntimeState and related tests.
+    """
     session_id: str
     run_id: str
     spec_name: str
@@ -56,6 +82,17 @@ def initial_runtime_state(
     compiled_spec: dict[str, Any],
     trigger: str = "manual",
 ) -> RuntimeState:
+    """Initial runtime state for the surrounding runtime workflow.
+
+    Inputs:
+        Receives session_id, spec_name, spec_path, input_payload, compiled_spec, trigger for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.state.initial_runtime_state.
+    """
     goal = str(input_payload.get("task") or input_payload.get("prompt") or input_payload.get("input") or "")
     timestamp = datetime.now(timezone.utc).isoformat()
     return {

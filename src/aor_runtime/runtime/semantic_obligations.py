@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.semantic_obligations
+
+Purpose:
+    Track semantic filters and metrics required by the user goal.
+
+Responsibilities:
+    Extract obligations such as state, partition, user, time window, metric, and group-by and apply safe pushdown/fallback rules.
+
+Data flow / Interfaces:
+    Consumes goals and action inputs, then annotates or repairs actions before execution.
+
+Boundaries:
+    Ensures tentative tool filters do not silently drop required user constraints.
+"""
+
 from __future__ import annotations
 
 import re
@@ -13,6 +28,17 @@ from aor_runtime.tools.slurm import slurm_accounting
 
 @dataclass(frozen=True)
 class SemanticObligation:
+    """Represent semantic obligation within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SemanticObligation.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.semantic_obligations.SemanticObligation and related tests.
+    """
     domain: str
     field: str
     value: str
@@ -22,6 +48,17 @@ class SemanticObligation:
 
 @dataclass(frozen=True)
 class FilterStrategySpec:
+    """Represent filter strategy spec within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FilterStrategySpec.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.semantic_obligations.FilterStrategySpec and related tests.
+    """
     tool: str
     reliable_pushdowns: tuple[str, ...] = ()
     tentative_pushdowns: tuple[str, ...] = ()
@@ -30,11 +67,33 @@ class FilterStrategySpec:
 
 @dataclass
 class SemanticCanonicalizationResult:
+    """Represent semantic canonicalization result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SemanticCanonicalizationResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.semantic_obligations.SemanticCanonicalizationResult and related tests.
+    """
     repairs: list[str] = field(default_factory=list)
     obligations: list[SemanticObligation] = field(default_factory=list)
 
     @property
     def metadata(self) -> dict[str, Any]:
+        """Metadata for SemanticCanonicalizationResult instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SemanticCanonicalizationResult.metadata calls and related tests.
+        """
         return {
             "obligations": [asdict(obligation) for obligation in self.obligations],
             "repairs": list(self.repairs),
@@ -43,6 +102,17 @@ class SemanticCanonicalizationResult:
 
 @dataclass
 class SemanticFallbackResult:
+    """Represent semantic fallback result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SemanticFallbackResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.semantic_obligations.SemanticFallbackResult and related tests.
+    """
     log: StepLog
     applied: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -57,6 +127,17 @@ SLURM_ACCOUNTING_AGGREGATE_STRATEGY = FilterStrategySpec(
 
 
 def apply_semantic_obligations_to_actions(goal: str, actions: list[dict[str, Any]]) -> SemanticCanonicalizationResult:
+    """Apply semantic obligations to actions for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, actions for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations.apply_semantic_obligations_to_actions.
+    """
     result = SemanticCanonicalizationResult(obligations=extract_semantic_obligations(goal))
     if not result.obligations:
         return result
@@ -93,6 +174,17 @@ def apply_semantic_obligations_to_actions(goal: str, actions: list[dict[str, Any
 
 
 def extract_semantic_obligations(goal: str) -> list[SemanticObligation]:
+    """Extract semantic obligations for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations.extract_semantic_obligations.
+    """
     text = str(goal or "")
     obligations: list[SemanticObligation] = []
     if _mentions_slurm(text):
@@ -134,6 +226,17 @@ def extract_semantic_obligations(goal: str) -> list[SemanticObligation]:
 
 
 def maybe_apply_semantic_fallback(settings: Settings, *, goal: str, log: StepLog) -> SemanticFallbackResult:
+    """Maybe apply semantic fallback for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, goal, log for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations.maybe_apply_semantic_fallback.
+    """
     if not log.success or log.step.action != "slurm.accounting_aggregate":
         return SemanticFallbackResult(log=log)
     obligations = extract_semantic_obligations(goal)
@@ -174,6 +277,17 @@ def _rerun_slurm_accounting_aggregate_with_local_state_filter(
     log: StepLog,
     desired_state: str,
 ) -> dict[str, Any]:
+    """Handle the internal rerun slurm accounting aggregate with local state filter helper path for this module.
+
+    Inputs:
+        Receives settings, log, desired_state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations._rerun_slurm_accounting_aggregate_with_local_state_filter.
+    """
     args = dict(log.step.args or {})
     broad = slurm_accounting(
         settings,
@@ -256,6 +370,17 @@ def _rerun_slurm_accounting_aggregate_with_local_state_filter(
 
 
 def _slurm_aggregate_needs_state_fallback(log: StepLog, desired_state: str) -> bool:
+    """Handle the internal slurm aggregate needs state fallback helper path for this module.
+
+    Inputs:
+        Receives log, desired_state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations._slurm_aggregate_needs_state_fallback.
+    """
     result = dict(log.result or {})
     args = dict(log.step.args or {})
     observed_state = _canonical_job_state(result.get("state"))
@@ -270,6 +395,17 @@ def _slurm_aggregate_needs_state_fallback(log: StepLog, desired_state: str) -> b
 
 
 def _obligation_value(obligations: list[SemanticObligation], *, domain: str, field: str) -> str | None:
+    """Handle the internal obligation value helper path for this module.
+
+    Inputs:
+        Receives obligations, domain, field for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations._obligation_value.
+    """
     for obligation in obligations:
         if obligation.domain == domain and obligation.field == field:
             return obligation.value
@@ -277,6 +413,17 @@ def _obligation_value(obligations: list[SemanticObligation], *, domain: str, fie
 
 
 def _mentions_slurm(goal: str) -> bool:
+    """Handle the internal mentions slurm helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations._mentions_slurm.
+    """
     return bool(
         re.search(
             r"\b(?:slurm|sacct|squeue|jobs?|partition|partitions|cluster|queue|nodes?)\b",
@@ -287,6 +434,17 @@ def _mentions_slurm(goal: str) -> bool:
 
 
 def _extract_slurm_state_mode(goal: str) -> str | None:
+    """Handle the internal extract slurm state mode helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations._extract_slurm_state_mode.
+    """
     text = str(goal or "").lower()
     if re.search(r"\b(?:all|any)\s+jobs?\b", text):
         return "all"
@@ -298,6 +456,17 @@ def _extract_slurm_state_mode(goal: str) -> str | None:
 
 
 def _extract_slurm_job_state(goal: str) -> str | None:
+    """Handle the internal extract slurm job state helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations._extract_slurm_job_state.
+    """
     text = str(goal or "").lower()
     patterns = [
         ("COMPLETED", r"\b(?:completed|complete|finished|successful|succeeded)\s+jobs?\b|\bjobs?\s+(?:that\s+)?(?:completed|finished|succeeded)\b|\bonly\s+completed\b"),
@@ -314,6 +483,17 @@ def _extract_slurm_job_state(goal: str) -> str | None:
 
 
 def _extract_slurm_partition(goal: str) -> str | None:
+    """Handle the internal extract slurm partition helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations._extract_slurm_partition.
+    """
     text = str(goal or "")
     for pattern in (
         r"\b(?:in|on|for)\s+(?:the\s+)?([A-Za-z0-9._-]+)\s+partition\b",
@@ -326,6 +506,17 @@ def _extract_slurm_partition(goal: str) -> str | None:
 
 
 def _canonical_job_state(value: Any) -> str:
+    """Handle the internal canonical job state helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.semantic_obligations._canonical_job_state.
+    """
     text = str(value or "").strip().upper().replace("-", "_")
     aliases = {
         "CANCELLED": "CANCELLED",

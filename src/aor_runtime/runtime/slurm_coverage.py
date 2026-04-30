@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.slurm_coverage
+
+Purpose:
+    Validate that SLURM action plans cover requested semantic facts.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,6 +23,17 @@ from aor_runtime.runtime.slurm_semantics import SlurmRequest, SlurmSemanticConst
 
 @dataclass
 class SlurmCoverageResult:
+    """Represent slurm coverage result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmCoverageResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_coverage.SlurmCoverageResult and related tests.
+    """
     passed: bool
     covered_requests: list[str] = field(default_factory=list)
     missing_requests: list[SlurmRequest] = field(default_factory=list)
@@ -16,6 +42,17 @@ class SlurmCoverageResult:
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for SlurmCoverageResult instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SlurmCoverageResult.to_dict calls and related tests.
+        """
         return {
             "passed": self.passed,
             "covered_requests": list(self.covered_requests),
@@ -27,6 +64,17 @@ class SlurmCoverageResult:
 
 
 def validate_slurm_coverage(frame: SlurmSemanticFrame, intent_or_plan: Any) -> SlurmCoverageResult:
+    """Validate slurm coverage for the surrounding runtime workflow.
+
+    Inputs:
+        Receives frame, intent_or_plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage.validate_slurm_coverage.
+    """
     intents = _flatten_intents(intent_or_plan)
     covered_requests: list[str] = []
     missing_requests: list[SlurmRequest] = []
@@ -57,6 +105,17 @@ def validate_slurm_coverage(frame: SlurmSemanticFrame, intent_or_plan: Any) -> S
 
 
 def _flatten_intents(intent_or_plan: Any) -> list[Any]:
+    """Handle the internal flatten intents helper path for this module.
+
+    Inputs:
+        Receives intent_or_plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._flatten_intents.
+    """
     if intent_or_plan is None:
         return []
     if isinstance(intent_or_plan, list):
@@ -70,6 +129,17 @@ def _flatten_intents(intent_or_plan: Any) -> list[Any]:
 
 
 def _request_is_covered(request: SlurmRequest, intents: list[Any]) -> bool:
+    """Handle the internal request is covered helper path for this module.
+
+    Inputs:
+        Receives request, intents for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._request_is_covered.
+    """
     if request.kind == "cluster_health":
         groups = {_metric_group(intent) for intent in intents if _metric_group(intent)}
         return "cluster_summary" in groups or {"queue_summary", "node_summary"}.issubset(groups)
@@ -77,6 +147,17 @@ def _request_is_covered(request: SlurmRequest, intents: list[Any]) -> bool:
 
 
 def _single_intent_covers_request(request: SlurmRequest, intent: Any) -> bool:
+    """Handle the internal single intent covers request helper path for this module.
+
+    Inputs:
+        Receives request, intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._single_intent_covers_request.
+    """
     name = type(intent).__name__
     filters = request.filters or {}
 
@@ -148,6 +229,17 @@ def _single_intent_covers_request(request: SlurmRequest, intent: Any) -> bool:
 
 
 def _constraint_is_covered(constraint: SlurmSemanticConstraint, intents: list[Any]) -> bool:
+    """Handle the internal constraint is covered helper path for this module.
+
+    Inputs:
+        Receives constraint, intents for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._constraint_is_covered.
+    """
     if constraint.kind == "source":
         return any(_source_for_intent(intent) == constraint.value for intent in intents)
     if constraint.kind == "metric":
@@ -196,6 +288,17 @@ def _constraint_is_covered(constraint: SlurmSemanticConstraint, intents: list[An
 
 
 def _job_filters_match(filters: dict[str, Any], intent: Any) -> bool:
+    """Handle the internal job filters match helper path for this module.
+
+    Inputs:
+        Receives filters, intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._job_filters_match.
+    """
     for field in ("user", "partition", "state", "group_by"):
         if field in filters and _attr(intent, field) != filters[field]:
             return False
@@ -203,6 +306,17 @@ def _job_filters_match(filters: dict[str, Any], intent: Any) -> bool:
 
 
 def _node_filters_match(filters: dict[str, Any], intent: Any) -> bool:
+    """Handle the internal node filters match helper path for this module.
+
+    Inputs:
+        Receives filters, intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._node_filters_match.
+    """
     for field in ("node", "partition", "state", "state_group"):
         if field == "state_group" and field in filters:
             expected = filters[field]
@@ -215,6 +329,17 @@ def _node_filters_match(filters: dict[str, Any], intent: Any) -> bool:
 
 
 def _time_filters_match(filters: dict[str, Any], intent: Any) -> bool:
+    """Handle the internal time filters match helper path for this module.
+
+    Inputs:
+        Receives filters, intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._time_filters_match.
+    """
     for field in ("start", "end"):
         if filters.get(field) and _attr(intent, field) != filters[field]:
             return False
@@ -222,6 +347,17 @@ def _time_filters_match(filters: dict[str, Any], intent: Any) -> bool:
 
 
 def _duration_filters_match(filters: dict[str, Any], intent: Any) -> bool:
+    """Handle the internal duration filters match helper path for this module.
+
+    Inputs:
+        Receives filters, intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._duration_filters_match.
+    """
     if filters.get("min_elapsed_seconds") and _attr(intent, "min_elapsed_seconds") != filters["min_elapsed_seconds"]:
         return False
     if filters.get("max_elapsed_seconds") and _attr(intent, "max_elapsed_seconds") != filters["max_elapsed_seconds"]:
@@ -230,6 +366,17 @@ def _duration_filters_match(filters: dict[str, Any], intent: Any) -> bool:
 
 
 def _aggregate_filters_match(filters: dict[str, Any], intent: Any) -> bool:
+    """Handle the internal aggregate filters match helper path for this module.
+
+    Inputs:
+        Receives filters, intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._aggregate_filters_match.
+    """
     for field in ("metric", "threshold_seconds"):
         if field in filters and _attr(intent, field) != filters[field]:
             return False
@@ -243,14 +390,47 @@ def _aggregate_filters_match(filters: dict[str, Any], intent: Any) -> bool:
 
 
 def _metric_group(intent: Any) -> str | None:
+    """Handle the internal metric group helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._metric_group.
+    """
     return _attr(intent, "metric_group")
 
 
 def _attr(intent: Any, field: str) -> Any:
+    """Handle the internal attr helper path for this module.
+
+    Inputs:
+        Receives intent, field for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._attr.
+    """
     return getattr(intent, field, None)
 
 
 def _source_for_intent(intent: Any) -> str:
+    """Handle the internal source for intent helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._source_for_intent.
+    """
     name = type(intent).__name__
     if name == "SlurmAccountingAggregateIntent":
         return "sacct"
@@ -270,6 +450,17 @@ def _source_for_intent(intent: Any) -> str:
 
 
 def _coverage_reason(missing_requests: list[SlurmRequest], missing_constraints: list[SlurmSemanticConstraint]) -> str:
+    """Handle the internal coverage reason helper path for this module.
+
+    Inputs:
+        Receives missing_requests, missing_constraints for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_coverage._coverage_reason.
+    """
     pieces: list[str] = []
     if missing_requests:
         pieces.append("missing requests: " + ", ".join(request.id for request in missing_requests))

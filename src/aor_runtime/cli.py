@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.cli
+
+Purpose:
+    Provide the command-line interface for running, chatting with, and serving OpenFABRIC assistants.
+
+Responsibilities:
+    Wire Typer commands to runtime compilation, interactive sessions, progress display, and API serving.
+
+Data flow / Interfaces:
+    Receives command arguments/config paths and invokes compiler, engine, or server entrypoints.
+
+Boundaries:
+    Must keep CLI display user-safe and avoid bypassing the same runtime validators used by API requests.
+"""
+
 from __future__ import annotations
 
 import json
@@ -27,14 +42,47 @@ CHAT_COMMANDS = ("/exit", "/quit", "/history", "/last", "/new", "/clear", "/capa
 
 
 def _is_dry_run_preview(payload: dict[str, Any]) -> bool:
+    """Handle the internal is dry run preview helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._is_dry_run_preview.
+    """
     return all(key in payload for key in ("session_id", "plan", "summary")) and "status" not in payload
 
 
 def _is_dangerous_confirmation_pause(payload: dict[str, Any]) -> bool:
+    """Handle the internal is dangerous confirmation pause helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._is_dangerous_confirmation_pause.
+    """
     return bool(payload.get("awaiting_confirmation")) and str(payload.get("confirmation_kind") or "") == "dangerous_step"
 
 
 def _dangerous_confirmation_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal dangerous confirmation preview helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._dangerous_confirmation_preview.
+    """
     return {
         "session_id": str(payload.get("session_id", "")),
         "confirmation_message": payload.get("confirmation_message"),
@@ -51,6 +99,17 @@ def _resolve_dangerous_confirmation(
     approve_dangerous: bool = False,
     stream_shell_output: bool = False,
 ) -> dict[str, Any]:
+    """Handle the internal resolve dangerous confirmation helper path for this module.
+
+    Inputs:
+        Receives engine, state, trigger, max_cycles, approve_dangerous, stream_shell_output for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._resolve_dangerous_confirmation.
+    """
     auto_approve = approve_dangerous
     while _is_dangerous_confirmation_pause(state):
         typer.echo(dumps_json(_dangerous_confirmation_preview(state), indent=2))
@@ -68,6 +127,17 @@ def _resolve_dangerous_confirmation(
 
 
 def _final_answer_from_state(state: dict[str, Any]) -> str:
+    """Handle the internal final answer from state helper path for this module.
+
+    Inputs:
+        Receives state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._final_answer_from_state.
+    """
     if bool(state.get("awaiting_confirmation")):
         confirmation_message = state.get("confirmation_message")
         if isinstance(confirmation_message, str) and confirmation_message.strip():
@@ -92,23 +162,78 @@ def _final_answer_from_state(state: dict[str, Any]) -> str:
 
 
 def _reset_chat_history(session_history: list[dict[str, str]]) -> None:
+    """Handle the internal reset chat history helper path for this module.
+
+    Inputs:
+        Receives session_history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._reset_chat_history.
+    """
     session_history.clear()
 
 
 def _session_history_window(session_history: list[dict[str, str]], max_history: int) -> list[dict[str, str]]:
+    """Handle the internal session history window helper path for this module.
+
+    Inputs:
+        Receives session_history, max_history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._session_history_window.
+    """
     if max_history <= 0 or not session_history:
         return []
     return session_history[-max_history:]
 
 
 def _chat_commands_banner() -> str:
+    """Handle the internal chat commands banner helper path for this module.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._chat_commands_banner.
+    """
     return f"Commands: {', '.join(CHAT_COMMANDS)}"
 
 
 def _start_background(target):
+    """Handle the internal start background helper path for this module.
+
+    Inputs:
+        Receives target for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._start_background.
+    """
     outcome: dict[str, Any] = {}
 
     def runner() -> None:
+        """Runner for the surrounding runtime workflow.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.runner.
+        """
         try:
             outcome["result"] = target()
         except Exception as exc:  # noqa: BLE001
@@ -120,6 +245,17 @@ def _start_background(target):
 
 
 def _render_progress_event(event: dict[str, Any]) -> None:
+    """Handle the internal render progress event helper path for this module.
+
+    Inputs:
+        Receives event for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._render_progress_event.
+    """
     event_type = str(event.get("event_type") or "")
     payload = dict(event.get("payload") or {})
     if event_type == "planner.started":
@@ -168,6 +304,17 @@ def _render_progress_event(event: dict[str, Any]) -> None:
 
 
 def _drain_progress_events(engine: ExecutionEngine, session_id: str, after_id: int | None) -> int | None:
+    """Handle the internal drain progress events helper path for this module.
+
+    Inputs:
+        Receives engine, session_id, after_id for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._drain_progress_events.
+    """
     cursor = after_id
     for event in engine.store.get_events_after(session_id, after_id=after_id):
         _render_progress_event(event)
@@ -183,6 +330,17 @@ def _run_session_with_progress(
     max_cycles: int | None = None,
     approve_dangerous: bool = False,
 ) -> dict[str, Any]:
+    """Handle the internal run session with progress helper path for this module.
+
+    Inputs:
+        Receives engine, session_id, trigger, max_cycles, approve_dangerous for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._run_session_with_progress.
+    """
     worker, outcome = _start_background(
         lambda: engine.resume_session(
             session_id,
@@ -216,6 +374,17 @@ def _run_session_with_progress(
 
 
 def _chat_capabilities_payload(spec_path: Path) -> dict[str, Any]:
+    """Handle the internal chat capabilities payload helper path for this module.
+
+    Inputs:
+        Receives spec_path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._chat_capabilities_payload.
+    """
     spec = load_runtime_spec(spec_path)
     registry = build_default_capability_registry()
     return {
@@ -240,11 +409,33 @@ def _chat_capabilities_payload(spec_path: Path) -> dict[str, Any]:
 
 
 def _build_engine(config_path: Path | None = None) -> ExecutionEngine:
+    """Handle the internal build engine helper path for this module.
+
+    Inputs:
+        Receives config_path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._build_engine.
+    """
     settings = get_settings(config_path=config_path)
     return ExecutionEngine(settings)
 
 
 def _resolve_server_binding(settings: Settings, host: str | None, port: int | None) -> tuple[str, int]:
+    """Handle the internal resolve server binding helper path for this module.
+
+    Inputs:
+        Receives settings, host, port for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli._resolve_server_binding.
+    """
     return (host or settings.server_host, port or settings.server_port)
 
 
@@ -253,6 +444,17 @@ def validate(
     spec_path: Path,
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
+    """Validate for the surrounding runtime workflow.
+
+    Inputs:
+        Receives spec_path, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.validate.
+    """
     engine = _build_engine(config)
     compiled = engine.validate_spec(str(spec_path))
     typer.echo(dumps_json(compiled.model_dump(), indent=2))
@@ -266,6 +468,17 @@ def run(
     progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
+    """Run for the surrounding runtime workflow.
+
+    Inputs:
+        Receives spec_path, input, dry_run, progress, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.run.
+    """
     payload = json.loads(input)
     engine = _build_engine(config)
     if progress:
@@ -301,6 +514,17 @@ def resume(
     progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
+    """Resume for the surrounding runtime workflow.
+
+    Inputs:
+        Receives session_id, trigger, max_cycles, approve_dangerous, progress, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.resume.
+    """
     engine = _build_engine(config)
     if progress:
         state = _run_session_with_progress(
@@ -328,6 +552,17 @@ def serve(
     reload: bool = False,
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
+    """Serve for the surrounding runtime workflow.
+
+    Inputs:
+        Receives host, port, reload, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.serve.
+    """
     settings = get_settings(config_path=config)
     resolved_host, resolved_port = _resolve_server_binding(settings, host, port)
     if settings.app_config_path is not None:
@@ -343,6 +578,17 @@ def chat(
     progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
+    """Chat for the surrounding runtime workflow.
+
+    Inputs:
+        Receives spec_path, system_note, max_history, progress, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.chat.
+    """
     engine = _build_engine(config)
     session_history: list[dict[str, str]] = []
 
@@ -404,12 +650,34 @@ def chat(
 
 @runs_app.command("list")
 def list_runs(limit: int = 20, config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config.")) -> None:
+    """List runs for the surrounding runtime workflow.
+
+    Inputs:
+        Receives limit, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.list_runs.
+    """
     engine = _build_engine(config)
     typer.echo(dumps_json(engine.list_runs(limit=limit), indent=2))
 
 
 @runs_app.command("show")
 def show_run(run_id: str, config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config.")) -> None:
+    """Show run for the surrounding runtime workflow.
+
+    Inputs:
+        Receives run_id, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.show_run.
+    """
     engine = _build_engine(config)
     payload = engine.get_run(run_id)
     if payload is None:
@@ -425,6 +693,17 @@ def create_session(
     progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
+    """Create session for the surrounding runtime workflow.
+
+    Inputs:
+        Receives spec_path, input, run_immediately, progress, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.create_session.
+    """
     payload = json.loads(input)
     engine = _build_engine(config)
     session = engine.create_session(str(spec_path), payload, trigger="manual", stream_shell_output=progress)
@@ -452,6 +731,17 @@ def resume_session(
     progress: bool = typer.Option(False, "--progress", help="Print live planning and execution events."),
     config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config."),
 ) -> None:
+    """Resume session for the surrounding runtime workflow.
+
+    Inputs:
+        Receives session_id, trigger, max_cycles, approve_dangerous, progress, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.resume_session.
+    """
     engine = _build_engine(config)
     if progress:
         state = _run_session_with_progress(
@@ -474,12 +764,34 @@ def resume_session(
 
 @sessions_app.command("list")
 def list_sessions(limit: int = 20, config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config.")) -> None:
+    """List sessions for the surrounding runtime workflow.
+
+    Inputs:
+        Receives limit, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.list_sessions.
+    """
     engine = _build_engine(config)
     typer.echo(dumps_json(engine.list_sessions(limit=limit), indent=2))
 
 
 @sessions_app.command("show")
 def show_session(session_id: str, config: Path | None = typer.Option(None, "--config", help="Path to the YAML app config.")) -> None:
+    """Show session for the surrounding runtime workflow.
+
+    Inputs:
+        Receives session_id, config for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.cli.show_session.
+    """
     engine = _build_engine(config)
     payload = engine.get_session(session_id)
     if payload is None:

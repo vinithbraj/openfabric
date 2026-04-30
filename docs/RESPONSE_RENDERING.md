@@ -1,5 +1,7 @@
 # Response Rendering
 
+For the full output lifecycle, including output envelopes, result-shape validation, auto-artifacts, and OpenWebUI trace boundaries, see [System Design](./SYSTEM_DESIGN.md).
+
 The runtime separates execution telemetry from user-facing answers. Tool execution, planner events, validation checks, coverage metadata, and raw payloads remain available through session events and debug/raw modes, but OpenWebUI receives polished Markdown by default.
 
 ## Modes
@@ -27,6 +29,8 @@ If `AOR_OPENWEBUI_TRACE_MODE` is not set, enabling any legacy planner/tool/valid
 User mode does not include lifecycle text such as `Thinking...`, `Plan ready`, `Executing runtime.return`, `Validating...`, or `Validation passed`. It also strips raw planner metadata, semantic frames, coverage blocks, gateway internals, stdout/stderr payloads, and raw command output unless that output is the requested result.
 
 User/OpenWebUI mode also forbids raw inline JSON. Structured dictionaries render as Markdown key-value tables, lists of dictionaries render as Markdown tables, and nested structures render as compact readable cells or capability-specific sections. If a client needs exact JSON, use `AOR_RESPONSE_RENDER_MODE=raw` through a developer/integration path or write the result to a `.json` file; normal chat output remains readable Markdown.
+
+Large table/list outputs are written as auto-artifacts when their display row count exceeds the configured threshold. The threshold is based on rows that would be shown to the user, not source records processed to compute an aggregate.
 
 Prompt suggestions are disabled in normal chat output by default. Failure metadata may still classify the failure for debug/session APIs, but generic `Suggested prompts:` sections are shown only when `AOR_SHOW_PROMPT_SUGGESTIONS=true`.
 

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.tools.text_format
+
+Purpose:
+    Implement deterministic local data formatting.
+
+Responsibilities:
+    Format rows, dictionaries, shell tables, CSV, text, and Markdown without sending raw data to the LLM.
+
+Data flow / Interfaces:
+    Receives resolved tool outputs and returns formatted content plus metadata.
+
+Boundaries:
+    Must preserve large-output policy by cooperating with auto-artifact and presentation thresholds.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -22,6 +37,17 @@ def format_data(
     query_used: str | None = None,
     output_path: str | None = None,
 ) -> dict[str, Any]:
+    """Format data for the surrounding runtime workflow.
+
+    Inputs:
+        Receives source, output_format, query_used, output_path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format.format_data.
+    """
     rows = _coerce_rows(source)
     columns = _columns_for_rows(rows)
     normalized_format = str(output_format or "txt").strip().lower()
@@ -48,13 +74,46 @@ def format_data(
 
 
 class TextFormatTool(BaseTool):
+    """Represent text format tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by TextFormatTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.text_format.TextFormatTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.text_format.ToolArgs and related tests.
+        """
         source: Any
         format: OutputFormat = "txt"
         query_used: str | None = None
         output_path: str | None = None
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.text_format.ToolResult and related tests.
+        """
         content: str
         format: str
         row_count: int
@@ -63,6 +122,17 @@ class TextFormatTool(BaseTool):
         output_path: str = ""
 
     def __init__(self) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through TextFormatTool.__init__ calls and related tests.
+        """
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
         self.spec = ToolSpec(
@@ -81,6 +151,17 @@ class TextFormatTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for TextFormatTool instances.
+
+        Inputs:
+            Receives arguments for this TextFormatTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through TextFormatTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(
             format_data(
                 arguments.source,
@@ -92,6 +173,17 @@ class TextFormatTool(BaseTool):
 
 
 def _coerce_rows(source: Any) -> list[dict[str, Any]]:
+    """Handle the internal coerce rows helper path for this module.
+
+    Inputs:
+        Receives source for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._coerce_rows.
+    """
     catalog = _extract_catalog(source)
     if catalog is not None:
         return _catalog_to_rows(catalog)
@@ -113,6 +205,17 @@ def _coerce_rows(source: Any) -> list[dict[str, Any]]:
 
 
 def _columns_for_rows(rows: list[dict[str, Any]]) -> list[str]:
+    """Handle the internal columns for rows helper path for this module.
+
+    Inputs:
+        Receives rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._columns_for_rows.
+    """
     columns: list[str] = []
     seen: set[str] = set()
     for row in rows:
@@ -126,6 +229,17 @@ def _columns_for_rows(rows: list[dict[str, Any]]) -> list[str]:
 
 
 def _rows_to_txt(rows: list[dict[str, Any]], columns: list[str]) -> str:
+    """Handle the internal rows to txt helper path for this module.
+
+    Inputs:
+        Receives rows, columns for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._rows_to_txt.
+    """
     if not rows:
         return "No rows returned."
     if len(columns) == 1:
@@ -137,6 +251,17 @@ def _rows_to_txt(rows: list[dict[str, Any]], columns: list[str]) -> str:
 
 
 def _rows_to_csv(rows: list[dict[str, Any]], columns: list[str]) -> str:
+    """Handle the internal rows to csv helper path for this module.
+
+    Inputs:
+        Receives rows, columns for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._rows_to_csv.
+    """
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
     writer.writeheader()
@@ -146,6 +271,17 @@ def _rows_to_csv(rows: list[dict[str, Any]], columns: list[str]) -> str:
 
 
 def _rows_to_markdown(rows: list[dict[str, Any]], columns: list[str]) -> str:
+    """Handle the internal rows to markdown helper path for this module.
+
+    Inputs:
+        Receives rows, columns for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._rows_to_markdown.
+    """
     if not columns:
         return "No rows returned."
     lines = [
@@ -158,6 +294,17 @@ def _rows_to_markdown(rows: list[dict[str, Any]], columns: list[str]) -> str:
 
 
 def _source_to_txt(source: Any) -> str:
+    """Handle the internal source to txt helper path for this module.
+
+    Inputs:
+        Receives source for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._source_to_txt.
+    """
     catalog = _extract_catalog(source)
     if catalog is not None:
         return _catalog_to_txt(catalog)
@@ -177,6 +324,17 @@ def _source_to_txt(source: Any) -> str:
 
 
 def _source_to_markdown(source: Any) -> str:
+    """Handle the internal source to markdown helper path for this module.
+
+    Inputs:
+        Receives source for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._source_to_markdown.
+    """
     catalog = _extract_catalog(source)
     if catalog is not None:
         rows = _catalog_to_rows(catalog)
@@ -192,6 +350,17 @@ def _source_to_markdown(source: Any) -> str:
 
 
 def _coerce_json_source(source: Any) -> Any:
+    """Handle the internal coerce json source helper path for this module.
+
+    Inputs:
+        Receives source for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._coerce_json_source.
+    """
     if isinstance(source, dict) and "rows" in source:
         return source.get("rows")
     catalog = _extract_catalog(source)
@@ -201,6 +370,17 @@ def _coerce_json_source(source: Any) -> Any:
 
 
 def _source_count(source: Any) -> int:
+    """Handle the internal source count helper path for this module.
+
+    Inputs:
+        Receives source for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._source_count.
+    """
     if isinstance(source, (list, tuple, set)):
         return len(source)
     if isinstance(source, dict) and isinstance(source.get("rows"), list):
@@ -209,6 +389,17 @@ def _source_count(source: Any) -> int:
 
 
 def _stringify(value: Any) -> str:
+    """Handle the internal stringify helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._stringify.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -217,10 +408,32 @@ def _stringify(value: Any) -> str:
 
 
 def _escape_markdown_cell(value: Any) -> str:
+    """Handle the internal escape markdown cell helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._escape_markdown_cell.
+    """
     return _stringify(value).replace("|", "\\|").replace("\n", " ")
 
 
 def _extract_catalog(source: Any) -> dict[str, Any] | None:
+    """Handle the internal extract catalog helper path for this module.
+
+    Inputs:
+        Receives source for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._extract_catalog.
+    """
     if not isinstance(source, dict):
         return None
     catalog = source.get("catalog") if isinstance(source.get("catalog"), dict) else source
@@ -230,6 +443,17 @@ def _extract_catalog(source: Any) -> dict[str, Any] | None:
 
 
 def _catalog_to_rows(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    """Handle the internal catalog to rows helper path for this module.
+
+    Inputs:
+        Receives catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._catalog_to_rows.
+    """
     rows: list[dict[str, Any]] = []
     for table in list(catalog.get("tables") or []):
         if not isinstance(table, dict):
@@ -247,6 +471,17 @@ def _catalog_to_rows(catalog: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _catalog_to_txt(catalog: dict[str, Any]) -> str:
+    """Handle the internal catalog to txt helper path for this module.
+
+    Inputs:
+        Receives catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._catalog_to_txt.
+    """
     rows = _catalog_to_rows(catalog)
     if not rows:
         return ""
@@ -257,14 +492,47 @@ def _catalog_to_txt(catalog: dict[str, Any]) -> str:
 
 
 def _is_simple_mapping(source: dict[str, Any]) -> bool:
+    """Handle the internal is simple mapping helper path for this module.
+
+    Inputs:
+        Receives source for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._is_simple_mapping.
+    """
     return all(not isinstance(value, (dict, list, tuple, set)) for value in source.values())
 
 
 def _mapping_to_rows(source: dict[str, Any]) -> list[dict[str, Any]]:
+    """Handle the internal mapping to rows helper path for this module.
+
+    Inputs:
+        Receives source for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._mapping_to_rows.
+    """
     return [{"field": str(key), "value": _compact_structured_value(value)} for key, value in source.items()]
 
 
 def _compact_structured_value(value: Any) -> str:
+    """Handle the internal compact structured value helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.text_format._compact_structured_value.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):

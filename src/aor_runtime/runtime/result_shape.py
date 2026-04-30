@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.result_shape
+
+Purpose:
+    Validate that final results satisfy the user-requested output shape.
+
+Responsibilities:
+    Check structured primary results for scalar, grouped-count, table/list, JSON, shell-table, and collection-leak mismatches.
+
+Data flow / Interfaces:
+    Consumes user goal, StepLog history, and final rendered content after presentation.
+
+Boundaries:
+    Separates primary-result correctness from verbose display content such as stats, trace, and DAG sections.
+"""
+
 from __future__ import annotations
 
 import re
@@ -23,6 +38,17 @@ LIST_GOAL_RE = re.compile(r"\b(?:list|show|display|return)\b", re.IGNORECASE)
 
 @dataclass(frozen=True)
 class ResultShapeValidation:
+    """Represent result shape validation within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ResultShapeValidation.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.result_shape.ResultShapeValidation and related tests.
+    """
     success: bool
     reason: str | None = None
     metadata: dict[str, Any] | None = None
@@ -35,6 +61,17 @@ def validate_result_shape(
     *,
     allow_raw_json: bool = False,
 ) -> ResultShapeValidation:
+    """Validate result shape for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, history, final_content, allow_raw_json for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape.validate_result_shape.
+    """
     goal_text = str(goal or "")
     if is_grouped_count_goal(goal_text):
         grouped_validation = _validate_grouped_count_result(goal_text, history)
@@ -86,6 +123,17 @@ def validate_result_shape(
 
 
 def _validate_count_primary_result(goal: str, history: list[StepLog]) -> ResultShapeValidation | None:
+    """Handle the internal validate count primary result helper path for this module.
+
+    Inputs:
+        Receives goal, history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._validate_count_primary_result.
+    """
     sql_log = _last_successful_sql_query(history)
     if sql_log is not None:
         return _validate_sql_count_result(sql_log)
@@ -126,6 +174,17 @@ def _validate_count_primary_result(goal: str, history: list[StepLog]) -> ResultS
 
 
 def _validate_sql_count_result(sql_log: StepLog) -> ResultShapeValidation:
+    """Handle the internal validate sql count result helper path for this module.
+
+    Inputs:
+        Receives sql_log for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._validate_sql_count_result.
+    """
     rows = sql_log.result.get("rows")
     if not isinstance(rows, list):
         return ResultShapeValidation(False, "Count request did not return SQL rows.", {"expected_shape": "single numeric scalar"})
@@ -175,6 +234,17 @@ def _validate_final_output(
     allow_raw_json: bool = False,
     enforce_scalar_text: bool = True,
 ) -> ResultShapeValidation:
+    """Handle the internal validate final output helper path for this module.
+
+    Inputs:
+        Receives goal, history, final_content, allow_raw_json, enforce_scalar_text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._validate_final_output.
+    """
     final_log = _last_successful_runtime_return(history)
     if final_log is None:
         return ResultShapeValidation(True)
@@ -231,10 +301,32 @@ def _validate_final_output(
 
 
 def _is_count_goal(goal: str) -> bool:
+    """Handle the internal is count goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._is_count_goal.
+    """
     return is_scalar_count_goal(goal)
 
 
 def _is_list_or_table_goal(goal: str) -> bool:
+    """Handle the internal is list or table goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._is_list_or_table_goal.
+    """
     text = str(goal or "").lower()
     if _is_count_goal(text):
         return False
@@ -242,14 +334,47 @@ def _is_list_or_table_goal(goal: str) -> bool:
 
 
 def _is_status_goal(goal: str) -> bool:
+    """Handle the internal is status goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._is_status_goal.
+    """
     return bool(re.search(r"\b(?:status|summary|overview|health|availability|utilization|usage)\b", str(goal or ""), re.IGNORECASE))
 
 
 def _explicit_json_goal(goal: str) -> bool:
+    """Handle the internal explicit json goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._explicit_json_goal.
+    """
     return bool(re.search(r"\b(?:json|raw\s+json)\b", str(goal or ""), re.IGNORECASE))
 
 
 def _looks_like_raw_json(content: str) -> bool:
+    """Handle the internal looks like raw json helper path for this module.
+
+    Inputs:
+        Receives content for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._looks_like_raw_json.
+    """
     text = str(content or "").strip()
     if not text or text[0] not in "[{":
         return False
@@ -263,6 +388,17 @@ def _looks_like_raw_json(content: str) -> bool:
 
 
 def _raw_parseable_shell_table_returned(content: str) -> bool:
+    """Handle the internal raw parseable shell table returned helper path for this module.
+
+    Inputs:
+        Receives content for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._raw_parseable_shell_table_returned.
+    """
     text = str(content or "").strip()
     if not text or text.startswith("|"):
         return False
@@ -271,6 +407,17 @@ def _raw_parseable_shell_table_returned(content: str) -> bool:
 
 
 def _validate_grouped_count_result(goal: str, history: list[StepLog]) -> ResultShapeValidation:
+    """Handle the internal validate grouped count result helper path for this module.
+
+    Inputs:
+        Receives goal, history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._validate_grouped_count_result.
+    """
     expected_group = grouped_count_field_for_goal(goal)
     for item in reversed(history):
         if not item.success or item.step.action in {"runtime.return", "text.format", "fs.write"}:
@@ -323,6 +470,17 @@ def _validate_grouped_count_result(goal: str, history: list[StepLog]) -> ResultS
 
 
 def _validate_count_final_dataflow(history: list[StepLog]) -> ResultShapeValidation:
+    """Handle the internal validate count final dataflow helper path for this module.
+
+    Inputs:
+        Receives history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._validate_count_final_dataflow.
+    """
     final_log = _last_successful_runtime_return(history)
     if final_log is None:
         return ResultShapeValidation(True)
@@ -343,6 +501,17 @@ def _validate_count_final_dataflow(history: list[StepLog]) -> ResultShapeValidat
 
 
 def _ref_points_to_collection(value: Any, history: list[StepLog]) -> bool:
+    """Handle the internal ref points to collection helper path for this module.
+
+    Inputs:
+        Receives value, history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._ref_points_to_collection.
+    """
     if isinstance(value, list):
         return True
     if isinstance(value, dict) and "$ref" not in value:
@@ -370,6 +539,17 @@ def _ref_points_to_collection(value: Any, history: list[StepLog]) -> bool:
 
 
 def _parse_ref(value: Any) -> tuple[str, str | None] | None:
+    """Handle the internal parse ref helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._parse_ref.
+    """
     if isinstance(value, dict) and "$ref" in value:
         alias = str(value.get("$ref") or "").strip().lstrip("$")
         path = value.get("path")
@@ -383,6 +563,17 @@ def _parse_ref(value: Any) -> tuple[str, str | None] | None:
 
 
 def _producer_for_alias(history: list[StepLog], alias: str) -> StepLog | None:
+    """Handle the internal producer for alias helper path for this module.
+
+    Inputs:
+        Receives history, alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._producer_for_alias.
+    """
     normalized = _normalize_alias(alias)
     for item in reversed(history):
         if not item.success:
@@ -395,6 +586,17 @@ def _producer_for_alias(history: list[StepLog], alias: str) -> StepLog | None:
 
 
 def _last_successful_scalar_producer(goal: str, history: list[StepLog]) -> tuple[StepLog | None, str | None, Any]:
+    """Handle the internal last successful scalar producer helper path for this module.
+
+    Inputs:
+        Receives goal, history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._last_successful_scalar_producer.
+    """
     for item in reversed(history):
         if not item.success or item.step.action in {"runtime.return", "text.format"}:
             continue
@@ -409,6 +611,17 @@ def _last_successful_scalar_producer(goal: str, history: list[StepLog]) -> tuple
 
 
 def _scalar_candidate_fields(tool: str, *, goal: str) -> list[str]:
+    """Handle the internal scalar candidate fields helper path for this module.
+
+    Inputs:
+        Receives tool, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._scalar_candidate_fields.
+    """
     fields: list[str] = []
     preferred = scalar_field_for_tool(tool, goal=goal)
     if preferred:
@@ -422,6 +635,17 @@ def _scalar_candidate_fields(tool: str, *, goal: str) -> list[str]:
 
 
 def _value_at_path(value: Any, path: str | None) -> Any:
+    """Handle the internal value at path helper path for this module.
+
+    Inputs:
+        Receives value, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._value_at_path.
+    """
     current = value
     if not path:
         return current
@@ -438,6 +662,17 @@ def _value_at_path(value: Any, path: str | None) -> Any:
 
 
 def _is_collection_like(value: Any) -> bool:
+    """Handle the internal is collection like helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._is_collection_like.
+    """
     if isinstance(value, (list, tuple, set)):
         return True
     if isinstance(value, dict):
@@ -446,6 +681,17 @@ def _is_collection_like(value: Any) -> bool:
 
 
 def _last_successful_sql_query(history: list[StepLog]) -> StepLog | None:
+    """Handle the internal last successful sql query helper path for this module.
+
+    Inputs:
+        Receives history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._last_successful_sql_query.
+    """
     for item in reversed(history):
         if item.success and item.step.action == "sql.query":
             return item
@@ -453,6 +699,17 @@ def _last_successful_sql_query(history: list[StepLog]) -> StepLog | None:
 
 
 def _last_successful_runtime_return(history: list[StepLog]) -> StepLog | None:
+    """Handle the internal last successful runtime return helper path for this module.
+
+    Inputs:
+        Receives history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._last_successful_runtime_return.
+    """
     for item in reversed(history):
         if item.success and item.step.action == "runtime.return":
             return item
@@ -460,6 +717,17 @@ def _last_successful_runtime_return(history: list[StepLog]) -> StepLog | None:
 
 
 def _output_aliases(history: list[StepLog]) -> set[str]:
+    """Handle the internal output aliases helper path for this module.
+
+    Inputs:
+        Receives history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._output_aliases.
+    """
     aliases: set[str] = set()
     for item in history:
         output = str(item.step.output or "").strip()
@@ -469,10 +737,32 @@ def _output_aliases(history: list[StepLog]) -> set[str]:
 
 
 def _normalize_alias(value: str) -> str:
+    """Handle the internal normalize alias helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._normalize_alias.
+    """
     return re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
 
 
 def _quoted_alias_in_content(content: str, aliases: set[str]) -> str | None:
+    """Handle the internal quoted alias in content helper path for this module.
+
+    Inputs:
+        Receives content, aliases for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._quoted_alias_in_content.
+    """
     for match in re.finditer(r'"([^"]+)"|`([^`]+)`', str(content or "")):
         value = match.group(1) or match.group(2) or ""
         if _normalize_alias(value) in aliases:
@@ -481,6 +771,17 @@ def _quoted_alias_in_content(content: str, aliases: set[str]) -> str | None:
 
 
 def _placeholder_alias_in_content(content: str, aliases: set[str]) -> str | None:
+    """Handle the internal placeholder alias in content helper path for this module.
+
+    Inputs:
+        Receives content, aliases for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._placeholder_alias_in_content.
+    """
     for match in re.finditer(r"\{([A-Za-z0-9_-]+)\}", str(content or "")):
         value = match.group(1) or ""
         if _normalize_alias(value) in aliases:
@@ -489,6 +790,17 @@ def _placeholder_alias_in_content(content: str, aliases: set[str]) -> str | None
 
 
 def _has_non_empty_data_result(history: list[StepLog]) -> bool:
+    """Handle the internal has non empty data result helper path for this module.
+
+    Inputs:
+        Receives history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._has_non_empty_data_result.
+    """
     for item in history:
         if not item.success or item.step.action == "runtime.return":
             continue
@@ -510,6 +822,17 @@ def _has_non_empty_data_result(history: list[StepLog]) -> bool:
 
 
 def _row_columns(rows: list[Any]) -> list[str]:
+    """Handle the internal row columns helper path for this module.
+
+    Inputs:
+        Receives rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._row_columns.
+    """
     columns: list[str] = []
     seen: set[str] = set()
     for row in rows[:5]:
@@ -524,6 +847,17 @@ def _row_columns(rows: list[Any]) -> list[str]:
 
 
 def _is_numeric_scalar(value: Any) -> bool:
+    """Handle the internal is numeric scalar helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape._is_numeric_scalar.
+    """
     if isinstance(value, bool):
         return False
     if isinstance(value, (int, float)):

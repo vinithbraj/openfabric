@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.intent_classifier
+
+Purpose:
+    Provide deterministic intent parsing helpers retained for compatibility and domain utilities.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -236,6 +251,17 @@ SHAPE_TRANSFORM_PATTERNS = (
 
 
 def classify_intent(goal: str, *, schema_payload: dict[str, Any] | None = None) -> IntentResult:
+    """Classify intent for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, schema_payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier.classify_intent.
+    """
     text = _normalize_goal_text(goal)
     if not text:
         return IntentResult(matched=False, reason="empty_goal")
@@ -249,6 +275,17 @@ def classify_intent(goal: str, *, schema_payload: dict[str, Any] | None = None) 
 
 
 def classify_single_intent(goal: str, *, schema_payload: dict[str, Any] | None = None) -> IntentResult:
+    """Classify single intent for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, schema_payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier.classify_single_intent.
+    """
     text = _normalize_goal_text(goal)
     if not text:
         return IntentResult(matched=False, reason="empty_goal")
@@ -271,6 +308,17 @@ def classify_single_intent(goal: str, *, schema_payload: dict[str, Any] | None =
 
 
 def classify_compound_intent(goal: str, *, schema_payload: dict[str, Any] | None = None) -> IntentResult:
+    """Classify compound intent for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, schema_payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier.classify_compound_intent.
+    """
     text = _normalize_goal_text(goal)
     clauses = _split_compound_clauses(text)
     if len(clauses) < 2:
@@ -369,6 +417,17 @@ def classify_compound_intent(goal: str, *, schema_payload: dict[str, Any] | None
 
 
 def _classify_read_file_line(goal: str) -> IntentResult:
+    """Handle the internal classify read file line helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_read_file_line.
+    """
     for pattern in READ_LINE_PATTERNS:
         match = pattern.search(goal)
         if match is None:
@@ -382,6 +441,17 @@ def _classify_read_file_line(goal: str) -> IntentResult:
 
 
 def _classify_count_files(goal: str) -> IntentResult:
+    """Handle the internal classify count files helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_count_files.
+    """
     match = COUNT_FILES_RE.search(goal)
     if match is not None:
         path = _clean_path(match.group("path"))
@@ -393,6 +463,17 @@ def _classify_count_files(goal: str) -> IntentResult:
 
 
 def _classify_file_aggregate(goal: str) -> IntentResult:
+    """Handle the internal classify file aggregate helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_file_aggregate.
+    """
     if AGGREGATE_TRIGGER_RE.search(goal) is None:
         return IntentResult(matched=False, reason="file_aggregate_no_match")
     path = _extract_first_path_candidate(goal)
@@ -419,6 +500,17 @@ def _classify_file_aggregate(goal: str) -> IntentResult:
 
 
 def _classify_list_files(goal: str) -> IntentResult:
+    """Handle the internal classify list files helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_list_files.
+    """
     match = LIST_FILES_RE.search(goal)
     if match is not None:
         path = _clean_path(match.group("path"))
@@ -455,6 +547,17 @@ def _classify_list_files(goal: str) -> IntentResult:
 
 
 def _classify_search_file_contents(goal: str) -> IntentResult:
+    """Handle the internal classify search file contents helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_search_file_contents.
+    """
     for pattern in SEARCH_FILES_PATTERNS:
         match = pattern.search(goal)
         if match is None:
@@ -482,6 +585,17 @@ def _classify_search_file_contents(goal: str) -> IntentResult:
 
 
 def _classify_write_text(goal: str) -> IntentResult:
+    """Handle the internal classify write text helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_write_text.
+    """
     match = WRITE_TO_PATH_RE.search(goal)
     if match is not None:
         path = _clean_path(match.group("path"))
@@ -506,6 +620,17 @@ def _classify_write_text(goal: str) -> IntentResult:
 
 
 def _classify_fetch_extract(goal: str) -> IntentResult:
+    """Handle the internal classify fetch extract helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_fetch_extract.
+    """
     match = FETCH_EXTRACT_RE.search(goal)
     if match is None:
         return IntentResult(matched=False, reason="fetch_extract_no_match")
@@ -521,6 +646,17 @@ def _classify_fetch_extract(goal: str) -> IntentResult:
 
 
 def _classify_shell_command(goal: str) -> IntentResult:
+    """Handle the internal classify shell command helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_shell_command.
+    """
     body = _extract_shell_body(goal)
     if not body:
         return IntentResult(matched=False, reason="shell_no_match")
@@ -543,6 +679,17 @@ def _classify_shell_command(goal: str) -> IntentResult:
 
 
 def _classify_sql_count(goal: str, *, schema_payload: dict[str, Any] | None = None) -> IntentResult:
+    """Handle the internal classify sql count helper path for this module.
+
+    Inputs:
+        Receives goal, schema_payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_sql_count.
+    """
     match = SQL_COUNT_RE.search(goal)
     if match is None:
         return IntentResult(matched=False, reason="sql_count_no_match")
@@ -557,6 +704,17 @@ def _classify_sql_count(goal: str, *, schema_payload: dict[str, Any] | None = No
 
 
 def _classify_sql_select(goal: str, *, schema_payload: dict[str, Any] | None = None) -> IntentResult:
+    """Handle the internal classify sql select helper path for this module.
+
+    Inputs:
+        Receives goal, schema_payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_sql_select.
+    """
     match = SQL_SELECT_RE.search(goal)
     if match is None:
         return IntentResult(matched=False, reason="sql_select_no_match")
@@ -593,6 +751,17 @@ def _classify_sql_select(goal: str, *, schema_payload: dict[str, Any] | None = N
 
 
 def _classify_transform_clause(clause: str) -> list[str]:
+    """Handle the internal classify transform clause helper path for this module.
+
+    Inputs:
+        Receives clause for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_transform_clause.
+    """
     operations: list[str] = []
     normalized = clause.strip()
     for pattern, operation in CASE_TRANSFORM_PATTERNS:
@@ -614,6 +783,17 @@ def _classify_transform_clause(clause: str) -> list[str]:
 
 
 def _classify_save_clause(clause: str, intents: list[Any]) -> WriteResultIntent | None:
+    """Handle the internal classify save clause helper path for this module.
+
+    Inputs:
+        Receives clause, intents for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_save_clause.
+    """
     match = SAVE_RESULT_RE.search(clause)
     if match is None:
         return None
@@ -624,6 +804,17 @@ def _classify_save_clause(clause: str, intents: list[Any]) -> WriteResultIntent 
 
 
 def _classify_return_clause(clause: str, *, has_save: bool) -> str | None:
+    """Handle the internal classify return clause helper path for this module.
+
+    Inputs:
+        Receives clause, has_save for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_return_clause.
+    """
     normalized = str(clause or "").strip().lower()
     if not normalized:
         return None
@@ -641,6 +832,17 @@ def _classify_return_clause(clause: str, *, has_save: bool) -> str | None:
 
 
 def _classify_inline_transform_compound(goal: str, *, schema_payload: dict[str, Any] | None = None) -> IntentResult:
+    """Handle the internal classify inline transform compound helper path for this module.
+
+    Inputs:
+        Receives goal, schema_payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_inline_transform_compound.
+    """
     operations, stripped_goal = _extract_inline_transform_operations(goal)
     if not operations:
         return IntentResult(matched=False, reason="inline_transform_not_found")
@@ -659,6 +861,17 @@ def _classify_inline_transform_compound(goal: str, *, schema_payload: dict[str, 
 
 
 def _extract_inline_transform_operations(clause: str) -> tuple[list[str], str]:
+    """Handle the internal extract inline transform operations helper path for this module.
+
+    Inputs:
+        Receives clause for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._extract_inline_transform_operations.
+    """
     operations = _classify_transform_clause(clause)
     stripped = clause
     if operations:
@@ -678,6 +891,17 @@ def _extract_inline_transform_operations(clause: str) -> tuple[list[str], str]:
 
 
 def _compound_output_mode(intents: list[Any]) -> str:
+    """Handle the internal compound output mode helper path for this module.
+
+    Inputs:
+        Receives intents for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._compound_output_mode.
+    """
     shape_operations: list[str] = []
     for intent in intents:
         if isinstance(intent, TransformIntent) and intent.operation in SHAPE_TRANSFORM_OPERATIONS:
@@ -702,6 +926,17 @@ def _compound_output_mode(intents: list[Any]) -> str:
 
 
 def _split_compound_clauses(goal: str) -> list[str]:
+    """Handle the internal split compound clauses helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._split_compound_clauses.
+    """
     clauses: list[str] = []
     current: list[str] = []
     quote: str | None = None
@@ -739,6 +974,17 @@ def _split_compound_clauses(goal: str) -> list[str]:
 
 
 def _push_clause(clauses: list[str], current: list[str]) -> None:
+    """Handle the internal push clause helper path for this module.
+
+    Inputs:
+        Receives clauses, current for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._push_clause.
+    """
     text = "".join(current).strip(" ,")
     current.clear()
     if not text:
@@ -747,6 +993,17 @@ def _push_clause(clauses: list[str], current: list[str]) -> None:
 
 
 def _clean_path(raw_path: str | None) -> str:
+    """Handle the internal clean path helper path for this module.
+
+    Inputs:
+        Receives raw_path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._clean_path.
+    """
     candidate = str(raw_path or "").strip()
     if not candidate:
         return ""
@@ -757,6 +1014,17 @@ def _clean_path(raw_path: str | None) -> str:
 
 
 def _normalize_phrase(value: str | None) -> str:
+    """Handle the internal normalize phrase helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._normalize_phrase.
+    """
     text = str(value or "").strip()
     if not text:
         return ""
@@ -767,12 +1035,34 @@ def _normalize_phrase(value: str | None) -> str:
 
 
 def _normalize_search_needle(value: str | None) -> str:
+    """Handle the internal normalize search needle helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._normalize_search_needle.
+    """
     text = _normalize_phrase(value)
     text = re.sub(r"\s+(?:and\s+)?(?:return|give)\b.*$", "", text, flags=re.IGNORECASE).strip()
     return text
 
 
 def _classify_count_files_by_path_hint(goal: str) -> IntentResult:
+    """Handle the internal classify count files by path hint helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_count_files_by_path_hint.
+    """
     normalized = goal.lower().strip()
     if not re.match(r"^(?:how\s+many|count|tell\s+me\s+the\s+number\s+of)\b", normalized):
         return IntentResult(matched=False, reason="count_files_no_match")
@@ -786,6 +1076,17 @@ def _classify_count_files_by_path_hint(goal: str) -> IntentResult:
 
 
 def _classify_list_files_by_path_hint(goal: str) -> IntentResult:
+    """Handle the internal classify list files by path hint helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_list_files_by_path_hint.
+    """
     normalized = goal.lower().strip()
     dir_only = _contains_directory_phrase(goal)
     if not re.match(r"^(?:list|show|return|give\s+me)\b", normalized) and not (
@@ -814,6 +1115,17 @@ def _classify_list_files_by_path_hint(goal: str) -> IntentResult:
 
 
 def _classify_list_files_in_current_folder(goal: str) -> IntentResult:
+    """Handle the internal classify list files in current folder helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._classify_list_files_in_current_folder.
+    """
     normalized = goal.lower().strip()
     dir_only = _contains_directory_phrase(goal)
     if not re.match(r"^(?:list|show|return|give\s+me)\b", normalized) and not (
@@ -845,6 +1157,17 @@ def _classify_list_files_in_current_folder(goal: str) -> IntentResult:
 
 
 def _wants_recursive_current_folder_listing(goal: str, query_recursive: bool) -> bool:
+    """Handle the internal wants recursive current folder listing helper path for this module.
+
+    Inputs:
+        Receives goal, query_recursive for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._wants_recursive_current_folder_listing.
+    """
     text = str(goal or "").lower()
     if any(hint in text for hint in NON_RECURSIVE_HINTS):
         return False
@@ -856,6 +1179,17 @@ def _wants_recursive_current_folder_listing(goal: str, query_recursive: bool) ->
 
 
 def _wants_recursive_listing(goal: str, *, fallback: bool) -> bool:
+    """Handle the internal wants recursive listing helper path for this module.
+
+    Inputs:
+        Receives goal, fallback for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._wants_recursive_listing.
+    """
     text = str(goal or "").lower()
     if any(hint in text for hint in NON_RECURSIVE_HINTS):
         return False
@@ -867,6 +1201,17 @@ def _wants_recursive_listing(goal: str, *, fallback: bool) -> bool:
 
 
 def _extract_glob_pattern(body: str | None) -> str | None:
+    """Handle the internal extract glob pattern helper path for this module.
+
+    Inputs:
+        Receives body for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._extract_glob_pattern.
+    """
     text = str(body or "").strip().lower()
     if not text:
         return None
@@ -916,12 +1261,34 @@ def _extract_glob_pattern(body: str | None) -> str | None:
 
 
 def _contains_file_phrase(text: str) -> bool:
+    """Handle the internal contains file phrase helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._contains_file_phrase.
+    """
     normalized = str(text or "").lower()
     scrubbed = PATH_CANDIDATE_RE.sub(" ", normalized)
     return re.search(r"\b(?:file|files|filename|filenames)\b", scrubbed) is not None
 
 
 def _contains_directory_phrase(text: str) -> bool:
+    """Handle the internal contains directory phrase helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._contains_directory_phrase.
+    """
     normalized = str(text or "").lower()
     scrubbed = PATH_CANDIDATE_RE.sub(" ", normalized)
     scrubbed = re.sub(r"\b(?:this|current)\s+(?:folder|directory)\b", " ", scrubbed)
@@ -932,6 +1299,17 @@ def _contains_directory_phrase(text: str) -> bool:
 
 
 def _looks_like_content_diagnostic_body(text: str) -> bool:
+    """Handle the internal looks like content diagnostic body helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._looks_like_content_diagnostic_body.
+    """
     normalized = str(text or "").lower()
     return any(
         token in normalized
@@ -949,6 +1327,17 @@ def _looks_like_content_diagnostic_body(text: str) -> bool:
 
 
 def _infer_output_mode(goal: str) -> str:
+    """Handle the internal infer output mode helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._infer_output_mode.
+    """
     if OUTPUT_JSON_RE.search(goal):
         return "json"
     if OUTPUT_CSV_RE.search(goal):
@@ -957,6 +1346,17 @@ def _infer_output_mode(goal: str) -> str:
 
 
 def _infer_file_aggregate_output_mode(goal: str, aggregate: str) -> str:
+    """Handle the internal infer file aggregate output mode helper path for this module.
+
+    Inputs:
+        Receives goal, aggregate for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._infer_file_aggregate_output_mode.
+    """
     if OUTPUT_JSON_RE.search(goal):
         return "json"
     if aggregate == "count" and AGGREGATE_COUNT_ONLY_RE.search(goal):
@@ -965,12 +1365,34 @@ def _infer_file_aggregate_output_mode(goal: str, aggregate: str) -> str:
 
 
 def _infer_file_aggregate_mode(goal: str) -> str:
+    """Handle the internal infer file aggregate mode helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._infer_file_aggregate_mode.
+    """
     if AGGREGATE_COUNT_AND_SIZE_RE.search(goal):
         return "count_and_total_size"
     return "total_size"
 
 
 def _infer_file_aggregate_size_unit(goal: str) -> str:
+    """Handle the internal infer file aggregate size unit helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._infer_file_aggregate_size_unit.
+    """
     match = SIZE_UNIT_RE.search(goal)
     if match is None:
         return "auto"
@@ -978,6 +1400,17 @@ def _infer_file_aggregate_size_unit(goal: str) -> str:
 
 
 def _infer_shell_output_mode(goal: str) -> str:
+    """Handle the internal infer shell output mode helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._infer_shell_output_mode.
+    """
     if OUTPUT_CSV_RE.search(goal):
         return "csv"
     if OUTPUT_COUNT_RE.search(goal):
@@ -986,6 +1419,17 @@ def _infer_shell_output_mode(goal: str) -> str:
 
 
 def _infer_recursive(body: str, relation: str, *, default: bool) -> bool:
+    """Handle the internal infer recursive helper path for this module.
+
+    Inputs:
+        Receives body, relation, default for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._infer_recursive.
+    """
     combined = f"{body} {relation}".lower()
     if any(hint in combined for hint in NON_RECURSIVE_HINTS):
         return False
@@ -995,10 +1439,32 @@ def _infer_recursive(body: str, relation: str, *, default: bool) -> bool:
 
 
 def _has_return_clause(text: str | None) -> bool:
+    """Handle the internal has return clause helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._has_return_clause.
+    """
     return bool(text and RETURN_HINT_RE.search(text))
 
 
 def _looks_like_path_candidate(candidate: str) -> bool:
+    """Handle the internal looks like path candidate helper path for this module.
+
+    Inputs:
+        Receives candidate for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._looks_like_path_candidate.
+    """
     value = str(candidate or "").strip()
     if not value:
         return False
@@ -1017,6 +1483,17 @@ def _looks_like_path_candidate(candidate: str) -> bool:
 
 
 def _extract_first_path_candidate(text: str) -> str:
+    """Handle the internal extract first path candidate helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._extract_first_path_candidate.
+    """
     for match in PATH_CANDIDATE_RE.findall(str(text or "")):
         candidate = _clean_path(match)
         if _looks_like_path_candidate(candidate):
@@ -1025,6 +1502,17 @@ def _extract_first_path_candidate(text: str) -> str:
 
 
 def _looks_like_literal_write_content(content: str) -> bool:
+    """Handle the internal looks like literal write content helper path for this module.
+
+    Inputs:
+        Receives content for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._looks_like_literal_write_content.
+    """
     text = str(content or "").strip()
     if not text:
         return False
@@ -1032,6 +1520,17 @@ def _looks_like_literal_write_content(content: str) -> bool:
 
 
 def _normalize_url(raw_url: str | None) -> str:
+    """Handle the internal normalize url helper path for this module.
+
+    Inputs:
+        Receives raw_url for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._normalize_url.
+    """
     value = _normalize_phrase(raw_url)
     if not value:
         return ""
@@ -1042,6 +1541,17 @@ def _normalize_url(raw_url: str | None) -> str:
 
 
 def _normalize_goal_text(value: str) -> str:
+    """Handle the internal normalize goal text helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._normalize_goal_text.
+    """
     text = str(value or "").strip()
     while text.endswith((".", "!", "?")):
         if text.endswith(" ."):
@@ -1051,11 +1561,33 @@ def _normalize_goal_text(value: str) -> str:
 
 
 def _normalize_identifier(value: str | None) -> str | None:
+    """Handle the internal normalize identifier helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._normalize_identifier.
+    """
     text = str(value or "").strip()
     return text or None
 
 
 def _schema_supports_table(schema_payload: dict[str, Any] | None, *, database: str | None, table: str) -> bool:
+    """Handle the internal schema supports table helper path for this module.
+
+    Inputs:
+        Receives schema_payload, database, table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._schema_supports_table.
+    """
     table_map = _schema_table_map(schema_payload)
     if not table_map:
         return False
@@ -1076,6 +1608,17 @@ def _schema_supports_columns(
     table: str,
     columns: list[str],
 ) -> bool:
+    """Handle the internal schema supports columns helper path for this module.
+
+    Inputs:
+        Receives schema_payload, database, table, columns for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._schema_supports_columns.
+    """
     table_map = _schema_table_map(schema_payload)
     normalized_table = table.lower()
     normalized_columns = {column.lower() for column in columns}
@@ -1101,6 +1644,17 @@ def _schema_supports_columns(
 
 
 def _schema_table_map(schema_payload: dict[str, Any] | None) -> dict[str, dict[str, set[str]]]:
+    """Handle the internal schema table map helper path for this module.
+
+    Inputs:
+        Receives schema_payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._schema_table_map.
+    """
     if not isinstance(schema_payload, dict):
         return {}
     databases: dict[str, dict[str, set[str]]] = {}
@@ -1127,6 +1681,17 @@ def _schema_table_map(schema_payload: dict[str, Any] | None) -> dict[str, dict[s
 
 
 def _extract_single_json_key(goal: str) -> str | None:
+    """Handle the internal extract single json key helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._extract_single_json_key.
+    """
     match = re.search(r"\bjson\s+with\s+key\s+([A-Za-z_][A-Za-z0-9_]*)\b", goal, re.IGNORECASE)
     if match is None:
         return None
@@ -1134,10 +1699,32 @@ def _extract_single_json_key(goal: str) -> str | None:
 
 
 def _shell_quote(value: str) -> str:
+    """Handle the internal shell quote helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._shell_quote.
+    """
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 def _line_number_from_match(match: re.Match[str]) -> int:
+    """Handle the internal line number from match helper path for this module.
+
+    Inputs:
+        Receives match for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._line_number_from_match.
+    """
     raw_number = str(match.groupdict().get("number") or "").lower()
     if raw_number.isdigit():
         return int(raw_number)
@@ -1148,6 +1735,17 @@ def _line_number_from_match(match: re.Match[str]) -> int:
 
 
 def _extract_shell_body(goal: str) -> str:
+    """Handle the internal extract shell body helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_classifier._extract_shell_body.
+    """
     for pattern in (USING_SHELL_RE, WITH_SHELL_RE, SHELL_PREFIX_RE, RUN_SHELL_RE):
         match = pattern.match(goal)
         if match is not None:

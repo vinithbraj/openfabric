@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.app_config
+
+Purpose:
+    Load application-level configuration from YAML and environment sources.
+
+Responsibilities:
+    Resolve model, server, SQL, gateway, and runtime defaults before Settings construction.
+
+Data flow / Interfaces:
+    Consumes config files/environment variables and produces typed app configuration used by CLI/API startup.
+
+Boundaries:
+    Keeps process configuration separate from per-request plans and user-provided tool arguments.
+"""
+
 from __future__ import annotations
 
 import os
@@ -14,11 +29,33 @@ APP_CONFIG_PATH_ENV = "AOR_APP_CONFIG_PATH"
 
 
 class ServerConfig(BaseModel):
+    """Represent server config within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ServerConfig.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.app_config.ServerConfig and related tests.
+    """
     host: str = "127.0.0.1"
     port: int = 8011
 
     @model_validator(mode="after")
     def validate_server(self) -> "ServerConfig":
+        """Validate validate server invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by OpenFABRIC runtime support through ServerConfig.validate_server calls and related tests.
+        """
         self.host = str(self.host or "").strip() or "127.0.0.1"
         if self.port <= 0 or self.port > 65535:
             raise ValueError("server.port must be between 1 and 65535.")
@@ -26,6 +63,17 @@ class ServerConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
+    """Represent l l m config within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by LLMConfig.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.app_config.LLMConfig and related tests.
+    """
     base_url: str = "http://127.0.0.1:8000/v1"
     api_key: str = "local"
     default_model: str = "stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ"
@@ -34,6 +82,17 @@ class LLMConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_llm(self) -> "LLMConfig":
+        """Validate validate llm invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by OpenFABRIC runtime support through LLMConfig.validate_llm calls and related tests.
+        """
         self.base_url = str(self.base_url or "").strip()
         self.api_key = str(self.api_key or "").strip()
         self.default_model = str(self.default_model or "").strip()
@@ -49,6 +108,17 @@ class LLMConfig(BaseModel):
 
 
 class RuntimeAppConfig(BaseModel):
+    """Represent runtime app config within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by RuntimeAppConfig.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.app_config.RuntimeAppConfig and related tests.
+    """
     allow_destructive_shell: bool = False
     shell_mode: str = "read_only"
     shell_allow_mutation_with_approval: bool = False
@@ -102,6 +172,17 @@ class RuntimeAppConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_runtime(self) -> "RuntimeAppConfig":
+        """Validate validate runtime invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by OpenFABRIC runtime support through RuntimeAppConfig.validate_runtime calls and related tests.
+        """
         if self.max_plan_retries < 0:
             raise ValueError("runtime.max_plan_retries must be zero or greater.")
         self.shell_mode = str(self.shell_mode or "read_only").strip().lower() or "read_only"
@@ -160,6 +241,17 @@ class RuntimeAppConfig(BaseModel):
 
 
 class SQLConfig(BaseModel):
+    """Represent s q l config within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SQLConfig.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.app_config.SQLConfig and related tests.
+    """
     database_url: str | None = None
     databases: dict[str, str] = Field(default_factory=dict)
     default_database: str | None = None
@@ -168,6 +260,17 @@ class SQLConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_sql(self) -> "SQLConfig":
+        """Validate validate sql invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by OpenFABRIC runtime support through SQLConfig.validate_sql calls and related tests.
+        """
         normalized_database_url = str(self.database_url or "").strip()
         self.database_url = normalized_database_url or None
 
@@ -195,6 +298,17 @@ class SQLConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    """Represent app config within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by AppConfig.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.app_config.AppConfig and related tests.
+    """
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     runtime: RuntimeAppConfig = Field(default_factory=RuntimeAppConfig)
@@ -202,12 +316,34 @@ class AppConfig(BaseModel):
 
 
 def _config_error_message(path: Path | None = None) -> str:
+    """Handle the internal config error message helper path for this module.
+
+    Inputs:
+        Receives path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.app_config._config_error_message.
+    """
     if path is not None:
         return f"App config not found at {path}. Create {APP_CONFIG_FILENAME} or pass --config."
     return f"App config not found. Create {APP_CONFIG_FILENAME} or pass --config."
 
 
 def resolve_app_config_path(config_path: str | Path | None = None, cwd: str | Path | None = None) -> Path:
+    """Resolve app config path for the surrounding runtime workflow.
+
+    Inputs:
+        Receives config_path, cwd for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.app_config.resolve_app_config_path.
+    """
     base_dir = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
     requested = config_path if config_path is not None else os.getenv(APP_CONFIG_PATH_ENV)
     if requested is not None and str(requested).strip():
@@ -223,6 +359,17 @@ def resolve_app_config_path(config_path: str | Path | None = None, cwd: str | Pa
 
 
 def load_app_config(config_path: str | Path | None = None, cwd: str | Path | None = None) -> tuple[AppConfig, Path]:
+    """Load app config for the surrounding runtime workflow.
+
+    Inputs:
+        Receives config_path, cwd for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.app_config.load_app_config.
+    """
     resolved = resolve_app_config_path(config_path=config_path, cwd=cwd)
     try:
         payload = yaml.safe_load(resolved.read_text()) or {}

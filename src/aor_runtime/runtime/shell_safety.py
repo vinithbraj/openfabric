@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.shell_safety
+
+Purpose:
+    Classify shell commands and enforce read-only/destructive-command policy.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -11,6 +26,17 @@ ShellRiskLevel = Literal["safe_read_only", "low_risk", "medium_risk", "high_risk
 
 @dataclass(frozen=True)
 class ShellCommandPolicy:
+    """Represent shell command policy within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ShellCommandPolicy.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.shell_safety.ShellCommandPolicy and related tests.
+    """
     risk: ShellRiskLevel
     allowed: bool
     requires_approval: bool
@@ -116,6 +142,17 @@ FORK_BOMB_RE = re.compile(r":\(\)\s*\{")
 
 
 def classify_shell_command(command: str, *, mode: str = "read_only", allow_mutation_with_approval: bool = False) -> ShellCommandPolicy:
+    """Classify shell command for the surrounding runtime workflow.
+
+    Inputs:
+        Receives command, mode, allow_mutation_with_approval for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety.classify_shell_command.
+    """
     text = str(command or "").strip()
     normalized_mode = str(mode or "read_only").strip().lower()
     if normalized_mode == "disabled":
@@ -160,6 +197,17 @@ def classify_shell_command(command: str, *, mode: str = "read_only", allow_mutat
 
 
 def _segment_risk(command_name: str, tokens: list[str]) -> tuple[ShellRiskLevel, str]:
+    """Handle the internal segment risk helper path for this module.
+
+    Inputs:
+        Receives command_name, tokens for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._segment_risk.
+    """
     if command_name in FORBIDDEN_COMMANDS:
         return "forbidden", f"`{command_name}` is forbidden by shell policy."
     if command_name == "find" and "-delete" in tokens:
@@ -212,6 +260,17 @@ def _policy_for_risk(
     detected: list[str],
     command: str,
 ) -> ShellCommandPolicy:
+    """Handle the internal policy for risk helper path for this module.
+
+    Inputs:
+        Receives risk, mode, allow_mutation_with_approval, reason, detected, command for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._policy_for_risk.
+    """
     if risk in {"safe_read_only", "low_risk"}:
         return ShellCommandPolicy(risk, mode != "disabled", False, reason, detected, _redact_command(command))
     if risk == "forbidden":
@@ -224,6 +283,17 @@ def _policy_for_risk(
 
 
 def _forbidden_text_reason(text: str) -> str | None:
+    """Handle the internal forbidden text reason helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._forbidden_text_reason.
+    """
     if FORK_BOMB_RE.search(text):
         return "Fork-bomb pattern is forbidden."
     if re.search(r"\brm\s+-[A-Za-z]*r[A-Za-z]*f[A-Za-z]*\s+/(?:\s|$)", text):
@@ -234,6 +304,17 @@ def _forbidden_text_reason(text: str) -> str | None:
 
 
 def _split_pipeline(text: str) -> list[str]:
+    """Handle the internal split pipeline helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._split_pipeline.
+    """
     if "|" not in text:
         return [text]
     parts = [part.strip() for part in text.split("|")]
@@ -241,6 +322,17 @@ def _split_pipeline(text: str) -> list[str]:
 
 
 def _has_unquoted_redirect(text: str) -> bool:
+    """Handle the internal has unquoted redirect helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._has_unquoted_redirect.
+    """
     quote: str | None = None
     escaped = False
     for index, character in enumerate(str(text or "")):
@@ -269,10 +361,32 @@ def _has_unquoted_redirect(text: str) -> bool:
 
 
 def _base_command(command: str) -> str:
+    """Handle the internal base command helper path for this module.
+
+    Inputs:
+        Receives command for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._base_command.
+    """
     return command.rsplit("/", 1)[-1].strip().lower()
 
 
 def _first_non_option(tokens: list[str]) -> str:
+    """Handle the internal first non option helper path for this module.
+
+    Inputs:
+        Receives tokens for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._first_non_option.
+    """
     for token in tokens:
         if token.startswith("-"):
             continue
@@ -281,10 +395,32 @@ def _first_non_option(tokens: list[str]) -> str:
 
 
 def _pipes_to_shell(tokens: list[str]) -> bool:
+    """Handle the internal pipes to shell helper path for this module.
+
+    Inputs:
+        Receives tokens for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._pipes_to_shell.
+    """
     return any(_base_command(token) in {"sh", "bash", "zsh", "fish"} for token in tokens[1:])
 
 
 def _redact_command(command: str) -> str:
+    """Handle the internal redact command helper path for this module.
+
+    Inputs:
+        Receives command for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.shell_safety._redact_command.
+    """
     text = str(command or "")
     text = re.sub(r"(?i)(password|token|secret|credential|api[_-]?key)=\\S+", r"\1=<redacted>", text)
     return text

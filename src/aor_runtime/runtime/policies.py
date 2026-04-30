@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.policies
+
+Purpose:
+    Define runtime policy checks used by validators and execution boundaries.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import ast
@@ -43,6 +58,17 @@ TEXTUAL_RESULT_PATHS = {"content", "csv", "json", "markdown", "text", "value"}
 
 
 class PlanningPolicy(BaseModel):
+    """Represent planning policy within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanningPolicy.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.policies.PlanningPolicy and related tests.
+    """
     name: str
     description: str
     rules: list[str]
@@ -50,6 +76,17 @@ class PlanningPolicy(BaseModel):
 
 @dataclass(slots=True)
 class PlanViolation:
+    """Represent plan violation within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanViolation.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.policies.PlanViolation and related tests.
+    """
     tier: Literal["hard", "soft"]
     code: str
     message: str
@@ -57,20 +94,64 @@ class PlanViolation:
 
 @dataclass(slots=True)
 class PlanViolations:
+    """Represent plan violations within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanViolations.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.policies.PlanViolations and related tests.
+    """
     hard: list[PlanViolation] = field(default_factory=list)
     soft: list[PlanViolation] = field(default_factory=list)
 
     def add(self, violation: PlanViolation) -> None:
+        """Add for PlanViolations instances.
+
+        Inputs:
+            Receives violation for this PlanViolations method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanViolations.add calls and related tests.
+        """
         if violation.tier == "hard":
             self.hard.append(violation)
         else:
             self.soft.append(violation)
 
     def extend(self, violations: list[PlanViolation]) -> None:
+        """Extend for PlanViolations instances.
+
+        Inputs:
+            Receives violations for this PlanViolations method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanViolations.extend calls and related tests.
+        """
         for violation in violations:
             self.add(violation)
 
     def first(self) -> PlanViolation | None:
+        """First for PlanViolations instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanViolations.first calls and related tests.
+        """
         if self.hard:
             return self.hard[0]
         if self.soft:
@@ -78,11 +159,44 @@ class PlanViolations:
         return None
 
     def any(self) -> bool:
+        """Any for PlanViolations instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanViolations.any calls and related tests.
+        """
         return bool(self.hard or self.soft)
 
 
 class PlanContractViolation(ValueError):
+    """Represent plan contract violation within the OpenFABRIC runtime. It extends ValueError.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanContractViolation.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.policies.PlanContractViolation and related tests.
+    """
     def __init__(self, message: str, *, tier: Literal["hard", "soft"], code: str, violations: list[PlanViolation]) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives message, tier, code, violations for this PlanContractViolation method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanContractViolation.__init__ calls and related tests.
+        """
         super().__init__(message)
         self.tier = tier
         self.code = code
@@ -90,6 +204,17 @@ class PlanContractViolation(ValueError):
 
     @classmethod
     def from_violations(cls, violations: PlanViolations) -> "PlanContractViolation":
+        """From violations for PlanContractViolation instances.
+
+        Inputs:
+            Receives violations for this PlanContractViolation method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanContractViolation.from_violations calls and related tests.
+        """
         first = violations.first()
         if first is None:
             raise ValueError("No plan violations were provided.")
@@ -97,6 +222,17 @@ class PlanContractViolation(ValueError):
         return cls(first.message, tier=first.tier, code=first.code, violations=relevant)
 
     def as_metadata(self) -> dict[str, Any]:
+        """As metadata for PlanContractViolation instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanContractViolation.as_metadata calls and related tests.
+        """
         return {
             "contract_violation": True,
             "violation_tier": self.tier,
@@ -218,6 +354,17 @@ def select_policies(
     allowed_tools: list[str],
     schema: dict[str, Any] | None = None,
 ) -> list[PlanningPolicy]:
+    """Select policies for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, allowed_tools, schema for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.select_policies.
+    """
     selected_names: list[str] = []
     goal_text = str(goal or "").lower()
     goal_tokens = _tokenize(goal_text)
@@ -246,12 +393,34 @@ def select_policies(
 
 
 def render_policy_text(policies: list[PlanningPolicy]) -> str:
+    """Render policy text for the surrounding runtime workflow.
+
+    Inputs:
+        Receives policies for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.render_policy_text.
+    """
     return "\n\n".join(
         f"{policy.name}: {policy.description}\nRules:\n- " + "\n- ".join(policy.rules) for policy in policies
     )
 
 
 def infer_output_mode(goal: str) -> Literal["json", "csv", "count", "text"]:
+    """Infer output mode for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.infer_output_mode.
+    """
     goal_text = str(goal or "").lower()
     if JSON_ONLY_RE.search(goal_text):
         return "json"
@@ -263,14 +432,47 @@ def infer_output_mode(goal: str) -> Literal["json", "csv", "count", "text"]:
 
 
 def goal_requests_return_value(goal: str) -> bool:
+    """Goal requests return value for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.goal_requests_return_value.
+    """
     return bool(RETURN_REQUEST_RE.search(str(goal or "")))
 
 
 def validate_plan(plan: ExecutionPlan, max_allowed_steps: int = MAX_ALLOWED_STEPS, *, goal: str = "") -> None:
+    """Validate plan for the surrounding runtime workflow.
+
+    Inputs:
+        Receives plan, max_allowed_steps, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.validate_plan.
+    """
     validate_plan_contract(plan, goal=goal, max_allowed_steps=max_allowed_steps)
 
 
 def validate_plan_efficiency(plan: ExecutionPlan, max_allowed_steps: int = MAX_ALLOWED_STEPS, *, goal: str = "") -> None:
+    """Validate plan efficiency for the surrounding runtime workflow.
+
+    Inputs:
+        Receives plan, max_allowed_steps, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.validate_plan_efficiency.
+    """
     validate_plan(plan, max_allowed_steps=max_allowed_steps, goal=goal)
 
 
@@ -280,6 +482,17 @@ def classify_plan_violations(
     goal: str = "",
     max_allowed_steps: int = MAX_ALLOWED_STEPS,
 ) -> PlanViolations:
+    """Classify plan violations for the surrounding runtime workflow.
+
+    Inputs:
+        Receives plan, goal, max_allowed_steps for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.classify_plan_violations.
+    """
     violations = PlanViolations()
 
     if not plan.steps:
@@ -304,12 +517,34 @@ def classify_plan_violations(
 
 
 def validate_plan_contract(plan: ExecutionPlan, *, goal: str = "", max_allowed_steps: int = MAX_ALLOWED_STEPS) -> None:
+    """Validate plan contract for the surrounding runtime workflow.
+
+    Inputs:
+        Receives plan, goal, max_allowed_steps for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.validate_plan_contract.
+    """
     violations = classify_plan_violations(plan, goal=goal, max_allowed_steps=max_allowed_steps)
     if violations.any():
         raise PlanContractViolation.from_violations(violations)
 
 
 def validate_dataflow(plan: ExecutionPlan) -> None:
+    """Validate dataflow for the surrounding runtime workflow.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies.validate_dataflow.
+    """
     outputs: set[str] = set()
 
     for step in plan.steps:
@@ -335,6 +570,17 @@ def validate_dataflow(plan: ExecutionPlan) -> None:
 
 
 def _validate_placeholder_outputs(plan: ExecutionPlan) -> None:
+    """Handle the internal validate placeholder outputs helper path for this module.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._validate_placeholder_outputs.
+    """
     prior_data_steps = 0
     seen_outputs: set[str] = set()
     for step in plan.steps:
@@ -358,6 +604,17 @@ def _validate_placeholder_outputs(plan: ExecutionPlan) -> None:
 
 
 def _validate_python_inputs_contract(plan: ExecutionPlan) -> None:
+    """Handle the internal validate python inputs contract helper path for this module.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._validate_python_inputs_contract.
+    """
     for step in plan.steps:
         if step.action != "python.exec":
             continue
@@ -369,6 +626,17 @@ def _validate_python_inputs_contract(plan: ExecutionPlan) -> None:
 
 
 def _classify_sql_contract_violations(plan: ExecutionPlan) -> list[PlanViolation]:
+    """Handle the internal classify sql contract violations helper path for this module.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._classify_sql_contract_violations.
+    """
     violations: list[PlanViolation] = []
     for step in plan.steps:
         if step.action != "sql.query":
@@ -384,6 +652,17 @@ def _classify_sql_contract_violations(plan: ExecutionPlan) -> list[PlanViolation
 
 
 def _classify_python_contract_violations(plan: ExecutionPlan) -> list[PlanViolation]:
+    """Handle the internal classify python contract violations helper path for this module.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._classify_python_contract_violations.
+    """
     producer_by_output = {
         str(step.output).strip(): step for step in plan.steps if isinstance(step.output, str) and str(step.output).strip()
     }
@@ -425,6 +704,17 @@ def _classify_python_contract_violations(plan: ExecutionPlan) -> list[PlanViolat
 
 
 def _classify_python_ast_hard_violations(tree: ast.AST) -> list[PlanViolation]:
+    """Handle the internal classify python ast hard violations helper path for this module.
+
+    Inputs:
+        Receives tree for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._classify_python_ast_hard_violations.
+    """
     violations: list[PlanViolation] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -481,6 +771,17 @@ def _classify_python_ast_hard_violations(tree: ast.AST) -> list[PlanViolation]:
 
 
 def _classify_dataflow_violations(plan: ExecutionPlan) -> list[PlanViolation]:
+    """Handle the internal classify dataflow violations helper path for this module.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._classify_dataflow_violations.
+    """
     violations: list[PlanViolation] = []
     for code, validator in (
         ("invalid_dataflow", validate_dataflow),
@@ -495,6 +796,17 @@ def _classify_dataflow_violations(plan: ExecutionPlan) -> list[PlanViolation]:
 
 
 def _classify_path_violations(plan: ExecutionPlan) -> list[PlanViolation]:
+    """Handle the internal classify path violations helper path for this module.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._classify_path_violations.
+    """
     violations: list[PlanViolation] = []
     prior_paths: list[str] = []
     for step in plan.steps:
@@ -525,6 +837,17 @@ def _classify_path_violations(plan: ExecutionPlan) -> list[PlanViolation]:
 
 
 def _classify_output_contract_violations(plan: ExecutionPlan, goal: str) -> list[PlanViolation]:
+    """Handle the internal classify output contract violations helper path for this module.
+
+    Inputs:
+        Receives plan, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._classify_output_contract_violations.
+    """
     violations: list[PlanViolation] = []
     if not plan.steps:
         return violations
@@ -542,6 +865,17 @@ def _classify_output_contract_violations(plan: ExecutionPlan, goal: str) -> list
 
 
 def _assigns_result_variable(tree: ast.AST) -> bool:
+    """Handle the internal assigns result variable helper path for this module.
+
+    Inputs:
+        Receives tree for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._assigns_result_variable.
+    """
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
@@ -554,6 +888,17 @@ def _assigns_result_variable(tree: ast.AST) -> bool:
 
 
 def _sql_row_aliases_for_step(step: ExecutionStep, producer_by_output: dict[str, ExecutionStep]) -> list[str]:
+    """Handle the internal sql row aliases for step helper path for this module.
+
+    Inputs:
+        Receives step, producer_by_output for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._sql_row_aliases_for_step.
+    """
     inputs_mapping = step.args.get("inputs")
     if not isinstance(inputs_mapping, dict):
         return []
@@ -570,6 +915,17 @@ def _selected_sql_fields_for_step(
     step: ExecutionStep,
     producer_by_output: dict[str, ExecutionStep],
 ) -> dict[str, set[str]]:
+    """Handle the internal selected sql fields for step helper path for this module.
+
+    Inputs:
+        Receives step, producer_by_output for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._selected_sql_fields_for_step.
+    """
     inputs_mapping = step.args.get("inputs")
     if not isinstance(inputs_mapping, dict):
         return {}
@@ -591,6 +947,17 @@ def _selected_sql_fields_for_step(
 
 
 def _classify_sql_field_assumptions(tree: ast.AST, selected_fields_by_alias: dict[str, set[str]]) -> list[PlanViolation]:
+    """Handle the internal classify sql field assumptions helper path for this module.
+
+    Inputs:
+        Receives tree, selected_fields_by_alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._classify_sql_field_assumptions.
+    """
     violations: list[PlanViolation] = []
     alias_assignments = _assignments_from_inputs(tree)
     for node in ast.walk(tree):
@@ -620,6 +987,17 @@ def _classify_sql_field_assumptions(tree: ast.AST, selected_fields_by_alias: dic
 
 
 def _assignments_from_inputs(tree: ast.AST) -> dict[str, str]:
+    """Handle the internal assignments from inputs helper path for this module.
+
+    Inputs:
+        Receives tree for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._assignments_from_inputs.
+    """
     assignments: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -636,6 +1014,17 @@ def _assignments_from_inputs(tree: ast.AST) -> dict[str, str]:
 
 
 def _ref_points_to_sql_rows(value: Any, producer_by_output: dict[str, ExecutionStep]) -> bool:
+    """Handle the internal ref points to sql rows helper path for this module.
+
+    Inputs:
+        Receives value, producer_by_output for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._ref_points_to_sql_rows.
+    """
     if not isinstance(value, dict):
         return False
     ref_name = str(value.get("$ref") or "").strip()
@@ -649,6 +1038,17 @@ def _ref_points_to_sql_rows(value: Any, producer_by_output: dict[str, ExecutionS
 
 
 def _extract_selected_sql_fields(query: str) -> set[str]:
+    """Handle the internal extract selected sql fields helper path for this module.
+
+    Inputs:
+        Receives query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._extract_selected_sql_fields.
+    """
     match = SQL_SELECT_RE.search(str(query or ""))
     if match is None:
         return set()
@@ -668,6 +1068,17 @@ def _extract_selected_sql_fields(query: str) -> set[str]:
 
 
 def _indexes_alias_without_guard(code: str, alias: str) -> bool:
+    """Handle the internal indexes alias without guard helper path for this module.
+
+    Inputs:
+        Receives code, alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._indexes_alias_without_guard.
+    """
     direct_index = re.search(rf"\b{re.escape(alias)}\s*\[\s*0\s*\]", code)
     if direct_index is None:
         return False
@@ -681,10 +1092,32 @@ def _indexes_alias_without_guard(code: str, alias: str) -> bool:
 
 
 def _is_inputs_access(node: ast.Subscript) -> bool:
+    """Handle the internal is inputs access helper path for this module.
+
+    Inputs:
+        Receives node for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._is_inputs_access.
+    """
     return isinstance(node.value, ast.Name) and node.value.id == "inputs"
 
 
 def _is_nested_inputs_wrapper_access(node: ast.Subscript) -> bool:
+    """Handle the internal is nested inputs wrapper access helper path for this module.
+
+    Inputs:
+        Receives node for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._is_nested_inputs_wrapper_access.
+    """
     if not isinstance(node.value, ast.Subscript):
         return False
     if not _is_inputs_access(node.value):
@@ -694,6 +1127,17 @@ def _is_nested_inputs_wrapper_access(node: ast.Subscript) -> bool:
 
 
 def _subscript_literal(node: ast.Subscript) -> Any:
+    """Handle the internal subscript literal helper path for this module.
+
+    Inputs:
+        Receives node for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._subscript_literal.
+    """
     slice_node = node.slice
     if isinstance(slice_node, ast.Constant):
         return slice_node.value
@@ -701,6 +1145,17 @@ def _subscript_literal(node: ast.Subscript) -> Any:
 
 
 def _subscript_base_name(node: ast.Subscript) -> str | None:
+    """Handle the internal subscript base name helper path for this module.
+
+    Inputs:
+        Receives node for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._subscript_base_name.
+    """
     value = node.value
     if isinstance(value, ast.Name):
         return value.id
@@ -710,6 +1165,17 @@ def _subscript_base_name(node: ast.Subscript) -> str | None:
 
 
 def _dedupe_violations(violations: list[PlanViolation]) -> list[PlanViolation]:
+    """Handle the internal dedupe violations helper path for this module.
+
+    Inputs:
+        Receives violations for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._dedupe_violations.
+    """
     seen: set[tuple[str, str, str]] = set()
     unique: list[PlanViolation] = []
     for violation in violations:
@@ -722,6 +1188,17 @@ def _dedupe_violations(violations: list[PlanViolation]) -> list[PlanViolation]:
 
 
 def _tokenize(value: str) -> set[str]:
+    """Handle the internal tokenize helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._tokenize.
+    """
     tokens = set(TOKEN_RE.findall(value))
     expanded = set(tokens)
     for token in tokens:
@@ -733,6 +1210,17 @@ def _tokenize(value: str) -> set[str]:
 
 
 def _schema_tokens(schema: dict[str, Any] | None) -> set[str]:
+    """Handle the internal schema tokens helper path for this module.
+
+    Inputs:
+        Receives schema for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._schema_tokens.
+    """
     if not isinstance(schema, dict):
         return set()
 
@@ -759,4 +1247,15 @@ def _schema_tokens(schema: dict[str, Any] | None) -> set[str]:
 
 
 def _looks_path_like(goal_text: str) -> bool:
+    """Handle the internal looks path like helper path for this module.
+
+    Inputs:
+        Receives goal_text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.policies._looks_path_like.
+    """
     return "/" in goal_text or "\\" in goal_text or ".txt" in goal_text or ".md" in goal_text

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.action_planner
+
+Purpose:
+    Convert natural-language goals into validator-enforced action plans using the LLM.
+
+Responsibilities:
+    Build planner prompts, parse action JSON, canonicalize tool arguments/dataflow, apply repairs, and compile ExecutionPlans.
+
+Data flow / Interfaces:
+    Receives user goals, tool registry metadata, runtime date context, and compact repair facts; returns deterministic ExecutionPlan steps.
+
+Boundaries:
+    The LLM may propose actions, but this module enforces schema, domain, temporal, SQL, SLURM, shell, dataflow, and output-shape boundaries before execution.
+"""
+
 from __future__ import annotations
 
 import json
@@ -130,6 +145,17 @@ EXPORT_PATH_RE = re.compile(r"\b(?:to|as|at|into)\s+([^\s,;]+?\.(?:txt|csv|json|
 
 
 class ExpectedResultShape(BaseModel):
+    """Represent expected result shape within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ExpectedResultShape.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.ExpectedResultShape and related tests.
+    """
     kind: ExpectedKind = "unknown"
     columns: list[str] = Field(default_factory=list)
     format: str | None = None
@@ -137,6 +163,17 @@ class ExpectedResultShape(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def coerce_shape(cls, value: Any) -> Any:
+        """Validate coerce shape invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Receives value for this ExpectedResultShape method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ExpectedResultShape.coerce_shape calls and related tests.
+        """
         if isinstance(value, str):
             return {"kind": _normalize_shape_kind(value)}
         if isinstance(value, dict):
@@ -149,6 +186,17 @@ class ExpectedResultShape(BaseModel):
 
 
 class RawPlannedAction(BaseModel):
+    """Represent raw planned action within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by RawPlannedAction.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.RawPlannedAction and related tests.
+    """
     model_config = ConfigDict(extra="allow")
 
     id: Any = None
@@ -164,6 +212,17 @@ class RawPlannedAction(BaseModel):
 
 
 class RawActionPlan(BaseModel):
+    """Represent raw action plan within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by RawActionPlan.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.RawActionPlan and related tests.
+    """
     model_config = ConfigDict(extra="allow")
 
     goal: Any = ""
@@ -174,12 +233,34 @@ class RawActionPlan(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_execution_plan_shape(cls, value: Any) -> Any:
+        """Validate reject execution plan shape invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Receives value for this RawActionPlan method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RawActionPlan.reject_execution_plan_shape calls and related tests.
+        """
         if isinstance(value, dict) and "steps" in value and "actions" not in value:
             raise ValueError("LLM returned ExecutionPlan shape; expected ActionPlan.actions.")
         return value
 
 
 class PlannedAction(BaseModel):
+    """Represent planned action within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlannedAction.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.PlannedAction and related tests.
+    """
     id: str
     tool: str
     purpose: str = ""
@@ -191,6 +272,17 @@ class PlannedAction(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def coerce_legacy_keys(cls, value: Any) -> Any:
+        """Validate coerce legacy keys invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Receives value for this PlannedAction method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlannedAction.coerce_legacy_keys calls and related tests.
+        """
         if not isinstance(value, dict):
             return value
         copied = dict(value)
@@ -204,6 +296,17 @@ class PlannedAction(BaseModel):
 
     @model_validator(mode="after")
     def normalize(self) -> "PlannedAction":
+        """Validate normalize invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlannedAction.normalize calls and related tests.
+        """
         self.id = _normalize_name(self.id)
         self.tool = str(self.tool or "").strip()
         self.depends_on = [_normalize_name(item) for item in self.depends_on if _normalize_name(item)]
@@ -215,6 +318,17 @@ class PlannedAction(BaseModel):
 
 
 class ActionPlan(BaseModel):
+    """Represent action plan within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ActionPlan.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.ActionPlan and related tests.
+    """
     goal: str
     actions: list[PlannedAction] = Field(default_factory=list)
     expected_final_shape: ExpectedResultShape = Field(default_factory=ExpectedResultShape)
@@ -223,12 +337,34 @@ class ActionPlan(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_execution_plan_shape(cls, value: Any) -> Any:
+        """Validate reject execution plan shape invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Receives value for this ActionPlan method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlan.reject_execution_plan_shape calls and related tests.
+        """
         if isinstance(value, dict) and "steps" in value and "actions" not in value:
             raise ValueError("LLM returned ExecutionPlan shape; expected ActionPlan.actions.")
         return value
 
     @model_validator(mode="after")
     def validate_actions(self) -> "ActionPlan":
+        """Validate validate actions invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlan.validate_actions calls and related tests.
+        """
         if not self.actions:
             raise ValueError("ActionPlan requires at least one action.")
         return self
@@ -236,6 +372,17 @@ class ActionPlan(BaseModel):
 
 @dataclass
 class ActionValidationResult:
+    """Represent action validation result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ActionValidationResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.ActionValidationResult and related tests.
+    """
     valid: bool
     errors: list[str] = field(default_factory=list)
     repairable: bool = True
@@ -243,6 +390,17 @@ class ActionValidationResult:
 
 @dataclass(frozen=True)
 class PlanIssue:
+    """Represent plan issue within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanIssue.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.PlanIssue and related tests.
+    """
     code: str
     message: str
     severity: Literal["info", "repair", "error"] = "repair"
@@ -250,6 +408,17 @@ class PlanIssue:
 
 @dataclass(frozen=True)
 class CanonicalizationResult:
+    """Represent canonicalization result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by CanonicalizationResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.CanonicalizationResult and related tests.
+    """
     plan: ActionPlan
     repairs: list[str] = field(default_factory=list)
     issues: list[PlanIssue] = field(default_factory=list)
@@ -258,6 +427,17 @@ class CanonicalizationResult:
 
 
 class PlanSymbol(BaseModel):
+    """Represent plan symbol within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanSymbol.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.PlanSymbol and related tests.
+    """
     name: str
     action_id: str
     output_binding: str
@@ -266,10 +446,32 @@ class PlanSymbol(BaseModel):
 
 
 class PlanSymbolTable(BaseModel):
+    """Represent plan symbol table within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanSymbolTable.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.PlanSymbolTable and related tests.
+    """
     symbols: dict[str, PlanSymbol] = Field(default_factory=dict)
 
     @classmethod
     def from_actions(cls, actions: list[dict[str, Any]]) -> "PlanSymbolTable":
+        """From actions for PlanSymbolTable instances.
+
+        Inputs:
+            Receives actions for this PlanSymbolTable method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanSymbolTable.from_actions calls and related tests.
+        """
         symbols: dict[str, PlanSymbol] = {}
         for action in actions:
             action_id = _normalize_name(action.get("id") or "")
@@ -291,12 +493,45 @@ class PlanSymbolTable(BaseModel):
         return cls(symbols=symbols)
 
     def lookup(self, value: str) -> PlanSymbol | None:
+        """Lookup for PlanSymbolTable instances.
+
+        Inputs:
+            Receives value for this PlanSymbolTable method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanSymbolTable.lookup calls and related tests.
+        """
         normalized = _normalize_name(value)
         return self.symbols.get(normalized)
 
 
 class PlanDataflowValidator:
+    """Represent plan dataflow validator within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanDataflowValidator.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.PlanDataflowValidator and related tests.
+    """
     def validate(self, plan: ActionPlan) -> list[str]:
+        """Validate for PlanDataflowValidator instances.
+
+        Inputs:
+            Receives plan for this PlanDataflowValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanDataflowValidator.validate calls and related tests.
+        """
         symbols = PlanSymbolTable.from_actions([action.model_dump() for action in plan.actions])
         errors: list[str] = []
         for action in plan.actions:
@@ -318,15 +553,59 @@ class PlanDataflowValidator:
 
 @dataclass(frozen=True)
 class ToolArgumentCanonicalizationResult:
+    """Represent tool argument canonicalization result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ToolArgumentCanonicalizationResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.ToolArgumentCanonicalizationResult and related tests.
+    """
     repairs: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ToolArgumentCanonicalizer:
+    """Represent tool argument canonicalizer within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ToolArgumentCanonicalizer.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.ToolArgumentCanonicalizer and related tests.
+    """
     def __init__(self, tools: ToolRegistry) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives tools for this ToolArgumentCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ToolArgumentCanonicalizer.__init__ calls and related tests.
+        """
         self.tools = tools
 
     def canonicalize(self, actions: list[dict[str, Any]]) -> ToolArgumentCanonicalizationResult:
+        """Canonicalize for ToolArgumentCanonicalizer instances.
+
+        Inputs:
+            Receives actions for this ToolArgumentCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ToolArgumentCanonicalizer.canonicalize calls and related tests.
+        """
         repairs: list[str] = []
         scrubbed: list[dict[str, Any]] = []
         for action in actions:
@@ -360,7 +639,29 @@ class ToolArgumentCanonicalizer:
 
 
 class LLMActionPlanner:
+    """Represent l l m action planner within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by LLMActionPlanner.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.LLMActionPlanner and related tests.
+    """
     def __init__(self, *, llm: LLMClient, tools: ToolRegistry, settings: Settings) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives llm, tools, settings for this LLMActionPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMActionPlanner.__init__ calls and related tests.
+        """
         self.llm = llm
         self.tools = tools
         self.settings = settings
@@ -389,6 +690,17 @@ class LLMActionPlanner:
         input_payload: dict[str, Any],
         failure_context: dict[str, Any] | None = None,
     ) -> ExecutionPlan:
+        """Build plan for LLMActionPlanner instances.
+
+        Inputs:
+            Receives goal, planner, allowed_tools, input_payload, failure_context for this LLMActionPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMActionPlanner.build_plan calls and related tests.
+        """
         planning_now = temporal_runtime.current_local_datetime(self.settings)
         context = self._build_context(goal, allowed_tools, input_payload, failure_context, now=planning_now)
         self.last_prompt = context
@@ -447,6 +759,17 @@ class LLMActionPlanner:
         failure_context: dict[str, Any] | None,
         now: Any | None = None,
     ) -> dict[str, Any]:
+        """Handle the internal build context helper path for this module.
+
+        Inputs:
+            Receives goal, allowed_tools, input_payload, failure_context, now for this LLMActionPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMActionPlanner._build_context calls and related tests.
+        """
         manifest = build_tool_manifest(self.tools, allowed_tools)
         context: dict[str, Any] = {
             "goal": goal,
@@ -479,12 +802,45 @@ class LLMActionPlanner:
 
 
 class ActionPlanValidator:
+    """Represent action plan validator within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ActionPlanValidator.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.ActionPlanValidator and related tests.
+    """
     def __init__(self, *, settings: Settings, tools: ToolRegistry, allowed_tools: list[str]) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings, tools, allowed_tools for this ActionPlanValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanValidator.__init__ calls and related tests.
+        """
         self.settings = settings
         self.tools = tools
         self.allowed_tools = set(allowed_tools) | {"runtime.return", "text.format", "sql.schema", "sql.validate"}
 
     def validate(self, plan: ActionPlan, *, goal: str) -> ActionValidationResult:
+        """Validate for ActionPlanValidator instances.
+
+        Inputs:
+            Receives plan, goal for this ActionPlanValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanValidator.validate calls and related tests.
+        """
         errors: list[str] = []
         if len(plan.actions) > 12:
             errors.append("Action plan has too many actions; maximum is 12.")
@@ -518,6 +874,17 @@ class ActionPlanValidator:
         return ActionValidationResult(valid=not errors, errors=errors, repairable=True)
 
     def _validate_tool_args(self, action: PlannedAction) -> list[str]:
+        """Handle the internal validate tool args helper path for this module.
+
+        Inputs:
+            Receives action for this ActionPlanValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanValidator._validate_tool_args calls and related tests.
+        """
         if _collect_action_refs(action.inputs):
             return []
         try:
@@ -527,6 +894,17 @@ class ActionPlanValidator:
         return []
 
     def _validate_action_policy(self, action: PlannedAction, *, goal: str) -> list[str]:
+        """Handle the internal validate action policy helper path for this module.
+
+        Inputs:
+            Receives action, goal for this ActionPlanValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanValidator._validate_action_policy calls and related tests.
+        """
         if action.tool in {"sql.query", "sql.validate"}:
             return self._validate_sql_action(action, goal=goal)
         if action.tool == "shell.exec":
@@ -557,6 +935,17 @@ class ActionPlanValidator:
         return []
 
     def _validate_sql_action(self, action: PlannedAction, *, goal: str) -> list[str]:
+        """Handle the internal validate sql action helper path for this module.
+
+        Inputs:
+            Receives action, goal for this ActionPlanValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanValidator._validate_sql_action calls and related tests.
+        """
         query = str(action.inputs.get("query") or "")
         try:
             safe_query = ensure_read_only_sql(query)
@@ -604,6 +993,17 @@ class ActionPlanValidator:
         return []
 
     def _validate_fs_action(self, action: PlannedAction, *, goal: str) -> list[str]:
+        """Handle the internal validate fs action helper path for this module.
+
+        Inputs:
+            Receives action, goal for this ActionPlanValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanValidator._validate_fs_action calls and related tests.
+        """
         path_keys = [key for key in ("path", "src", "dst") if key in action.inputs]
         errors: list[str] = []
         for key in path_keys:
@@ -623,6 +1023,17 @@ class ActionPlanValidator:
         return errors
 
     def _validate_goal_flow(self, plan: ActionPlan, *, goal: str) -> list[str]:
+        """Handle the internal validate goal flow helper path for this module.
+
+        Inputs:
+            Receives plan, goal for this ActionPlanValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanValidator._validate_goal_flow calls and related tests.
+        """
         actions = [action.tool for action in plan.actions]
         errors: list[str] = []
         if not actions or actions[-1] != "runtime.return":
@@ -666,6 +1077,17 @@ class ActionPlanValidator:
 
 
 class ActionPlanCanonicalizer:
+    """Represent action plan canonicalizer within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ActionPlanCanonicalizer.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.ActionPlanCanonicalizer and related tests.
+    """
     def __init__(
         self,
         *,
@@ -676,6 +1098,17 @@ class ActionPlanCanonicalizer:
         now: Any | None = None,
         tools: ToolRegistry | None = None,
     ) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives goal, settings, failure_context, llm, now, tools for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer.__init__ calls and related tests.
+        """
         self.goal = goal
         self.settings = settings
         self.failure_context = failure_context or {}
@@ -688,6 +1121,17 @@ class ActionPlanCanonicalizer:
         self.metadata: dict[str, Any] = {}
 
     def canonicalize(self, plan: ActionPlan) -> CanonicalizationResult:
+        """Canonicalize for ActionPlanCanonicalizer instances.
+
+        Inputs:
+            Receives plan for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer.canonicalize calls and related tests.
+        """
         payload = plan.model_dump()
         actions = [dict(action) for action in payload.get("actions", [])]
         if not actions:
@@ -741,6 +1185,17 @@ class ActionPlanCanonicalizer:
         )
 
     def _canonicalize_display(self, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Handle the internal canonicalize display helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._canonicalize_display calls and related tests.
+        """
         if not actions:
             return actions
         scalar_actions = self._canonicalize_scalar_display(actions)
@@ -763,6 +1218,17 @@ class ActionPlanCanonicalizer:
         return actions
 
     def _canonicalize_scalar_display(self, actions: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        """Handle the internal canonicalize scalar display helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._canonicalize_scalar_display calls and related tests.
+        """
         contract = infer_goal_output_contract(self.goal)
         if contract.kind != "scalar":
             return None
@@ -778,6 +1244,17 @@ class ActionPlanCanonicalizer:
         return actions
 
     def _canonicalize_export(self, actions: list[dict[str, Any]], *, export_path: str | None) -> list[dict[str, Any]]:
+        """Handle the internal canonicalize export helper path for this module.
+
+        Inputs:
+            Receives actions, export_path for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._canonicalize_export calls and related tests.
+        """
         if not actions:
             return actions
         write_action = _first_action_with_tool(actions, "fs.write")
@@ -829,6 +1306,17 @@ class ActionPlanCanonicalizer:
         *,
         output_path: str | None = None,
     ) -> dict[str, Any]:
+        """Handle the internal make formatter helper path for this module.
+
+        Inputs:
+            Receives producer, output_path for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._make_formatter calls and related tests.
+        """
         producer_id = str(producer["id"])
         producer_tool = str(producer["tool"])
         path = formatter_source_path_for_tool(producer_tool)
@@ -852,6 +1340,17 @@ class ActionPlanCanonicalizer:
         }
 
     def _ensure_formatter_source(self, formatter: dict[str, Any], actions: list[dict[str, Any]]) -> None:
+        """Handle the internal ensure formatter source helper path for this module.
+
+        Inputs:
+            Receives formatter, actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._ensure_formatter_source calls and related tests.
+        """
         inputs = formatter.setdefault("inputs", {})
         try:
             formatter_index = actions.index(formatter)
@@ -883,6 +1382,17 @@ class ActionPlanCanonicalizer:
         self._repair("repaired_text_format_source", "Repaired text.format source reference.")
 
     def _make_return(self, source: dict[str, Any] | None, *, dependency: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Handle the internal make return helper path for this module.
+
+        Inputs:
+            Receives source, dependency for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._make_return calls and related tests.
+        """
         value = ""
         if source is not None:
             source_tool = str(source.get("tool") or "")
@@ -905,6 +1415,17 @@ class ActionPlanCanonicalizer:
         }
 
     def _make_scalar_return(self, source: dict[str, Any]) -> dict[str, Any]:
+        """Handle the internal make scalar return helper path for this module.
+
+        Inputs:
+            Receives source for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._make_scalar_return calls and related tests.
+        """
         source_tool = str(source.get("tool") or "")
         field = scalar_field_for_tool(source_tool, goal=self.goal)
         value = f"${source['id']}.{field}" if field else f"${source['id']}"
@@ -919,14 +1440,47 @@ class ActionPlanCanonicalizer:
         }
 
     def _repair(self, code: str, message: str) -> None:
+        """Handle the internal repair helper path for this module.
+
+        Inputs:
+            Receives code, message for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._repair calls and related tests.
+        """
         self.repairs.append(message)
         self.issues.append(PlanIssue(code=code, message=message))
 
     def _symbol_table(self, actions: list[dict[str, Any]]) -> "PlanSymbolTable":
+        """Handle the internal symbol table helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._symbol_table calls and related tests.
+        """
         self.symbol_table = PlanSymbolTable.from_actions(actions)
         return self.symbol_table
 
     def _propagate_sql_database(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal propagate sql database helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._propagate_sql_database calls and related tests.
+        """
         if self.settings is None:
             return
         configured = resolve_sql_databases(self.settings)
@@ -947,6 +1501,17 @@ class ActionPlanCanonicalizer:
             self._repair("propagated_sql_database", f"Set {action.get('tool')} database to {selected}.")
 
     def _normalize_temporal_arguments(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal normalize temporal arguments helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._normalize_temporal_arguments calls and related tests.
+        """
         if self.settings is None:
             return
         try:
@@ -968,6 +1533,17 @@ class ActionPlanCanonicalizer:
             self.metadata["temporal_llm_calls"] = result.llm_calls
 
     def _apply_semantic_obligations(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal apply semantic obligations helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._apply_semantic_obligations calls and related tests.
+        """
         result = apply_semantic_obligations_to_actions(self.goal, actions)
         if result.metadata["obligations"]:
             self.metadata["semantic_obligations"] = result.metadata
@@ -982,6 +1558,17 @@ class ActionPlanCanonicalizer:
             self._repair("applied_semantic_obligation", repair)
 
     def _canonicalize_tool_arguments(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal canonicalize tool arguments helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._canonicalize_tool_arguments calls and related tests.
+        """
         if self.tools is None:
             return
         result = ToolArgumentCanonicalizer(self.tools).canonicalize(actions)
@@ -991,6 +1578,17 @@ class ActionPlanCanonicalizer:
             self._repair("canonicalized_tool_arguments", repair)
 
     def _repair_grouped_slurm_queue_counts(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal repair grouped slurm queue counts helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._repair_grouped_slurm_queue_counts calls and related tests.
+        """
         group_by = grouped_count_field_for_goal(self.goal)
         if group_by is None:
             return
@@ -1015,6 +1613,17 @@ class ActionPlanCanonicalizer:
                 self._repair("repaired_grouped_count_shape", "Repaired grouped count expected shape to table.")
 
     def _bound_broad_diagnostic_actions(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal bound broad diagnostic actions helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._bound_broad_diagnostic_actions calls and related tests.
+        """
         diagnostic_plan = diagnostic_plan_for_goal(self.goal)
         if diagnostic_plan is None:
             return
@@ -1058,6 +1667,17 @@ class ActionPlanCanonicalizer:
             self._repair("bounded_diagnostic_plan", "Bounded broad diagnostic request to compact staged inspection actions.")
 
     def _rewrite_schema_introspection_queries(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal rewrite schema introspection queries helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._rewrite_schema_introspection_queries calls and related tests.
+        """
         if not _schema_question_goal(self.goal):
             return
         for action in actions:
@@ -1073,6 +1693,17 @@ class ActionPlanCanonicalizer:
             self._repair("rewrote_schema_introspection_query", "Rewrote system-catalog SQL query to sql.schema.")
 
     def _rewrite_explain_only_sql(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal rewrite explain only sql helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._rewrite_explain_only_sql calls and related tests.
+        """
         if not _is_sql_explain_only_goal(self.goal):
             return
         for action in actions:
@@ -1083,6 +1714,17 @@ class ActionPlanCanonicalizer:
             self._repair("rewrote_sql_execute_to_validate", "Rewrote SQL execution to non-executing sql.validate for explain-only request.")
 
     def _rewrite_bare_data_refs(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal rewrite bare data refs helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._rewrite_bare_data_refs calls and related tests.
+        """
         self._symbol_table(actions)
         for action in actions:
             tool = str(action.get("tool") or "")
@@ -1107,6 +1749,17 @@ class ActionPlanCanonicalizer:
                     self._repair("rewrote_write_content_ref", "Rewrote fs.write content to structured output reference.")
 
     def _rewrite_data_value(self, value: Any, *, preferred_path: str | None) -> Any:
+        """Handle the internal rewrite data value helper path for this module.
+
+        Inputs:
+            Receives value, preferred_path for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._rewrite_data_value calls and related tests.
+        """
         if isinstance(value, dict) and "$ref" in value:
             ref = _normalize_name(str(value.get("$ref") or ""))
             symbol = self.symbol_table.lookup(ref) if self.symbol_table is not None else None
@@ -1143,6 +1796,17 @@ class ActionPlanCanonicalizer:
         return {"$ref": symbol.name, "path": _ref_path_for_symbol(symbol, preferred_path)}
 
     def _ensure_depends_on_ref(self, action: dict[str, Any], value: Any) -> None:
+        """Handle the internal ensure depends on ref helper path for this module.
+
+        Inputs:
+            Receives action, value for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._ensure_depends_on_ref calls and related tests.
+        """
         refs = _collect_action_refs(value)
         if not refs or self.symbol_table is None:
             return
@@ -1155,12 +1819,34 @@ class ActionPlanCanonicalizer:
                 depends.append(symbol.action_id)
 
     def _prune_unused_actions(self, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Handle the internal prune unused actions helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._prune_unused_actions calls and related tests.
+        """
         if not actions:
             return actions
         required_ids: set[str] = set()
         by_id = {str(action.get("id")): action for action in actions}
 
         def mark(action: dict[str, Any]) -> None:
+            """Mark for the surrounding runtime workflow.
+
+            Inputs:
+                Receives action for this function; type hints and validators define accepted shapes.
+
+            Returns:
+                Returns None; side effects are limited to the local runtime operation described above.
+
+            Used by:
+                Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner.mark.
+            """
             action_id = str(action.get("id") or "")
             if not action_id or action_id in required_ids:
                 return
@@ -1186,6 +1872,17 @@ class ActionPlanCanonicalizer:
         return pruned
 
     def _repair_count_shape_query(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal repair count shape query helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._repair_count_shape_query calls and related tests.
+        """
         repaired_query = _count_shape_repair_query(self.goal, self.failure_context)
         if not repaired_query:
             return
@@ -1201,6 +1898,17 @@ class ActionPlanCanonicalizer:
         self._repair("repaired_count_shape_query", "Repaired grouped count SQL to return one numeric scalar.")
 
     def _repair_scalar_count_absence_query(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal repair scalar count absence query helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._repair_scalar_count_absence_query calls and related tests.
+        """
         if self.settings is None or not _is_scalar_count_goal(self.goal):
             return
         if sum(1 for action in actions if action.get("tool") == "sql.query") <= 1:
@@ -1232,6 +1940,17 @@ class ActionPlanCanonicalizer:
         self._repair("repaired_absence_count_query", "Repaired multi-query count arithmetic into one anti-join SQL aggregate.")
 
     def _repair_missing_scalar_count_sql(self, actions: list[dict[str, Any]]) -> None:
+        """Handle the internal repair missing scalar count sql helper path for this module.
+
+        Inputs:
+            Receives actions for this ActionPlanCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._repair_missing_scalar_count_sql calls and related tests.
+        """
         if self.settings is None or not _is_scalar_count_goal(self.goal) or not _looks_like_sql_goal(self.goal):
             return
         if any(action.get("tool") == "sql.query" for action in actions):
@@ -1264,10 +1983,43 @@ class ActionPlanCanonicalizer:
 
 
 class ActionPlanCompiler:
+    """Represent action plan compiler within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ActionPlanCompiler.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.ActionPlanCompiler and related tests.
+    """
     def __init__(self, *, goal: str) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives goal for this ActionPlanCompiler method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCompiler.__init__ calls and related tests.
+        """
         self.goal = goal
 
     def compile(self, plan: ActionPlan) -> ExecutionPlan:
+        """Compile for ActionPlanCompiler instances.
+
+        Inputs:
+            Receives plan for this ActionPlanCompiler method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActionPlanCompiler.compile calls and related tests.
+        """
         aliases_by_action: dict[str, str] = {}
         steps: list[ExecutionStep] = []
         for index, action in enumerate(plan.actions, start=1):
@@ -1289,6 +2041,17 @@ class ActionPlanCompiler:
 
 
 def build_tool_manifest(tools: ToolRegistry, allowed_tools: list[str]) -> list[dict[str, Any]]:
+    """Build tool manifest for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tools, allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner.build_tool_manifest.
+    """
     manifest: list[dict[str, Any]] = []
     for spec in tools.specs(allowed_tools):
         name = str(spec["name"])
@@ -1358,6 +2121,17 @@ def build_tool_manifest(tools: ToolRegistry, allowed_tools: list[str]) -> list[d
 
 
 def _constraints_for_tool(name: str) -> list[str]:
+    """Handle the internal constraints for tool helper path for this module.
+
+    Inputs:
+        Receives name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._constraints_for_tool.
+    """
     if name == "sql.query":
         return ["SELECT-only", "known database", "known schema identifiers", "PostgreSQL mixed-case identifiers must be quoted"]
     if name == "sql.schema":
@@ -1376,6 +2150,17 @@ def _constraints_for_tool(name: str) -> list[str]:
 
 
 def _should_include_sql_schema(goal: str, allowed_tools: list[str], settings: Settings) -> bool:
+    """Handle the internal should include sql schema helper path for this module.
+
+    Inputs:
+        Receives goal, allowed_tools, settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._should_include_sql_schema.
+    """
     if "sql.query" not in allowed_tools:
         return False
     configured = resolve_sql_databases(settings)
@@ -1386,6 +2171,17 @@ def _should_include_sql_schema(goal: str, allowed_tools: list[str], settings: Se
 
 
 def _compact_sql_schema(settings: Settings) -> dict[str, Any]:
+    """Handle the internal compact sql schema helper path for this module.
+
+    Inputs:
+        Receives settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._compact_sql_schema.
+    """
     databases: list[dict[str, Any]] = []
     for catalog in get_all_sql_catalogs(settings):
         databases.append(
@@ -1425,6 +2221,17 @@ def _compact_sql_schema(settings: Settings) -> dict[str, Any]:
 
 
 def _compact_failure_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal compact failure context helper path for this module.
+
+    Inputs:
+        Receives context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._compact_failure_context.
+    """
     if not context:
         return {}
     compact = {
@@ -1448,6 +2255,17 @@ def _compact_failure_context(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_raw_action_plan(raw_plan: RawActionPlan, *, fallback_goal: str) -> dict[str, Any]:
+    """Normalize raw action plan for the surrounding runtime workflow.
+
+    Inputs:
+        Receives raw_plan, fallback_goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner.normalize_raw_action_plan.
+    """
     actions: list[dict[str, Any]] = []
     for index, raw_action in enumerate(raw_plan.actions, start=1):
         raw_inputs = raw_action.inputs if raw_action.inputs is not None else raw_action.args
@@ -1476,6 +2294,17 @@ def normalize_raw_action_plan(raw_plan: RawActionPlan, *, fallback_goal: str) ->
 
 
 def _normalize_shape_payload(value: Any) -> dict[str, Any]:
+    """Handle the internal normalize shape payload helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_shape_payload.
+    """
     if isinstance(value, str):
         return {"kind": _normalize_shape_kind(value)}
     if isinstance(value, dict):
@@ -1488,23 +2317,67 @@ def _normalize_shape_payload(value: Any) -> dict[str, Any]:
 
 
 def _normalize_shape_kind(value: Any) -> str:
+    """Handle the internal normalize shape kind helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_shape_kind.
+    """
     normalized = re.sub(r"[^a-z0-9_]+", "_", str(value or "unknown").strip().lower()).strip("_")
     return SHAPE_KIND_ALIASES.get(normalized, normalized if normalized in {"scalar", "table", "file", "text", "json", "status"} else "unknown")
 
 
 def _normalize_format(value: Any) -> str:
+    """Handle the internal normalize format helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_format.
+    """
     normalized = re.sub(r"[^a-z0-9_]+", "_", str(value or "txt").strip().lower()).strip("_")
     normalized = FORMAT_ALIASES.get(normalized, normalized)
     return normalized if normalized in {"txt", "csv", "json", "markdown"} else "txt"
 
 
 def _normalize_tool_name(value: Any) -> str:
+    """Handle the internal normalize tool name helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_tool_name.
+    """
     raw = str(value or "").strip()
     lowered = raw.lower().replace("_", ".")
     return TOOL_ALIASES.get(lowered, raw)
 
 
 def _normalize_action_inputs(inputs: dict[str, Any], *, tool: str) -> dict[str, Any]:
+    """Handle the internal normalize action inputs helper path for this module.
+
+    Inputs:
+        Receives inputs, tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_action_inputs.
+    """
     normalized = dict(inputs)
     if "output_format" in normalized and "format" not in normalized:
         normalized["format"] = normalized.pop("output_format")
@@ -1524,6 +2397,17 @@ def _normalize_action_inputs(inputs: dict[str, Any], *, tool: str) -> dict[str, 
 
 
 def _normalize_depends_on(value: Any) -> list[str]:
+    """Handle the internal normalize depends on helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_depends_on.
+    """
     if isinstance(value, str):
         return [_normalize_name(value)] if _normalize_name(value) else []
     if isinstance(value, list):
@@ -1532,6 +2416,17 @@ def _normalize_depends_on(value: Any) -> list[str]:
 
 
 def _extract_export_path(goal: str) -> str | None:
+    """Handle the internal extract export path helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._extract_export_path.
+    """
     match = EXPORT_PATH_RE.search(str(goal or ""))
     if not match:
         return None
@@ -1539,6 +2434,17 @@ def _extract_export_path(goal: str) -> str | None:
 
 
 def _format_for_goal(goal: str, *, producer: dict[str, Any], output_path: str | None = None) -> str:
+    """Handle the internal format for goal helper path for this module.
+
+    Inputs:
+        Receives goal, producer, output_path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._format_for_goal.
+    """
     if output_path:
         suffix = Path(output_path).suffix.lower().lstrip(".")
         return _normalize_format("markdown" if suffix == "md" else suffix)
@@ -1569,6 +2475,17 @@ def _format_for_goal(goal: str, *, producer: dict[str, Any], output_path: str | 
 
 
 def _is_table_display_goal(goal: str) -> bool:
+    """Handle the internal is table display goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._is_table_display_goal.
+    """
     text = str(goal or "").lower()
     if EXPORT_GOAL_RE.search(text) or _is_scalar_count_goal(text):
         return False
@@ -1576,6 +2493,17 @@ def _is_table_display_goal(goal: str) -> bool:
 
 
 def _goal_requires_unlimited_rows(goal: str) -> bool:
+    """Handle the internal goal requires unlimited rows helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._goal_requires_unlimited_rows.
+    """
     text = str(goal or "").lower()
     if not _is_table_display_goal(text):
         return False
@@ -1587,6 +2515,17 @@ def _goal_requires_unlimited_rows(goal: str) -> bool:
 
 
 def _is_explicit_shell_command_goal(goal: str) -> bool:
+    """Handle the internal is explicit shell command goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._is_explicit_shell_command_goal.
+    """
     text = str(goal or "").strip().lower()
     return bool(
         re.search(r"^(?:run|execute)\b", text)
@@ -1597,6 +2536,17 @@ def _is_explicit_shell_command_goal(goal: str) -> bool:
 
 
 def _shell_command_has_unrequested_limit(command: str) -> bool:
+    """Handle the internal shell command has unrequested limit helper path for this module.
+
+    Inputs:
+        Receives command for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._shell_command_has_unrequested_limit.
+    """
     text = str(command or "")
     lowered = text.lower()
     if re.search(r"(?:^|[|;&]\s*)head(?:\s+-n)?\s+\d+\b", lowered):
@@ -1613,6 +2563,17 @@ def _shell_command_has_unrequested_limit(command: str) -> bool:
 
 
 def _sql_query_has_unrequested_limit(query: str) -> bool:
+    """Handle the internal sql query has unrequested limit helper path for this module.
+
+    Inputs:
+        Receives query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._sql_query_has_unrequested_limit.
+    """
     text = str(query or "")
     lowered = text.lower()
     if re.search(r"\blimit\s+\d+\b", lowered):
@@ -1623,6 +2584,17 @@ def _sql_query_has_unrequested_limit(query: str) -> bool:
 
 
 def _count_shape_repair_query(goal: str, failure_context: dict[str, Any]) -> str | None:
+    """Handle the internal count shape repair query helper path for this module.
+
+    Inputs:
+        Receives goal, failure_context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._count_shape_repair_query.
+    """
     if not _is_scalar_count_goal(goal):
         return None
     reason = str(failure_context.get("reason") or "")
@@ -1641,6 +2613,17 @@ def _count_shape_repair_query(goal: str, failure_context: dict[str, Any]) -> str
 
 
 def _looks_like_outer_count_query(query: str) -> bool:
+    """Handle the internal looks like outer count query helper path for this module.
+
+    Inputs:
+        Receives query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._looks_like_outer_count_query.
+    """
     text = str(query or "").strip().rstrip(";")
     if not text:
         return False
@@ -1652,14 +2635,47 @@ def _looks_like_outer_count_query(query: str) -> bool:
 
 
 def _is_scalar_count_goal(goal: str) -> bool:
+    """Handle the internal is scalar count goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._is_scalar_count_goal.
+    """
     return _shared_is_scalar_count_goal(goal)
 
 
 def _looks_like_sql_goal(goal: str) -> bool:
+    """Handle the internal looks like sql goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._looks_like_sql_goal.
+    """
     return bool(SQL_GOAL_RE.search(str(goal or "")))
 
 
 def _is_sql_explain_only_goal(goal: str) -> bool:
+    """Handle the internal is sql explain only goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._is_sql_explain_only_goal.
+    """
     text = str(goal or "").lower()
     if not re.search(r"\b(?:generate|write|draft|produce)\b", text):
         return False
@@ -1669,10 +2685,32 @@ def _is_sql_explain_only_goal(goal: str) -> bool:
 
 
 def _explicit_json_goal(goal: str) -> bool:
+    """Handle the internal explicit json goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._explicit_json_goal.
+    """
     return bool(re.search(r"\b(?:json|raw\s+json)\b", str(goal or ""), re.IGNORECASE))
 
 
 def _validate_goal_domain_contract(plan: ActionPlan, *, goal: str) -> list[str]:
+    """Handle the internal validate goal domain contract helper path for this module.
+
+    Inputs:
+        Receives plan, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._validate_goal_domain_contract.
+    """
     domain = _infer_goal_domain(goal)
     if domain != "system_process":
         return []
@@ -1688,6 +2726,17 @@ def _validate_goal_domain_contract(plan: ActionPlan, *, goal: str) -> list[str]:
 
 
 def _infer_goal_domain(goal: str) -> str:
+    """Handle the internal infer goal domain helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._infer_goal_domain.
+    """
     text = str(goal or "").lower()
     if re.search(r"\bslurm\b|\bsqueue\b|\bsinfo\b|\bsacct\b|\bcluster\b|\bpartition(?:s)?\b|\bnode(?:s)?\b", text):
         return "slurm"
@@ -1702,6 +2751,17 @@ def _infer_goal_domain(goal: str) -> str:
 
 
 def _scalar_count_absence_query(goal: str, catalog: Any) -> str | None:
+    """Handle the internal scalar count absence query helper path for this module.
+
+    Inputs:
+        Receives goal, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._scalar_count_absence_query.
+    """
     related_concept = _absence_related_concept(goal)
     if not related_concept:
         return None
@@ -1728,6 +2788,17 @@ def _scalar_count_absence_query(goal: str, catalog: Any) -> str | None:
 
 
 def _scalar_count_query_from_goal(goal: str, catalog: Any) -> str | None:
+    """Handle the internal scalar count query from goal helper path for this module.
+
+    Inputs:
+        Receives goal, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._scalar_count_query_from_goal.
+    """
     table = _first_table_mentioned_in_goal(goal, catalog)
     if table is None:
         return None
@@ -1736,6 +2807,17 @@ def _scalar_count_query_from_goal(goal: str, catalog: Any) -> str | None:
 
 
 def _first_table_mentioned_in_goal(goal: str, catalog: Any) -> Any:
+    """Handle the internal first table mentioned in goal helper path for this module.
+
+    Inputs:
+        Receives goal, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._first_table_mentioned_in_goal.
+    """
     text = str(goal or "").lower()
     candidates: list[tuple[int, Any]] = []
     for table in catalog.tables:
@@ -1748,6 +2830,17 @@ def _first_table_mentioned_in_goal(goal: str, catalog: Any) -> Any:
 
 
 def _absence_related_concept(goal: str) -> str | None:
+    """Handle the internal absence related concept helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._absence_related_concept.
+    """
     match = re.search(r"\b(?:no|without|missing)\s+([A-Za-z_][A-Za-z0-9_]*)", str(goal or ""), re.IGNORECASE)
     if not match:
         return None
@@ -1755,6 +2848,17 @@ def _absence_related_concept(goal: str) -> str | None:
 
 
 def _base_table_for_absence_goal(goal: str, catalog: Any, related_concept: str) -> Any:
+    """Handle the internal base table for absence goal helper path for this module.
+
+    Inputs:
+        Receives goal, catalog, related_concept for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._base_table_for_absence_goal.
+    """
     text = str(goal or "").lower()
     related_pos_match = re.search(r"\b(?:no|without|missing)\b", text)
     related_pos = related_pos_match.start() if related_pos_match else len(text)
@@ -1781,6 +2885,17 @@ def _base_table_for_absence_goal(goal: str, catalog: Any, related_concept: str) 
 
 
 def _table_for_concept(catalog: Any, concept: str) -> Any:
+    """Handle the internal table for concept helper path for this module.
+
+    Inputs:
+        Receives catalog, concept for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._table_for_concept.
+    """
     normalized = _singular_concept(concept)
     exact = [table for table in catalog.tables if _singular_concept(table.table_name) == normalized]
     if exact:
@@ -1790,6 +2905,17 @@ def _table_for_concept(catalog: Any, concept: str) -> Any:
 
 
 def _shared_join_column(base_table: Any, related_table: Any) -> str | None:
+    """Handle the internal shared join column helper path for this module.
+
+    Inputs:
+        Receives base_table, related_table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._shared_join_column.
+    """
     base_columns = {column.column_name for column in base_table.columns}
     related_columns = {column.column_name for column in related_table.columns}
     shared = base_columns.intersection(related_columns)
@@ -1804,6 +2930,17 @@ def _shared_join_column(base_table: Any, related_table: Any) -> str | None:
 
 
 def _singular_concept(value: str) -> str:
+    """Handle the internal singular concept helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._singular_concept.
+    """
     text = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
     if text == "series":
         return text
@@ -1815,6 +2952,17 @@ def _singular_concept(value: str) -> str:
 
 
 def _concept_pattern(concept: str) -> str:
+    """Handle the internal concept pattern helper path for this module.
+
+    Inputs:
+        Receives concept for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._concept_pattern.
+    """
     escaped = re.escape(concept)
     if concept == "series":
         return rf"\b{escaped}\b"
@@ -1824,10 +2972,32 @@ def _concept_pattern(concept: str) -> str:
 
 
 def _quote_sql_relation(schema: str, table: str, *, dialect: str | None) -> str:
+    """Handle the internal quote sql relation helper path for this module.
+
+    Inputs:
+        Receives schema, table, dialect for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._quote_sql_relation.
+    """
     return f"{_quote_sql_identifier(schema, dialect=dialect)}.{_quote_sql_identifier(table, dialect=dialect)}"
 
 
 def _quote_sql_identifier(identifier: str, *, dialect: str | None) -> str:
+    """Handle the internal quote sql identifier helper path for this module.
+
+    Inputs:
+        Receives identifier, dialect for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._quote_sql_identifier.
+    """
     if str(dialect or "").lower() == "postgresql":
         escaped = str(identifier).replace('"', '""')
         return f'"{escaped}"'
@@ -1835,6 +3005,17 @@ def _quote_sql_identifier(identifier: str, *, dialect: str | None) -> str:
 
 
 def _first_action_with_tool(actions: list[dict[str, Any]], tool: str) -> dict[str, Any] | None:
+    """Handle the internal first action with tool helper path for this module.
+
+    Inputs:
+        Receives actions, tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._first_action_with_tool.
+    """
     for action in actions:
         if action.get("tool") == tool:
             return action
@@ -1842,6 +3023,17 @@ def _first_action_with_tool(actions: list[dict[str, Any]], tool: str) -> dict[st
 
 
 def _last_action_with_tool(actions: list[dict[str, Any]], tool: str) -> dict[str, Any] | None:
+    """Handle the internal last action with tool helper path for this module.
+
+    Inputs:
+        Receives actions, tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._last_action_with_tool.
+    """
     for action in reversed(actions):
         if action.get("tool") == tool:
             return action
@@ -1849,6 +3041,17 @@ def _last_action_with_tool(actions: list[dict[str, Any]], tool: str) -> dict[str
 
 
 def _formatter_after_producer(actions: list[dict[str, Any]], producer: dict[str, Any]) -> dict[str, Any] | None:
+    """Handle the internal formatter after producer helper path for this module.
+
+    Inputs:
+        Receives actions, producer for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._formatter_after_producer.
+    """
     try:
         producer_index = actions.index(producer)
     except ValueError:
@@ -1868,6 +3071,17 @@ def _formatter_after_producer(actions: list[dict[str, Any]], producer: dict[str,
 
 
 def _last_data_action(actions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Handle the internal last data action helper path for this module.
+
+    Inputs:
+        Receives actions for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._last_data_action.
+    """
     for action in reversed(actions):
         if str(action.get("tool") or "") in DATA_REF_PATHS:
             return action
@@ -1875,6 +3089,17 @@ def _last_data_action(actions: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _last_scalar_action(actions: list[dict[str, Any]], *, goal: str) -> dict[str, Any] | None:
+    """Handle the internal last scalar action helper path for this module.
+
+    Inputs:
+        Receives actions, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._last_scalar_action.
+    """
     for action in reversed(actions):
         tool = str(action.get("tool") or "")
         if scalar_field_for_tool(tool, goal=goal):
@@ -1883,6 +3108,17 @@ def _last_scalar_action(actions: list[dict[str, Any]], *, goal: str) -> dict[str
 
 
 def _unique_action_id(actions: list[dict[str, Any]], preferred: str) -> str:
+    """Handle the internal unique action id helper path for this module.
+
+    Inputs:
+        Receives actions, preferred for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._unique_action_id.
+    """
     existing = {str(action.get("id") or "") for action in actions}
     base = _normalize_name(preferred) or "action"
     if base not in existing:
@@ -1894,6 +3130,17 @@ def _unique_action_id(actions: list[dict[str, Any]], preferred: str) -> str:
 
 
 def _database_for_goal(goal: str, configured: dict[str, str]) -> str | None:
+    """Handle the internal database for goal helper path for this module.
+
+    Inputs:
+        Receives goal, configured for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._database_for_goal.
+    """
     goal_text = str(goal or "").lower()
     normalized_goal = re.sub(r"[^a-z0-9_]+", " ", goal_text)
     tokens = set(normalized_goal.split())
@@ -1905,6 +3152,17 @@ def _database_for_goal(goal: str, configured: dict[str, str]) -> str | None:
 
 
 def _ref_path_for_symbol(symbol: PlanSymbol, preferred_path: str | None) -> str | None:
+    """Handle the internal ref path for symbol helper path for this module.
+
+    Inputs:
+        Receives symbol, preferred_path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._ref_path_for_symbol.
+    """
     if preferred_path is None:
         return default_path_for_tool(symbol.tool)
     if path_is_declared_for_tool(symbol.tool, preferred_path):
@@ -1913,6 +3171,17 @@ def _ref_path_for_symbol(symbol: PlanSymbol, preferred_path: str | None) -> str 
 
 
 def _is_generic_wrong_ref_path(path: str, symbol: PlanSymbol) -> bool:
+    """Handle the internal is generic wrong ref path helper path for this module.
+
+    Inputs:
+        Receives path, symbol for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._is_generic_wrong_ref_path.
+    """
     if not default_path_for_tool(symbol.tool):
         return False
     normalized = str(path or "").strip()
@@ -1924,11 +3193,33 @@ def _is_generic_wrong_ref_path(path: str, symbol: PlanSymbol) -> bool:
 
 
 def _schema_question_goal(goal: str) -> bool:
+    """Handle the internal schema question goal helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._schema_question_goal.
+    """
     return bool(re.search(r"\b(?:schema|schemas|table|tables|column|columns|describe|identify|link|links|related)\b", str(goal or ""), re.IGNORECASE))
 
 
 @dataclass(frozen=True)
 class SqlRelationshipEdge:
+    """Represent sql relationship edge within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlRelationshipEdge.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.SqlRelationshipEdge and related tests.
+    """
     left_table: str
     right_table: str
     left_column: str
@@ -1936,11 +3227,44 @@ class SqlRelationshipEdge:
 
 
 class SqlRelationshipGraph:
+    """Represent sql relationship graph within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlRelationshipGraph.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.action_planner.SqlRelationshipGraph and related tests.
+    """
     def __init__(self, catalog: Any) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives catalog for this SqlRelationshipGraph method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlRelationshipGraph.__init__ calls and related tests.
+        """
         self.catalog = catalog
         self.edges = self._build_edges(catalog)
 
     def join_columns(self, left_table: Any, right_table: Any) -> tuple[str, str] | None:
+        """Join columns for SqlRelationshipGraph instances.
+
+        Inputs:
+            Receives left_table, right_table for this SqlRelationshipGraph method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlRelationshipGraph.join_columns calls and related tests.
+        """
         left_name = left_table.qualified_name
         right_name = right_table.qualified_name
         for edge in self.edges:
@@ -1955,6 +3279,17 @@ class SqlRelationshipGraph:
 
     @staticmethod
     def _build_edges(catalog: Any) -> list[SqlRelationshipEdge]:
+        """Handle the internal build edges helper path for this module.
+
+        Inputs:
+            Receives catalog for this SqlRelationshipGraph method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlRelationshipGraph._build_edges calls and related tests.
+        """
         edges: list[SqlRelationshipEdge] = []
         tables_by_qualified = {table.qualified_name.lower(): table for table in catalog.tables}
         for table in catalog.tables:
@@ -1990,6 +3325,17 @@ class SqlRelationshipGraph:
 
 
 def _repair_sql_relationship_query_from_goal(query: str, catalog: Any, *, goal: str) -> str | None:
+    """Handle the internal repair sql relationship query from goal helper path for this module.
+
+    Inputs:
+        Receives query, catalog, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._repair_sql_relationship_query_from_goal.
+    """
     goal_text = str(goal or "").lower()
     aggregate_repair = _aggregate_over_related_counts_query(catalog, goal=goal)
     if aggregate_repair:
@@ -2006,6 +3352,17 @@ def _repair_sql_relationship_query_from_goal(query: str, catalog: Any, *, goal: 
 
 
 def _aggregate_over_related_counts_query(catalog: Any, *, goal: str) -> str | None:
+    """Handle the internal aggregate over related counts query helper path for this module.
+
+    Inputs:
+        Receives catalog, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._aggregate_over_related_counts_query.
+    """
     text = str(goal or "").lower()
     if not (re.search(r"\bmin(?:imum)?\b", text) and re.search(r"\bmax(?:imum)?\b", text) and re.search(r"\b(?:average|avg)\b", text)):
         return None
@@ -2049,6 +3406,17 @@ def _aggregate_over_related_counts_query(catalog: Any, *, goal: str) -> str | No
 
 
 def _is_study_count_by_modality_goal(goal_text: str) -> bool:
+    """Handle the internal is study count by modality goal helper path for this module.
+
+    Inputs:
+        Receives goal_text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._is_study_count_by_modality_goal.
+    """
     if not (re.search(r"\bmodalit(?:y|ies)\b", goal_text) and re.search(r"\bstud(?:y|ies)\b", goal_text)):
         return False
     return bool(
@@ -2060,6 +3428,17 @@ def _is_study_count_by_modality_goal(goal_text: str) -> bool:
 
 
 def _study_count_by_modality_query(catalog: Any, *, goal: str) -> str | None:
+    """Handle the internal study count by modality query helper path for this module.
+
+    Inputs:
+        Receives catalog, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._study_count_by_modality_query.
+    """
     study = catalog.table_by_name(None, "Study")
     series = catalog.table_by_name(None, "Series")
     if study is None or series is None:
@@ -2087,6 +3466,17 @@ def _study_count_by_modality_query(catalog: Any, *, goal: str) -> str | None:
 
 
 def _study_instance_count_query(catalog: Any, *, goal: str) -> str | None:
+    """Handle the internal study instance count query helper path for this module.
+
+    Inputs:
+        Receives catalog, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._study_instance_count_query.
+    """
     study = catalog.table_by_name(None, "Study")
     series = catalog.table_by_name(None, "Series")
     instance = catalog.table_by_name(None, "Instance")
@@ -2124,6 +3514,17 @@ def _study_instance_count_query(catalog: Any, *, goal: str) -> str | None:
 
 
 def _first_existing_column(table: Any, candidates: list[str]) -> str | None:
+    """Handle the internal first existing column helper path for this module.
+
+    Inputs:
+        Receives table, candidates for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._first_existing_column.
+    """
     for candidate in candidates:
         column = table.column_by_name(candidate)
         if column is not None:
@@ -2132,6 +3533,17 @@ def _first_existing_column(table: Any, candidates: list[str]) -> str | None:
 
 
 def _validate_sql_catalog_references(query: str, catalog: Any) -> list[str]:
+    """Handle the internal validate sql catalog references helper path for this module.
+
+    Inputs:
+        Receives query, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._validate_sql_catalog_references.
+    """
     if re.search(r"(?i)\binformation_schema\b|\bpg_catalog\b", query):
         return ["Use sql.schema for schema/catalog questions instead of querying system catalog tables directly."]
 
@@ -2189,6 +3601,17 @@ def _validate_sql_catalog_references(query: str, catalog: Any) -> list[str]:
 
 
 def _validate_sql_goal_concepts(query: str, catalog: Any, *, goal: str) -> list[str]:
+    """Handle the internal validate sql goal concepts helper path for this module.
+
+    Inputs:
+        Receives query, catalog, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._validate_sql_goal_concepts.
+    """
     goal_text = str(goal or "").lower()
     if not re.search(r"\bbody\s+parts?\b|\bbodypart\b|\bbody\s+part\s+examined\b", goal_text):
         return []
@@ -2211,6 +3634,17 @@ def _validate_sql_goal_concepts(query: str, catalog: Any, *, goal: str) -> list[
 
 
 def _repair_sql_empty_date_comparisons(query: str, catalog: Any) -> str:
+    """Handle the internal repair sql empty date comparisons helper path for this module.
+
+    Inputs:
+        Receives query, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._repair_sql_empty_date_comparisons.
+    """
     date_columns = {
         column.column_name
         for table in catalog.tables
@@ -2232,6 +3666,17 @@ def _repair_sql_empty_date_comparisons(query: str, catalog: Any) -> str:
 
 
 def _repair_sql_date_year_extraction(query: str, catalog: Any) -> str:
+    """Handle the internal repair sql date year extraction helper path for this module.
+
+    Inputs:
+        Receives query, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._repair_sql_date_year_extraction.
+    """
     date_columns = {
         column.column_name
         for table in catalog.tables
@@ -2257,6 +3702,17 @@ def _repair_sql_date_year_extraction(query: str, catalog: Any) -> str:
 
 
 def _repair_sql_age_argument_order(query: str, catalog: Any) -> str:
+    """Handle the internal repair sql age argument order helper path for this module.
+
+    Inputs:
+        Receives query, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._repair_sql_age_argument_order.
+    """
     date_columns = {
         column.column_name
         for table in catalog.tables
@@ -2279,6 +3735,17 @@ def _repair_sql_age_argument_order(query: str, catalog: Any) -> str:
 
 
 def _repair_pg_relation_qualified_columns(query: str, catalog: Any) -> str:
+    """Handle the internal repair pg relation qualified columns helper path for this module.
+
+    Inputs:
+        Receives query, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._repair_pg_relation_qualified_columns.
+    """
     if str(catalog.dialect or "").lower() != "postgresql":
         return query
     repaired = query
@@ -2297,6 +3764,17 @@ def _repair_pg_relation_qualified_columns(query: str, catalog: Any) -> str:
 
 
 def _sql_output_aliases(query: str) -> set[str]:
+    """Handle the internal sql output aliases helper path for this module.
+
+    Inputs:
+        Receives query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._sql_output_aliases.
+    """
     aliases: set[str] = set()
     select_part = _top_level_select_part(query)
     if not select_part:
@@ -2307,6 +3785,17 @@ def _sql_output_aliases(query: str) -> set[str]:
 
 
 def _top_level_select_part(query: str) -> str:
+    """Handle the internal top level select part helper path for this module.
+
+    Inputs:
+        Receives query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._top_level_select_part.
+    """
     match = re.search(r"(?is)\bselect\b", query)
     if not match:
         return ""
@@ -2333,6 +3822,17 @@ def _top_level_select_part(query: str) -> str:
 
 
 def _sql_alias_columns(query: str, catalog: Any) -> dict[str, set[str]]:
+    """Handle the internal sql alias columns helper path for this module.
+
+    Inputs:
+        Receives query, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._sql_alias_columns.
+    """
     aliases: dict[str, set[str]] = {}
     relation_re = re.compile(
         r'(?is)\b(?:from|join)\s+(?!\()((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*))?)(?:\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?'
@@ -2353,6 +3853,17 @@ def _sql_alias_columns(query: str, catalog: Any) -> dict[str, set[str]]:
 
 
 def _sql_alias_tables(query: str, catalog: Any) -> dict[str, Any]:
+    """Handle the internal sql alias tables helper path for this module.
+
+    Inputs:
+        Receives query, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._sql_alias_tables.
+    """
     aliases: dict[str, Any] = {}
     relation_re = re.compile(
         r'(?is)\b(?:from|join)\s+(?!\()((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*))?)(?:\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?'
@@ -2388,6 +3899,17 @@ CLAUSE_ALIAS_STOP_WORDS = {
 
 
 def _split_sql_relation(relation: str) -> tuple[str | None, str]:
+    """Handle the internal split sql relation helper path for this module.
+
+    Inputs:
+        Receives relation for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._split_sql_relation.
+    """
     parts = [_strip_sql_identifier(part) for part in re.split(r"\s*\.\s*", relation.strip()) if part.strip()]
     if len(parts) >= 2:
         return parts[-2], parts[-1]
@@ -2395,6 +3917,17 @@ def _split_sql_relation(relation: str) -> tuple[str | None, str]:
 
 
 def _strip_sql_identifier(value: str) -> str:
+    """Handle the internal strip sql identifier helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._strip_sql_identifier.
+    """
     text = str(value or "").strip()
     if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
         return text[1:-1].replace('""', '"')
@@ -2402,6 +3935,17 @@ def _strip_sql_identifier(value: str) -> str:
 
 
 def _sql_relation_identifier_names(query: str) -> set[str]:
+    """Handle the internal sql relation identifier names helper path for this module.
+
+    Inputs:
+        Receives query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._sql_relation_identifier_names.
+    """
     names: set[str] = set()
     for relation in re.findall(
         r'(?is)\b(?:from|join)\s+((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*))?)',
@@ -2416,6 +3960,17 @@ def _sql_relation_identifier_names(query: str) -> set[str]:
 
 
 def _unknown_column_error(column: str, candidates: set[str], *, alias: str | None = None) -> str:
+    """Handle the internal unknown column error helper path for this module.
+
+    Inputs:
+        Receives column, candidates, alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._unknown_column_error.
+    """
     ranked = _rank_column_candidates(column, candidates)
     target = f"{alias}.{column}" if alias else column
     suffix = f" Candidate columns: {', '.join(ranked[:8])}." if ranked else ""
@@ -2423,6 +3978,17 @@ def _unknown_column_error(column: str, candidates: set[str], *, alias: str | Non
 
 
 def _rank_column_candidates(column: str, candidates: set[str]) -> list[str]:
+    """Handle the internal rank column candidates helper path for this module.
+
+    Inputs:
+        Receives column, candidates for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._rank_column_candidates.
+    """
     needle = re.sub(r"[^a-z0-9]+", "", column.lower())
     scored: list[tuple[int, str]] = []
     for candidate in sorted(candidates):
@@ -2441,11 +4007,33 @@ def _rank_column_candidates(column: str, candidates: set[str]) -> list[str]:
 
 
 def _nearest_column_match(column: str, candidates: set[str]) -> str | None:
+    """Handle the internal nearest column match helper path for this module.
+
+    Inputs:
+        Receives column, candidates for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._nearest_column_match.
+    """
     ranked = _rank_column_candidates(column, candidates)
     return ranked[0] if ranked else None
 
 
 def _validate_sql_literal_type_mismatches(query: str, catalog: Any) -> list[str]:
+    """Handle the internal validate sql literal type mismatches helper path for this module.
+
+    Inputs:
+        Receives query, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._validate_sql_literal_type_mismatches.
+    """
     date_columns = {
         column.column_name
         for table in catalog.tables
@@ -2460,6 +4048,17 @@ def _validate_sql_literal_type_mismatches(query: str, catalog: Any) -> list[str]
 
 
 def _split_validation_errors(errors: list[str]) -> tuple[list[str], list[str]]:
+    """Handle the internal split validation errors helper path for this module.
+
+    Inputs:
+        Receives errors for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._split_validation_errors.
+    """
     contract_markers = (
         "Action plan",
         "depends on",
@@ -2480,6 +4079,17 @@ def _split_validation_errors(errors: list[str]) -> tuple[list[str], list[str]]:
 
 
 def _collect_action_refs(value: Any) -> set[str]:
+    """Handle the internal collect action refs helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._collect_action_refs.
+    """
     refs = collect_step_references(_normalize_refs(value, {}))
     if isinstance(value, str):
         match = REFERENCE_RE.match(value.strip())
@@ -2495,6 +4105,17 @@ def _collect_action_refs(value: Any) -> set[str]:
 
 
 def _iter_action_refs_with_paths(value: Any) -> list[tuple[str, str | None]]:
+    """Handle the internal iter action refs with paths helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._iter_action_refs_with_paths.
+    """
     refs: list[tuple[str, str | None]] = []
     normalized = _normalize_refs(value, {})
     if isinstance(normalized, dict):
@@ -2516,6 +4137,17 @@ def _iter_action_refs_with_paths(value: Any) -> list[tuple[str, str | None]]:
 
 
 def _validate_shell_scalar_flow(plan: ActionPlan, *, goal: str) -> list[str]:
+    """Handle the internal validate shell scalar flow helper path for this module.
+
+    Inputs:
+        Receives plan, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._validate_shell_scalar_flow.
+    """
     if not _is_scalar_count_goal(goal) or is_shell_status_goal(goal):
         return []
     alias_to_tool: dict[str, str] = {}
@@ -2537,6 +4169,17 @@ def _validate_shell_scalar_flow(plan: ActionPlan, *, goal: str) -> list[str]:
 
 
 def _placeholder_aliases(value: Any, aliases: set[str]) -> set[str]:
+    """Handle the internal placeholder aliases helper path for this module.
+
+    Inputs:
+        Receives value, aliases for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._placeholder_aliases.
+    """
     found: set[str] = set()
     normalized_aliases = {_normalize_name(alias) for alias in aliases if _normalize_name(alias)}
     if isinstance(value, str):
@@ -2554,6 +4197,17 @@ def _placeholder_aliases(value: Any, aliases: set[str]) -> set[str]:
 
 
 def _normalize_refs(value: Any, aliases_by_action: dict[str, str]) -> Any:
+    """Handle the internal normalize refs helper path for this module.
+
+    Inputs:
+        Receives value, aliases_by_action for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_refs.
+    """
     if isinstance(value, str):
         match = REFERENCE_RE.match(value.strip())
         if match:
@@ -2577,11 +4231,33 @@ def _normalize_refs(value: Any, aliases_by_action: dict[str, str]) -> Any:
 
 
 def _has_cycle(plan: ActionPlan) -> bool:
+    """Handle the internal has cycle helper path for this module.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._has_cycle.
+    """
     graph = {action.id: list(action.depends_on) for action in plan.actions}
     visiting: set[str] = set()
     visited: set[str] = set()
 
     def visit(node: str) -> bool:
+        """Visit for the surrounding runtime workflow.
+
+        Inputs:
+            Receives node for this function; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner.visit.
+        """
         if node in visiting:
             return True
         if node in visited:
@@ -2598,6 +4274,17 @@ def _has_cycle(plan: ActionPlan) -> bool:
 
 
 def _mentioned_database(goal: str, configured: dict[str, str]) -> bool:
+    """Handle the internal mentioned database helper path for this module.
+
+    Inputs:
+        Receives goal, configured for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._mentioned_database.
+    """
     text = str(goal or "").lower()
     if any(name.lower() in text or name.replace("_", " ").lower() in text for name in configured):
         return True
@@ -2605,10 +4292,32 @@ def _mentioned_database(goal: str, configured: dict[str, str]) -> bool:
 
 
 def _normalize_database_name(value: str) -> str:
+    """Handle the internal normalize database name helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_database_name.
+    """
     return re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
 
 
 def _normalize_name(value: Any) -> str:
+    """Handle the internal normalize name helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._normalize_name.
+    """
     return re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "").strip()).strip("_")
 
 

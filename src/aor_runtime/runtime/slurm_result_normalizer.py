@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.slurm_result_normalizer
+
+Purpose:
+    Normalize SLURM tool payloads into presentation-ready result types.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 from collections import Counter
@@ -9,6 +24,17 @@ from aor_runtime.tools.slurm import dedupe_slurm_nodes_by_name, is_problematic_n
 
 
 class SlurmResultKind(str, Enum):
+    """Represent slurm result kind within the OpenFABRIC runtime. It extends str, Enum.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmResultKind.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_result_normalizer.SlurmResultKind and related tests.
+    """
     CLUSTER_STATUS = "cluster_status"
     QUEUE_JOBS = "queue_jobs"
     QUEUE_COUNTS = "queue_counts"
@@ -29,6 +55,17 @@ class SlurmResultKind(str, Enum):
 
 @dataclass
 class NormalizedSlurmResult:
+    """Represent normalized slurm result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by NormalizedSlurmResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_result_normalizer.NormalizedSlurmResult and related tests.
+    """
     kind: SlurmResultKind
     title: str
     summary: dict[str, Any] = field(default_factory=dict)
@@ -43,6 +80,17 @@ class NormalizedSlurmResult:
 
 
 def normalize_slurm_result(result: Any, context: Any | None = None) -> NormalizedSlurmResult:
+    """Normalize slurm result for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer.normalize_slurm_result.
+    """
     source_action = str(getattr(context, "source_action", "") or "")
     source_args = dict(getattr(context, "source_args", {}) or {})
     payload = _coerce_payload(result, source_action)
@@ -113,6 +161,17 @@ def normalize_slurm_result(result: Any, context: Any | None = None) -> Normalize
 
 
 def _normalize_compound(payload: dict[str, Any], context: Any | None) -> NormalizedSlurmResult:
+    """Handle the internal normalize compound helper path for this module.
+
+    Inputs:
+        Receives payload, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_compound.
+    """
     children: list[NormalizedSlurmResult] = []
     summary: dict[str, Any] = {}
     warnings: list[str] = []
@@ -134,6 +193,17 @@ def _normalize_compound(payload: dict[str, Any], context: Any | None) -> Normali
 
 
 def _normalize_cluster_status(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize cluster status helper path for this module.
+
+    Inputs:
+        Receives payload, raw for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_cluster_status.
+    """
     warnings = []
     problematic = _to_int(payload.get("problematic_nodes"))
     if problematic and problematic > 0:
@@ -164,6 +234,17 @@ def _normalize_cluster_status(payload: dict[str, Any], raw: dict[str, Any]) -> N
 
 
 def _normalize_queue_summary(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize queue summary helper path for this module.
+
+    Inputs:
+        Receives payload, raw for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_queue_summary.
+    """
     grouped = {
         "by_state": payload.get("by_state") or {},
         "by_user": payload.get("by_user") or {},
@@ -185,6 +266,17 @@ def _normalize_queue_summary(payload: dict[str, Any], raw: dict[str, Any]) -> No
 
 
 def _normalize_queue_jobs(payload: dict[str, Any], source_args: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize queue jobs helper path for this module.
+
+    Inputs:
+        Receives payload, source_args for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_queue_jobs.
+    """
     jobs = _dict_rows(payload.get("jobs"))
     filters = dict(payload.get("filters") or {})
     filters.update({key: value for key, value in source_args.items() if value not in (None, "") and key not in filters})
@@ -220,6 +312,17 @@ def _normalize_queue_jobs(payload: dict[str, Any], source_args: dict[str, Any]) 
 
 
 def _normalize_accounting_jobs(payload: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize accounting jobs helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_accounting_jobs.
+    """
     jobs = _dict_rows(payload.get("jobs"))
     filters = dict(payload.get("filters") or {})
     total = _to_int(payload.get("total_count", payload.get("count", len(jobs))))
@@ -256,6 +359,17 @@ def _normalize_accounting_jobs(payload: dict[str, Any]) -> NormalizedSlurmResult
 
 
 def _normalize_accounting_aggregate(payload: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize accounting aggregate helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_accounting_aggregate.
+    """
     warnings = [str(warning) for warning in payload.get("warnings") or [] if str(warning)]
     metric = str(payload.get("metric") or "average_elapsed")
     partition = payload.get("partition")
@@ -311,6 +425,17 @@ def _normalize_accounting_aggregate(payload: dict[str, Any]) -> NormalizedSlurmR
 
 
 def _looks_like_multi_metric_accounting_aggregate(payload: dict[str, Any]) -> bool:
+    """Handle the internal looks like multi metric accounting aggregate helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._looks_like_multi_metric_accounting_aggregate.
+    """
     if not payload or "result_kind" in payload:
         return False
     metric_children = [
@@ -326,6 +451,17 @@ def _looks_like_multi_metric_accounting_aggregate(payload: dict[str, Any]) -> bo
 
 
 def _normalize_multi_metric_accounting_aggregate(payload: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize multi metric accounting aggregate helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_multi_metric_accounting_aggregate.
+    """
     metric_order = {
         "min": 0,
         "min_elapsed": 0,
@@ -391,6 +527,17 @@ def _normalize_multi_metric_accounting_aggregate(payload: dict[str, Any]) -> Nor
 
 
 def _metric_row_label(key: str, metric: str) -> str:
+    """Handle the internal metric row label helper path for this module.
+
+    Inputs:
+        Receives key, metric for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._metric_row_label.
+    """
     normalized = str(metric or key).lower()
     if normalized == "average_elapsed" or key.lower() in {"avg", "average"}:
         return "Average runtime"
@@ -406,6 +553,17 @@ def _metric_row_label(key: str, metric: str) -> str:
 
 
 def _metric_value_for_child(metric: str, child: dict[str, Any]) -> Any:
+    """Handle the internal metric value for child helper path for this module.
+
+    Inputs:
+        Receives metric, child for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._metric_value_for_child.
+    """
     normalized = str(metric or "").lower()
     if normalized == "average_elapsed":
         return child.get("average_elapsed_human")
@@ -421,6 +579,17 @@ def _metric_value_for_child(metric: str, child: dict[str, Any]) -> Any:
 
 
 def _normalize_nodes(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize nodes helper path for this module.
+
+    Inputs:
+        Receives payload, raw for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_nodes.
+    """
     rows = _dict_rows(payload.get("nodes"))
     filters = dict(payload.get("filters") or {})
     state_group = str(filters.get("state_group") or "").lower()
@@ -453,6 +622,17 @@ def _normalize_nodes(payload: dict[str, Any], raw: dict[str, Any]) -> Normalized
 
 
 def _normalize_node_summary(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize node summary helper path for this module.
+
+    Inputs:
+        Receives payload, raw for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_node_summary.
+    """
     return NormalizedSlurmResult(
         kind=SlurmResultKind.NODE_SUMMARY,
         title="SLURM Node Summary",
@@ -467,6 +647,17 @@ def _normalize_node_summary(payload: dict[str, Any], raw: dict[str, Any]) -> Nor
 
 
 def _normalize_partitions(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize partitions helper path for this module.
+
+    Inputs:
+        Receives payload, raw for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_partitions.
+    """
     rows = _dict_rows(payload.get("partitions"))
     grouped: dict[str, Any] = {}
     for row in rows:
@@ -504,6 +695,17 @@ def _normalize_partitions(payload: dict[str, Any], raw: dict[str, Any]) -> Norma
 
 
 def _normalize_gpu(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize gpu helper path for this module.
+
+    Inputs:
+        Receives payload, raw for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_gpu.
+    """
     return NormalizedSlurmResult(
         kind=SlurmResultKind.GPU_SUMMARY,
         title="SLURM GPU Summary",
@@ -519,6 +721,17 @@ def _normalize_gpu(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSl
 
 
 def _normalize_slurmdbd(payload: dict[str, Any], raw: dict[str, Any]) -> NormalizedSlurmResult:
+    """Handle the internal normalize slurmdbd helper path for this module.
+
+    Inputs:
+        Receives payload, raw for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._normalize_slurmdbd.
+    """
     available = payload.get("available")
     status = str(payload.get("status") or "unknown")
     warnings = [] if bool(available) else ["SLURM accounting appears unavailable."]
@@ -532,6 +745,17 @@ def _normalize_slurmdbd(payload: dict[str, Any], raw: dict[str, Any]) -> Normali
 
 
 def _coerce_payload(result: Any, source_action: str) -> Any:
+    """Handle the internal coerce payload helper path for this module.
+
+    Inputs:
+        Receives result, source_action for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._coerce_payload.
+    """
     if isinstance(result, dict):
         if source_action == "slurm.queue" and "value" in result and isinstance(result["value"], list):
             return {"jobs": result["value"]}
@@ -553,6 +777,17 @@ def _coerce_payload(result: Any, source_action: str) -> Any:
 
 
 def _merge_child_summary(summary: dict[str, Any], child: NormalizedSlurmResult) -> None:
+    """Handle the internal merge child summary helper path for this module.
+
+    Inputs:
+        Receives summary, child for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._merge_child_summary.
+    """
     data = child.summary or {}
     if child.kind == SlurmResultKind.CLUSTER_STATUS:
         summary.update(data)
@@ -579,6 +814,17 @@ def _merge_child_summary(summary: dict[str, Any], child: NormalizedSlurmResult) 
 
 
 def _source_for_compound_key(key: str) -> str:
+    """Handle the internal source for compound key helper path for this module.
+
+    Inputs:
+        Receives key for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._source_for_compound_key.
+    """
     lowered = key.lower()
     if "runtime" in lowered or "aggregate" in lowered:
         return "slurm.accounting_aggregate"
@@ -594,6 +840,17 @@ def _source_for_compound_key(key: str) -> str:
 
 
 def _queue_title(state: str) -> str:
+    """Handle the internal queue title helper path for this module.
+
+    Inputs:
+        Receives state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._queue_title.
+    """
     if state == "RUNNING":
         return "Running SLURM Jobs"
     if state == "PENDING":
@@ -602,11 +859,33 @@ def _queue_title(state: str) -> str:
 
 
 def _queue_grouped_title(state: str, group_by: str) -> str:
+    """Handle the internal queue grouped title helper path for this module.
+
+    Inputs:
+        Receives state, group_by for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._queue_grouped_title.
+    """
     prefix = "Running Jobs" if state == "RUNNING" else "Pending Jobs" if state == "PENDING" else "Jobs"
     return f"{prefix} by {group_by.replace('_', ' ').title()}"
 
 
 def _accounting_title(filters: dict[str, Any]) -> str:
+    """Handle the internal accounting title helper path for this module.
+
+    Inputs:
+        Receives filters for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._accounting_title.
+    """
     state = str(filters.get("state") or "").upper()
     if state == "FAILED" and filters.get("start"):
         return "Failed Jobs Since Yesterday" if "00:00:00" in str(filters.get("start")) else "Failed SLURM Accounting Jobs"
@@ -618,12 +897,34 @@ def _accounting_title(filters: dict[str, Any]) -> str:
 
 
 def _truncation_warnings(label: str, total: int | None, returned: int | None, truncated: bool) -> list[str]:
+    """Handle the internal truncation warnings helper path for this module.
+
+    Inputs:
+        Receives label, total, returned, truncated for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._truncation_warnings.
+    """
     if truncated and total is not None and returned is not None:
         return [f"Showing {returned} of {total} {label}."]
     return []
 
 
 def _count_by(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
+    """Handle the internal count by helper path for this module.
+
+    Inputs:
+        Receives rows, field for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._count_by.
+    """
     counter: Counter[str] = Counter()
     for row in rows:
         value = str(row.get(field) or "unknown")
@@ -632,10 +933,32 @@ def _count_by(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
 
 
 def _dict_rows(value: Any) -> list[dict[str, Any]]:
+    """Handle the internal dict rows helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._dict_rows.
+    """
     return [dict(row) for row in value or [] if isinstance(row, dict)]
 
 
 def _to_int(value: Any) -> int | None:
+    """Handle the internal to int helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._to_int.
+    """
     if value is None:
         return None
     try:
@@ -645,14 +968,47 @@ def _to_int(value: Any) -> int | None:
 
 
 def _small_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal small summary helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._small_summary.
+    """
     return {str(key): value for key, value in payload.items() if isinstance(value, (str, int, float, bool)) or value is None}
 
 
 def _drop_none(value: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal drop none helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._drop_none.
+    """
     return {key: item for key, item in value.items() if item is not None}
 
 
 def _dedupe(values: list[Any]) -> list[Any]:
+    """Handle the internal dedupe helper path for this module.
+
+    Inputs:
+        Receives values for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._dedupe.
+    """
     result: list[Any] = []
     for value in values:
         if value not in result:
@@ -661,11 +1017,33 @@ def _dedupe(values: list[Any]) -> list[Any]:
 
 
 def _looks_like_mutation_refusal(value: str) -> bool:
+    """Handle the internal looks like mutation refusal helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_result_normalizer._looks_like_mutation_refusal.
+    """
     lowered = value.lower()
     return "read-only slurm" in lowered and ("unsupported operation" in lowered or "supports read-only" in lowered)
 
 
 @dataclass
 class _ChildContext:
+    """Represent child context within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _ChildContext.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_result_normalizer._ChildContext and related tests.
+    """
     source_action: str
     source_args: dict[str, Any] = field(default_factory=dict)

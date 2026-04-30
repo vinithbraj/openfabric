@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.temporal
+
+Purpose:
+    Canonicalize natural-language time ranges into tool-safe date arguments.
+
+Responsibilities:
+    Parse relative and absolute windows such as today, yesterday, last N days, and from/to ranges.
+
+Data flow / Interfaces:
+    Feeds action canonicalization with ISO-like start/end values and runtime metadata labels.
+
+Boundaries:
+    Natural-language temporal phrases must not reach strict tool schemas unvalidated.
+"""
+
 from __future__ import annotations
 
 import json
@@ -16,11 +31,33 @@ TEMPORAL_TOOLS = {"slurm.accounting", "slurm.accounting_aggregate", "slurm.metri
 
 
 class TemporalNormalizationError(ValueError):
+    """Represent temporal normalization error within the OpenFABRIC runtime. It extends ValueError.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by TemporalNormalizationError.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.temporal.TemporalNormalizationError and related tests.
+    """
     pass
 
 
 @dataclass(frozen=True)
 class TemporalRange:
+    """Represent temporal range within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by TemporalRange.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.temporal.TemporalRange and related tests.
+    """
     start: str | None = None
     end: str | None = None
     time_window_label: str | None = None
@@ -29,6 +66,17 @@ class TemporalRange:
 
 @dataclass
 class TemporalCanonicalizationResult:
+    """Represent temporal canonicalization result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by TemporalCanonicalizationResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.temporal.TemporalCanonicalizationResult and related tests.
+    """
     actions: list[dict[str, Any]]
     repairs: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -36,6 +84,17 @@ class TemporalCanonicalizationResult:
 
 
 class TemporalArgumentCanonicalizer:
+    """Represent temporal argument canonicalizer within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by TemporalArgumentCanonicalizer.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.temporal.TemporalArgumentCanonicalizer and related tests.
+    """
     def __init__(
         self,
         *,
@@ -44,12 +103,34 @@ class TemporalArgumentCanonicalizer:
         llm: Any | None = None,
         now: datetime | None = None,
     ) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives goal, settings, llm, now for this TemporalArgumentCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TemporalArgumentCanonicalizer.__init__ calls and related tests.
+        """
         self.goal = str(goal or "")
         self.settings = settings
         self.llm = llm
         self.now = now or current_local_datetime(settings)
 
     def canonicalize(self, actions: list[dict[str, Any]]) -> TemporalCanonicalizationResult:
+        """Canonicalize for TemporalArgumentCanonicalizer instances.
+
+        Inputs:
+            Receives actions for this TemporalArgumentCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TemporalArgumentCanonicalizer.canonicalize calls and related tests.
+        """
         repairs: list[str] = []
         metadata: dict[str, Any] = {}
         llm_calls = 0
@@ -103,6 +184,17 @@ class TemporalArgumentCanonicalizer:
         return TemporalCanonicalizationResult(actions=actions, repairs=repairs, metadata=metadata, llm_calls=llm_calls)
 
     def _resolve_or_fail(self, phrase: str) -> tuple[TemporalRange, int]:
+        """Handle the internal resolve or fail helper path for this module.
+
+        Inputs:
+            Receives phrase for this TemporalArgumentCanonicalizer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TemporalArgumentCanonicalizer._resolve_or_fail calls and related tests.
+        """
         resolved = parse_temporal_range(phrase, now=self.now)
         if resolved is not None:
             return resolved, 0
@@ -114,10 +206,32 @@ class TemporalArgumentCanonicalizer:
 
 
 def current_local_datetime(settings: Settings | None = None) -> datetime:
+    """Current local datetime for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal.current_local_datetime.
+    """
     return _current_aware_datetime(settings).replace(tzinfo=None)
 
 
 def runtime_date_context(settings: Settings | None = None, *, now: datetime | None = None) -> dict[str, str]:
+    """Runtime date context for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, now for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal.runtime_date_context.
+    """
     if now is None:
         aware_now = _current_aware_datetime(settings)
         local_now = aware_now.replace(tzinfo=None)
@@ -134,6 +248,17 @@ def runtime_date_context(settings: Settings | None = None, *, now: datetime | No
 
 
 def _current_aware_datetime(settings: Settings | None = None) -> datetime:
+    """Handle the internal current aware datetime helper path for this module.
+
+    Inputs:
+        Receives settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._current_aware_datetime.
+    """
     timezone_name = str(getattr(settings, "runtime_timezone", "") or "").strip()
     if timezone_name:
         try:
@@ -144,11 +269,33 @@ def _current_aware_datetime(settings: Settings | None = None) -> datetime:
 
 
 def is_iso_like_temporal(value: Any) -> bool:
+    """Is iso like temporal for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal.is_iso_like_temporal.
+    """
     text = str(value or "").strip()
     return bool(text and ISO_LIKE_RE.match(text))
 
 
 def parse_temporal_range(value: Any, *, now: datetime | None = None) -> TemporalRange | None:
+    """Parse temporal range for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, now for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal.parse_temporal_range.
+    """
     text = _clean_time_phrase(value)
     if not text:
         return None
@@ -172,6 +319,17 @@ def parse_temporal_range(value: Any, *, now: datetime | None = None) -> Temporal
 
 
 def parse_relative_temporal_range(value: Any, *, now: datetime | None = None) -> TemporalRange | None:
+    """Parse relative temporal range for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, now for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal.parse_relative_temporal_range.
+    """
     text = _clean_time_phrase(value)
     if not text:
         return None
@@ -214,6 +372,17 @@ def parse_relative_temporal_range(value: Any, *, now: datetime | None = None) ->
 
 
 def _resolve_with_llm(llm: Any, *, phrase: str, goal: str, now: datetime) -> TemporalRange | None:
+    """Handle the internal resolve with llm helper path for this module.
+
+    Inputs:
+        Receives llm, phrase, goal, now for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._resolve_with_llm.
+    """
     prompt = {
         "task": "Resolve the user time phrase to ISO-like local start/end values.",
         "current_local_datetime": _format_dt(now),
@@ -250,6 +419,17 @@ def _resolve_with_llm(llm: Any, *, phrase: str, goal: str, now: datetime) -> Tem
 
 
 def _temporal_phrase_from_inputs(inputs: dict[str, Any]) -> str | None:
+    """Handle the internal temporal phrase from inputs helper path for this module.
+
+    Inputs:
+        Receives inputs for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._temporal_phrase_from_inputs.
+    """
     time_range = inputs.pop("time_range", None)
     if isinstance(time_range, dict):
         start = time_range.get("start")
@@ -285,10 +465,32 @@ def _temporal_phrase_from_inputs(inputs: dict[str, Any]) -> str | None:
 
 
 def _has_temporal_bounds(inputs: dict[str, Any]) -> bool:
+    """Handle the internal has temporal bounds helper path for this module.
+
+    Inputs:
+        Receives inputs for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._has_temporal_bounds.
+    """
     return any(str(inputs.get(key) or "").strip() for key in ("start", "end", "time_range", "since", "until", "date"))
 
 
 def _range_from_valid_bounds(inputs: dict[str, Any]) -> TemporalRange | None:
+    """Handle the internal range from valid bounds helper path for this module.
+
+    Inputs:
+        Receives inputs for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._range_from_valid_bounds.
+    """
     start = _normalize_iso_value(inputs.get("start"))
     end = _normalize_iso_value(inputs.get("end"))
     if inputs.get("start") and start is None:
@@ -302,6 +504,17 @@ def _range_from_valid_bounds(inputs: dict[str, Any]) -> TemporalRange | None:
 
 
 def _apply_temporal_range(inputs: dict[str, Any], temporal_range: TemporalRange) -> bool:
+    """Handle the internal apply temporal range helper path for this module.
+
+    Inputs:
+        Receives inputs, temporal_range for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._apply_temporal_range.
+    """
     changed = False
     if temporal_range.start and inputs.get("start") != temporal_range.start:
         inputs["start"] = temporal_range.start
@@ -320,6 +533,17 @@ def _apply_temporal_range(inputs: dict[str, Any], temporal_range: TemporalRange)
 
 
 def _invalid_temporal(value: Any) -> bool:
+    """Handle the internal invalid temporal helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._invalid_temporal.
+    """
     if value in (None, ""):
         return False
     if isinstance(value, (int, float, bool)):
@@ -329,6 +553,17 @@ def _invalid_temporal(value: Any) -> bool:
 
 
 def _parse_explicit_range(text: str) -> TemporalRange | None:
+    """Handle the internal parse explicit range helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._parse_explicit_range.
+    """
     match = re.search(
         r"\b(?:from|between)\s+(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)\s+(?:to|and)\s+(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)\b",
         text,
@@ -340,6 +575,17 @@ def _parse_explicit_range(text: str) -> TemporalRange | None:
 
 
 def _normalize_iso_value(value: Any) -> str | None:
+    """Handle the internal normalize iso value helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._normalize_iso_value.
+    """
     if value in (None, ""):
         return None
     text = str(value).strip()
@@ -349,10 +595,32 @@ def _normalize_iso_value(value: Any) -> str | None:
 
 
 def _clean_time_phrase(value: Any) -> str:
+    """Handle the internal clean time phrase helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._clean_time_phrase.
+    """
     text = str(value or "").strip().strip("'\"")
     text = re.sub(r"\s+", " ", text)
     return text
 
 
 def _format_dt(value: datetime) -> str:
+    """Handle the internal format dt helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.temporal._format_dt.
+    """
     return value.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")

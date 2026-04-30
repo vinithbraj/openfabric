@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.tools.gateway
+
+Purpose:
+    Implement gateway HTTP transport for shell and SLURM execution.
+
+Responsibilities:
+    Expose typed tool arguments/results for filesystem, SQL, shell, SLURM, text formatting, Python, and runtime return operations.
+
+Data flow / Interfaces:
+    Receives validated tool arguments from the executor and returns structured result models for downstream contracts and presenters.
+
+Boundaries:
+    Does not decide user intent; every tool must preserve safety, allowed-root, read-only, timeout, and result-shape boundaries.
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,18 +26,51 @@ from aor_runtime.tools.base import ToolExecutionError
 
 
 class GatewayExecResult(BaseModel):
+    """Represent gateway exec result within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by GatewayExecResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.gateway.GatewayExecResult and related tests.
+    """
     stdout: str
     stderr: str
     exit_code: int
 
 
 class GatewayExecStreamChunk(BaseModel):
+    """Represent gateway exec stream chunk within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by GatewayExecStreamChunk.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.gateway.GatewayExecStreamChunk and related tests.
+    """
     type: str
     text: str = ""
     exit_code: int | None = None
 
 
 def resolve_execution_node(settings: Settings, node: str = "") -> str:
+    """Resolve execution node for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, node for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.gateway.resolve_execution_node.
+    """
     try:
         return settings.resolve_node(node)
     except ValueError as exc:
@@ -30,6 +78,17 @@ def resolve_execution_node(settings: Settings, node: str = "") -> str:
 
 
 def execute_gateway_command(settings: Settings, *, node: str, command: str, timeout: float | None = None) -> GatewayExecResult:
+    """Execute gateway command for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, node, command, timeout for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.gateway.execute_gateway_command.
+    """
     normalized_command = str(command).strip()
     if not normalized_command:
         raise ToolExecutionError("Command is required.")
@@ -57,6 +116,17 @@ def execute_gateway_command(settings: Settings, *, node: str, command: str, time
 
 
 def stream_gateway_command(settings: Settings, *, node: str, command: str, timeout: float | None = None) -> Iterator[GatewayExecStreamChunk]:
+    """Stream gateway command for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, node, command, timeout for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.gateway.stream_gateway_command.
+    """
     normalized_command = str(command or "").strip()
     if not normalized_command:
         raise ToolExecutionError("Command is required.")
@@ -86,6 +156,17 @@ def stream_gateway_command(settings: Settings, *, node: str, command: str, timeo
 
 
 def _parse_sse_stream(response: requests.Response) -> Iterator[GatewayExecStreamChunk]:
+    """Handle the internal parse sse stream helper path for this module.
+
+    Inputs:
+        Receives response for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.gateway._parse_sse_stream.
+    """
     event_name = "message"
     data_lines: list[str] = []
     for raw_line in response.iter_lines(decode_unicode=True):

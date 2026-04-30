@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.lifecycle
+
+Purpose:
+    Manage request lifecycle, cancellation, and child worker ownership.
+
+Responsibilities:
+    Track active runs, cancellation tokens, managed processes, and bounded shutdown behavior.
+
+Data flow / Interfaces:
+    Used by API, engine, SQL/Python workers, and long-running tool execution paths.
+
+Boundaries:
+    Prevents leaked child processes, inherited sockets, blocked joins, and shutdown hangs.
+"""
+
 from __future__ import annotations
 
 import multiprocessing as mp
@@ -11,57 +26,199 @@ from typing import Any
 
 
 class CancellationError(RuntimeError):
-    """Raised when a runtime request has been cancelled."""
+    """Represent cancellation error within the OpenFABRIC runtime. It extends RuntimeError.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by CancellationError.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.lifecycle.CancellationError and related tests.
+    """
 
 
 class CancellationToken:
+    """Represent cancellation token within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by CancellationToken.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.lifecycle.CancellationToken and related tests.
+    """
     def __init__(self) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through CancellationToken.__init__ calls and related tests.
+        """
         self._event = threading.Event()
         self._reason = "cancelled"
 
     @property
     def cancelled(self) -> bool:
+        """Cancelled for CancellationToken instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through CancellationToken.cancelled calls and related tests.
+        """
         return self._event.is_set()
 
     @property
     def reason(self) -> str:
+        """Reason for CancellationToken instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through CancellationToken.reason calls and related tests.
+        """
         return self._reason
 
     def cancel(self, reason: str = "cancelled") -> None:
+        """Cancel for CancellationToken instances.
+
+        Inputs:
+            Receives reason for this CancellationToken method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through CancellationToken.cancel calls and related tests.
+        """
         normalized = str(reason or "cancelled").strip() or "cancelled"
         self._reason = normalized
         self._event.set()
 
     def throw_if_cancelled(self) -> None:
+        """Throw if cancelled for CancellationToken instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through CancellationToken.throw_if_cancelled calls and related tests.
+        """
         if self.cancelled:
             raise CancellationError(self.reason)
 
 
 @dataclass
 class ManagedProcess:
+    """Represent managed process within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ManagedProcess.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.lifecycle.ManagedProcess and related tests.
+    """
     process: mp.Process
     name: str
     started_at: float = field(default_factory=time.monotonic)
 
     @property
     def pid(self) -> int | None:
+        """Pid for ManagedProcess instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ManagedProcess.pid calls and related tests.
+        """
         return self.process.pid
 
 
 @dataclass
 class ToolInvocationContext:
+    """Represent tool invocation context within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ToolInvocationContext.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.lifecycle.ToolInvocationContext and related tests.
+    """
     cancellation: CancellationToken | None = None
     process_registry: "ActiveRunRegistry | None" = None
     worker_join_timeout_seconds: float = 2.0
     tool_process_kill_grace_seconds: float = 1.0
 
     def throw_if_cancelled(self) -> None:
+        """Throw if cancelled for ToolInvocationContext instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ToolInvocationContext.throw_if_cancelled calls and related tests.
+        """
         if self.cancellation is not None:
             self.cancellation.throw_if_cancelled()
 
 
 class RunHandle:
+    """Represent run handle within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by RunHandle.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.lifecycle.RunHandle and related tests.
+    """
     def __init__(self, run_id: str, registry: "ActiveRunRegistry", token: CancellationToken | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives run_id, registry, token for this RunHandle method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RunHandle.__init__ calls and related tests.
+        """
         self.run_id = run_id
         self.registry = registry
         self.token = token or CancellationToken()
@@ -69,19 +226,74 @@ class RunHandle:
         self.thread: threading.Thread | None = None
 
     def cancel(self, reason: str = "cancelled") -> None:
+        """Cancel for RunHandle instances.
+
+        Inputs:
+            Receives reason for this RunHandle method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RunHandle.cancel calls and related tests.
+        """
         self.token.cancel(reason)
 
     def join(self, timeout: float | None = None) -> None:
+        """Join for RunHandle instances.
+
+        Inputs:
+            Receives timeout for this RunHandle method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RunHandle.join calls and related tests.
+        """
         if self.thread is not None:
             self.thread.join(timeout=timeout)
 
     @property
     def is_alive(self) -> bool:
+        """Is alive for RunHandle instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RunHandle.is_alive calls and related tests.
+        """
         return bool(self.thread and self.thread.is_alive())
 
 
 class ActiveRunRegistry:
+    """Represent active run registry within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ActiveRunRegistry.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.lifecycle.ActiveRunRegistry and related tests.
+    """
     def __init__(self, *, shutdown_grace_seconds: float = 5.0, process_kill_grace_seconds: float = 1.0) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives shutdown_grace_seconds, process_kill_grace_seconds for this ActiveRunRegistry method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.__init__ calls and related tests.
+        """
         self.shutdown_grace_seconds = float(shutdown_grace_seconds)
         self.process_kill_grace_seconds = float(process_kill_grace_seconds)
         self._lock = threading.RLock()
@@ -89,6 +301,17 @@ class ActiveRunRegistry:
         self._processes: dict[int, ManagedProcess] = {}
 
     def register_run(self, run_id: str | None = None) -> RunHandle:
+        """Register run for ActiveRunRegistry instances.
+
+        Inputs:
+            Receives run_id for this ActiveRunRegistry method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.register_run calls and related tests.
+        """
         normalized_run_id = str(run_id or uuid.uuid4().hex)
         handle = RunHandle(normalized_run_id, self)
         with self._lock:
@@ -96,9 +319,31 @@ class ActiveRunRegistry:
         return handle
 
     def start_background(self, run_id: str | None, target: Callable[[CancellationToken], Any]) -> RunHandle:
+        """Start background for ActiveRunRegistry instances.
+
+        Inputs:
+            Receives run_id, target for this ActiveRunRegistry method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.start_background calls and related tests.
+        """
         handle = self.register_run(run_id)
 
         def runner() -> None:
+            """Runner for the surrounding runtime workflow.
+
+            Inputs:
+                Uses module or instance state; no caller-supplied data parameters are required.
+
+            Returns:
+                Returns None; side effects are limited to the local runtime operation described above.
+
+            Used by:
+                Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.lifecycle.runner.
+            """
             try:
                 handle.outcome["result"] = target(handle.token)
             except Exception as exc:  # noqa: BLE001
@@ -111,10 +356,32 @@ class ActiveRunRegistry:
         return handle
 
     def unregister_run(self, run_id: str) -> None:
+        """Unregister run for ActiveRunRegistry instances.
+
+        Inputs:
+            Receives run_id for this ActiveRunRegistry method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.unregister_run calls and related tests.
+        """
         with self._lock:
             self._runs.pop(str(run_id), None)
 
     def register_process(self, process: mp.Process, *, name: str) -> ManagedProcess:
+        """Register process for ActiveRunRegistry instances.
+
+        Inputs:
+            Receives process, name for this ActiveRunRegistry method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.register_process calls and related tests.
+        """
         managed = ManagedProcess(process=process, name=name)
         if process.pid is not None:
             with self._lock:
@@ -122,19 +389,63 @@ class ActiveRunRegistry:
         return managed
 
     def unregister_process(self, process: mp.Process) -> None:
+        """Unregister process for ActiveRunRegistry instances.
+
+        Inputs:
+            Receives process for this ActiveRunRegistry method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.unregister_process calls and related tests.
+        """
         if process.pid is not None:
             with self._lock:
                 self._processes.pop(int(process.pid), None)
 
     def active_run_count(self) -> int:
+        """Active run count for ActiveRunRegistry instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.active_run_count calls and related tests.
+        """
         with self._lock:
             return len(self._runs)
 
     def active_process_count(self) -> int:
+        """Active process count for ActiveRunRegistry instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.active_process_count calls and related tests.
+        """
         with self._lock:
             return len(self._processes)
 
     def cancel_all(self, reason: str = "server shutdown", *, wait_seconds: float | None = None) -> None:
+        """Cancel all for ActiveRunRegistry instances.
+
+        Inputs:
+            Receives reason, wait_seconds for this ActiveRunRegistry method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ActiveRunRegistry.cancel_all calls and related tests.
+        """
         with self._lock:
             handles = list(self._runs.values())
             processes = [managed.process for managed in self._processes.values()]
@@ -149,6 +460,17 @@ class ActiveRunRegistry:
 
 
 def terminate_process(process: mp.Process, *, kill_grace_seconds: float = 1.0) -> None:
+    """Terminate process for the surrounding runtime workflow.
+
+    Inputs:
+        Receives process, kill_grace_seconds for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.lifecycle.terminate_process.
+    """
     if process.is_alive():
         process.terminate()
         process.join(timeout=max(0.0, float(kill_grace_seconds)))
@@ -168,6 +490,17 @@ def run_process_with_queue(
     context: ToolInvocationContext | None = None,
     process_name: str = "tool-worker",
 ) -> Any:
+    """Run process with queue for the surrounding runtime workflow.
+
+    Inputs:
+        Receives target, args, timeout_seconds, timeout_message, context, process_name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.lifecycle.run_process_with_queue.
+    """
     runtime_context = context or ToolInvocationContext()
     spawn_context = mp.get_context("spawn")
     result_queue: mp.Queue = spawn_context.Queue()
@@ -212,6 +545,17 @@ def _wait_for_queue_payload(
     timeout_message: str,
     context: ToolInvocationContext,
 ) -> Any:
+    """Handle the internal wait for queue payload helper path for this module.
+
+    Inputs:
+        Receives process, result_queue, timeout_seconds, timeout_message, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.lifecycle._wait_for_queue_payload.
+    """
     deadline = time.monotonic() + max(0.001, float(timeout_seconds))
     saw_exit = False
     while True:

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.tools.factory
+
+Purpose:
+    Build the registered tool set from runtime settings.
+
+Responsibilities:
+    Expose typed tool arguments/results for filesystem, SQL, shell, SLURM, text formatting, Python, and runtime return operations.
+
+Data flow / Interfaces:
+    Receives validated tool arguments from the executor and returns structured result models for downstream contracts and presenters.
+
+Boundaries:
+    Does not decide user intent; every tool must preserve safety, allowed-root, read-only, timeout, and result-shape boundaries.
+"""
+
 from __future__ import annotations
 
 from aor_runtime.config import Settings, get_settings
@@ -35,6 +50,17 @@ from aor_runtime.tools.text_format import TextFormatTool
 
 
 def build_tool_registry(settings: Settings | None = None) -> ToolRegistry:
+    """Build tool registry for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.factory.build_tool_registry.
+    """
     configured = settings or get_settings()
     return ToolRegistry(
         [

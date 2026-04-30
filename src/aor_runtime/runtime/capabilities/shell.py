@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.capabilities.shell
+
+Purpose:
+    Provide compatibility capability-pack helpers and fixtures for domain-specific tests and utilities.
+
+Responsibilities:
+    Classify or compile typed intents when called directly by tests or compatibility surfaces.
+
+Data flow / Interfaces:
+    Consumes compile contexts, allowed tools, and typed intents; returns execution-plan fragments or eval metadata.
+
+Boundaries:
+    These modules are not the active top-level natural-language planner; user prompts route through LLMActionPlanner.
+"""
+
 from __future__ import annotations
 
 import re
@@ -75,6 +90,17 @@ ALLOWED_SHELL_KINDS = {
 
 
 class ShellExplicitCommandIntent(BaseModel):
+    """Represent shell explicit command intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ShellExplicitCommandIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.shell.ShellExplicitCommandIntent and related tests.
+    """
     model_config = ConfigDict(extra="forbid")
 
     command: str
@@ -85,6 +111,17 @@ class ShellExplicitCommandIntent(BaseModel):
 
 
 class ShellInspectionIntent(BaseModel):
+    """Represent shell inspection intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ShellInspectionIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.shell.ShellInspectionIntent and related tests.
+    """
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal[
@@ -122,6 +159,17 @@ class ShellInspectionIntent(BaseModel):
 
 
 class FileContentDiagnosticIntent(BaseModel):
+    """Represent file content diagnostic intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FileContentDiagnosticIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.shell.FileContentDiagnosticIntent and related tests.
+    """
     model_config = ConfigDict(extra="forbid")
 
     path: str
@@ -133,6 +181,17 @@ class FileContentDiagnosticIntent(BaseModel):
 
 
 class ShellUnsupportedMutationIntent(BaseModel):
+    """Represent shell unsupported mutation intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ShellUnsupportedMutationIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.shell.ShellUnsupportedMutationIntent and related tests.
+    """
     model_config = ConfigDict(extra="forbid")
 
     operation: str
@@ -140,6 +199,17 @@ class ShellUnsupportedMutationIntent(BaseModel):
 
 
 class ShellMutationIntent(BaseModel):
+    """Represent shell mutation intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ShellMutationIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.shell.ShellMutationIntent and related tests.
+    """
     model_config = ConfigDict(extra="forbid")
 
     operation: Literal[
@@ -163,6 +233,17 @@ class ShellMutationIntent(BaseModel):
 
 
 class ShellUnsupportedIntent(BaseModel):
+    """Represent shell unsupported intent within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ShellUnsupportedIntent.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.shell.ShellUnsupportedIntent and related tests.
+    """
     model_config = ConfigDict(extra="forbid")
 
     reason: str
@@ -170,6 +251,17 @@ class ShellUnsupportedIntent(BaseModel):
 
 
 class ShellCapabilityPack(CapabilityPack):
+    """Represent shell capability pack within the OpenFABRIC runtime. It extends CapabilityPack.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ShellCapabilityPack.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.shell.ShellCapabilityPack and related tests.
+    """
     name = "shell"
     supports_llm_intent_extraction = True
     intent_types = (
@@ -183,6 +275,17 @@ class ShellCapabilityPack(CapabilityPack):
     )
 
     def classify(self, goal: str, context: ClassificationContext) -> IntentResult:
+        """Classify for ShellCapabilityPack instances.
+
+        Inputs:
+            Receives goal, context for this ShellCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ShellCapabilityPack.classify calls and related tests.
+        """
         shell_result = _classify_shell_goal(goal, context)
         if shell_result.matched:
             return shell_result
@@ -192,6 +295,17 @@ class ShellCapabilityPack(CapabilityPack):
         return IntentResult(matched=False, reason=f"{self.name}_no_match")
 
     def is_llm_intent_domain(self, goal: str, context: ClassificationContext) -> bool:
+        """Is llm intent domain for ShellCapabilityPack instances.
+
+        Inputs:
+            Receives goal, context for this ShellCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ShellCapabilityPack.is_llm_intent_domain calls and related tests.
+        """
         if not context.settings.enable_llm_intent_extraction:
             return False
         prompt = str(goal or "").strip()
@@ -227,6 +341,17 @@ class ShellCapabilityPack(CapabilityPack):
         return True
 
     def try_llm_extract(self, goal: str, context: ClassificationContext, extractor: LLMIntentExtractor) -> IntentResult:
+        """Try llm extract for ShellCapabilityPack instances.
+
+        Inputs:
+            Receives goal, context, extractor for this ShellCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ShellCapabilityPack.try_llm_extract calls and related tests.
+        """
         if not context.settings.enable_llm_intent_extraction:
             return IntentResult(matched=False, reason="shell_llm_intent_disabled")
         prompt = str(goal or "").strip()
@@ -298,6 +423,17 @@ class ShellCapabilityPack(CapabilityPack):
         )
 
     def compile(self, intent: Any, context: CompileContext) -> CompiledIntentPlan | None:
+        """Compile for ShellCapabilityPack instances.
+
+        Inputs:
+            Receives intent, context for this ShellCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ShellCapabilityPack.compile calls and related tests.
+        """
         if isinstance(intent, ShellExplicitCommandIntent):
             _require_tools(context.allowed_tools, "shell.exec")
             policy = classify_shell_command(
@@ -481,6 +617,17 @@ class ShellCapabilityPack(CapabilityPack):
 
 
 def _shell_llm_intent_system_prompt() -> str:
+    """Handle the internal shell llm intent system prompt helper path for this module.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._shell_llm_intent_system_prompt.
+    """
     return """You are an intent extractor only.
 You convert shell-style user requests into one typed, read-only intent.
 You must output JSON only.
@@ -502,12 +649,34 @@ Use the exact JSON keys matched, intent_type, confidence, arguments, reason."""
 
 
 def _require_tools(allowed_tools: list[str], *required: str) -> None:
+    """Handle the internal require tools helper path for this module.
+
+    Inputs:
+        Receives allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._require_tools.
+    """
     missing = [tool for tool in required if tool not in allowed_tools]
     if missing:
         raise ValueError(f"Deterministic intent requires unavailable tools: {', '.join(missing)}")
 
 
 def _looks_like_plain_filesystem_prompt(prompt: str) -> bool:
+    """Handle the internal looks like plain filesystem prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._looks_like_plain_filesystem_prompt.
+    """
     lower = prompt.lower()
     if "shell" in lower or "terminal" in lower or "bash" in lower:
         return False
@@ -517,18 +686,62 @@ def _looks_like_plain_filesystem_prompt(prompt: str) -> bool:
 
 
 def _looks_like_file_aggregate_prompt(prompt: str) -> bool:
+    """Handle the internal looks like file aggregate prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._looks_like_file_aggregate_prompt.
+    """
     return SHELL_FILE_AGGREGATE_RE.search(prompt) is not None
 
 
 def _looks_like_content_diagnostic_prompt(prompt: str) -> bool:
+    """Handle the internal looks like content diagnostic prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._looks_like_content_diagnostic_prompt.
+    """
     return SHELL_CONTENT_DIAGNOSTIC_RE.search(prompt) is not None and PATH_CANDIDATE_RE.search(prompt) is not None
 
 
 def _looks_like_fetch_prompt(prompt: str) -> bool:
+    """Handle the internal looks like fetch prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._looks_like_fetch_prompt.
+    """
     return URL_RE.search(prompt) is not None and SHELL_FETCH_RE.search(prompt) is not None
 
 
 def _extract_prompt_node(prompt: str, available_nodes: list[str]) -> tuple[str, str | None]:
+    """Handle the internal extract prompt node helper path for this module.
+
+    Inputs:
+        Receives prompt, available_nodes for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._extract_prompt_node.
+    """
     prompt_text = str(prompt or "").strip()
     if not prompt_text:
         return "", None
@@ -548,6 +761,17 @@ def _extract_prompt_node(prompt: str, available_nodes: list[str]) -> tuple[str, 
 
 
 def _finalize_llm_shell_intent(intent: Any, prompt: str, *, node: str | None, available_nodes: list[str]) -> Any:
+    """Handle the internal finalize llm shell intent helper path for this module.
+
+    Inputs:
+        Receives intent, prompt, node, available_nodes for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._finalize_llm_shell_intent.
+    """
     if isinstance(intent, (ShellExplicitCommandIntent, ShellCommandIntent)):
         raise ValueError("LLM shell intent extraction may not emit raw command intents.")
     if isinstance(intent, (ShellMutationIntent, ShellUnsupportedIntent, ShellUnsupportedMutationIntent)):
@@ -618,6 +842,17 @@ def _finalize_llm_shell_intent(intent: Any, prompt: str, *, node: str | None, av
 
 
 def _llm_capability_owner(intent: Any) -> str:
+    """Handle the internal llm capability owner helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._llm_capability_owner.
+    """
     if isinstance(intent, FileAggregateIntent):
         return "filesystem"
     if isinstance(intent, FetchExtractIntent):
@@ -626,6 +861,17 @@ def _llm_capability_owner(intent: Any) -> str:
 
 
 def _extract_prompt_path(prompt: str) -> str | None:
+    """Handle the internal extract prompt path helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._extract_prompt_path.
+    """
     match = PATH_CANDIDATE_RE.search(prompt)
     if match is None:
         return None
@@ -633,6 +879,17 @@ def _extract_prompt_path(prompt: str) -> str | None:
 
 
 def _extract_prompt_url(prompt: str) -> str | None:
+    """Handle the internal extract prompt url helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._extract_prompt_url.
+    """
     match = URL_RE.search(prompt)
     if match is None:
         return None
@@ -643,10 +900,32 @@ def _extract_prompt_url(prompt: str) -> str | None:
 
 
 def _prompt_wants_matching_lines(prompt: str) -> bool:
+    """Handle the internal prompt wants matching lines helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._prompt_wants_matching_lines.
+    """
     return bool(re.search(r"\b(?:matching\s+lines?|show\s+lines?|lines?\s+containing)\b", prompt, re.IGNORECASE))
 
 
 def _validate_shell_string_fields(payload: dict[str, Any], *, allow_path: bool, allow_url: bool = False) -> None:
+    """Handle the internal validate shell string fields helper path for this module.
+
+    Inputs:
+        Receives payload, allow_path, allow_url for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._validate_shell_string_fields.
+    """
     for key, value in payload.items():
         if value is None or not isinstance(value, str):
             continue
@@ -666,6 +945,17 @@ def _validate_shell_string_fields(payload: dict[str, Any], *, allow_path: bool, 
 
 
 def _shell_inspection_command(intent: ShellInspectionIntent) -> str:
+    """Handle the internal shell inspection command helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._shell_inspection_command.
+    """
     path = _quote_path(intent.path or ".")
     if intent.kind == "uptime":
         return "uptime"
@@ -718,6 +1008,17 @@ def _shell_inspection_command(intent: ShellInspectionIntent) -> str:
 
 
 def _classify_shell_goal(goal: str, context: ClassificationContext) -> IntentResult:
+    """Handle the internal classify shell goal helper path for this module.
+
+    Inputs:
+        Receives goal, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._classify_shell_goal.
+    """
     prompt = str(goal or "").strip()
     if not prompt:
         return IntentResult(matched=False, reason="shell_empty_goal")
@@ -762,6 +1063,17 @@ def _classify_shell_goal(goal: str, context: ClassificationContext) -> IntentRes
 
 
 def _extract_explicit_command(prompt: str) -> str:
+    """Handle the internal extract explicit command helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._extract_explicit_command.
+    """
     match = EXPLICIT_COMMAND_RE.match(prompt)
     if match is None:
         return ""
@@ -778,6 +1090,17 @@ def _extract_explicit_command(prompt: str) -> str:
 
 
 def _classify_shell_inspection_prompt(prompt: str) -> ShellInspectionIntent | None:
+    """Handle the internal classify shell inspection prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._classify_shell_inspection_prompt.
+    """
     text = prompt.lower()
     path = _extract_prompt_path(prompt) or ("." if _current_scope_mentioned(prompt) else None)
 
@@ -822,6 +1145,17 @@ def _classify_shell_inspection_prompt(prompt: str) -> ShellInspectionIntent | No
 
 
 def _classify_shell_mutation_prompt(prompt: str) -> IntentResult:
+    """Handle the internal classify shell mutation prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._classify_shell_mutation_prompt.
+    """
     text = prompt.lower()
     explicit = _extract_explicit_command(prompt)
     if explicit:
@@ -854,6 +1188,17 @@ def _classify_shell_mutation_prompt(prompt: str) -> IntentResult:
 
 
 def _compile_shell_refusal(*, reason: str, risk: str, command: str, approval_required: bool) -> CompiledIntentPlan:
+    """Handle the internal compile shell refusal helper path for this module.
+
+    Inputs:
+        Receives reason, risk, command, approval_required for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._compile_shell_refusal.
+    """
     return CompiledIntentPlan(
         plan=ExecutionPlan.model_validate(
             {
@@ -886,6 +1231,17 @@ def _shell_refusal_markdown(
     risk: str | None = None,
     approval_required: bool | None = None,
 ) -> str:
+    """Handle the internal shell refusal markdown helper path for this module.
+
+    Inputs:
+        Receives reason, operation, risk, approval_required for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._shell_refusal_markdown.
+    """
     status = "requires approval" if approval_required else "was not executed"
     risk_line = f"\n\nRisk: {risk}." if risk else ""
     return (
@@ -900,14 +1256,47 @@ def _shell_refusal_markdown(
 
 
 def _quote_path(path: str) -> str:
+    """Handle the internal quote path helper path for this module.
+
+    Inputs:
+        Receives path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._quote_path.
+    """
     return shlex.quote(str(path or ".").strip() or ".")
 
 
 def _current_scope_mentioned(prompt: str) -> bool:
+    """Handle the internal current scope mentioned helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._current_scope_mentioned.
+    """
     return re.search(r"\b(?:this|current)\s+(?:folder|directory)\b|\bhere\b|(?:^|\s)\.(?:\s|$|[?!.,;:])", prompt, re.IGNORECASE) is not None
 
 
 def _extract_port(prompt: str) -> int | None:
+    """Handle the internal extract port helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._extract_port.
+    """
     match = PORT_RE.search(prompt)
     if match is None:
         return None
@@ -922,6 +1311,17 @@ def _extract_port(prompt: str) -> int | None:
 
 
 def _extract_limit(prompt: str) -> int | None:
+    """Handle the internal extract limit helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._extract_limit.
+    """
     match = re.search(r"\b(?:top|first|last|limit)\s+(\d{1,3})\b|\b-n\s+(\d{1,3})\b", prompt, re.IGNORECASE)
     if match is None:
         return None
@@ -930,15 +1330,48 @@ def _extract_limit(prompt: str) -> int | None:
 
 
 def _wants_json(prompt: str) -> bool:
+    """Handle the internal wants json helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._wants_json.
+    """
     return re.search(r"\bjson\b", prompt, re.IGNORECASE) is not None
 
 
 def _mutation_target(prompt: str) -> str | None:
+    """Handle the internal mutation target helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._mutation_target.
+    """
     text = re.sub(r"^\s*(?:please\s+)?(?:delete|remove|kill|chmod|chown|restart|stop|start)\b", "", prompt, flags=re.IGNORECASE).strip()
     return text or None
 
 
 def _operation_from_policy(detected: list[str]) -> str:
+    """Handle the internal operation from policy helper path for this module.
+
+    Inputs:
+        Receives detected for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._operation_from_policy.
+    """
     ops = set(detected)
     if "rm" in ops:
         return "delete"
@@ -954,6 +1387,17 @@ def _operation_from_policy(detected: list[str]) -> str:
 
 
 def _looks_like_explicit_shell_command(command: str) -> bool:
+    """Handle the internal looks like explicit shell command helper path for this module.
+
+    Inputs:
+        Receives command for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.shell._looks_like_explicit_shell_command.
+    """
     try:
         tokens = shlex.split(command)
     except ValueError:

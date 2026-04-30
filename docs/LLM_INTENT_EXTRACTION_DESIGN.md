@@ -1,5 +1,7 @@
 # LLM Intent Extraction Design
 
+This document describes a narrow helper path for typed intent extraction. It is not the active top-level planner. The current user-prompt path is the validator-enforced LLM action planner described in [System Design](./SYSTEM_DESIGN.md).
+
 ## Implemented Today
 
 The runtime currently includes an optional typed LLM intent extraction path behind:
@@ -16,14 +18,14 @@ Its purpose is to safely handle fuzzy SLURM inspection prompts that do not match
 
 ## Design Goal
 
-Allow limited LLM help without allowing the LLM to design execution.
+Allow limited LLM help for typed helper intents without allowing this helper to design execution graphs.
 
 That means the LLM may help answer:
 
 - which SLURM intent type best matches a fuzzy request?
 - what safe arguments belong on that intent?
 
-But it may not answer:
+For this helper path, it may not answer:
 
 - which raw tools to call?
 - which shell or gateway commands to execute?
@@ -64,9 +66,9 @@ Today only `SlurmCapabilityPack` uses this path.
 5. If valid, the same SLURM compiler path builds a deterministic `ExecutionPlan`.
 6. If no valid intent is produced, callers that use this helper receive no match. `TaskPlanner` itself does not use this path for top-level routing.
 
-## Hard Safety Rule
+## Hard Safety Rule For This Helper
 
-The LLM must never emit:
+The typed intent extractor must never emit:
 
 - raw tool calls
 - shell commands
@@ -153,11 +155,13 @@ It preserves the most important guarantees:
 
 ## What Must Never Be Done
 
-- do not let the LLM emit tool calls directly
+- do not let this typed-intent helper emit tool calls directly
 - do not let the LLM emit shell or gateway command strings
 - do not let the LLM emit `ExecutionPlan`
 - do not skip post-LLM safety validation
 - do not use typed LLM intent extraction as a shortcut around domain capability design
+
+The active action planner is different: it may emit validated structured tool actions, but those actions are canonicalized and checked by deterministic validators before execution. Neither LLM path may emit raw executable commands or unchecked payloads.
 
 See also:
 

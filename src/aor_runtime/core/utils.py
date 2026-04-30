@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.core.utils
+
+Purpose:
+    Provide small shared serialization and parsing utilities.
+
+Responsibilities:
+    Define stable data structures and helpers that keep planning, execution, validation, and persistence aligned.
+
+Data flow / Interfaces:
+    Exports dataclasses, models, and utility functions consumed by runtime, tools, API, and tests.
+
+Boundaries:
+    Keeps shared primitives dependency-light and free of domain-specific execution policy.
+"""
+
 from __future__ import annotations
 
 import ast
@@ -13,6 +28,17 @@ VALID_JSON_ESCAPE_CHARS = {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}
 
 
 def ensure_jsonable(value: Any) -> Any:
+    """Ensure jsonable for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils.ensure_jsonable.
+    """
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
@@ -25,14 +51,47 @@ def ensure_jsonable(value: Any) -> Any:
 
 
 def dumps_json(value: Any, *, indent: int | None = None) -> str:
+    """Dumps json for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, indent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils.dumps_json.
+    """
     return json.dumps(ensure_jsonable(value), ensure_ascii=False, indent=indent, default=str)
 
 
 def loads_json(text: str) -> Any:
+    """Loads json for the surrounding runtime workflow.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils.loads_json.
+    """
     return json.loads(text)
 
 
 def extract_json_object(text: str) -> Any:
+    """Extract json object for the surrounding runtime workflow.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils.extract_json_object.
+    """
     cleaned = str(text or "").strip()
     if not cleaned:
         raise ValueError("Empty LLM response")
@@ -71,6 +130,17 @@ def extract_json_object(text: str) -> Any:
 
 
 def _repair_json_candidates(text: str, *, include_original: bool = False) -> list[str]:
+    """Handle the internal repair json candidates helper path for this module.
+
+    Inputs:
+        Receives text, include_original for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils._repair_json_candidates.
+    """
     candidates: list[str] = [text] if include_original else []
     multiline_fixed = _escape_multiline_code_strings(text)
     control_fixed = _escape_control_chars_in_strings(text)
@@ -84,6 +154,17 @@ def _repair_json_candidates(text: str, *, include_original: bool = False) -> lis
 
 
 def _escape_control_chars_in_strings(text: str) -> str:
+    """Handle the internal escape control chars in strings helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils._escape_control_chars_in_strings.
+    """
     chars: list[str] = []
     in_string = False
     escaped = False
@@ -119,6 +200,17 @@ def _escape_control_chars_in_strings(text: str) -> str:
 
 
 def _escape_multiline_code_strings(text: str) -> str:
+    """Handle the internal escape multiline code strings helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils._escape_multiline_code_strings.
+    """
     if '"code"' not in text:
         return text
 
@@ -154,6 +246,17 @@ def _escape_multiline_code_strings(text: str) -> str:
 
 
 def _repair_invalid_json_string_escapes(text: str) -> str:
+    """Handle the internal repair invalid json string escapes helper path for this module.
+
+    Inputs:
+        Receives text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils._repair_invalid_json_string_escapes.
+    """
     chars: list[str] = []
     in_string = False
     index = 0
@@ -223,6 +326,17 @@ SAFE_GLOBALS = {"len": len, "min": min, "max": max, "sum": sum, "any": any, "all
 
 
 def safe_eval_condition(expression: str, context: dict[str, Any]) -> bool:
+    """Safe eval condition for the surrounding runtime workflow.
+
+    Inputs:
+        Receives expression, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by shared runtime contracts code paths that import or call aor_runtime.core.utils.safe_eval_condition.
+    """
     parsed = ast.parse(expression, mode="eval")
     for node in ast.walk(parsed):
         if type(node) not in ALLOWED_AST_NODES:

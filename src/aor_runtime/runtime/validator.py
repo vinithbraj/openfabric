@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.validator
+
+Purpose:
+    Re-validate executed tool outputs against deterministic expectations and fixtures.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -52,6 +67,17 @@ SQL_IDENTIFIER_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 
 
 def _top_level_select_list(query: str) -> str:
+    """Handle the internal top level select list helper path for this module.
+
+    Inputs:
+        Receives query for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.validator._top_level_select_list.
+    """
     text = str(query or "")
     select_start = _find_top_level_keyword(text, "select")
     if select_start < 0:
@@ -64,6 +90,17 @@ def _top_level_select_list(query: str) -> str:
 
 
 def _find_top_level_keyword(text: str, keyword: str, *, start: int = 0) -> int:
+    """Handle the internal find top level keyword helper path for this module.
+
+    Inputs:
+        Receives text, keyword, start for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.validator._find_top_level_keyword.
+    """
     keyword_lower = keyword.lower()
     depth = 0
     quote: str | None = None
@@ -101,7 +138,29 @@ def _find_top_level_keyword(text: str, keyword: str, *, start: int = 0) -> int:
 
 
 class RuntimeValidator:
+    """Represent runtime validator within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by RuntimeValidator.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.validator.RuntimeValidator and related tests.
+    """
     def __init__(self, settings: Settings | None = None, tools: object | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings, tools for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         if tools is None:
             from aor_runtime.tools.factory import build_tool_registry
@@ -110,6 +169,17 @@ class RuntimeValidator:
         self.tools = tools
 
     def validate(self, history: list[StepLog], goal: str | None = None) -> tuple[ValidationResult, list[dict[str, str | bool]]]:
+        """Validate for RuntimeValidator instances.
+
+        Inputs:
+            Receives history, goal for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator.validate calls and related tests.
+        """
         checks: list[dict[str, str | bool]] = []
         for item in history:
             checks.append(self._validate_step(item, goal=goal))
@@ -120,6 +190,17 @@ class RuntimeValidator:
         return ValidationResult(success=True, reason=None), checks
 
     def _validate_step(self, item: StepLog, *, goal: str | None = None) -> dict[str, str | bool]:
+        """Handle the internal validate step helper path for this module.
+
+        Inputs:
+            Receives item, goal for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator._validate_step calls and related tests.
+        """
         step = item.step
         if not item.success:
             return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": item.error or "step failed"}
@@ -562,6 +643,17 @@ class RuntimeValidator:
         return {"name": f"step_{step.id}_{step.action}", "success": False, "detail": "unknown action"}
 
     def _validate_live_slurm_queue(self, args: dict, result: dict) -> tuple[bool, str]:
+        """Handle the internal validate live slurm queue helper path for this module.
+
+        Inputs:
+            Receives args, result for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator._validate_live_slurm_queue calls and related tests.
+        """
         jobs = result.get("jobs")
         if not isinstance(jobs, list):
             return False, "slurm queue result missing jobs"
@@ -588,6 +680,17 @@ class RuntimeValidator:
         return True, f"slurm queue semantic validation passed rows={returned_count} total={total_count}"
 
     def _validate_live_slurm_accounting_aggregate(self, args: dict, result: dict) -> tuple[bool, str]:
+        """Handle the internal validate live slurm accounting aggregate helper path for this module.
+
+        Inputs:
+            Receives args, result for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator._validate_live_slurm_accounting_aggregate calls and related tests.
+        """
         if not isinstance(result, dict):
             return False, "slurm accounting aggregate result is not an object"
         if str(result.get("result_kind") or "") != "accounting_aggregate":
@@ -627,6 +730,17 @@ class RuntimeValidator:
         return True, f"slurm accounting aggregate semantic validation passed jobs={job_count} total={total_count}"
 
     def _validate_live_slurm_nodes(self, args: dict, result: dict) -> tuple[bool, str]:
+        """Handle the internal validate live slurm nodes helper path for this module.
+
+        Inputs:
+            Receives args, result for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator._validate_live_slurm_nodes calls and related tests.
+        """
         nodes = result.get("nodes")
         if not isinstance(nodes, list):
             return False, "slurm nodes result missing nodes"
@@ -656,6 +770,17 @@ class RuntimeValidator:
         return True, f"slurm nodes semantic validation passed partition_rows={partition_rows}"
 
     def _validate_python_manifest(self, output: str) -> tuple[bool, str] | None:
+        """Handle the internal validate python manifest helper path for this module.
+
+        Inputs:
+            Receives output for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator._validate_python_manifest calls and related tests.
+        """
         try:
             payload = extract_json_object(output)
         except Exception:  # noqa: BLE001
@@ -688,6 +813,17 @@ class RuntimeValidator:
         return True, "python.exec bulk_copy manifest verified"
 
     def _extract_sql_aliases(self, query: str) -> list[str]:
+        """Handle the internal extract sql aliases helper path for this module.
+
+        Inputs:
+            Receives query for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator._extract_sql_aliases calls and related tests.
+        """
         aliases: list[str] = []
         select_list = _top_level_select_list(str(query or ""))
         for match in ALIAS_RE.finditer(select_list):
@@ -699,6 +835,17 @@ class RuntimeValidator:
         return aliases
 
     def _validate_shell_semantics(self, *, step, stdout: str, goal: str) -> tuple[bool, str] | None:
+        """Handle the internal validate shell semantics helper path for this module.
+
+        Inputs:
+            Receives step, stdout, goal for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator._validate_shell_semantics calls and related tests.
+        """
         intent = self._classify_storage_intent(goal)
         if intent is None:
             return None
@@ -722,6 +869,17 @@ class RuntimeValidator:
         return None
 
     def _classify_storage_intent(self, goal: str) -> str | None:
+        """Handle the internal classify storage intent helper path for this module.
+
+        Inputs:
+            Receives goal for this RuntimeValidator method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RuntimeValidator._classify_storage_intent calls and related tests.
+        """
         tokens = set(STORAGE_TOKEN_RE.findall(str(goal or "").lower()))
         if not tokens:
             return None

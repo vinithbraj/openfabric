@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.eval_fixtures
+
+Purpose:
+    Create deterministic fixture data and workspaces for capability and runtime evaluations.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import getpass
@@ -12,6 +27,17 @@ from pydantic import BaseModel, Field
 
 
 class EvalFixturePayload(BaseModel):
+    """Represent eval fixture payload within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by EvalFixturePayload.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.eval_fixtures.EvalFixturePayload and related tests.
+    """
     workspace_root: str
     run_store_path: str
     sql_databases: dict[str, str] = Field(default_factory=dict)
@@ -19,6 +45,17 @@ class EvalFixturePayload(BaseModel):
     variables: dict[str, str] = Field(default_factory=dict)
 
     def settings_payload(self) -> dict[str, Any]:
+        """Settings payload for EvalFixturePayload instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through EvalFixturePayload.settings_payload calls and related tests.
+        """
         return {
             "workspace_root": self.workspace_root,
             "run_store_path": self.run_store_path,
@@ -101,6 +138,17 @@ FETCH_FIXTURES = {
 
 
 def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
+    """Rebuild eval workspace for the surrounding runtime workflow.
+
+    Inputs:
+        Receives workspace for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures.rebuild_eval_workspace.
+    """
     if workspace.exists():
         shutil.rmtree(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -228,18 +276,62 @@ def rebuild_eval_workspace(workspace: Path) -> EvalFixturePayload:
 
 
 def render_template(value: Any, fixtures: EvalFixturePayload) -> Any:
+    """Render template for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, fixtures for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures.render_template.
+    """
     return _render_value(value, fixtures.variables)
 
 
 def render_case_prompt(prompt: str, fixtures: EvalFixturePayload) -> str:
+    """Render case prompt for the surrounding runtime workflow.
+
+    Inputs:
+        Receives prompt, fixtures for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures.render_case_prompt.
+    """
     return str(render_template(prompt, fixtures))
 
 
 def render_case_expected(expected: Any, fixtures: EvalFixturePayload) -> Any:
+    """Render case expected for the surrounding runtime workflow.
+
+    Inputs:
+        Receives expected, fixtures for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures.render_case_expected.
+    """
     return render_template(expected, fixtures)
 
 
 def _path_variables(prefix: str, root: Path, files: dict[str, str]) -> dict[str, str]:
+    """Handle the internal path variables helper path for this module.
+
+    Inputs:
+        Receives prefix, root, files for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures._path_variables.
+    """
     variables: dict[str, str] = {}
     for filename in files:
         stem = Path(filename).stem
@@ -248,10 +340,32 @@ def _path_variables(prefix: str, root: Path, files: dict[str, str]) -> dict[str,
 
 
 def _directory_variables(prefix: str, root: Path, directories: dict[str, Any]) -> dict[str, str]:
+    """Handle the internal directory variables helper path for this module.
+
+    Inputs:
+        Receives prefix, root, directories for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures._directory_variables.
+    """
     return {f"{prefix}_{name}": str(root / name) for name in directories}
 
 
 def _tilde_path(path: Path) -> str:
+    """Handle the internal tilde path helper path for this module.
+
+    Inputs:
+        Receives path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures._tilde_path.
+    """
     resolved = path.resolve()
     home = Path.home().resolve()
     try:
@@ -261,6 +375,17 @@ def _tilde_path(path: Path) -> str:
 
 
 def _render_value(value: Any, variables: dict[str, str]) -> Any:
+    """Handle the internal render value helper path for this module.
+
+    Inputs:
+        Receives value, variables for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures._render_value.
+    """
     if isinstance(value, str):
         return value.format(**variables)
     if isinstance(value, list):
@@ -271,11 +396,33 @@ def _render_value(value: Any, variables: dict[str, str]) -> Any:
 
 
 def _write(path: Path, content: str) -> None:
+    """Handle the internal write helper path for this module.
+
+    Inputs:
+        Receives path, content for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures._write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
 
 
 def _slurm_fixture_files() -> dict[str, str]:
+    """Handle the internal slurm fixture files helper path for this module.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures._slurm_fixture_files.
+    """
     current_user = getpass.getuser()
     now = datetime.now().replace(microsecond=0)
     yesterday = now - timedelta(days=1)
@@ -327,6 +474,17 @@ def _slurm_fixture_files() -> dict[str, str]:
 
 
 def _llm_intent_fixture_payload(variables: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Handle the internal llm intent fixture payload helper path for this module.
+
+    Inputs:
+        Receives variables for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.eval_fixtures._llm_intent_fixture_payload.
+    """
     current_user = getpass.getuser()
     shell_aggregate_prompt = f"using shell, how much space do mp4s take under {variables['files_lambda']}"
     shell_content_files_prompt = f"with shell, show files containing cinnamon under {variables['search_pantry']} as json"

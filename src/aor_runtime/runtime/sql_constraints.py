@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.sql_constraints
+
+Purpose:
+    Extract and validate SQL semantic constraints from user prompts and generated SQL.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -88,6 +103,17 @@ PROJECTION_LEADING_STOPWORDS_RE = re.compile(r"^(?:the|all|of|values?|rows?|colu
 
 @dataclass(frozen=True)
 class SqlConstraint:
+    """Represent sql constraint within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlConstraint.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_constraints.SqlConstraint and related tests.
+    """
     id: str
     kind: SqlConstraintKind
     raw_text: str
@@ -103,6 +129,17 @@ class SqlConstraint:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for SqlConstraint instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlConstraint.to_dict calls and related tests.
+        """
         return {
             "id": self.id,
             "kind": self.kind,
@@ -122,6 +159,17 @@ class SqlConstraint:
 
 @dataclass(frozen=True)
 class SqlProjection:
+    """Represent sql projection within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlProjection.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_constraints.SqlProjection and related tests.
+    """
     id: str
     raw_text: str
     subject: str
@@ -132,6 +180,17 @@ class SqlProjection:
     confidence: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for SqlProjection instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlProjection.to_dict calls and related tests.
+        """
         return {
             "id": self.id,
             "raw_text": self.raw_text,
@@ -146,6 +205,17 @@ class SqlProjection:
 
 @dataclass(frozen=True)
 class SqlConstraintFrame:
+    """Represent sql constraint frame within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlConstraintFrame.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_constraints.SqlConstraintFrame and related tests.
+    """
     query_type: SqlQueryType
     target_entity: str | None = None
     constraints: list[SqlConstraint] = field(default_factory=list)
@@ -158,25 +228,80 @@ class SqlConstraintFrame:
 
     @property
     def unresolved_constraint_ids(self) -> list[str]:
+        """Unresolved constraint ids for SqlConstraintFrame instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlConstraintFrame.unresolved_constraint_ids calls and related tests.
+        """
         return [constraint.id for constraint in self.unresolved_constraints]
 
     @property
     def non_target_constraints(self) -> list[SqlConstraint]:
+        """Non target constraints for SqlConstraintFrame instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlConstraintFrame.non_target_constraints calls and related tests.
+        """
         return [constraint for constraint in self.constraints if constraint.kind != "target_table"]
 
     def constraint_by_id(self, constraint_id: str) -> SqlConstraint | None:
+        """Constraint by id for SqlConstraintFrame instances.
+
+        Inputs:
+            Receives constraint_id for this SqlConstraintFrame method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlConstraintFrame.constraint_by_id calls and related tests.
+        """
         for constraint in self.constraints:
             if constraint.id == constraint_id:
                 return constraint
         return None
 
     def projection_by_id(self, projection_id: str) -> SqlProjection | None:
+        """Projection by id for SqlConstraintFrame instances.
+
+        Inputs:
+            Receives projection_id for this SqlConstraintFrame method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlConstraintFrame.projection_by_id calls and related tests.
+        """
         for projection in self.projections:
             if projection.id == projection_id:
                 return projection
         return None
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for SqlConstraintFrame instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlConstraintFrame.to_dict calls and related tests.
+        """
         return {
             "query_type": self.query_type,
             "target_entity": self.target_entity,
@@ -191,6 +316,17 @@ class SqlConstraintFrame:
 
 @dataclass(frozen=True)
 class SqlConstraintCoverageResult:
+    """Represent sql constraint coverage result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlConstraintCoverageResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_constraints.SqlConstraintCoverageResult and related tests.
+    """
     valid: bool
     covered_constraint_ids: list[str] = field(default_factory=list)
     missing_constraint_ids: list[str] = field(default_factory=list)
@@ -201,6 +337,17 @@ class SqlConstraintCoverageResult:
 
 @dataclass(frozen=True)
 class SqlJoinResolution:
+    """Represent sql join resolution within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlJoinResolution.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_constraints.SqlJoinResolution and related tests.
+    """
     primary_table: SqlTableRef
     related_table: SqlTableRef
     primary_column: str
@@ -208,12 +355,34 @@ class SqlJoinResolution:
 
 
 def extract_sql_constraints(goal: str) -> SqlConstraintFrame:
+    """Extract sql constraints for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints.extract_sql_constraints.
+    """
     text = str(goal or "")
     constraints: list[SqlConstraint] = []
     projections: list[SqlProjection] = []
     used_spans: list[tuple[int, int]] = []
 
     def add(kind: SqlConstraintKind, raw_text: str, **kwargs: Any) -> None:
+        """Add for the surrounding runtime workflow.
+
+        Inputs:
+            Receives kind, raw_text for this function; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints.add.
+        """
         constraints.append(
             SqlConstraint(
                 id=f"c{len(constraints) + 1}",
@@ -224,6 +393,17 @@ def extract_sql_constraints(goal: str) -> SqlConstraintFrame:
         )
 
     def add_projection(raw_text: str, subject: str, **kwargs: Any) -> None:
+        """Add projection for the surrounding runtime workflow.
+
+        Inputs:
+            Receives raw_text, subject for this function; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints.add_projection.
+        """
         if _is_explicit_all_entity_subject(subject):
             return
         clean_subject = _clean_projection_subject(subject)
@@ -356,6 +536,17 @@ def extract_sql_constraints(goal: str) -> SqlConstraintFrame:
 
 
 def resolve_sql_constraints(frame: SqlConstraintFrame, catalog: SqlSchemaCatalog) -> SqlConstraintFrame:
+    """Resolve sql constraints for the surrounding runtime workflow.
+
+    Inputs:
+        Receives frame, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints.resolve_sql_constraints.
+    """
     target_table = resolve_table_name(frame.goal, catalog)
     resolved_projections, unresolved_projections = _resolve_sql_projections(frame.projections, target_table, catalog)
     resolved_projection_tables = {
@@ -455,6 +646,17 @@ def resolve_sql_constraints(frame: SqlConstraintFrame, catalog: SqlSchemaCatalog
 
 
 def resolve_birth_date_column(table: SqlTableRef) -> SqlColumnRef | None:
+    """Resolve birth date column for the surrounding runtime workflow.
+
+    Inputs:
+        Receives table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints.resolve_birth_date_column.
+    """
     exact_priority = ["PatientBirthDate", "BirthDate", "DOB", "DateOfBirth"]
     for expected in exact_priority:
         column = table.column_by_name(expected)
@@ -471,6 +673,17 @@ def resolve_birth_date_column(table: SqlTableRef) -> SqlColumnRef | None:
 
 
 def resolve_join_relationship(primary_table: SqlTableRef | None, related_table: SqlTableRef | None) -> SqlJoinResolution | None:
+    """Resolve join relationship for the surrounding runtime workflow.
+
+    Inputs:
+        Receives primary_table, related_table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints.resolve_join_relationship.
+    """
     if primary_table is None or related_table is None:
         return None
     for foreign_key in related_table.foreign_keys:
@@ -501,6 +714,17 @@ def resolve_join_relationship(primary_table: SqlTableRef | None, related_table: 
 
 
 def validate_sql_constraint_coverage(frame: SqlConstraintFrame, sql: str) -> SqlConstraintCoverageResult:
+    """Validate sql constraint coverage for the surrounding runtime workflow.
+
+    Inputs:
+        Receives frame, sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints.validate_sql_constraint_coverage.
+    """
     constraints = list(frame.constraints)
     projections = list(frame.projections)
     if not constraints and not projections and not frame.unresolved_projections:
@@ -577,6 +801,17 @@ def validate_sql_constraint_coverage(frame: SqlConstraintFrame, sql: str) -> Sql
 
 
 def constraint_telemetry(frame: SqlConstraintFrame, coverage: SqlConstraintCoverageResult | None = None) -> dict[str, Any]:
+    """Constraint telemetry for the surrounding runtime workflow.
+
+    Inputs:
+        Receives frame, coverage for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints.constraint_telemetry.
+    """
     covered = list(coverage.covered_constraint_ids if coverage is not None else frame.covered_constraint_ids)
     missing = list(coverage.missing_constraint_ids if coverage is not None else frame.missing_constraint_ids)
     projection_covered = list(coverage.covered_projection_ids if coverage is not None else [])
@@ -610,6 +845,17 @@ def _resolve_sql_projections(
     target_table: SqlTableRef | None,
     catalog: SqlSchemaCatalog,
 ) -> tuple[list[SqlProjection], list[SqlProjection]]:
+    """Handle the internal resolve sql projections helper path for this module.
+
+    Inputs:
+        Receives projections, target_table, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._resolve_sql_projections.
+    """
     resolved: list[SqlProjection] = []
     unresolved: list[SqlProjection] = []
     for projection in projections:
@@ -632,6 +878,17 @@ def _resolve_sql_projections(
 
 
 def _resolve_unique_catalog_column(subject: str, catalog: SqlSchemaCatalog) -> SqlColumnRef | None:
+    """Handle the internal resolve unique catalog column helper path for this module.
+
+    Inputs:
+        Receives subject, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._resolve_unique_catalog_column.
+    """
     matches: list[SqlColumnRef] = []
     for table in catalog.tables:
         column = resolve_column_name(subject, table)
@@ -642,6 +899,17 @@ def _resolve_unique_catalog_column(subject: str, catalog: SqlSchemaCatalog) -> S
 
 
 def _parse_related_quantity(value: str) -> tuple[SqlConstraintOperator, int]:
+    """Handle the internal parse related quantity helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._parse_related_quantity.
+    """
     text = str(value or "").strip().lower()
     if text == "no":
         return "eq", 0
@@ -661,6 +929,17 @@ def _parse_related_quantity(value: str) -> tuple[SqlConstraintOperator, int]:
 
 
 def _infer_query_type(goal: str) -> SqlQueryType:
+    """Handle the internal infer query type helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._infer_query_type.
+    """
     if LIST_TABLES_RE.search(goal):
         return "list_tables"
     if DESCRIBE_RE.search(goal):
@@ -677,6 +956,17 @@ def _infer_query_type(goal: str) -> SqlQueryType:
 
 
 def _table_from_qualified(qualified_name: str | None, catalog: SqlSchemaCatalog) -> SqlTableRef | None:
+    """Handle the internal table from qualified helper path for this module.
+
+    Inputs:
+        Receives qualified_name, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._table_from_qualified.
+    """
     if not qualified_name or "." not in qualified_name:
         return None
     schema, table = qualified_name.split(".", 1)
@@ -684,12 +974,34 @@ def _table_from_qualified(qualified_name: str | None, catalog: SqlSchemaCatalog)
 
 
 def _covers_table(constraint: SqlConstraint, normalized_sql: str) -> bool:
+    """Handle the internal covers table helper path for this module.
+
+    Inputs:
+        Receives constraint, normalized_sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._covers_table.
+    """
     if not constraint.resolved_table:
         return False
     return _normalized_relation(constraint.resolved_table) in normalized_sql
 
 
 def _covers_column(constraint: SqlConstraint, normalized_sql: str) -> bool:
+    """Handle the internal covers column helper path for this module.
+
+    Inputs:
+        Receives constraint, normalized_sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._covers_column.
+    """
     if not constraint.resolved_column:
         return False
     column = constraint.resolved_column.split(".")[-1]
@@ -697,6 +1009,17 @@ def _covers_column(constraint: SqlConstraint, normalized_sql: str) -> bool:
 
 
 def _covers_projection(projection: SqlProjection, normalized_sql: str) -> bool:
+    """Handle the internal covers projection helper path for this module.
+
+    Inputs:
+        Receives projection, normalized_sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._covers_projection.
+    """
     if not projection.resolved_column:
         return False
     column = projection.resolved_column.split(".")[-1]
@@ -713,6 +1036,17 @@ def _covers_projection(projection: SqlProjection, normalized_sql: str) -> bool:
 
 
 def _covers_age_constraint(constraint: SqlConstraint, normalized_sql: str) -> bool:
+    """Handle the internal covers age constraint helper path for this module.
+
+    Inputs:
+        Receives constraint, normalized_sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._covers_age_constraint.
+    """
     if not constraint.resolved_column:
         return False
     column = constraint.resolved_column.split(".")[-1]
@@ -730,6 +1064,17 @@ def _covers_age_constraint(constraint: SqlConstraint, normalized_sql: str) -> bo
 
 
 def _covers_related_row_count(constraint: SqlConstraint, normalized_sql: str) -> bool:
+    """Handle the internal covers related row count helper path for this module.
+
+    Inputs:
+        Receives constraint, normalized_sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._covers_related_row_count.
+    """
     if not constraint.resolved_table:
         return False
     if _normalized_relation(constraint.resolved_table) not in normalized_sql:
@@ -751,6 +1096,17 @@ def _covers_related_row_count(constraint: SqlConstraint, normalized_sql: str) ->
 
 
 def _is_plain_unfiltered_count(normalized_sql: str) -> bool:
+    """Handle the internal is plain unfiltered count helper path for this module.
+
+    Inputs:
+        Receives normalized_sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._is_plain_unfiltered_count.
+    """
     return (
         re.fullmatch(r"select\s+count\s*\(\s*\*\s*\)(?:\s+as\s+\w+)?\s+from\s+[\w.]+", normalized_sql) is not None
         and " where " not in f" {normalized_sql} "
@@ -760,29 +1116,95 @@ def _is_plain_unfiltered_count(normalized_sql: str) -> bool:
 
 
 def _coverage_normalize(sql: str) -> str:
+    """Handle the internal coverage normalize helper path for this module.
+
+    Inputs:
+        Receives sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._coverage_normalize.
+    """
     return re.sub(r"\s+", " ", str(sql or "").replace('"', "").strip().lower())
 
 
 def _select_list(normalized_sql: str) -> str:
+    """Handle the internal select list helper path for this module.
+
+    Inputs:
+        Receives normalized_sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._select_list.
+    """
     match = re.search(r"\bselect\s+(?:distinct\s+)?(?P<select>.*?)\s+from\b", normalized_sql)
     return match.group("select") if match is not None else ""
 
 
 def _coverage_compact(value: str) -> str:
+    """Handle the internal coverage compact helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._coverage_compact.
+    """
     return re.sub(r"[^a-z0-9]+", "", str(value or "").replace('"', "").lower())
 
 
 def _column_matches_sql(column: str, normalized_sql: str) -> bool:
+    """Handle the internal column matches sql helper path for this module.
+
+    Inputs:
+        Receives column, normalized_sql for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._column_matches_sql.
+    """
     compact_sql = _coverage_compact(normalized_sql)
     compact_column = _coverage_compact(column)
     return bool(compact_column and (compact_column in compact_sql or _normalize_name(column) in normalized_sql))
 
 
 def _normalized_relation(qualified_name: str) -> str:
+    """Handle the internal normalized relation helper path for this module.
+
+    Inputs:
+        Receives qualified_name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._normalized_relation.
+    """
     return _coverage_normalize(qualified_name)
 
 
 def _age_birthdate_operator(operator: str) -> str | None:
+    """Handle the internal age birthdate operator helper path for this module.
+
+    Inputs:
+        Receives operator for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._age_birthdate_operator.
+    """
     return {
         "gt": "<",
         "gte": "<=",
@@ -792,6 +1214,17 @@ def _age_birthdate_operator(operator: str) -> str | None:
 
 
 def _sql_operator(operator: str) -> str | None:
+    """Handle the internal sql operator helper path for this module.
+
+    Inputs:
+        Receives operator for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._sql_operator.
+    """
     return {
         "eq": "=",
         "neq": "<>",
@@ -803,6 +1236,17 @@ def _sql_operator(operator: str) -> str | None:
 
 
 def _fk_points_to(foreign_key: dict[str, Any], table: SqlTableRef) -> bool:
+    """Handle the internal fk points to helper path for this module.
+
+    Inputs:
+        Receives foreign_key, table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._fk_points_to.
+    """
     return (
         str(foreign_key.get("referred_schema") or "").lower() == table.schema_name.lower()
         and str(foreign_key.get("referred_table") or "").lower() == table.table_name.lower()
@@ -810,6 +1254,17 @@ def _fk_points_to(foreign_key: dict[str, Any], table: SqlTableRef) -> bool:
 
 
 def _first_string(value: Any) -> str | None:
+    """Handle the internal first string helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._first_string.
+    """
     if not isinstance(value, list) or not value:
         return None
     text = str(value[0] or "").strip()
@@ -817,10 +1272,32 @@ def _first_string(value: Any) -> str | None:
 
 
 def _clean_subject(value: str) -> str:
+    """Handle the internal clean subject helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._clean_subject.
+    """
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
 def _clean_projection_subject(value: str) -> str:
+    """Handle the internal clean projection subject helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._clean_projection_subject.
+    """
     text = _clean_subject(value)
     text = re.sub(r"\b(?:in|from)\s+[A-Za-z_][\w.-]*\s*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\bas\s+(?:json|csv|text)\s*$", "", text, flags=re.IGNORECASE)
@@ -832,6 +1309,17 @@ def _clean_projection_subject(value: str) -> str:
 
 
 def _is_row_projection_subject(subject: str) -> bool:
+    """Handle the internal is row projection subject helper path for this module.
+
+    Inputs:
+        Receives subject for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._is_row_projection_subject.
+    """
     normalized = _normalize_name(subject)
     if not normalized:
         return True
@@ -839,18 +1327,62 @@ def _is_row_projection_subject(subject: str) -> bool:
 
 
 def _is_explicit_all_entity_subject(subject: str) -> bool:
+    """Handle the internal is explicit all entity subject helper path for this module.
+
+    Inputs:
+        Receives subject for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._is_explicit_all_entity_subject.
+    """
     tokens = _normalize_name(subject).split()
     return len(tokens) == 2 and tokens[0] == "all"
 
 
 def _projection_subject_starts_with_count(subject: str) -> bool:
+    """Handle the internal projection subject starts with count helper path for this module.
+
+    Inputs:
+        Receives subject for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._projection_subject_starts_with_count.
+    """
     return bool(re.match(r"\s*(?:the\s+)?(?:count|number\s+of|how\s+many)\b", str(subject or ""), re.IGNORECASE))
 
 
 def _normalize_name(value: str) -> str:
+    """Handle the internal normalize name helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._normalize_name.
+    """
     text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
     return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
 
 def _overlaps(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    """Handle the internal overlaps helper path for this module.
+
+    Inputs:
+        Receives span, spans for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_constraints._overlaps.
+    """
     return any(span[0] < existing[1] and existing[0] < span[1] for existing in spans)

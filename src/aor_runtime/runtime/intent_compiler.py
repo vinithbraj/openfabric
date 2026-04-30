@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.intent_compiler
+
+Purpose:
+    Provide deterministic plan-builder helpers retained for compatibility and domain utilities.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -32,6 +47,17 @@ INTERNAL_RETURN_ACTION = "runtime.return"
 
 @dataclass
 class CompiledFragment:
+    """Represent compiled fragment within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by CompiledFragment.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.intent_compiler.CompiledFragment and related tests.
+    """
     steps: list[dict[str, Any]]
     output_alias: str
     output_kind: str
@@ -42,6 +68,17 @@ class CompiledFragment:
 
 
 def compile_intent_to_plan(intent: Any, allowed_tools: list[str], settings: Settings) -> ExecutionPlan:
+    """Compile intent to plan for the surrounding runtime workflow.
+
+    Inputs:
+        Receives intent, allowed_tools, settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler.compile_intent_to_plan.
+    """
     if isinstance(intent, CompoundIntent):
         return _compile_compound_intent(intent, allowed_tools, settings)
 
@@ -396,6 +433,17 @@ def compile_intent_to_plan(intent: Any, allowed_tools: list[str], settings: Sett
 
 
 def _compile_compound_intent(intent: CompoundIntent, allowed_tools: list[str], settings: Settings) -> ExecutionPlan:
+    """Handle the internal compile compound intent helper path for this module.
+
+    Inputs:
+        Receives intent, allowed_tools, settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._compile_compound_intent.
+    """
     if not intent.intents:
         raise ValueError("Compound deterministic intent requires at least one nested intent.")
     producer = intent.intents[0]
@@ -454,6 +502,17 @@ def _compile_compound_intent(intent: CompoundIntent, allowed_tools: list[str], s
 
 
 def _compile_producer_fragment(intent: Any, allowed_tools: list[str], settings: Settings) -> CompiledFragment:
+    """Handle the internal compile producer fragment helper path for this module.
+
+    Inputs:
+        Receives intent, allowed_tools, settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._compile_producer_fragment.
+    """
     if isinstance(intent, CountFilesIntent):
         action, args, output = _file_discovery_step(intent.path, intent.pattern, recursive=intent.recursive)
         _require_tools(allowed_tools, action)
@@ -599,6 +658,17 @@ def _compile_producer_fragment(intent: Any, allowed_tools: list[str], settings: 
 
 
 def _compile_transform_fragment(fragment: CompiledFragment, intent: TransformIntent | TransformChainIntent) -> CompiledFragment:
+    """Handle the internal compile transform fragment helper path for this module.
+
+    Inputs:
+        Receives fragment, intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._compile_transform_fragment.
+    """
     operations = [intent.operation] if isinstance(intent, TransformIntent) else list(intent.operations)
     current = fragment
     for index, operation in enumerate(operations):
@@ -615,6 +685,17 @@ def _compile_transform_fragment(fragment: CompiledFragment, intent: TransformInt
 
 
 def _append_case_transform(fragment: CompiledFragment, operation: str, output_alias: str) -> CompiledFragment:
+    """Handle the internal append case transform helper path for this module.
+
+    Inputs:
+        Receives fragment, operation, output_alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._append_case_transform.
+    """
     code = _case_transform_code(operation, fragment.output_kind)
     steps = list(fragment.steps)
     steps.append(
@@ -643,6 +724,17 @@ def _append_case_transform(fragment: CompiledFragment, operation: str, output_al
 
 
 def _append_shape_formatter(fragment: CompiledFragment, output_alias: str, mode: str) -> CompiledFragment:
+    """Handle the internal append shape formatter helper path for this module.
+
+    Inputs:
+        Receives fragment, output_alias, mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._append_shape_formatter.
+    """
     steps = list(fragment.steps)
     steps.append(
         {
@@ -669,6 +761,17 @@ def _append_shape_formatter(fragment: CompiledFragment, output_alias: str, mode:
 
 
 def _append_write_step(fragment: CompiledFragment, path: str) -> CompiledFragment:
+    """Handle the internal append write step helper path for this module.
+
+    Inputs:
+        Receives fragment, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._append_write_step.
+    """
     steps = list(fragment.steps)
     steps.append(
         {
@@ -689,6 +792,17 @@ def _append_write_step(fragment: CompiledFragment, path: str) -> CompiledFragmen
 
 
 def _ensure_fragment_mode(fragment: CompiledFragment, mode: str) -> CompiledFragment:
+    """Handle the internal ensure fragment mode helper path for this module.
+
+    Inputs:
+        Receives fragment, mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._ensure_fragment_mode.
+    """
     desired_mode = "text" if mode == "newline_text" else mode
     if fragment.output_kind == "text" and desired_mode == "text":
         return fragment
@@ -702,6 +816,17 @@ def _ensure_fragment_mode(fragment: CompiledFragment, mode: str) -> CompiledFrag
 
 
 def _case_transform_code(operation: str, input_kind: str) -> str:
+    """Handle the internal case transform code helper path for this module.
+
+    Inputs:
+        Receives operation, input_kind for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._case_transform_code.
+    """
     transform_expression = {
         "uppercase": "str(value).upper()",
         "lowercase": "str(value).lower()",
@@ -724,12 +849,34 @@ def _case_transform_code(operation: str, input_kind: str) -> str:
 
 
 def _next_transform_alias(fragment: CompiledFragment) -> str:
+    """Handle the internal next transform alias helper path for this module.
+
+    Inputs:
+        Receives fragment for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._next_transform_alias.
+    """
     existing = [step.get("output") for step in fragment.steps if step.get("output")]
     transform_count = sum(1 for alias in existing if str(alias).startswith("transform"))
     return f"transform{transform_count + 1}_result"
 
 
 def _fetch_extract_code(extract: str) -> str:
+    """Handle the internal fetch extract code helper path for this module.
+
+    Inputs:
+        Receives extract for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._fetch_extract_code.
+    """
     if extract == "title":
         pattern = r"<title[^>]*>(.*?)</title>"
         group_expression = "match.group(1).strip()"
@@ -747,6 +894,17 @@ def _fetch_extract_code(extract: str) -> str:
 
 
 def _output_contract_for_fragment(fragment: CompiledFragment, *, mode: str | None = None) -> dict[str, Any]:
+    """Handle the internal output contract for fragment helper path for this module.
+
+    Inputs:
+        Receives fragment, mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._output_contract_for_fragment.
+    """
     contract_mode = mode or fragment.return_mode
     json_shape = None
     if contract_mode == "json":
@@ -776,6 +934,17 @@ def _file_discovery_step(
     dir_only: bool = False,
     path_style: str = "relative",
 ) -> tuple[str, dict[str, Any], str]:
+    """Handle the internal file discovery step helper path for this module.
+
+    Inputs:
+        Receives path, pattern, recursive, file_only, dir_only, path_style for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._file_discovery_step.
+    """
     normalized_pattern = pattern or "*"
     if recursive and not dir_only:
         return "fs.find", {"path": path, "pattern": normalized_pattern}, "file_matches"
@@ -794,6 +963,17 @@ def _file_discovery_step(
 
 
 def _require_tools(allowed_tools: list[str], *required: str) -> None:
+    """Handle the internal require tools helper path for this module.
+
+    Inputs:
+        Receives allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intent_compiler._require_tools.
+    """
     missing = [name for name in required if name not in allowed_tools]
     if missing:
         missing_text = ", ".join(sorted(missing))

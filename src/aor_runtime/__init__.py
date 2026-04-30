@@ -1,4 +1,17 @@
-"""OpenFABRIC runtime."""
+"""OpenFABRIC Runtime Module: aor_runtime.__init__
+
+Purpose:
+    Expose package version metadata and runtime version helpers for OpenFABRIC. Existing module summary: OpenFABRIC runtime.
+
+Responsibilities:
+    Resolve package version, Git revision, and dirty-worktree suffix for API/model identity surfaces.
+
+Data flow / Interfaces:
+    Exports __version__, __package_version__, and get_runtime_version for CLI, API, and OpenWebUI model naming.
+
+Boundaries:
+    Performs read-only Git inspection only and must not mutate repository state.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +26,17 @@ __package_version__ = "0.4.2"
 
 @lru_cache(maxsize=1)
 def get_runtime_version() -> str:
+    """Get runtime version for the surrounding runtime workflow.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.__init__.get_runtime_version.
+    """
     repo_root = Path(__file__).resolve().parents[2]
     if not (repo_root / ".git").exists():
         return __package_version__
@@ -26,11 +50,33 @@ def get_runtime_version() -> str:
 
 
 def _git_worktree_is_dirty(repo_root: Path) -> bool:
+    """Handle the internal git worktree is dirty helper path for this module.
+
+    Inputs:
+        Receives repo_root for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.__init__._git_worktree_is_dirty.
+    """
     status = _run_git_command(repo_root, ["status", "--short"])
     return bool(status)
 
 
 def _run_git_command(repo_root: Path, args: list[str]) -> str:
+    """Handle the internal run git command helper path for this module.
+
+    Inputs:
+        Receives repo_root, args for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.__init__._run_git_command.
+    """
     try:
         result = subprocess.run(
             ["git", *args],

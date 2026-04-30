@@ -1,5 +1,7 @@
 # Intent and Compiler Model
 
+This document describes typed intent and compiler helpers retained for compatibility, fixtures, and direct tests. The active user-prompt architecture is the validator-enforced LLM action planner described in [System Design](./SYSTEM_DESIGN.md).
+
 ## Overview
 
 Typed intents are retained as helper and compatibility models. The active runtime first asks the LLM action planner for structured tool actions, then canonicalizes and validates those actions before compiling an `ExecutionPlan`.
@@ -165,13 +167,15 @@ The runtime’s intent model is designed so that:
 - pack-local compilers emit fixed plans
 - any optional LLM participation must stop at validated intent JSON
 
-The LLM must never be allowed to emit:
+Compatibility typed-intent LLM helpers must never emit:
 
 - raw tool calls
 - shell commands
 - gateway commands
 - `python.exec`
 - raw `ExecutionPlan` payloads
+
+The active action planner may emit structured tool actions, but only through the validator-enforced action JSON contract. Those actions are not executable until deterministic canonicalization and validation approve them.
 
 See also:
 

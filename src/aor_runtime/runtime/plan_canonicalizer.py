@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.plan_canonicalizer
+
+Purpose:
+    Apply lower-level execution-plan canonicalization helpers outside the LLM planner.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -48,6 +63,17 @@ TEXTUAL_CONTENT_PATHS = {"content", "csv", "json", "markdown", "text", "value"}
 
 @dataclass(slots=True)
 class CanonicalizedPlanResult:
+    """Represent canonicalized plan result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by CanonicalizedPlanResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.plan_canonicalizer.CanonicalizedPlanResult and related tests.
+    """
     plan: ExecutionPlan
     changed: bool
     repairs: list[str]
@@ -55,6 +81,17 @@ class CanonicalizedPlanResult:
 
 @dataclass(slots=True)
 class _Producer:
+    """Represent producer within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _Producer.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.plan_canonicalizer._Producer and related tests.
+    """
     step_id: int
     action: str
     output: str
@@ -62,6 +99,17 @@ class _Producer:
 
 
 def coerce_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Coerce plan payload for the surrounding runtime workflow.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer.coerce_plan_payload.
+    """
     coerced = deepcopy(payload)
     steps = coerced.get("steps")
     if not isinstance(steps, list):
@@ -88,6 +136,17 @@ def canonicalize_plan(
     *,
     repair_budget: int = DEFAULT_REPAIR_BUDGET,
 ) -> CanonicalizedPlanResult:
+    """Canonicalize plan for the surrounding runtime workflow.
+
+    Inputs:
+        Receives plan, goal, allowed_tools, repair_budget for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer.canonicalize_plan.
+    """
     working = ExecutionPlan.model_validate(plan.model_dump())
     original_dump = working.model_dump()
     repairs: list[str] = []
@@ -220,6 +279,17 @@ def canonicalize_plan(
 
 
 def _consume_budget(limit: int, proposed_total: int) -> None:
+    """Handle the internal consume budget helper path for this module.
+
+    Inputs:
+        Receives limit, proposed_total for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._consume_budget.
+    """
     if proposed_total > limit:
         raise ValueError("Canonicalization repair budget exceeded.")
 
@@ -230,6 +300,17 @@ def _canonical_output_alias(
     seen_outputs: set[str],
     alias_counts: dict[str, int],
 ) -> str:
+    """Handle the internal canonical output alias helper path for this module.
+
+    Inputs:
+        Receives step, output_name, seen_outputs, alias_counts for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._canonical_output_alias.
+    """
     normalized = output_name.strip()
     if _is_stable_output_alias(normalized) and normalized not in seen_outputs:
         return normalized
@@ -238,6 +319,17 @@ def _canonical_output_alias(
 
 
 def _is_stable_output_alias(alias: str) -> bool:
+    """Handle the internal is stable output alias helper path for this module.
+
+    Inputs:
+        Receives alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._is_stable_output_alias.
+    """
     if not alias:
         return False
     if alias.lower() in GENERIC_OUTPUT_ALIASES:
@@ -246,6 +338,17 @@ def _is_stable_output_alias(alias: str) -> bool:
 
 
 def _dedupe_alias(base_alias: str, seen_outputs: set[str], alias_counts: dict[str, int]) -> str:
+    """Handle the internal dedupe alias helper path for this module.
+
+    Inputs:
+        Receives base_alias, seen_outputs, alias_counts for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._dedupe_alias.
+    """
     if base_alias not in seen_outputs:
         alias_counts.setdefault(base_alias, 1)
         return base_alias
@@ -259,6 +362,17 @@ def _dedupe_alias(base_alias: str, seen_outputs: set[str], alias_counts: dict[st
 
 
 def _default_output_kind(action: str) -> str:
+    """Handle the internal default output kind helper path for this module.
+
+    Inputs:
+        Receives action for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._default_output_kind.
+    """
     return TOOL_OUTPUT_MAP.get(action, ("data",))[0]
 
 
@@ -267,9 +381,31 @@ def _rewrite_step_args(
     prior_producers: list[_Producer],
     alias_rewrites: dict[str, str],
 ) -> tuple[Any, list[str]]:
+    """Handle the internal rewrite step args helper path for this module.
+
+    Inputs:
+        Receives value, prior_producers, alias_rewrites for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._rewrite_step_args.
+    """
     repairs: list[str] = []
 
     def rewrite(current: Any) -> Any:
+        """Rewrite for the surrounding runtime workflow.
+
+        Inputs:
+            Receives current for this function; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer.rewrite.
+        """
         if is_step_reference(current):
             ref = deepcopy(current)
             original_alias = str(ref["$ref"]).strip()
@@ -293,6 +429,17 @@ def _rewrite_step_args(
 
 
 def _repair_unknown_ref(alias: str, path: Any, prior_producers: list[_Producer]) -> str | None:
+    """Handle the internal repair unknown ref helper path for this module.
+
+    Inputs:
+        Receives alias, path, prior_producers for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._repair_unknown_ref.
+    """
     expected_field = _expected_ref_field(alias, path)
     compatible: list[_Producer] = []
     for producer in prior_producers:
@@ -306,6 +453,17 @@ def _repair_unknown_ref(alias: str, path: Any, prior_producers: list[_Producer])
 
 
 def _expected_ref_field(alias: str, path: Any) -> str | None:
+    """Handle the internal expected ref field helper path for this module.
+
+    Inputs:
+        Receives alias, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._expected_ref_field.
+    """
     path_text = str(path or "").strip()
     if path_text:
         return path_text.split(".", 1)[0].strip() or None
@@ -324,6 +482,17 @@ def _rewrite_step_inputs(
     prior_producers: list[_Producer],
     alias_rewrites: dict[str, str],
 ) -> tuple[list[str], list[str]]:
+    """Handle the internal rewrite step inputs helper path for this module.
+
+    Inputs:
+        Receives inputs, args, prior_producers, alias_rewrites for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._rewrite_step_inputs.
+    """
     repairs: list[str] = []
     referenced_outputs = list(_ordered_step_references(args))
     known_outputs = {producer.output for producer in prior_producers}
@@ -364,6 +533,17 @@ def _repair_python_inputs_args(
     prior_producers: list[_Producer],
     alias_rewrites: dict[str, str],
 ) -> tuple[dict[str, Any], list[str]]:
+    """Handle the internal repair python inputs args helper path for this module.
+
+    Inputs:
+        Receives step, args, prior_producers, alias_rewrites for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._repair_python_inputs_args.
+    """
     if step.action != "python.exec":
         return args, []
     inputs_mapping = args.get("inputs")
@@ -409,9 +589,31 @@ def _repair_python_inputs_args(
 
 
 def _ordered_step_references(value: Any) -> list[str]:
+    """Handle the internal ordered step references helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._ordered_step_references.
+    """
     refs: list[str] = []
 
     def collect(current: Any) -> None:
+        """Collect for the surrounding runtime workflow.
+
+        Inputs:
+            Receives current for this function; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer.collect.
+        """
         if is_step_reference(current):
             alias = str(current["$ref"]).strip()
             if alias and alias not in refs:
@@ -430,6 +632,17 @@ def _ordered_step_references(value: Any) -> list[str]:
 
 
 def _repair_step_paths(args: dict[str, Any], prior_paths: list[str]) -> tuple[dict[str, Any], list[str]]:
+    """Handle the internal repair step paths helper path for this module.
+
+    Inputs:
+        Receives args, prior_paths for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._repair_step_paths.
+    """
     repaired = deepcopy(args)
     repairs: list[str] = []
     for key in PATH_ARG_KEYS:
@@ -450,6 +663,17 @@ def _repair_write_content_from_inputs(
     inputs: list[str],
     prior_producers: list[_Producer],
 ) -> tuple[dict[str, Any], list[str]]:
+    """Handle the internal repair write content from inputs helper path for this module.
+
+    Inputs:
+        Receives step, args, inputs, prior_producers for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._repair_write_content_from_inputs.
+    """
     if step.action != "fs.write":
         return args, []
     path_value = args.get("path")
@@ -496,6 +720,17 @@ def _rewrite_structured_fs_write_step(
     args: dict[str, Any],
     inputs: list[str],
 ) -> tuple[str, dict[str, Any], list[str], list[str]]:
+    """Handle the internal rewrite structured fs write step helper path for this module.
+
+    Inputs:
+        Receives step, args, inputs for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._rewrite_structured_fs_write_step.
+    """
     if step.action != "fs.write":
         return step.action, args, inputs, []
     path_value = args.get("path")
@@ -522,6 +757,17 @@ def _rewrite_structured_fs_write_step(
 
 
 def _is_structured_write_content(value: Any) -> bool:
+    """Handle the internal is structured write content helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._is_structured_write_content.
+    """
     if isinstance(value, (dict, list)):
         if is_step_reference(value):
             path_text = str(value.get("path") or "").strip().split(".", 1)[0]
@@ -531,6 +777,17 @@ def _is_structured_write_content(value: Any) -> bool:
 
 
 def _repair_single_path(value: str, prior_paths: list[str]) -> str | None:
+    """Handle the internal repair single path helper path for this module.
+
+    Inputs:
+        Receives value, prior_paths for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._repair_single_path.
+    """
     path_text = str(value).strip()
     if not path_text or "/" in path_text or path_text.startswith(".") or "*" in path_text:
         return None
@@ -541,6 +798,17 @@ def _repair_single_path(value: str, prior_paths: list[str]) -> str | None:
 
 
 def _literal_paths_for_args(args: dict[str, Any]) -> list[str]:
+    """Handle the internal literal paths for args helper path for this module.
+
+    Inputs:
+        Receives args for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._literal_paths_for_args.
+    """
     paths: list[str] = []
     for key in PATH_ARG_KEYS:
         value = args.get(key)
@@ -550,6 +818,17 @@ def _literal_paths_for_args(args: dict[str, Any]) -> list[str]:
 
 
 def _preferred_content_path_for_write(path_value: str, producer_action: str) -> str | None:
+    """Handle the internal preferred content path for write helper path for this module.
+
+    Inputs:
+        Receives path_value, producer_action for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._preferred_content_path_for_write.
+    """
     suffix = PurePosixPath(path_value).suffix.lower()
     if producer_action == "fs.read":
         return "content"
@@ -572,6 +851,17 @@ def _append_final_readback_if_needed(
     goal: str,
     allowed_tools: list[str],
 ) -> tuple[list[ExecutionStep], list[str]]:
+    """Handle the internal append final readback if needed helper path for this module.
+
+    Inputs:
+        Receives steps, goal, allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._append_final_readback_if_needed.
+    """
     if "fs.read" not in allowed_tools:
         return steps, []
     if not steps:
@@ -608,4 +898,15 @@ def _append_final_readback_if_needed(
 def _merge_adjacent_python_steps_if_safe(steps: list[ExecutionStep]) -> tuple[list[ExecutionStep], list[str]]:
     # Existing step ids and order must remain stable, so aggressive merging is intentionally disabled.
     # We keep the hook in place for future safe transforms, but under the current invariants this is a no-op.
+    """Handle the internal merge adjacent python steps if safe helper path for this module.
+
+    Inputs:
+        Receives steps for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.plan_canonicalizer._merge_adjacent_python_steps_if_safe.
+    """
     return steps, []

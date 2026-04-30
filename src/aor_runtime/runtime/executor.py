@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.executor
+
+Purpose:
+    Execute compiled plan steps against the tool registry.
+
+Responsibilities:
+    Resolve dataflow, invoke tools, stream progress, summarize step outputs, and collect StepLog history.
+
+Data flow / Interfaces:
+    Consumes ExecutionPlan steps and runtime context; returns structured tool results for validators and presenters.
+
+Boundaries:
+    Never chooses semantic intent; it executes only compiled, validated steps and observes cancellation tokens.
+"""
+
 from __future__ import annotations
 
 import json
@@ -20,10 +35,43 @@ COUNT_TEXT_RE = re.compile(r"^\s*(-?\d+)(?:\s+\S.*)?$")
 
 
 class PlanExecutor:
+    """Represent plan executor within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PlanExecutor.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.executor.PlanExecutor and related tests.
+    """
     def __init__(self, tools: ToolRegistry) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives tools for this PlanExecutor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanExecutor.__init__ calls and related tests.
+        """
         self.tools = tools
 
     def describe_step(self, step: PlanStep) -> dict[str, Any]:
+        """Describe step for PlanExecutor instances.
+
+        Inputs:
+            Receives step for this PlanExecutor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanExecutor.describe_step calls and related tests.
+        """
         preview: dict[str, Any] = {}
         node = str(step.args.get("node") or step.args.get("gateway_node") or "").strip()
         if node:
@@ -50,6 +98,17 @@ class PlanExecutor:
         event_sink: Callable[[dict[str, Any]], None] | None = None,
         context: ToolInvocationContext | None = None,
     ) -> StepLog:
+        """Execute step for PlanExecutor instances.
+
+        Inputs:
+            Receives step, step_outputs, event_sink, context for this PlanExecutor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanExecutor.execute_step calls and related tests.
+        """
         started = datetime.now(timezone.utc).isoformat()
         try:
             if context is not None:
@@ -97,6 +156,17 @@ class PlanExecutor:
             )
 
     def _supports_streaming(self, action: str) -> bool:
+        """Handle the internal supports streaming helper path for this module.
+
+        Inputs:
+            Receives action for this PlanExecutor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanExecutor._supports_streaming calls and related tests.
+        """
         tool = self.tools.get(action)
         return callable(getattr(tool, "stream", None))
 
@@ -107,6 +177,17 @@ class PlanExecutor:
         *,
         context: ToolInvocationContext | None = None,
     ) -> dict[str, Any]:
+        """Handle the internal invoke streaming tool helper path for this module.
+
+        Inputs:
+            Receives step, event_sink, context for this PlanExecutor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanExecutor._invoke_streaming_tool calls and related tests.
+        """
         tool = self.tools.get(step.action)
         validated_args = tool.args_model.model_validate(step.args)
         stream_method = getattr(tool, "stream", None)
@@ -178,6 +259,17 @@ class PlanExecutor:
         return result
 
     def execute(self, plan: ExecutionPlan) -> tuple[list[StepLog], dict[str, Any] | None]:
+        """Execute for PlanExecutor instances.
+
+        Inputs:
+            Receives plan for this PlanExecutor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through PlanExecutor.execute calls and related tests.
+        """
         history: list[StepLog] = []
         failure: dict[str, Any] | None = None
         step_outputs: dict[str, Any] = {}
@@ -203,6 +295,17 @@ def summarize_final_output(
     settings: Settings | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Summarize final output for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, history, settings, metadata for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor.summarize_final_output.
+    """
     artifacts: list[str] = []
     if history:
         for item in history:
@@ -289,6 +392,17 @@ def _render_final_result(
     output_mode: str,
     metadata: dict[str, Any],
 ):
+    """Handle the internal render final result helper path for this module.
+
+    Inputs:
+        Receives goal, history, settings, output_mode, metadata for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._render_final_result.
+    """
     if output_mode == "csv":
         return None
     raw_mode = settings.response_render_mode == "raw"
@@ -336,6 +450,17 @@ def _render_final_result(
 
 
 def _upstream_presentation_action(history: list[StepLog]) -> str | None:
+    """Handle the internal upstream presentation action helper path for this module.
+
+    Inputs:
+        Receives history for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._upstream_presentation_action.
+    """
     for item in reversed(history):
         action = str(item.step.action or "")
         if action not in {"runtime.return", "text.format"}:
@@ -344,18 +469,51 @@ def _upstream_presentation_action(history: list[StepLog]) -> str | None:
 
 
 def _presentation_source_supported(action: str | None) -> bool:
+    """Handle the internal presentation source supported helper path for this module.
+
+    Inputs:
+        Receives action for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._presentation_source_supported.
+    """
     if not action:
         return False
     return action in {"sql.query", "sql.validate", "shell.exec"} or action.startswith("slurm.") or action.startswith("fs.")
 
 
 def _presentation_value_supported(value: Any) -> bool:
+    """Handle the internal presentation value supported helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._presentation_value_supported.
+    """
     if isinstance(value, list):
         return True
     return isinstance(value, dict)
 
 
 def _coerce_structured_user_value(value: Any, *, fallback: Any = None) -> Any:
+    """Handle the internal coerce structured user value helper path for this module.
+
+    Inputs:
+        Receives value, fallback for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._coerce_structured_user_value.
+    """
     if isinstance(value, str) and _looks_like_json_object_or_array(value):
         decoded = _decode_json_string(value)
         if decoded is not None:
@@ -368,6 +526,17 @@ def _coerce_structured_user_value(value: Any, *, fallback: Any = None) -> Any:
 
 
 def _decode_json_string(value: str) -> Any | None:
+    """Handle the internal decode json string helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._decode_json_string.
+    """
     try:
         return json.loads(value)
     except Exception:
@@ -375,6 +544,17 @@ def _decode_json_string(value: str) -> Any | None:
 
 
 def _shape_text_like_content(content: str, mode: str) -> str:
+    """Handle the internal shape text like content helper path for this module.
+
+    Inputs:
+        Receives content, mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._shape_text_like_content.
+    """
     stripped = str(content or "").strip()
     if mode == "count":
         count_value = _extract_count_value(stripped)
@@ -384,6 +564,17 @@ def _shape_text_like_content(content: str, mode: str) -> str:
 
 
 def _shape_sequence_content(values: list[Any], mode: str, *, key: str) -> str:
+    """Handle the internal shape sequence content helper path for this module.
+
+    Inputs:
+        Receives values, mode, key for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._shape_sequence_content.
+    """
     items = [str(value) for value in values]
     if mode == "count":
         return str(len(items))
@@ -395,6 +586,17 @@ def _shape_sequence_content(values: list[Any], mode: str, *, key: str) -> str:
 
 
 def _shape_python_result(result: dict[str, Any], mode: str) -> str:
+    """Handle the internal shape python result helper path for this module.
+
+    Inputs:
+        Receives result, mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._shape_python_result.
+    """
     value = result.get("result")
     fallback = str(result.get("output") or "").strip()
     if mode == "count":
@@ -426,6 +628,17 @@ def _shape_python_result(result: dict[str, Any], mode: str) -> str:
 
 
 def _shape_sql_result(result: dict[str, Any], mode: str) -> str:
+    """Handle the internal shape sql result helper path for this module.
+
+    Inputs:
+        Receives result, mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._shape_sql_result.
+    """
     rows = list(result.get("rows", []) or [])
     database = str(result.get("database", ""))
     row_count = int(result.get("row_count", 0))
@@ -442,6 +655,17 @@ def _shape_sql_result(result: dict[str, Any], mode: str) -> str:
 
 
 def _shape_shell_output(stdout: str, mode: str) -> str:
+    """Handle the internal shape shell output helper path for this module.
+
+    Inputs:
+        Receives stdout, mode for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._shape_shell_output.
+    """
     if mode == "count":
         count_value = _extract_count_value(stdout)
         if count_value is not None:
@@ -450,6 +674,17 @@ def _shape_shell_output(stdout: str, mode: str) -> str:
 
 
 def _extract_textual_value(value: Any, *, preferred_keys: tuple[str, ...]) -> str | None:
+    """Handle the internal extract textual value helper path for this module.
+
+    Inputs:
+        Receives value, preferred_keys for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._extract_textual_value.
+    """
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
@@ -465,6 +700,17 @@ def _extract_textual_value(value: Any, *, preferred_keys: tuple[str, ...]) -> st
 
 
 def _extract_json_value(value: Any) -> str | None:
+    """Handle the internal extract json value helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._extract_json_value.
+    """
     if isinstance(value, dict):
         for key in ("json", "value"):
             nested = value.get(key)
@@ -479,6 +725,17 @@ def _extract_json_value(value: Any) -> str | None:
 
 
 def _extract_single_row_scalar(rows: list[Any]) -> Any | None:
+    """Handle the internal extract single row scalar helper path for this module.
+
+    Inputs:
+        Receives rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._extract_single_row_scalar.
+    """
     if len(rows) != 1:
         return None
     row = rows[0]
@@ -488,6 +745,17 @@ def _extract_single_row_scalar(rows: list[Any]) -> Any | None:
 
 
 def _rows_to_csv(rows: list[Any]) -> str:
+    """Handle the internal rows to csv helper path for this module.
+
+    Inputs:
+        Receives rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._rows_to_csv.
+    """
     if not rows:
         return ""
     normalized_rows = [row for row in rows if isinstance(row, dict)]
@@ -504,6 +772,17 @@ def _rows_to_csv(rows: list[Any]) -> str:
 
 
 def _extract_count_value(value: Any) -> int | float | None:
+    """Handle the internal extract count value helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._extract_count_value.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -530,9 +809,31 @@ def _extract_count_value(value: Any) -> int | float | None:
 
 
 def _looks_like_json_object_or_array(value: str) -> bool:
+    """Handle the internal looks like json object or array helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._looks_like_json_object_or_array.
+    """
     stripped = str(value or "").strip()
     return stripped.startswith("{") or stripped.startswith("[")
 
 
 def _dump_json(value: Any) -> str:
+    """Handle the internal dump json helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.executor._dump_json.
+    """
     return json.dumps(value, ensure_ascii=False, sort_keys=True)

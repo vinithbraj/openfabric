@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.slurm_semantics
+
+Purpose:
+    Extract SLURM semantic intent details used by planners, validators, and fixtures.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import getpass
@@ -69,6 +84,17 @@ SlurmDataSource = Literal["squeue", "sacct", "sinfo", "scontrol", "sacctmgr", "d
 
 @dataclass
 class SlurmRequest:
+    """Represent slurm request within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmRequest.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_semantics.SlurmRequest and related tests.
+    """
     id: str
     kind: SlurmRequestKind
     raw_text: str
@@ -93,11 +119,33 @@ class SlurmRequest:
     covered: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for SlurmRequest instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SlurmRequest.to_dict calls and related tests.
+        """
         return asdict(self)
 
 
 @dataclass
 class SlurmSemanticConstraint:
+    """Represent slurm semantic constraint within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmSemanticConstraint.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_semantics.SlurmSemanticConstraint and related tests.
+    """
     id: str
     kind: SlurmConstraintKind
     raw_text: str
@@ -110,11 +158,33 @@ class SlurmSemanticConstraint:
     covered: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for SlurmSemanticConstraint instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SlurmSemanticConstraint.to_dict calls and related tests.
+        """
         return asdict(self)
 
 
 @dataclass
 class SlurmSemanticFrame:
+    """Represent slurm semantic frame within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmSemanticFrame.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_semantics.SlurmSemanticFrame and related tests.
+    """
     query_type: SlurmQueryType
     requests: list[SlurmRequest] = field(default_factory=list)
     constraints: list[SlurmSemanticConstraint] = field(default_factory=list)
@@ -137,6 +207,17 @@ class SlurmSemanticFrame:
     missing_constraint_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for SlurmSemanticFrame instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SlurmSemanticFrame.to_dict calls and related tests.
+        """
         return {
             "query_type": self.query_type,
             "requests": [request.to_dict() for request in self.requests],
@@ -193,6 +274,17 @@ _RUNTIME_AGGREGATE_RE = re.compile(
 
 
 def extract_slurm_semantic_frame(goal: str, context: dict[str, Any] | None = None) -> SlurmSemanticFrame:
+    """Extract slurm semantic frame for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics.extract_slurm_semantic_frame.
+    """
     del context
     prompt = str(goal or "").strip()
     output_mode = _detect_output_mode(prompt)
@@ -220,6 +312,17 @@ def extract_slurm_semantic_frame(goal: str, context: dict[str, Any] | None = Non
 
 
 def _looks_like_slurm_prompt(prompt: str) -> bool:
+    """Handle the internal looks like slurm prompt helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._looks_like_slurm_prompt.
+    """
     lower = prompt.lower()
     if _SLURM_DOMAIN_RE.search(prompt):
         return True
@@ -237,7 +340,29 @@ def _looks_like_slurm_prompt(prompt: str) -> bool:
 
 
 class _FrameBuilder:
+    """Represent frame builder within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _FrameBuilder.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_semantics._FrameBuilder and related tests.
+    """
     def __init__(self, prompt: str, output_mode: Literal["text", "csv", "json", "count"]) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives prompt, output_mode for this _FrameBuilder method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through _FrameBuilder.__init__ calls and related tests.
+        """
         self.prompt = prompt
         self.lower = prompt.lower()
         self.output_mode = output_mode
@@ -246,6 +371,17 @@ class _FrameBuilder:
         self._seen_requests: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
 
     def frame(self) -> SlurmSemanticFrame:
+        """Frame for _FrameBuilder instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through _FrameBuilder.frame calls and related tests.
+        """
         query_type = _query_type_for_requests(self.requests)
         requested_tools = [
             str(request.requires_tool)
@@ -275,6 +411,17 @@ class _FrameBuilder:
         return frame
 
     def add_common_constraints(self) -> None:
+        """Add common constraints for _FrameBuilder instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through _FrameBuilder.add_common_constraints calls and related tests.
+        """
         user = _detect_user(self.prompt)
         if user:
             self._constraint("job_user", "my" if user == getpass.getuser() and _MY_RE.search(self.prompt) else user, value=user, resolved_field="user")
@@ -330,6 +477,17 @@ class _FrameBuilder:
             self._constraint("output_mode", self.output_mode, value=self.output_mode, resolved_field="output_mode")
 
     def extract_requests(self) -> None:
+        """Extract requests for _FrameBuilder instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through _FrameBuilder.extract_requests calls and related tests.
+        """
         prompt = self.prompt
         lower = self.lower
         output = _request_output(prompt)
@@ -504,6 +662,17 @@ class _FrameBuilder:
         output: Literal["count", "rows", "summary", "json"] = "summary",
         requires_tool: str | None = None,
     ) -> None:
+        """Handle the internal request helper path for this module.
+
+        Inputs:
+            Receives kind, raw_text, filters, output, requires_tool for this _FrameBuilder method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through _FrameBuilder._request calls and related tests.
+        """
         normalized_filters = _clean_filters(filters or {})
         key = (kind, tuple(sorted((str(k), str(v)) for k, v in normalized_filters.items())))
         if key in self._seen_requests:
@@ -531,6 +700,17 @@ class _FrameBuilder:
         unit: str | None = None,
         resolved_field: str | None = None,
     ) -> None:
+        """Handle the internal constraint helper path for this module.
+
+        Inputs:
+            Receives kind, raw_text, subject, operator, value, unit, resolved_field for this _FrameBuilder method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through _FrameBuilder._constraint calls and related tests.
+        """
         key = (kind, str(value), str(resolved_field))
         for existing in self.constraints:
             if (existing.kind, str(existing.value), str(existing.resolved_field)) == key:
@@ -550,6 +730,17 @@ class _FrameBuilder:
 
 
 def detect_time_range(prompt: str) -> tuple[str | None, str | None]:
+    """Detect time range for the surrounding runtime workflow.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics.detect_time_range.
+    """
     lower = prompt.lower()
     now = datetime.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -571,6 +762,17 @@ def detect_time_range(prompt: str) -> tuple[str | None, str | None]:
 
 
 def _detect_output_mode(prompt: str) -> Literal["text", "csv", "json", "count"]:
+    """Handle the internal detect output mode helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_output_mode.
+    """
     if _JSON_RE.search(prompt):
         return "json"
     if _CSV_RE.search(prompt):
@@ -581,6 +783,17 @@ def _detect_output_mode(prompt: str) -> Literal["text", "csv", "json", "count"]:
 
 
 def _request_output(prompt: str) -> Literal["count", "rows", "summary", "json"]:
+    """Handle the internal request output helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._request_output.
+    """
     if _COUNT_RE.search(prompt):
         return "count"
     if _JSON_RE.search(prompt):
@@ -591,6 +804,17 @@ def _request_output(prompt: str) -> Literal["count", "rows", "summary", "json"]:
 
 
 def _detect_user(prompt: str) -> str | None:
+    """Handle the internal detect user helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_user.
+    """
     lower = prompt.lower()
     if _MY_RE.search(prompt) and re.search(r"\b(?:job|jobs|queue|squeue|accounting|sacct)\b", lower):
         return getpass.getuser()
@@ -599,6 +823,17 @@ def _detect_user(prompt: str) -> str | None:
 
 
 def _detect_partition(prompt: str) -> str | None:
+    """Handle the internal detect partition helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_partition.
+    """
     match = _PARTITION_RE.search(prompt)
     if match is None:
         return None
@@ -609,6 +844,17 @@ def _detect_partition(prompt: str) -> str | None:
 
 
 def _detect_job_states(prompt: str) -> list[str]:
+    """Handle the internal detect job states helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_job_states.
+    """
     lower = prompt.lower()
     states: list[str] = []
     mapping = [
@@ -626,10 +872,32 @@ def _detect_job_states(prompt: str) -> list[str]:
 
 
 def _first_state(states: list[str]) -> str | None:
+    """Handle the internal first state helper path for this module.
+
+    Inputs:
+        Receives states for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._first_state.
+    """
     return states[0] if states else None
 
 
 def _detect_node_state_group(prompt: str) -> str | None:
+    """Handle the internal detect node state group helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_node_state_group.
+    """
     lower = prompt.lower()
     if re.search(r"\b(?:problematic|unhealthy|unavailable|not\s+responding|no_respond|down\s+or\s+drained)\b", lower):
         return "problematic"
@@ -647,11 +915,33 @@ def _detect_node_state_group(prompt: str) -> str | None:
 
 
 def _detect_job_id(prompt: str) -> str | None:
+    """Handle the internal detect job id helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_job_id.
+    """
     match = _JOB_ID_RE.search(prompt)
     return match.group(1) if match else None
 
 
 def _detect_group_by(prompt: str) -> str | None:
+    """Handle the internal detect group by helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_group_by.
+    """
     match = _GROUP_BY_RE.search(prompt)
     if match:
         return match.group(1).lower().replace(" ", "_")
@@ -659,6 +949,17 @@ def _detect_group_by(prompt: str) -> str | None:
 
 
 def _detect_limit(prompt: str) -> int | None:
+    """Handle the internal detect limit helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_limit.
+    """
     match = _LIMIT_RE.search(prompt)
     if match is None:
         return None
@@ -669,6 +970,17 @@ def _detect_limit(prompt: str) -> int | None:
 
 
 def _detect_duration(prompt: str) -> tuple[int, str] | None:
+    """Handle the internal detect duration helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_duration.
+    """
     match = _DURATION_RE.search(prompt)
     if match is None:
         return None
@@ -685,6 +997,17 @@ def _detect_duration(prompt: str) -> tuple[int, str] | None:
 
 
 def _mentions_runtime_aggregate(lower: str) -> bool:
+    """Handle the internal mentions runtime aggregate helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_runtime_aggregate.
+    """
     return _RUNTIME_AGGREGATE_RE.search(lower) is not None or (
         "runtime" in lower and re.search(r"\b(?:average|avg|mean|min|max|longest|total|summary|by|longer\s+than)\b", lower)
         is not None
@@ -692,6 +1015,17 @@ def _mentions_runtime_aggregate(lower: str) -> bool:
 
 
 def _detect_runtime_aggregate(prompt: str) -> dict[str, Any] | None:
+    """Handle the internal detect runtime aggregate helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_runtime_aggregate.
+    """
     lower = prompt.lower()
     if not _mentions_runtime_aggregate(lower):
         return None
@@ -732,6 +1066,17 @@ def _detect_runtime_aggregate(prompt: str) -> dict[str, Any] | None:
 
 
 def _detect_runtime_metric(lower: str, duration: tuple[int, str] | None) -> str:
+    """Handle the internal detect runtime metric helper path for this module.
+
+    Inputs:
+        Receives lower, duration for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_runtime_metric.
+    """
     if duration is not None and re.search(r"\b(?:count|how\s+many)\b", lower):
         return "count_longer_than"
     if re.search(r"\bruntime\s+summary\b|\bmin\s*/\s*max\s*/\s*average\b", lower):
@@ -748,6 +1093,17 @@ def _detect_runtime_metric(lower: str, duration: tuple[int, str] | None) -> str:
 
 
 def _detect_runtime_state(prompt: str) -> str | None:
+    """Handle the internal detect runtime state helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_runtime_state.
+    """
     lower = prompt.lower()
     if _runtime_all_states(prompt):
         return None
@@ -756,10 +1112,32 @@ def _detect_runtime_state(prompt: str) -> str | None:
 
 
 def _runtime_all_states(prompt: str) -> bool:
+    """Handle the internal runtime all states helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._runtime_all_states.
+    """
     return _runtime_all_states_raw(prompt) is not None
 
 
 def _runtime_all_states_raw(prompt: str) -> str | None:
+    """Handle the internal runtime all states raw helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._runtime_all_states_raw.
+    """
     patterns = [
         r"\bdo\s+not\s+filter\s+by\s+completed\b",
         r"\bdon't\s+filter\s+by\s+completed\b",
@@ -783,6 +1161,17 @@ def _runtime_all_states_raw(prompt: str) -> str | None:
 
 
 def _detect_negated_state_filters(prompt: str) -> list[str]:
+    """Handle the internal detect negated state filters helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_negated_state_filters.
+    """
     if re.search(
         r"\b(?:do\s+not|don't)\s+(?:filter\s+by|restrict\s+to)\s+completed\b|\bnot\s+just\s+completed\b",
         prompt,
@@ -793,6 +1182,17 @@ def _detect_negated_state_filters(prompt: str) -> list[str]:
 
 
 def _detect_runtime_partition(prompt: str) -> str | None:
+    """Handle the internal detect runtime partition helper path for this module.
+
+    Inputs:
+        Receives prompt for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._detect_runtime_partition.
+    """
     patterns = [
         r"\b(?:on|in)\s+([A-Za-z0-9._-]+)\s+partition\b",
         r"\b([A-Za-z0-9._-]+)\s+partition\b",
@@ -839,10 +1239,32 @@ def _detect_runtime_partition(prompt: str) -> str | None:
 
 
 def _default_accounting_start() -> str:
+    """Handle the internal default accounting start helper path for this module.
+
+    Inputs:
+        Uses module or instance state; no caller-supplied data parameters are required.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._default_accounting_start.
+    """
     return (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _time_window_label(prompt: str, start: str | None, end: str | None) -> str | None:
+    """Handle the internal time window label helper path for this module.
+
+    Inputs:
+        Receives prompt, start, end for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._time_window_label.
+    """
     lower = prompt.lower()
     if "last 7 days" in lower:
         return "Last 7 days"
@@ -862,6 +1284,17 @@ def _time_window_label(prompt: str, start: str | None, end: str | None) -> str |
 
 
 def _is_broad_cluster_health(lower: str) -> bool:
+    """Handle the internal is broad cluster health helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._is_broad_cluster_health.
+    """
     return (
         ("cluster" in lower or "slurm cluster" in lower)
         and re.search(r"\b(?:status|health|healthy|unhealthy|wrong|summary|summarize|operational|busy)\b", lower) is not None
@@ -869,42 +1302,152 @@ def _is_broad_cluster_health(lower: str) -> bool:
 
 
 def _mentions_scheduler_health(lower: str) -> bool:
+    """Handle the internal mentions scheduler health helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_scheduler_health.
+    """
     return "scheduler" in lower and re.search(r"\b(?:health|healthy|status)\b", lower) is not None
 
 
 def _mentions_slurmdbd_health(lower: str) -> bool:
+    """Handle the internal mentions slurmdbd health helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_slurmdbd_health.
+    """
     return "slurmdbd" in lower
 
 
 def _mentions_accounting_health(lower: str) -> bool:
+    """Handle the internal mentions accounting health helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_accounting_health.
+    """
     return "accounting" in lower and re.search(r"\b(?:health|healthy|status|available|availability)\b", lower) is not None
 
 
 def _mentions_gpu(lower: str) -> bool:
+    """Handle the internal mentions gpu helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_gpu.
+    """
     return re.search(r"\b(?:gpu|gpus|gres)\b", lower) is not None
 
 
 def _mentions_partitions(lower: str) -> bool:
+    """Handle the internal mentions partitions helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_partitions.
+    """
     return re.search(r"\b(?:partition|partitions)\b", lower) is not None
 
 
 def _mentions_nodes(lower: str) -> bool:
+    """Handle the internal mentions nodes helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_nodes.
+    """
     return re.search(r"\b(?:node|nodes)\b", lower) is not None
 
 
 def _mentions_node_detail(lower: str) -> bool:
+    """Handle the internal mentions node detail helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_node_detail.
+    """
     return re.search(r"\bnode\s+details?\b|\bdetails?\s+for\s+[-A-Za-z0-9_.]*node", lower) is not None
 
 
 def _mentions_problematic_nodes(lower: str) -> bool:
+    """Handle the internal mentions problematic nodes helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_problematic_nodes.
+    """
     return re.search(r"\b(?:problematic|unhealthy|unavailable|down\s+or\s+drained|down|drained|no_respond|not\s+responding)\s+nodes?\b", lower) is not None
 
 
 def _mentions_unhealthy_things(lower: str) -> bool:
+    """Handle the internal mentions unhealthy things helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_unhealthy_things.
+    """
     return re.search(r"\b(?:anything\s+unhealthy|unhealthy\s+things|what\s+is\s+wrong)\b", lower) is not None
 
 
 def _mentions_accounting_jobs(lower: str) -> bool:
+    """Handle the internal mentions accounting jobs helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_accounting_jobs.
+    """
     return any(
         token in lower
         for token in (
@@ -924,18 +1467,62 @@ def _mentions_accounting_jobs(lower: str) -> bool:
 
 
 def _mentions_jobs(lower: str) -> bool:
+    """Handle the internal mentions jobs helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_jobs.
+    """
     return re.search(r"\b(?:job|jobs|queue)\b", lower) is not None
 
 
 def _mentions_queue(lower: str) -> bool:
+    """Handle the internal mentions queue helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_queue.
+    """
     return "queue" in lower or "squeue" in lower
 
 
 def _mentions_queue_status(lower: str) -> bool:
+    """Handle the internal mentions queue status helper path for this module.
+
+    Inputs:
+        Receives lower for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._mentions_queue_status.
+    """
     return re.search(r"\b(?:(?:summarize|summary\s+of|show)\s+queue|queue\s+(?:status|summary|health|pressure)|scheduler\s+health)\b", lower) is not None
 
 
 def _query_type_for_requests(requests: list[SlurmRequest]) -> SlurmQueryType:
+    """Handle the internal query type for requests helper path for this module.
+
+    Inputs:
+        Receives requests for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._query_type_for_requests.
+    """
     if not requests:
         return "unknown"
     kinds = {request.kind for request in requests}
@@ -960,6 +1547,17 @@ def _query_type_for_requests(requests: list[SlurmRequest]) -> SlurmQueryType:
 
 
 def select_slurm_data_source(frame: SlurmSemanticFrame) -> SlurmDataSource:
+    """Select slurm data source for the surrounding runtime workflow.
+
+    Inputs:
+        Receives frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics.select_slurm_data_source.
+    """
     if frame.query_type == "unsupported_mutation":
         return "unknown"
     if len(frame.requests) > 1 or frame.query_type == "compound":
@@ -985,6 +1583,17 @@ def select_slurm_data_source(frame: SlurmSemanticFrame) -> SlurmDataSource:
 
 
 def _first_filter_value(requests: list[SlurmRequest], key: str) -> Any | None:
+    """Handle the internal first filter value helper path for this module.
+
+    Inputs:
+        Receives requests, key for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._first_filter_value.
+    """
     for request in requests:
         if key in request.filters:
             return request.filters[key]
@@ -992,4 +1601,15 @@ def _first_filter_value(requests: list[SlurmRequest], key: str) -> Any | None:
 
 
 def _clean_filters(filters: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal clean filters helper path for this module.
+
+    Inputs:
+        Receives filters for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_semantics._clean_filters.
+    """
     return {key: value for key, value in filters.items() if value is not None}

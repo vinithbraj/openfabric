@@ -16,6 +16,8 @@ Major runtime properties:
 
 At runtime, the CLI or API hands a request to `ExecutionEngine`. The engine invokes `TaskPlanner`, which always uses the validator-enforced LLM action planner for natural-language requests. The action planner emits structured tool actions, the runtime canonicalizes and validates them, the executor resolves step-to-step dataflow and runs tools, and final user-facing output is shaped locally through `runtime.return` and response renderers.
 
+For the complete current-state design, start with [System Design](docs/SYSTEM_DESIGN.md). It is the canonical reference for request flow, LLM usage, deterministic boundaries, output contracts, artifacts, worker lifecycle, and regression strategy.
+
 ## Quick Start
 
 1. Create and activate the venv:
@@ -71,7 +73,7 @@ Application-level settings now live in `config.yaml`, not `.env.example`.
 
 The runtime spec continues to own agent behavior, tools, and node routing. The app config owns process settings such as LLM, SQL, retry, and server defaults.
 
-By default, planner and decomposer model selection also comes from `config.yaml -> llm.default_model`. Set `planner.model` in a runtime spec only when you intentionally want that spec to override the app default.
+By default, action-planner model selection comes from `config.yaml -> llm.default_model`. Set `planner.model` in a runtime spec only when you intentionally want that spec to override the app default.
 
 Important runtime flags and envs include:
 
@@ -149,6 +151,7 @@ So once the agent is running, `examples/general_purpose_assistant.yaml` can use 
 
 ## Documentation
 
+- [System Design](docs/SYSTEM_DESIGN.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Capability Packs](docs/CAPABILITY_PACKS.md)
 - [Intent and Compiler Model](docs/INTENT_AND_COMPILER_MODEL.md)

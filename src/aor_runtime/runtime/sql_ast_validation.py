@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.sql_ast_validation
+
+Purpose:
+    Validate SQL syntax and schema references using AST-aware analysis.
+
+Responsibilities:
+    Check read-only structure, alias scopes, identifier quoting, ambiguous columns, wrong-table columns, and repair hints.
+
+Data flow / Interfaces:
+    Consumes SQL text plus catalog metadata before sql.query or sql.validate execution.
+
+Boundaries:
+    Prevents PostgreSQL runtime errors and unsafe SQL from becoming user-visible failures.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,6 +28,17 @@ from aor_runtime.runtime.sql_safety import normalize_pg_relation_quoting, quote_
 
 @dataclass(frozen=True)
 class SqlScopeIssue:
+    """Represent sql scope issue within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlScopeIssue.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_ast_validation.SqlScopeIssue and related tests.
+    """
     issue_type: str
     column: str | None = None
     alias: str | None = None
@@ -22,6 +48,17 @@ class SqlScopeIssue:
     suggested_reference: str | None = None
 
     def message(self) -> str:
+        """Message for SqlScopeIssue instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlScopeIssue.message calls and related tests.
+        """
         target = f"{self.alias}.{self.column}" if self.alias and self.column else self.column or self.table or "SQL"
         if self.issue_type == "ambiguous_column":
             suffix = f" Scope tables: {', '.join(self.scope_tables)}." if self.scope_tables else ""
@@ -44,6 +81,17 @@ class SqlScopeIssue:
 
 @dataclass(frozen=True)
 class SqlAstValidationResult:
+    """Represent sql ast validation result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlAstValidationResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_ast_validation.SqlAstValidationResult and related tests.
+    """
     valid: bool
     normalized_sql: str
     issues: tuple[SqlScopeIssue, ...] = ()
@@ -52,12 +100,34 @@ class SqlAstValidationResult:
 
     @property
     def messages(self) -> list[str]:
+        """Messages for SqlAstValidationResult instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlAstValidationResult.messages calls and related tests.
+        """
         if self.parse_error:
             return [self.parse_error]
         return [issue.message() for issue in self.issues]
 
 
 def normalize_and_validate_sql_ast(sql: str, catalog: SqlSchemaCatalog) -> SqlAstValidationResult:
+    """Normalize and validate sql ast for the surrounding runtime workflow.
+
+    Inputs:
+        Receives sql, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation.normalize_and_validate_sql_ast.
+    """
     normalized = normalize_pg_relation_quoting(sql, catalog)
     result = validate_sql_ast_scope(normalized, catalog)
     if not result.valid:
@@ -66,6 +136,17 @@ def normalize_and_validate_sql_ast(sql: str, catalog: SqlSchemaCatalog) -> SqlAs
 
 
 def validate_sql_ast_scope(sql: str, catalog: SqlSchemaCatalog) -> SqlAstValidationResult:
+    """Validate sql ast scope for the surrounding runtime workflow.
+
+    Inputs:
+        Receives sql, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation.validate_sql_ast_scope.
+    """
     dialect = _sqlglot_dialect(catalog)
     try:
         tree = sqlglot.parse_one(sql, read=dialect)
@@ -146,6 +227,17 @@ def _validate_qualified_column(
     catalog: SqlSchemaCatalog,
     scope_tables: tuple[str, ...],
 ) -> SqlScopeIssue | None:
+    """Handle the internal validate qualified column helper path for this module.
+
+    Inputs:
+        Receives column, table, alias, catalog, scope_tables for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._validate_qualified_column.
+    """
     name = str(column.name or "").strip()
     if not name:
         return None
@@ -166,6 +258,17 @@ def _validate_qualified_column(
 
 
 def _scope_alias_tables(scope: Any, catalog: SqlSchemaCatalog) -> dict[str, SqlTableRef]:
+    """Handle the internal scope alias tables helper path for this module.
+
+    Inputs:
+        Receives scope, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._scope_alias_tables.
+    """
     alias_tables: dict[str, SqlTableRef] = {}
     for alias, source_pair in dict(scope.selected_sources).items():
         source = source_pair[1] if isinstance(source_pair, tuple) and len(source_pair) >= 2 else source_pair
@@ -179,6 +282,17 @@ def _scope_alias_tables(scope: Any, catalog: SqlSchemaCatalog) -> dict[str, SqlT
 
 
 def _table_ref_for_expression(table: exp.Table, catalog: SqlSchemaCatalog) -> SqlTableRef | None:
+    """Handle the internal table ref for expression helper path for this module.
+
+    Inputs:
+        Receives table, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._table_ref_for_expression.
+    """
     name = str(table.name or "").strip()
     schema = str(table.db or "").strip() or None
     if "." in name and not schema:
@@ -187,6 +301,17 @@ def _table_ref_for_expression(table: exp.Table, catalog: SqlSchemaCatalog) -> Sq
 
 
 def _unknown_table_issue(table: exp.Table, catalog: SqlSchemaCatalog) -> SqlScopeIssue:
+    """Handle the internal unknown table issue helper path for this module.
+
+    Inputs:
+        Receives table, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._unknown_table_issue.
+    """
     name = str(table.sql(dialect=_sqlglot_dialect(catalog)) or table.name)
     return SqlScopeIssue(
         issue_type="unknown_table",
@@ -196,6 +321,17 @@ def _unknown_table_issue(table: exp.Table, catalog: SqlSchemaCatalog) -> SqlScop
 
 
 def _owners_for_column(column: str, alias_tables: dict[str, SqlTableRef]) -> list[tuple[str, SqlTableRef]]:
+    """Handle the internal owners for column helper path for this module.
+
+    Inputs:
+        Receives column, alias_tables for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._owners_for_column.
+    """
     owners: list[tuple[str, SqlTableRef]] = []
     seen_tables: set[str] = set()
     for alias, table in alias_tables.items():
@@ -212,6 +348,17 @@ def _owners_for_column(column: str, alias_tables: dict[str, SqlTableRef]) -> lis
 
 
 def _catalog_owners_for_column(column: str, catalog: SqlSchemaCatalog) -> list[tuple[str, SqlTableRef, str]]:
+    """Handle the internal catalog owners for column helper path for this module.
+
+    Inputs:
+        Receives column, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._catalog_owners_for_column.
+    """
     owners: list[tuple[str, SqlTableRef, str]] = []
     for table in catalog.tables:
         column_ref = table.column_by_name(column)
@@ -221,20 +368,64 @@ def _catalog_owners_for_column(column: str, catalog: SqlSchemaCatalog) -> list[t
 
 
 def _canonical_column_name(column: str, table: SqlTableRef) -> str | None:
+    """Handle the internal canonical column name helper path for this module.
+
+    Inputs:
+        Receives column, table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._canonical_column_name.
+    """
     column_ref = table.column_by_name(column)
     return column_ref.column_name if column_ref is not None else None
 
 
 def _scope_column_names(alias_tables: dict[str, SqlTableRef]) -> list[str]:
+    """Handle the internal scope column names helper path for this module.
+
+    Inputs:
+        Receives alias_tables for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._scope_column_names.
+    """
     names = sorted({column.column_name for table in alias_tables.values() for column in table.columns})
     return names
 
 
 def _catalog_column_names(catalog: SqlSchemaCatalog) -> list[str]:
+    """Handle the internal catalog column names helper path for this module.
+
+    Inputs:
+        Receives catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._catalog_column_names.
+    """
     return sorted({column.column_name for table in catalog.tables for column in table.columns})
 
 
 def _scope_output_aliases(expression: exp.Expression) -> set[str]:
+    """Handle the internal scope output aliases helper path for this module.
+
+    Inputs:
+        Receives expression for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._scope_output_aliases.
+    """
     if not isinstance(expression, exp.Select):
         return set()
     aliases: set[str] = set()
@@ -246,13 +437,46 @@ def _scope_output_aliases(expression: exp.Expression) -> set[str]:
 
 
 def _suggest_reference(alias: str, column: str) -> str:
+    """Handle the internal suggest reference helper path for this module.
+
+    Inputs:
+        Receives alias, column for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._suggest_reference.
+    """
     return f"{alias}.{quote_pg_identifier(column)}"
 
 
 def _is_pseudo_relation(table: exp.Table) -> bool:
+    """Handle the internal is pseudo relation helper path for this module.
+
+    Inputs:
+        Receives table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._is_pseudo_relation.
+    """
     return str(table.name or "").lower() in {"unnest"}
 
 
 def _sqlglot_dialect(catalog: SqlSchemaCatalog) -> str:
+    """Handle the internal sqlglot dialect helper path for this module.
+
+    Inputs:
+        Receives catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_ast_validation._sqlglot_dialect.
+    """
     dialect = str(catalog.dialect or "").lower()
     return "postgres" if dialect == "postgresql" else dialect or "postgres"

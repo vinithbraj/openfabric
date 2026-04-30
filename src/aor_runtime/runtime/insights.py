@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.insights
+
+Purpose:
+    Generate compact deterministic insight summaries over runtime outputs.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import json
@@ -12,17 +27,50 @@ InsightSeverity = Literal["info", "warning", "critical"]
 
 @dataclass
 class Insight:
+    """Represent insight within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by Insight.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.insights.Insight and related tests.
+    """
     title: str
     message: str
     severity: InsightSeverity = "info"
     evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for Insight instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through Insight.to_dict calls and related tests.
+        """
         return asdict(self)
 
 
 @dataclass
 class InsightResult:
+    """Represent insight result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by InsightResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.insights.InsightResult and related tests.
+    """
     domain: str
     summary: str
     insights: list[Insight] = field(default_factory=list)
@@ -31,6 +79,17 @@ class InsightResult:
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """To dict for InsightResult instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through InsightResult.to_dict calls and related tests.
+        """
         return {
             "domain": self.domain,
             "summary": self.summary,
@@ -43,6 +102,17 @@ class InsightResult:
 
 @dataclass
 class InsightContext:
+    """Represent insight context within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by InsightContext.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.insights.InsightContext and related tests.
+    """
     enable_llm: bool = False
     max_facts: int = 50
     max_input_chars: int = 4000
@@ -51,6 +121,17 @@ class InsightContext:
 
 
 def generate_insights(facts: dict[str, Any], context: InsightContext | None = None) -> InsightResult:
+    """Generate insights for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights.generate_insights.
+    """
     ctx = context or InsightContext()
     domain = str(facts.get("domain") or "generic")
     if domain == "slurm":
@@ -63,6 +144,17 @@ def generate_insights(facts: dict[str, Any], context: InsightContext | None = No
 
 
 def generate_slurm_insights(facts: dict[str, Any]) -> InsightResult:
+    """Generate slurm insights for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights.generate_slurm_insights.
+    """
     queue = dict(facts.get("queue") or {})
     nodes = dict(facts.get("nodes") or {})
     gpu = dict(facts.get("gpu") or {})
@@ -181,6 +273,17 @@ def generate_slurm_insights(facts: dict[str, Any]) -> InsightResult:
 
 
 def generate_sql_insights(facts: dict[str, Any]) -> InsightResult:
+    """Generate sql insights for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights.generate_sql_insights.
+    """
     insights: list[Insight] = []
     result = dict(facts.get("result") or {})
     count = _int(facts.get("result_count", result.get("count")))
@@ -234,6 +337,17 @@ def generate_sql_insights(facts: dict[str, Any]) -> InsightResult:
 
 
 def generate_filesystem_insights(facts: dict[str, Any]) -> InsightResult:
+    """Generate filesystem insights for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights.generate_filesystem_insights.
+    """
     insights: list[Insight] = []
     count = _int(facts.get("file_count"))
     total_size = _int(facts.get("total_size_bytes"))
@@ -293,6 +407,17 @@ def generate_filesystem_insights(facts: dict[str, Any]) -> InsightResult:
 
 
 def generate_generic_insights(facts: dict[str, Any]) -> InsightResult:
+    """Generate generic insights for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights.generate_generic_insights.
+    """
     domain = str(facts.get("domain") or "generic")
     return InsightResult(
         domain=domain,
@@ -309,6 +434,17 @@ def summarize_insights_with_llm(
     context: InsightContext,
     settings: Any,
 ) -> str | None:
+    """Summarize insights with llm for the surrounding runtime workflow.
+
+    Inputs:
+        Receives facts, deterministic_insights, context, settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights.summarize_insights_with_llm.
+    """
     if not context.enable_llm:
         return None
     compact_payload = {
@@ -346,6 +482,17 @@ def summarize_insights_with_llm(
 
 
 def _slurm_problem_summary(total: int | None, running: int | None, pending: int | None, problematic: int | None, gpu_available: Any) -> str:
+    """Handle the internal slurm problem summary helper path for this module.
+
+    Inputs:
+        Receives total, running, pending, problematic, gpu_available for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights._slurm_problem_summary.
+    """
     parts: list[str] = []
     if total is not None:
         parts.append(f"{total:,} jobs total")
@@ -363,6 +510,17 @@ def _slurm_problem_summary(total: int | None, running: int | None, pending: int 
 
 
 def _int(value: Any) -> int | None:
+    """Handle the internal int helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights._int.
+    """
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -372,6 +530,17 @@ def _int(value: Any) -> int | None:
 
 
 def _human_size(value: int) -> str:
+    """Handle the internal human size helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.insights._human_size.
+    """
     units = ["bytes", "KB", "MB", "GB", "TB"]
     amount = float(value)
     unit = units[0]

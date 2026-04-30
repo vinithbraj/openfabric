@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.llm_intent_extractor
+
+Purpose:
+    Extract constrained typed intents from the LLM for supported helper flows.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import json
@@ -39,6 +54,17 @@ DISALLOWED_STRING_RE = (
 
 
 class LLMIntentExtractionResult(BaseModel):
+    """Represent l l m intent extraction result within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by LLMIntentExtractionResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.llm_intent_extractor.LLMIntentExtractionResult and related tests.
+    """
     matched: bool
     intent: Any | None = None
     intent_type: str | None = None
@@ -48,6 +74,17 @@ class LLMIntentExtractionResult(BaseModel):
 
 
 class LLMIntentExtractor:
+    """Represent l l m intent extractor within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by LLMIntentExtractor.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.llm_intent_extractor.LLMIntentExtractor and related tests.
+    """
     def __init__(
         self,
         *,
@@ -55,6 +92,17 @@ class LLMIntentExtractor:
         settings: Settings | None = None,
         confidence_threshold: float = 0.70,
     ) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives llm, settings, confidence_threshold for this LLMIntentExtractor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMIntentExtractor.__init__ calls and related tests.
+        """
         self.llm = llm
         self.settings = settings or get_settings()
         self.confidence_threshold = confidence_threshold
@@ -66,6 +114,17 @@ class LLMIntentExtractor:
         allowed_intents: list[type],
         context: dict[str, Any] | None = None,
     ) -> LLMIntentExtractionResult:
+        """Extract intent for LLMIntentExtractor instances.
+
+        Inputs:
+            Receives goal, capability_name, allowed_intents, context for this LLMIntentExtractor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMIntentExtractor.extract_intent calls and related tests.
+        """
         model_lookup = {intent_type.__name__: intent_type for intent_type in allowed_intents}
         if not model_lookup:
             return LLMIntentExtractionResult(
@@ -185,6 +244,17 @@ class LLMIntentExtractor:
         user_prompt: str,
         context: dict[str, Any],
     ) -> str:
+        """Handle the internal complete helper path for this module.
+
+        Inputs:
+            Receives goal, capability_name, system_prompt, user_prompt, context for this LLMIntentExtractor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMIntentExtractor._complete calls and related tests.
+        """
         fixture_output = _fixture_response(capability_name, goal)
         if fixture_output is not None:
             return fixture_output
@@ -196,6 +266,17 @@ class LLMIntentExtractor:
         )
 
     def _default_system_prompt(self, capability_name: str) -> str:
+        """Handle the internal default system prompt helper path for this module.
+
+        Inputs:
+            Receives capability_name for this LLMIntentExtractor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMIntentExtractor._default_system_prompt calls and related tests.
+        """
         return (
             f"You convert user requests into one typed {capability_name} intent.\n"
             "You must output JSON only.\n"
@@ -215,6 +296,17 @@ class LLMIntentExtractor:
         allowed_intents: list[type],
         context: dict[str, Any],
     ) -> str:
+        """Handle the internal build user prompt helper path for this module.
+
+        Inputs:
+            Receives goal, capability_name, allowed_intents, context for this LLMIntentExtractor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMIntentExtractor._build_user_prompt calls and related tests.
+        """
         schema_payload = []
         for intent_type in allowed_intents:
             json_schema = intent_type.model_json_schema()
@@ -239,12 +331,34 @@ class LLMIntentExtractor:
         return json.dumps(prompt_payload, indent=2, ensure_ascii=False)
 
     def _coerce_confidence(self, value: Any) -> float:
+        """Handle the internal coerce confidence helper path for this module.
+
+        Inputs:
+            Receives value for this LLMIntentExtractor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMIntentExtractor._coerce_confidence calls and related tests.
+        """
         try:
             return max(0.0, min(1.0, float(value)))
         except Exception:  # noqa: BLE001
             return 0.0
 
     def _looks_like_disallowed_output(self, value: Any) -> bool:
+        """Handle the internal looks like disallowed output helper path for this module.
+
+        Inputs:
+            Receives value for this LLMIntentExtractor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMIntentExtractor._looks_like_disallowed_output calls and related tests.
+        """
         if isinstance(value, dict):
             if DISALLOWED_PAYLOAD_KEYS.intersection(value.keys()):
                 return True
@@ -259,6 +373,17 @@ class LLMIntentExtractor:
         return False
 
     def _looks_like_disallowed_top_level_payload(self, payload: dict[str, Any]) -> bool:
+        """Handle the internal looks like disallowed top level payload helper path for this module.
+
+        Inputs:
+            Receives payload for this LLMIntentExtractor method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through LLMIntentExtractor._looks_like_disallowed_top_level_payload calls and related tests.
+        """
         if DISALLOWED_PAYLOAD_KEYS.intersection(payload.keys()):
             return True
         for key in ("matched", "intent_type", "confidence", "arguments", "reason"):
@@ -273,11 +398,33 @@ class LLMIntentExtractor:
 
 @lru_cache(maxsize=4)
 def _load_fixture_payload(path_str: str) -> dict[str, Any]:
+    """Handle the internal load fixture payload helper path for this module.
+
+    Inputs:
+        Receives path_str for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.llm_intent_extractor._load_fixture_payload.
+    """
     path = Path(path_str).expanduser().resolve()
     return json.loads(path.read_text())
 
 
 def _fixture_response(capability_name: str, goal: str) -> str | None:
+    """Handle the internal fixture response helper path for this module.
+
+    Inputs:
+        Receives capability_name, goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.llm_intent_extractor._fixture_response.
+    """
     fixture_path = str(os.getenv(LLM_INTENT_FIXTURE_PATH_ENV, "")).strip()
     if not fixture_path:
         return None

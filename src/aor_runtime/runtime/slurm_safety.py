@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.slurm_safety
+
+Purpose:
+    Validate SLURM arguments and block unsupported or unsafe SLURM operations.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -34,11 +49,33 @@ ALLOWED_METRIC_GROUPS = {
 
 @dataclass(frozen=True)
 class SlurmSafetyResult:
+    """Represent slurm safety result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SlurmSafetyResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.slurm_safety.SlurmSafetyResult and related tests.
+    """
     valid: bool
     reason: str = ""
 
 
 def validate_slurm_intent_safety(intent: Any) -> SlurmSafetyResult:
+    """Validate slurm intent safety for the surrounding runtime workflow.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.validate_slurm_intent_safety.
+    """
     try:
         _validate_payload(_dump_intent(intent))
         _validate_known_fields(intent)
@@ -48,6 +85,17 @@ def validate_slurm_intent_safety(intent: Any) -> SlurmSafetyResult:
 
 
 def validate_slurm_frame_safety(frame: Any) -> SlurmSafetyResult:
+    """Validate slurm frame safety for the surrounding runtime workflow.
+
+    Inputs:
+        Receives frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.validate_slurm_frame_safety.
+    """
     try:
         payload = frame.to_dict() if hasattr(frame, "to_dict") else frame
         _validate_payload(payload)
@@ -57,6 +105,17 @@ def validate_slurm_frame_safety(frame: Any) -> SlurmSafetyResult:
 
 
 def safe_slurm_token(value: str | None, *, field_name: str) -> str | None:
+    """Safe slurm token for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, field_name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.safe_slurm_token.
+    """
     if value is None:
         return None
     text = str(value).strip()
@@ -70,6 +129,17 @@ def safe_slurm_token(value: str | None, *, field_name: str) -> str | None:
 
 
 def safe_time_value(value: str | None, *, field_name: str) -> str | None:
+    """Safe time value for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, field_name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.safe_time_value.
+    """
     if value is None:
         return None
     text = str(value).strip()
@@ -83,6 +153,17 @@ def safe_time_value(value: str | None, *, field_name: str) -> str | None:
 
 
 def normalize_job_state(state: str | None) -> str | None:
+    """Normalize job state for the surrounding runtime workflow.
+
+    Inputs:
+        Receives state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.normalize_job_state.
+    """
     if state is None:
         return None
     normalized = safe_slurm_token(state, field_name="state")
@@ -95,6 +176,17 @@ def normalize_job_state(state: str | None) -> str | None:
 
 
 def normalize_node_state(state: str | None) -> str | None:
+    """Normalize node state for the surrounding runtime workflow.
+
+    Inputs:
+        Receives state for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.normalize_node_state.
+    """
     if state is None:
         return None
     normalized = safe_slurm_token(state, field_name="state")
@@ -107,6 +199,17 @@ def normalize_node_state(state: str | None) -> str | None:
 
 
 def normalize_node_state_group(state_group: str | None) -> str | None:
+    """Normalize node state group for the surrounding runtime workflow.
+
+    Inputs:
+        Receives state_group for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.normalize_node_state_group.
+    """
     if state_group is None:
         return None
     normalized = safe_slurm_token(state_group, field_name="state_group")
@@ -119,6 +222,17 @@ def normalize_node_state_group(state_group: str | None) -> str | None:
 
 
 def normalize_group_by(group_by: str | None) -> str | None:
+    """Normalize group by for the surrounding runtime workflow.
+
+    Inputs:
+        Receives group_by for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.normalize_group_by.
+    """
     if group_by is None:
         return None
     normalized = safe_slurm_token(group_by, field_name="group_by")
@@ -131,6 +245,17 @@ def normalize_group_by(group_by: str | None) -> str | None:
 
 
 def normalize_metric_group(metric_group: str | None) -> str | None:
+    """Normalize metric group for the surrounding runtime workflow.
+
+    Inputs:
+        Receives metric_group for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety.normalize_metric_group.
+    """
     if metric_group is None:
         return None
     normalized = safe_slurm_token(metric_group, field_name="metric_group")
@@ -143,6 +268,17 @@ def normalize_metric_group(metric_group: str | None) -> str | None:
 
 
 def _validate_payload(value: Any) -> None:
+    """Handle the internal validate payload helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety._validate_payload.
+    """
     if isinstance(value, dict):
         raw_keys = {str(key).lower() for key in value}
         if raw_keys.intersection(DISALLOWED_RAW_KEYS):
@@ -165,6 +301,17 @@ def _validate_payload(value: Any) -> None:
 
 
 def _validate_known_fields(intent: Any) -> None:
+    """Handle the internal validate known fields helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety._validate_known_fields.
+    """
     class_name = type(intent).__name__
     if class_name == "SlurmCompoundIntent":
         for child in getattr(intent, "intents", []) or []:
@@ -193,6 +340,17 @@ def _validate_known_fields(intent: Any) -> None:
 
 
 def _dump_intent(intent: Any) -> Any:
+    """Handle the internal dump intent helper path for this module.
+
+    Inputs:
+        Receives intent for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.slurm_safety._dump_intent.
+    """
     if hasattr(intent, "model_dump"):
         return intent.model_dump()
     if hasattr(intent, "to_dict"):

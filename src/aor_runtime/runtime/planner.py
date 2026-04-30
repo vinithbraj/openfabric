@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.planner
+
+Purpose:
+    Wrap the LLM action planner as the single natural-language planning path.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -63,11 +78,33 @@ FILESYSTEM_TOOL_INTENT_PATTERNS = {
 
 
 def summarize_plan(plan: ExecutionPlan) -> str:
+    """Summarize plan for the surrounding runtime workflow.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.planner.summarize_plan.
+    """
     actions = [step.action for step in plan.steps]
     return f"Plan with {len(actions)} steps: " + ", ".join(actions)
 
 
 def summarize_planner_raw_output(raw_output: str | None, limit: int = PLANNER_RAW_OUTPUT_PREVIEW_CHARS) -> str | None:
+    """Summarize planner raw output for the surrounding runtime workflow.
+
+    Inputs:
+        Receives raw_output, limit for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.planner.summarize_planner_raw_output.
+    """
     text = str(raw_output or "").strip()
     if not text:
         return None
@@ -77,6 +114,17 @@ def summarize_planner_raw_output(raw_output: str | None, limit: int = PLANNER_RA
 
 
 def extract_explicit_tool_intent(goal: str, allowed_tools: list[str]) -> list[str]:
+    """Extract explicit tool intent for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, allowed_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.planner.extract_explicit_tool_intent.
+    """
     goal_text = str(goal or "").lower()
     requested: list[str] = []
     for tool_name, patterns in TOOL_INTENT_PATTERNS.items():
@@ -97,6 +145,17 @@ def extract_explicit_tool_intent(goal: str, allowed_tools: list[str]) -> list[st
 
 
 class TaskPlanner:
+    """Represent task planner within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by TaskPlanner.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.planner.TaskPlanner and related tests.
+    """
     def __init__(
         self,
         *,
@@ -105,6 +164,17 @@ class TaskPlanner:
         settings: Settings | None = None,
         capability_registry: Any | None = None,
     ) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives llm, tools, settings, capability_registry for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner.__init__ calls and related tests.
+        """
         self.llm = llm
         self.tools = tools
         self.settings = settings or get_settings()
@@ -143,6 +213,17 @@ class TaskPlanner:
         input_payload: dict[str, Any],
         failure_context: dict[str, Any] | None = None,
     ) -> ExecutionPlan:
+        """Build plan for TaskPlanner instances.
+
+        Inputs:
+            Receives goal, planner, allowed_tools, input_payload, failure_context for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner.build_plan calls and related tests.
+        """
         self._reset_tracking()
         self.last_planning_mode = ACTIVE_PLANNING_MODE
         self.last_capability_name = "action_planner"
@@ -183,6 +264,17 @@ class TaskPlanner:
             raise
 
     def _reset_tracking(self) -> None:
+        """Handle the internal reset tracking helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._reset_tracking calls and related tests.
+        """
         self.last_policies_used = []
         self.last_high_level_plan = None
         self.last_planning_mode = ACTIVE_PLANNING_MODE
@@ -203,6 +295,17 @@ class TaskPlanner:
         self.last_capability_metadata = {}
 
     def _action_planner_metadata(self, action_planner: LLMActionPlanner) -> dict[str, Any]:
+        """Handle the internal action planner metadata helper path for this module.
+
+        Inputs:
+            Receives action_planner for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._action_planner_metadata calls and related tests.
+        """
         return {
             "capability_pack": "action_planner",
             "planning_mode": ACTIVE_PLANNING_MODE,
@@ -231,6 +334,17 @@ class TaskPlanner:
         allow_internal_tools: set[str] | None = None,
         canonicalize_soft_violations: bool = True,
     ) -> ExecutionPlan:
+        """Handle the internal finalize plan helper path for this module.
+
+        Inputs:
+            Receives goal, plan, allowed_tools, explicit_tool_intent, allow_internal_tools, canonicalize_soft_violations for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._finalize_plan calls and related tests.
+        """
         self._apply_storage_shell_semantics(goal, plan)
         normalize_execution_plan_dataflow(plan)
         self.last_original_execution_plan = plan.model_dump()
@@ -265,6 +379,17 @@ class TaskPlanner:
         return plan
 
     def _validate_explicit_tool_intent(self, plan: ExecutionPlan, explicit_tool_intent: list[str]) -> None:
+        """Handle the internal validate explicit tool intent helper path for this module.
+
+        Inputs:
+            Receives plan, explicit_tool_intent for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._validate_explicit_tool_intent calls and related tests.
+        """
         if not explicit_tool_intent:
             return
         actions = [step.action for step in plan.steps]
@@ -277,6 +402,17 @@ class TaskPlanner:
                 raise ValueError(f"Planner ignored the explicit tool request for {requested_tool}.")
 
     def _validate_explicit_database_targets(self, goal: str, plan: ExecutionPlan) -> None:
+        """Handle the internal validate explicit database targets helper path for this module.
+
+        Inputs:
+            Receives goal, plan for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._validate_explicit_database_targets calls and related tests.
+        """
         configured_databases = resolve_sql_databases(self.settings)
         if not configured_databases:
             return
@@ -302,6 +438,17 @@ class TaskPlanner:
                 raise ValueError(f"Planner changed the requested database target. Expected one of: {requested}.")
 
     def _validate_shell_targets(self, plan: ExecutionPlan) -> None:
+        """Handle the internal validate shell targets helper path for this module.
+
+        Inputs:
+            Receives plan for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._validate_shell_targets calls and related tests.
+        """
         allowed_nodes = self.settings.available_nodes
         default_node = str(self.settings.resolved_default_node() or "").strip()
         for step in plan.steps:
@@ -317,6 +464,17 @@ class TaskPlanner:
                 )
 
     def _apply_storage_shell_semantics(self, goal: str, plan: ExecutionPlan) -> None:
+        """Handle the internal apply storage shell semantics helper path for this module.
+
+        Inputs:
+            Receives goal, plan for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._apply_storage_shell_semantics calls and related tests.
+        """
         intent = self._classify_storage_intent(goal)
         if intent is None:
             return
@@ -339,6 +497,17 @@ class TaskPlanner:
                 return
 
     def _classify_storage_intent(self, goal: str) -> str | None:
+        """Handle the internal classify storage intent helper path for this module.
+
+        Inputs:
+            Receives goal for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._classify_storage_intent calls and related tests.
+        """
         tokens = set(STORAGE_TOKEN_RE.findall(str(goal or "").lower()))
         if not tokens:
             return None
@@ -360,6 +529,17 @@ class TaskPlanner:
         return None
 
     def _preferred_storage_command(self, intent: str) -> str | None:
+        """Handle the internal preferred storage command helper path for this module.
+
+        Inputs:
+            Receives intent for this TaskPlanner method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through TaskPlanner._preferred_storage_command calls and related tests.
+        """
         if intent == "folder_usage_workspace":
             return "du -sh * | sort -hr"
         if intent == "folder_usage_system":

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.intelligent_output
+
+Purpose:
+    Let the LLM choose display fields from metadata while keeping values local.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import json
@@ -18,6 +33,17 @@ RenderStyle = Literal["table", "key_value", "bullets"]
 
 @dataclass(frozen=True)
 class DisplayField:
+    """Represent display field within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by DisplayField.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.intelligent_output.DisplayField and related tests.
+    """
     id: str
     label: str
     type: str = "text"
@@ -26,6 +52,17 @@ class DisplayField:
     domain: str = "generic"
 
     def prompt_dict(self) -> dict[str, Any]:
+        """Prompt dict for DisplayField instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through DisplayField.prompt_dict calls and related tests.
+        """
         data = {
             "id": self.id,
             "label": self.label,
@@ -40,6 +77,17 @@ class DisplayField:
 
 @dataclass
 class DisplayFieldCatalog:
+    """Represent display field catalog within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by DisplayFieldCatalog.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.intelligent_output.DisplayFieldCatalog and related tests.
+    """
     domain: str
     title: str
     fields: list[DisplayField]
@@ -49,9 +97,31 @@ class DisplayFieldCatalog:
     source_tools: list[str] = field(default_factory=list)
 
     def field_map(self) -> dict[str, DisplayField]:
+        """Field map for DisplayFieldCatalog instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through DisplayFieldCatalog.field_map calls and related tests.
+        """
         return {field.id: field for field in self.fields}
 
     def prompt_payload(self, *, goal: str, max_fields: int) -> dict[str, Any]:
+        """Prompt payload for DisplayFieldCatalog instances.
+
+        Inputs:
+            Receives goal, max_fields for this DisplayFieldCatalog method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through DisplayFieldCatalog.prompt_payload calls and related tests.
+        """
         return {
             "user_goal": str(goal or ""),
             "domain": self.domain,
@@ -68,6 +138,17 @@ class DisplayFieldCatalog:
 
 @dataclass
 class IntelligentOutputSelection:
+    """Represent intelligent output selection within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by IntelligentOutputSelection.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.intelligent_output.IntelligentOutputSelection and related tests.
+    """
     selected_fields: list[str]
     title: str = "Intelligent Output"
     render_style: RenderStyle = "table"
@@ -77,6 +158,17 @@ class IntelligentOutputSelection:
 
 @dataclass
 class IntelligentOutputResult:
+    """Represent intelligent output result within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by IntelligentOutputResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.intelligent_output.IntelligentOutputResult and related tests.
+    """
     markdown: str
     selected_fields: list[str]
     prompt_payload: dict[str, Any]
@@ -92,6 +184,17 @@ def render_intelligent_output(
     mode: str = "off",
     max_fields: int = 8,
 ) -> IntelligentOutputResult | None:
+    """Render intelligent output for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, actions, context, settings, mode, max_fields for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output.render_intelligent_output.
+    """
     normalized_mode = str(mode or "off").strip().lower()
     if normalized_mode not in {"compare", "replace"} or settings is None:
         return None
@@ -114,6 +217,17 @@ def build_display_field_catalog(
     actions: list[Any],
     context: PresentationContext,
 ) -> DisplayFieldCatalog | None:
+    """Build display field catalog for the surrounding runtime workflow.
+
+    Inputs:
+        Receives result, actions, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output.build_display_field_catalog.
+    """
     clean = strip_internal_telemetry(result)
     source_tools = _action_tools(actions)
     source_action = str(context.source_action or (source_tools[-1] if source_tools else "") or "")
@@ -137,6 +251,17 @@ def _select_fields_with_llm(
     *,
     max_fields: int,
 ) -> IntelligentOutputSelection | None:
+    """Handle the internal select fields with llm helper path for this module.
+
+    Inputs:
+        Receives prompt_payload, catalog, settings, max_fields for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._select_fields_with_llm.
+    """
     try:
         from aor_runtime.llm.client import LLMClient
 
@@ -161,6 +286,17 @@ def _select_fields_with_llm(
 
 
 def _coerce_selection(raw: dict[str, Any], catalog: DisplayFieldCatalog, *, max_fields: int) -> IntelligentOutputSelection | None:
+    """Handle the internal coerce selection helper path for this module.
+
+    Inputs:
+        Receives raw, catalog, max_fields for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._coerce_selection.
+    """
     allowed = catalog.field_map()
     selected: list[str] = []
     for item in raw.get("selected_fields") or []:
@@ -189,6 +325,17 @@ def _coerce_selection(raw: dict[str, Any], catalog: DisplayFieldCatalog, *, max_
 
 
 def _render_selection(catalog: DisplayFieldCatalog, selection: IntelligentOutputSelection, *, max_rows: int) -> str:
+    """Handle the internal render selection helper path for this module.
+
+    Inputs:
+        Receives catalog, selection, max_rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._render_selection.
+    """
     fields = [catalog.field_map()[field_id] for field_id in selection.selected_fields if field_id in catalog.field_map()]
     if not fields:
         return ""
@@ -217,6 +364,17 @@ def _render_selection(catalog: DisplayFieldCatalog, selection: IntelligentOutput
 
 
 def _slurm_catalog(result: Any, source_action: str, context: PresentationContext, source_tools: list[str]) -> DisplayFieldCatalog | None:
+    """Handle the internal slurm catalog helper path for this module.
+
+    Inputs:
+        Receives result, source_action, context, source_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._slurm_catalog.
+    """
     if not (source_action.startswith("slurm.") or _looks_like_slurm_payload(result)):
         return None
     normalized = normalize_slurm_result(result, context)
@@ -298,6 +456,17 @@ def _slurm_catalog(result: Any, source_action: str, context: PresentationContext
 
 
 def _sql_catalog(result: Any, source_tools: list[str]) -> DisplayFieldCatalog | None:
+    """Handle the internal sql catalog helper path for this module.
+
+    Inputs:
+        Receives result, source_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._sql_catalog.
+    """
     if not isinstance(result, dict) or "rows" not in result:
         return None
     rows = [dict(row) for row in list(result.get("rows") or []) if isinstance(row, dict)]
@@ -308,6 +477,17 @@ def _sql_catalog(result: Any, source_tools: list[str]) -> DisplayFieldCatalog | 
 
 
 def _filesystem_catalog(result: Any, source_tools: list[str]) -> DisplayFieldCatalog | None:
+    """Handle the internal filesystem catalog helper path for this module.
+
+    Inputs:
+        Receives result, source_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._filesystem_catalog.
+    """
     if not isinstance(result, dict):
         return None
     collection = result.get("matches") or result.get("entries")
@@ -321,6 +501,17 @@ def _filesystem_catalog(result: Any, source_tools: list[str]) -> DisplayFieldCat
 
 
 def _generic_catalog(result: Any, source_tools: list[str]) -> DisplayFieldCatalog | None:
+    """Handle the internal generic catalog helper path for this module.
+
+    Inputs:
+        Receives result, source_tools for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._generic_catalog.
+    """
     if isinstance(result, list) and result and all(isinstance(item, dict) for item in result):
         return _catalog_from_records("generic", "Result", [dict(item) for item in result], source_tools=source_tools)
     if isinstance(result, dict):
@@ -342,6 +533,17 @@ def _catalog_from_records(
     source_tools: list[str],
     render_style: RenderStyle = "table",
 ) -> DisplayFieldCatalog | None:
+    """Handle the internal catalog from records helper path for this module.
+
+    Inputs:
+        Receives domain, title, records, source_tools, render_style for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._catalog_from_records.
+    """
     if not records:
         return None
     field_ids: list[str] = []
@@ -368,6 +570,17 @@ def _catalog_from_records(
 
 
 def _looks_like_slurm_payload(value: Any) -> bool:
+    """Handle the internal looks like slurm payload helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._looks_like_slurm_payload.
+    """
     if not isinstance(value, dict):
         return False
     if "metric_group" in value or "results" in value:
@@ -384,6 +597,17 @@ def _looks_like_slurm_payload(value: Any) -> bool:
 
 
 def _action_tools(actions: list[Any]) -> list[str]:
+    """Handle the internal action tools helper path for this module.
+
+    Inputs:
+        Receives actions for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._action_tools.
+    """
     tools: list[str] = []
     for action in actions:
         tool = str(getattr(action, "tool", "") or (action.get("tool") if isinstance(action, dict) else "") or "")
@@ -393,6 +617,17 @@ def _action_tools(actions: list[Any]) -> list[str]:
 
 
 def _field_type(records: list[dict[str, Any]], field_id: str) -> str:
+    """Handle the internal field type helper path for this module.
+
+    Inputs:
+        Receives records, field_id for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._field_type.
+    """
     for record in records:
         value = record.get(field_id)
         if value is None:
@@ -406,12 +641,34 @@ def _field_type(records: list[dict[str, Any]], field_id: str) -> str:
 
 
 def _is_safe_field_id(field_id: str) -> bool:
+    """Handle the internal is safe field id helper path for this module.
+
+    Inputs:
+        Receives field_id for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._is_safe_field_id.
+    """
     lowered = field_id.lower()
     forbidden = ("password", "token", "secret", "credential", "raw", "payload", "stdout", "stderr")
     return bool(field_id.strip()) and not any(part in lowered for part in forbidden)
 
 
 def _time_window(summary: dict[str, Any]) -> str:
+    """Handle the internal time window helper path for this module.
+
+    Inputs:
+        Receives summary for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._time_window.
+    """
     start = summary.get("start")
     end = summary.get("end")
     if start and end:
@@ -424,12 +681,45 @@ def _time_window(summary: dict[str, Any]) -> str:
 
 
 def _drop_empty(data: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal drop empty helper path for this module.
+
+    Inputs:
+        Receives data for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._drop_empty.
+    """
     return {key: value for key, value in data.items() if value not in (None, "", [], {})}
 
 
 def _inline_code(value: Any) -> str:
+    """Handle the internal inline code helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._inline_code.
+    """
     return md_cell(value).replace("`", "'")
 
 
 def _code_cell(value: Any) -> str:
+    """Handle the internal code cell helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._code_cell.
+    """
     return f"`{_inline_code(value)}`"

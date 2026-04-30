@@ -2,6 +2,8 @@
 
 SQL planning is LLM-proposed and schema-aware, then deterministically validated before execution. The action planner receives compact schema metadata when SQL is relevant; runtime validators enforce read-only SQL, known databases, known tables/columns, PostgreSQL quoting rules, and result-shape contracts.
 
+For the full request and output lifecycle, see [System Design](./SYSTEM_DESIGN.md).
+
 ## Schema Catalog
 
 `src/aor_runtime/tools/sql.py` exposes `get_sql_catalog(...)`, `get_all_sql_catalogs(...)`, and `refresh_schema_cache(...)`.
@@ -46,7 +48,7 @@ When `AOR_ENABLE_SQL_LLM_GENERATION=true`, broad SQL questions can use `src/aor_
 
 The LLM receives compact schema context only. It must return JSON containing a single PostgreSQL read-only query. The generated SQL is normalized, validated, checked against declared schema references, optionally validated with PostgreSQL `EXPLAIN`, and then executed only through `sql.query`.
 
-The LLM never emits execution plans, shell commands, Python, or raw tool calls.
+The SQL-generation helper never emits execution plans, shell commands, Python, or raw tool calls. The active action planner may emit structured `sql.*` tool actions, but those actions must pass deterministic SQL validation before execution.
 
 When a constraint frame exists, the LLM prompt includes it and the response may declare `constraints_addressed`. The runtime still performs its own coverage validation; the declaration is telemetry, not trust.
 

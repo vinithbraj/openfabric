@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.tool_surfaces
+
+Purpose:
+    Describe registered tools for validation, tracing, stats, and presentation surfaces.
+
+Responsibilities:
+    Merge tool registry metadata with output contracts into friendly labels and presentation categories.
+
+Data flow / Interfaces:
+    Feeds OpenWebUI trace summaries, stats tables, generic validation, and renderer fallbacks.
+
+Boundaries:
+    A registered tool should not require bespoke plumbing just to be recognized as known.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -12,6 +27,17 @@ ToolSurfaceCategory = Literal["sql", "filesystem", "shell", "slurm", "text", "ru
 
 @dataclass(frozen=True)
 class ToolSurfaceContract:
+    """Represent tool surface contract within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ToolSurfaceContract.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.tool_surfaces.ToolSurfaceContract and related tests.
+    """
     name: str
     category: ToolSurfaceCategory
     friendly_label: str
@@ -25,6 +51,17 @@ class ToolSurfaceContract:
 
 
 def build_tool_surface(tool: BaseTool) -> ToolSurfaceContract:
+    """Build tool surface for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_surfaces.build_tool_surface.
+    """
     name = str(tool.spec.name)
     output_contract = contract_for_tool(name)
     category = category_for_tool(name)
@@ -43,10 +80,32 @@ def build_tool_surface(tool: BaseTool) -> ToolSurfaceContract:
 
 
 def build_tool_surfaces(registry: ToolRegistry) -> dict[str, ToolSurfaceContract]:
+    """Build tool surfaces for the surrounding runtime workflow.
+
+    Inputs:
+        Receives registry for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_surfaces.build_tool_surfaces.
+    """
     return {name: build_tool_surface(registry.get(name)) for name in registry.names()}
 
 
 def category_for_tool(name: str) -> ToolSurfaceCategory:
+    """Category for tool for the surrounding runtime workflow.
+
+    Inputs:
+        Receives name for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_surfaces.category_for_tool.
+    """
     tool = str(name or "")
     if tool.startswith("sql."):
         return "sql"
@@ -66,6 +125,17 @@ def category_for_tool(name: str) -> ToolSurfaceCategory:
 
 
 def friendly_label_for_tool(name: str, args: dict[str, Any] | None = None) -> str:
+    """Friendly label for tool for the surrounding runtime workflow.
+
+    Inputs:
+        Receives name, args for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_surfaces.friendly_label_for_tool.
+    """
     tool = str(name or "")
     values = dict(args or {})
     if tool == "sql.query":
@@ -97,6 +167,17 @@ def friendly_label_for_tool(name: str, args: dict[str, Any] | None = None) -> st
 
 
 def registered_tool_result_valid(tool_name: str, result: Any, registry: ToolRegistry) -> tuple[bool, str]:
+    """Registered tool result valid for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool_name, result, registry for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_surfaces.registered_tool_result_valid.
+    """
     try:
         tool = registry.get(tool_name)
     except KeyError:
@@ -109,6 +190,17 @@ def registered_tool_result_valid(tool_name: str, result: Any, registry: ToolRegi
 
 
 def _result_kind_for_tool(name: str, contract: ToolOutputContract | None) -> str:
+    """Handle the internal result kind for tool helper path for this module.
+
+    Inputs:
+        Receives name, contract for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_surfaces._result_kind_for_tool.
+    """
     if contract is None:
         return category_for_tool(name)
     if contract.collection_paths:
@@ -123,4 +215,15 @@ def _result_kind_for_tool(name: str, contract: ToolOutputContract | None) -> str
 
 
 def _clean(value: Any) -> str:
+    """Handle the internal clean helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_surfaces._clean.
+    """
     return str(value or "").strip()

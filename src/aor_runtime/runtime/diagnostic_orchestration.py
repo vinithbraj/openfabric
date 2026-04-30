@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.diagnostic_orchestration
+
+Purpose:
+    Bound broad multi-domain diagnostic prompts into compact staged sections.
+
+Responsibilities:
+    Recognize diagnostic goals and define budgets, sections, and partial-completion behavior.
+
+Data flow / Interfaces:
+    Provides planner-time guidance for filesystem, config, SQL, shell, and capability summaries.
+
+Boundaries:
+    Prevents broad diagnostics from monopolizing request time or dumping raw lists into final output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -7,12 +22,34 @@ from typing import Any
 
 @dataclass(frozen=True)
 class RequestBudget:
+    """Represent request budget within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by RequestBudget.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.diagnostic_orchestration.RequestBudget and related tests.
+    """
     max_wall_time_seconds: int = 60
     max_llm_calls: int = 2
     max_actions: int = 8
     max_output_facts_per_section: int = 8
 
     def model_dump(self) -> dict[str, int]:
+        """Model dump for RequestBudget instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through RequestBudget.model_dump calls and related tests.
+        """
         return {
             "max_wall_time_seconds": self.max_wall_time_seconds,
             "max_llm_calls": self.max_llm_calls,
@@ -23,20 +60,64 @@ class RequestBudget:
 
 @dataclass(frozen=True)
 class DiagnosticSectionPlan:
+    """Represent diagnostic section plan within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by DiagnosticSectionPlan.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.diagnostic_orchestration.DiagnosticSectionPlan and related tests.
+    """
     name: str
     allowed_tools: tuple[str, ...]
     instruction: str
 
     def model_dump(self) -> dict[str, Any]:
+        """Model dump for DiagnosticSectionPlan instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through DiagnosticSectionPlan.model_dump calls and related tests.
+        """
         return {"name": self.name, "allowed_tools": list(self.allowed_tools), "instruction": self.instruction}
 
 
 @dataclass(frozen=True)
 class DiagnosticPlan:
+    """Represent diagnostic plan within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by DiagnosticPlan.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.diagnostic_orchestration.DiagnosticPlan and related tests.
+    """
     budget: RequestBudget = field(default_factory=RequestBudget)
     sections: tuple[DiagnosticSectionPlan, ...] = ()
 
     def model_dump(self) -> dict[str, Any]:
+        """Model dump for DiagnosticPlan instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through DiagnosticPlan.model_dump calls and related tests.
+        """
         return {"budget": self.budget.model_dump(), "sections": [section.model_dump() for section in self.sections]}
 
 
@@ -70,6 +151,17 @@ DIAGNOSTIC_SECTIONS: tuple[DiagnosticSectionPlan, ...] = (
 
 
 def is_broad_diagnostic_goal(goal: str) -> bool:
+    """Is broad diagnostic goal for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.diagnostic_orchestration.is_broad_diagnostic_goal.
+    """
     text = str(goal or "").lower()
     if not re.search(r"\b(?:diagnostic|summarize|summary|available|capabilities|config\s+flags)\b", text):
         return False
@@ -88,6 +180,17 @@ def is_broad_diagnostic_goal(goal: str) -> bool:
 
 
 def diagnostic_plan_for_goal(goal: str) -> DiagnosticPlan | None:
+    """Diagnostic plan for goal for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.diagnostic_orchestration.diagnostic_plan_for_goal.
+    """
     if not is_broad_diagnostic_goal(goal):
         return None
     return DiagnosticPlan(sections=DIAGNOSTIC_SECTIONS)

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.openwebui_trace
+
+Purpose:
+    Render compact OpenWebUI progress traces without exposing raw payloads.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import re
@@ -21,6 +36,17 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 
 def resolve_openwebui_trace_mode(settings: Any | None) -> TraceMode:
+    """Resolve openwebui trace mode for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace.resolve_openwebui_trace_mode.
+    """
     raw_mode = str(getattr(settings, "openwebui_trace_mode", "") or "").strip().lower()
     if raw_mode in {"off", "summary", "diagnostic"}:
         return raw_mode
@@ -34,6 +60,17 @@ def resolve_openwebui_trace_mode(settings: Any | None) -> TraceMode:
 
 @dataclass
 class OpenWebUITraceRenderer:
+    """Represent open web u i trace renderer within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by OpenWebUITraceRenderer.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.openwebui_trace.OpenWebUITraceRenderer and related tests.
+    """
     mode: TraceMode = "off"
     max_detail_chars: int = 240
     _planner_started_count: int = 0
@@ -43,9 +80,31 @@ class OpenWebUITraceRenderer:
 
     @classmethod
     def from_settings(cls, settings: Any | None) -> "OpenWebUITraceRenderer":
+        """From settings for OpenWebUITraceRenderer instances.
+
+        Inputs:
+            Receives settings for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer.from_settings calls and related tests.
+        """
         return cls(mode=resolve_openwebui_trace_mode(settings))
 
     def render(self, event: dict[str, Any]) -> str | None:
+        """Render for OpenWebUITraceRenderer instances.
+
+        Inputs:
+            Receives event for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer.render calls and related tests.
+        """
         if self.mode == "off":
             return None
 
@@ -74,9 +133,31 @@ class OpenWebUITraceRenderer:
 
     @property
     def diagnostic(self) -> bool:
+        """Diagnostic for OpenWebUITraceRenderer instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer.diagnostic calls and related tests.
+        """
         return self.mode == "diagnostic"
 
     def _render_planner_started(self, payload: dict[str, Any]) -> str:
+        """Handle the internal render planner started helper path for this module.
+
+        Inputs:
+            Receives payload for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer._render_planner_started calls and related tests.
+        """
         self._planner_started_count += 1
         attempt = _to_int(payload.get("attempt")) or self._planner_started_count
         if attempt <= 1:
@@ -84,6 +165,17 @@ class OpenWebUITraceRenderer:
         return _trace_progress([f"Repair attempt {attempt - 1}: replanning..."])
 
     def _render_planner_completed(self, payload: dict[str, Any]) -> str:
+        """Handle the internal render planner completed helper path for this module.
+
+        Inputs:
+            Receives payload for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer._render_planner_completed calls and related tests.
+        """
         steps = _plan_steps(payload)
         signature = "|".join(steps)
         changed = signature and signature != self._last_plan_signature
@@ -105,6 +197,17 @@ class OpenWebUITraceRenderer:
         return _trace_markdown(lines)
 
     def _render_step_started(self, payload: dict[str, Any]) -> str | None:
+        """Handle the internal render step started helper path for this module.
+
+        Inputs:
+            Receives payload for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer._render_step_started calls and related tests.
+        """
         step = dict(payload.get("step") or {})
         step_index = _to_int(payload.get("step_index")) or _to_int(step.get("id")) or 0
         tool = str(step.get("action") or "step").strip()
@@ -124,6 +227,17 @@ class OpenWebUITraceRenderer:
         return _trace_progress([f"Running {label}..."])
 
     def _render_step_completed(self, payload: dict[str, Any]) -> str | None:
+        """Handle the internal render step completed helper path for this module.
+
+        Inputs:
+            Receives payload for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer._render_step_completed calls and related tests.
+        """
         step = dict(payload.get("step") or {})
         step_index = _to_int(step.get("id")) or 0
         tool = str(step.get("action") or "").strip()
@@ -144,6 +258,17 @@ class OpenWebUITraceRenderer:
         return _trace_progress([summary]) if summary else None
 
     def _render_validation_completed(self, payload: dict[str, Any]) -> str | None:
+        """Handle the internal render validation completed helper path for this module.
+
+        Inputs:
+            Receives payload for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer._render_validation_completed calls and related tests.
+        """
         result = dict(payload.get("result") or {})
         if bool(result.get("success")):
             return _trace_progress(["Checks passed."]) if self.diagnostic else None
@@ -151,23 +276,67 @@ class OpenWebUITraceRenderer:
         return _trace_progress([f"Validation failed: {reason}. Repairing if possible..."])
 
     def _render_result_shape(self, payload: dict[str, Any]) -> str | None:
+        """Handle the internal render result shape helper path for this module.
+
+        Inputs:
+            Receives payload for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer._render_result_shape calls and related tests.
+        """
         if bool(payload.get("success")):
             return _trace_progress(["Result shape verified."]) if self.diagnostic else None
         reason = sanitize_detail(payload.get("reason") or "result shape did not match the request", max_chars=self.max_detail_chars)
         return _trace_progress([f"Result check failed: {reason}. Repairing if possible..."])
 
     def _render_failed(self, event_type: str, payload: dict[str, Any]) -> str:
+        """Handle the internal render failed helper path for this module.
+
+        Inputs:
+            Receives event_type, payload for this OpenWebUITraceRenderer method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through OpenWebUITraceRenderer._render_failed calls and related tests.
+        """
         phase = event_type.split(".", 1)[0].replace("_", " ").title()
         error = sanitize_detail(payload.get("error") or "Task failed.", max_chars=self.max_detail_chars)
         return _trace_progress([f"{phase} failed: {error}"])
 
 
 def _trace_progress(body: list[str]) -> str:
+    """Handle the internal trace progress helper path for this module.
+
+    Inputs:
+        Receives body for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._trace_progress.
+    """
     lines = [f"`{_inline_code(item)}`" for item in body if str(item or "")]
     return _trace_markdown(lines)
 
 
 def _trace_markdown(lines: str | list[str], *, code: bool = False) -> str:
+    """Handle the internal trace markdown helper path for this module.
+
+    Inputs:
+        Receives lines, code for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._trace_markdown.
+    """
     raw_lines = [lines] if isinstance(lines, str) else list(lines)
     rendered: list[str] = []
     for line in raw_lines:
@@ -179,10 +348,32 @@ def _trace_markdown(lines: str | list[str], *, code: bool = False) -> str:
 
 
 def _inline_code(value: Any) -> str:
+    """Handle the internal inline code helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._inline_code.
+    """
     return str(value or "").replace("`", "'")
 
 
 def sanitize_detail(value: Any, *, max_chars: int = 240) -> str:
+    """Sanitize detail for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, max_chars for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace.sanitize_detail.
+    """
     text = str(value or "")
     text = text.replace("\x00", "")
     text = _BEARER_TOKEN_RE.sub("Bearer <redacted>", text)
@@ -195,6 +386,17 @@ def sanitize_detail(value: Any, *, max_chars: int = 240) -> str:
 
 
 def _plan_steps(payload: dict[str, Any]) -> list[str]:
+    """Handle the internal plan steps helper path for this module.
+
+    Inputs:
+        Receives payload for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._plan_steps.
+    """
     high_level = [sanitize_detail(item, max_chars=140) for item in _as_list(payload.get("high_level_plan"))]
     if high_level:
         return [item for item in high_level if item]
@@ -212,10 +414,32 @@ def _plan_steps(payload: dict[str, Any]) -> list[str]:
 
 
 def _friendly_step(tool: str, args: dict[str, Any]) -> str:
+    """Handle the internal friendly step helper path for this module.
+
+    Inputs:
+        Receives tool, args for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._friendly_step.
+    """
     return sanitize_detail(friendly_label_for_tool(tool, args), max_chars=120)
 
 
 def _step_detail(tool: str, args: dict[str, Any], payload: dict[str, Any], *, max_chars: int) -> str:
+    """Handle the internal step detail helper path for this module.
+
+    Inputs:
+        Receives tool, args, payload, max_chars for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._step_detail.
+    """
     if tool in {"sql.query", "sql.validate"}:
         database = str(args.get("database") or "").strip()
         sql = sanitize_sql(args.get("query") or payload.get("command") or "", max_chars=max_chars)
@@ -235,6 +459,17 @@ def _step_detail(tool: str, args: dict[str, Any], payload: dict[str, Any], *, ma
 
 
 def sanitize_sql(value: Any, *, max_chars: int = 240) -> str:
+    """Sanitize sql for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, max_chars for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace.sanitize_sql.
+    """
     text = sanitize_detail(value, max_chars=max_chars * 2)
     text = re.sub(r"(?s)'[^']{48,}'", "'<redacted>'", text)
     text = re.sub(r'(?s)"[^"]{80,}"', '"<redacted>"', text)
@@ -242,6 +477,17 @@ def sanitize_sql(value: Any, *, max_chars: int = 240) -> str:
 
 
 def _result_summary(tool: str, result: dict[str, Any], *, max_chars: int) -> str:
+    """Handle the internal result summary helper path for this module.
+
+    Inputs:
+        Receives tool, result, max_chars for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._result_summary.
+    """
     if tool == "sql.validate":
         valid = result.get("valid")
         if isinstance(valid, bool):
@@ -286,12 +532,34 @@ def _result_summary(tool: str, result: dict[str, Any], *, max_chars: int) -> str
 
 
 def _as_list(value: Any) -> list[Any]:
+    """Handle the internal as list helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._as_list.
+    """
     if isinstance(value, list):
         return value
     return []
 
 
 def _to_int(value: Any) -> int | None:
+    """Handle the internal to int helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.openwebui_trace._to_int.
+    """
     try:
         return int(value)
     except (TypeError, ValueError):

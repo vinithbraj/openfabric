@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.sql_resolver
+
+Purpose:
+    Resolve user SQL concepts to schema-backed tables, columns, and relationships.
+
+Responsibilities:
+    Map concepts such as patient, study, series, instance, modality, age, and DICOM relationships to catalog entities.
+
+Data flow / Interfaces:
+    Used by SQL repair, validation, and schema-grounded planning helpers.
+
+Boundaries:
+    Must return clean unsupported-concept answers instead of speculative invalid SQL.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -12,6 +27,17 @@ TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 @dataclass(frozen=True)
 class ResolvedSqlContext:
+    """Represent resolved sql context within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ResolvedSqlContext.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.sql_resolver.ResolvedSqlContext and related tests.
+    """
     goal: str
     catalog: SqlSchemaCatalog
     tables: list[SqlTableRef] = field(default_factory=list)
@@ -22,10 +48,32 @@ class ResolvedSqlContext:
 
     @property
     def has_ambiguity(self) -> bool:
+        """Has ambiguity for ResolvedSqlContext instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ResolvedSqlContext.has_ambiguity calls and related tests.
+        """
         return bool(self.ambiguous_tables or self.ambiguous_columns)
 
 
 def resolve_table_name(user_phrase: str, catalog: SqlSchemaCatalog) -> SqlTableRef | None:
+    """Resolve table name for the surrounding runtime workflow.
+
+    Inputs:
+        Receives user_phrase, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver.resolve_table_name.
+    """
     ambiguous_exact = _ambiguous_exact_table_matches(user_phrase, catalog)
     if ambiguous_exact:
         return None
@@ -40,6 +88,17 @@ def resolve_table_name(user_phrase: str, catalog: SqlSchemaCatalog) -> SqlTableR
 
 
 def resolve_column_name(user_phrase: str, table: SqlTableRef) -> SqlColumnRef | None:
+    """Resolve column name for the surrounding runtime workflow.
+
+    Inputs:
+        Receives user_phrase, table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver.resolve_column_name.
+    """
     candidates = _rank_columns(user_phrase, table)
     if not candidates:
         return None
@@ -51,6 +110,17 @@ def resolve_column_name(user_phrase: str, table: SqlTableRef) -> SqlColumnRef | 
 
 
 def resolve_sql_references(goal: str, catalog: SqlSchemaCatalog) -> ResolvedSqlContext:
+    """Resolve sql references for the surrounding runtime workflow.
+
+    Inputs:
+        Receives goal, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver.resolve_sql_references.
+    """
     ambiguous_exact = _ambiguous_exact_table_matches(goal, catalog)
     if ambiguous_exact:
         return ResolvedSqlContext(goal=goal, catalog=catalog, ambiguous_tables=ambiguous_exact)
@@ -102,6 +172,17 @@ def resolve_sql_references(goal: str, catalog: SqlSchemaCatalog) -> ResolvedSqlC
 
 
 def _rank_tables(user_phrase: str, catalog: SqlSchemaCatalog) -> list[tuple[int, SqlTableRef]]:
+    """Handle the internal rank tables helper path for this module.
+
+    Inputs:
+        Receives user_phrase, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver._rank_tables.
+    """
     phrase = str(user_phrase or "")
     phrase_tokens = _tokens(phrase)
     normalized_phrase = _normalize(phrase)
@@ -140,6 +221,17 @@ def _rank_tables(user_phrase: str, catalog: SqlSchemaCatalog) -> list[tuple[int,
 
 
 def _ambiguous_exact_table_matches(user_phrase: str, catalog: SqlSchemaCatalog) -> list[SqlTableRef]:
+    """Handle the internal ambiguous exact table matches helper path for this module.
+
+    Inputs:
+        Receives user_phrase, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver._ambiguous_exact_table_matches.
+    """
     phrase_tokens = _tokens(user_phrase)
     matches: dict[str, list[SqlTableRef]] = {}
     for table in catalog.tables:
@@ -153,6 +245,17 @@ def _ambiguous_exact_table_matches(user_phrase: str, catalog: SqlSchemaCatalog) 
 
 
 def _rank_columns(user_phrase: str, table: SqlTableRef) -> list[tuple[int, SqlColumnRef]]:
+    """Handle the internal rank columns helper path for this module.
+
+    Inputs:
+        Receives user_phrase, table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver._rank_columns.
+    """
     phrase = str(user_phrase or "")
     phrase_tokens = _tokens(phrase)
     normalized_phrase = _normalize(phrase)
@@ -187,6 +290,17 @@ def _rank_columns(user_phrase: str, table: SqlTableRef) -> list[tuple[int, SqlCo
 
 
 def _semantic_column_score(phrase_tokens: set[str], column: SqlColumnRef) -> int:
+    """Handle the internal semantic column score helper path for this module.
+
+    Inputs:
+        Receives phrase_tokens, column for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver._semantic_column_score.
+    """
     column_tokens = _tokens(column.column_name)
     score = 0
     if "age" in phrase_tokens and {"birth", "date"} <= column_tokens:
@@ -201,6 +315,17 @@ def _semantic_column_score(phrase_tokens: set[str], column: SqlColumnRef) -> int
 
 
 def _tokens(value: str) -> set[str]:
+    """Handle the internal tokens helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver._tokens.
+    """
     normalized = _normalize(value)
     raw_tokens = set(TOKEN_RE.findall(normalized))
     expanded: set[str] = set()
@@ -214,11 +339,33 @@ def _tokens(value: str) -> set[str]:
 
 
 def _normalize(value: str) -> str:
+    """Handle the internal normalize helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver._normalize.
+    """
     text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
     return " ".join(TOKEN_RE.findall(text.lower()))
 
 
 def _normalize_singular(value: str) -> str:
+    """Handle the internal normalize singular helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver._normalize_singular.
+    """
     tokens = []
     for token in TOKEN_RE.findall(_normalize(value)):
         tokens.append(_singular(token))
@@ -226,6 +373,17 @@ def _normalize_singular(value: str) -> str:
 
 
 def _singular(token: str) -> str:
+    """Handle the internal singular helper path for this module.
+
+    Inputs:
+        Receives token for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.sql_resolver._singular.
+    """
     if token == "ids":
         return "id"
     if token.endswith("ies") and len(token) > 4:

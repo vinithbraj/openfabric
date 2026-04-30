@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.capabilities.sql
+
+Purpose:
+    Provide compatibility capability-pack helpers and fixtures for domain-specific tests and utilities.
+
+Responsibilities:
+    Classify or compile typed intents when called directly by tests or compatibility surfaces.
+
+Data flow / Interfaces:
+    Consumes compile contexts, allowed tools, and typed intents; returns execution-plan fragments or eval metadata.
+
+Boundaries:
+    These modules are not the active top-level natural-language planner; user prompts route through LLMActionPlanner.
+"""
+
 from __future__ import annotations
 
 import re
@@ -53,10 +68,32 @@ SLURM_SQL_EXCLUSION_RE = re.compile(
 
 
 class SqlCapabilityPack(CapabilityPack):
+    """Represent sql capability pack within the OpenFABRIC runtime. It extends CapabilityPack.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by SqlCapabilityPack.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.capabilities.sql.SqlCapabilityPack and related tests.
+    """
     name = "sql"
     intent_types = (SqlCountIntent, SqlSelectIntent, SqlGeneratedQueryIntent, SqlCatalogReturnIntent, SqlFailureIntent)
 
     def classify(self, goal: str, context: ClassificationContext) -> IntentResult:
+        """Classify for SqlCapabilityPack instances.
+
+        Inputs:
+            Receives goal, context for this SqlCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlCapabilityPack.classify calls and related tests.
+        """
         if SLURM_SQL_EXCLUSION_RE.search(str(goal or "")):
             return IntentResult(matched=False, reason=f"{self.name}_slurm_domain")
         legacy = classify_single_intent(goal, schema_payload=context.schema_payload)
@@ -133,6 +170,17 @@ class SqlCapabilityPack(CapabilityPack):
         return _classify_llm_sql(goal, context, catalog, constraint_frame=constraint_frame)
 
     def compile(self, intent: Any, context: CompileContext) -> CompiledIntentPlan | None:
+        """Compile for SqlCapabilityPack instances.
+
+        Inputs:
+            Receives intent, context for this SqlCapabilityPack method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through SqlCapabilityPack.compile calls and related tests.
+        """
         if isinstance(intent, (SqlCountIntent, SqlSelectIntent)):
             return CompiledIntentPlan(
                 plan=compile_intent_to_plan(intent, context.allowed_tools, context.settings),
@@ -216,6 +264,17 @@ class SqlCapabilityPack(CapabilityPack):
 
 
 def _classify_deterministic_sql(goal: str, catalog: SqlSchemaCatalog, *, constraint_frame: SqlConstraintFrame) -> IntentResult:
+    """Handle the internal classify deterministic sql helper path for this module.
+
+    Inputs:
+        Receives goal, catalog, constraint_frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._classify_deterministic_sql.
+    """
     goal_text = str(goal or "")
     database = catalog.database
     if LIST_SCHEMAS_RE.search(goal_text):
@@ -297,6 +356,17 @@ def _classify_deterministic_sql(goal: str, catalog: SqlSchemaCatalog, *, constra
 
 
 def _classify_llm_sql(goal: str, context: ClassificationContext, catalog: SqlSchemaCatalog, *, constraint_frame: SqlConstraintFrame) -> IntentResult:
+    """Handle the internal classify llm sql helper path for this module.
+
+    Inputs:
+        Receives goal, context, catalog, constraint_frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._classify_llm_sql.
+    """
     resolved = resolve_sql_references(goal, catalog)
     llm = LLMClient(context.settings)
     repair_context = _sql_repair_context(context.failure_context)
@@ -391,6 +461,17 @@ def _deterministic_select(
     *,
     constraint_frame: SqlConstraintFrame,
 ) -> IntentResult:
+    """Handle the internal deterministic select helper path for this module.
+
+    Inputs:
+        Receives database, query, tables_used, columns_used, constraint_frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._deterministic_select.
+    """
     validation = _validate_generated_sql(query, constraint_frame)
     if validation is None:
         return IntentResult(matched=False, reason="sql_constraint_coverage_failed")
@@ -426,6 +507,17 @@ def _failure(
     llm_calls: int = 0,
     constraint_frame: SqlConstraintFrame | None = None,
 ) -> IntentResult:
+    """Handle the internal failure helper path for this module.
+
+    Inputs:
+        Receives message, error_type, database, catalog, validation_failure, llm_calls, constraint_frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._failure.
+    """
     suggestions = _sql_suggestions(database=database, catalog=catalog)
     return IntentResult(
         matched=True,
@@ -446,6 +538,17 @@ def _failure(
 
 
 def _looks_like_sql_goal(goal: str, context: ClassificationContext) -> bool:
+    """Handle the internal looks like sql goal helper path for this module.
+
+    Inputs:
+        Receives goal, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._looks_like_sql_goal.
+    """
     if not context.settings.sql_databases and not context.settings.sql_database_url:
         return False
     text = str(goal or "")
@@ -465,6 +568,17 @@ def _looks_like_sql_goal(goal: str, context: ClassificationContext) -> bool:
 
 
 def _requires_broad_sql(goal: str) -> bool:
+    """Handle the internal requires broad sql helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._requires_broad_sql.
+    """
     return bool(
         re.search(
             r"\b(?:join|group(?:ed)?|per|by|having|with\s+more\s+than|with\s+less\s+than|more\s+than\s+\d+\s+\w+|less\s+than\s+\d+\s+\w+)\b",
@@ -475,6 +589,17 @@ def _requires_broad_sql(goal: str) -> bool:
 
 
 def _database_hint(goal: str, context: ClassificationContext) -> str | None:
+    """Handle the internal database hint helper path for this module.
+
+    Inputs:
+        Receives goal, context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._database_hint.
+    """
     lowered = str(goal or "").lower()
     for name in sorted(context.settings.sql_databases, key=len, reverse=True):
         if re.search(rf"\b{re.escape(str(name).lower())}\b", lowered):
@@ -483,6 +608,17 @@ def _database_hint(goal: str, context: ClassificationContext) -> str | None:
 
 
 def _classify_constraint_count(catalog: SqlSchemaCatalog, frame: SqlConstraintFrame) -> IntentResult:
+    """Handle the internal classify constraint count helper path for this module.
+
+    Inputs:
+        Receives catalog, frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._classify_constraint_count.
+    """
     target = _table_from_qualified(frame.target_entity, catalog)
     if target is None:
         return IntentResult(matched=False, reason="sql_count_no_target")
@@ -585,6 +721,17 @@ def _classify_constraint_count(catalog: SqlSchemaCatalog, frame: SqlConstraintFr
 
 
 def _classify_constraint_select(catalog: SqlSchemaCatalog, frame: SqlConstraintFrame) -> IntentResult:
+    """Handle the internal classify constraint select helper path for this module.
+
+    Inputs:
+        Receives catalog, frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._classify_constraint_select.
+    """
     target = _table_from_qualified(frame.target_entity, catalog)
     if target is None:
         return IntentResult(matched=False, reason="sql_select_no_target")
@@ -668,6 +815,17 @@ def _projection_related_select_sql(
     age_constraints: list[SqlConstraint],
     dialect: str | None,
 ) -> tuple[str, SqlTableRef, list[str]] | None:
+    """Handle the internal projection related select sql helper path for this module.
+
+    Inputs:
+        Receives catalog, target, related, projections, age_constraints, dialect for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._projection_related_select_sql.
+    """
     related_table = _table_from_qualified(related.resolved_table, catalog)
     primary_column = str(related.metadata.get("primary_column") or "")
     related_column = str(related.metadata.get("related_column") or "")
@@ -710,6 +868,17 @@ def _projection_related_select_sql(
 
 
 def _projection_select_clause(projections: list[SqlProjection], *, table_alias: str | None = None) -> str | None:
+    """Handle the internal projection select clause helper path for this module.
+
+    Inputs:
+        Receives projections, table_alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._projection_select_clause.
+    """
     if not projections:
         return None
     prefix = f"{table_alias}." if table_alias else ""
@@ -723,6 +892,17 @@ def _projection_select_clause(projections: list[SqlProjection], *, table_alias: 
 
 
 def _age_predicate_sql(constraint: SqlConstraint, *, dialect: str | None, table_alias: str | None = None) -> str | None:
+    """Handle the internal age predicate sql helper path for this module.
+
+    Inputs:
+        Receives constraint, dialect, table_alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._age_predicate_sql.
+    """
     if not constraint.resolved_column:
         return None
     column_name = constraint.resolved_column.split(".")[-1]
@@ -747,12 +927,34 @@ def _age_predicate_sql(constraint: SqlConstraint, *, dialect: str | None, table_
 
 
 def _age_cutoff_sql(age: int, dialect: str | None) -> str:
+    """Handle the internal age cutoff sql helper path for this module.
+
+    Inputs:
+        Receives age, dialect for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._age_cutoff_sql.
+    """
     if str(dialect or "").lower() == "sqlite":
         return f"date('now', '-{age} years')"
     return f"CURRENT_DATE - INTERVAL '{age} years'"
 
 
 def _sql_count_operator(operator: str) -> str | None:
+    """Handle the internal sql count operator helper path for this module.
+
+    Inputs:
+        Receives operator for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._sql_count_operator.
+    """
     return {
         "eq": "=",
         "neq": "<>",
@@ -764,6 +966,17 @@ def _sql_count_operator(operator: str) -> str | None:
 
 
 def _validate_generated_sql(query: str, frame: SqlConstraintFrame, catalog: SqlSchemaCatalog | None = None) -> tuple[str, SqlConstraintCoverageResult] | None:
+    """Handle the internal validate generated sql helper path for this module.
+
+    Inputs:
+        Receives query, frame, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._validate_generated_sql.
+    """
     normalized_query = normalize_pg_relation_quoting(query, catalog)
     validation = validate_read_only_sql(normalized_query)
     if not validation.valid:
@@ -776,6 +989,17 @@ def _validate_generated_sql(query: str, frame: SqlConstraintFrame, catalog: SqlS
 
 
 def _table_from_qualified(qualified_name: str | None, catalog: SqlSchemaCatalog) -> SqlTableRef | None:
+    """Handle the internal table from qualified helper path for this module.
+
+    Inputs:
+        Receives qualified_name, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._table_from_qualified.
+    """
     if not qualified_name or "." not in qualified_name:
         return None
     schema, table = qualified_name.split(".", 1)
@@ -783,6 +1007,17 @@ def _table_from_qualified(qualified_name: str | None, catalog: SqlSchemaCatalog)
 
 
 def _order_by_clause(frame: SqlConstraintFrame, *, table_alias: str | None = None) -> str | None:
+    """Handle the internal order by clause helper path for this module.
+
+    Inputs:
+        Receives frame, table_alias for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._order_by_clause.
+    """
     for constraint in frame.constraints:
         if constraint.kind != "order_by" or not constraint.resolved_column:
             continue
@@ -794,6 +1029,17 @@ def _order_by_clause(frame: SqlConstraintFrame, *, table_alias: str | None = Non
 
 
 def _limit_value(frame: SqlConstraintFrame) -> int | None:
+    """Handle the internal limit value helper path for this module.
+
+    Inputs:
+        Receives frame for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._limit_value.
+    """
     for constraint in frame.constraints:
         if constraint.kind == "limit" and constraint.value is not None:
             return min(max(int(constraint.value), 1), 500)
@@ -801,6 +1047,17 @@ def _limit_value(frame: SqlConstraintFrame) -> int | None:
 
 
 def _extract_limit(goal: str) -> int | None:
+    """Handle the internal extract limit helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._extract_limit.
+    """
     match = LIMIT_RE.search(goal)
     if match is None:
         return None
@@ -809,10 +1066,32 @@ def _extract_limit(goal: str) -> int | None:
 
 
 def _wants_json(goal: str) -> bool:
+    """Handle the internal wants json helper path for this module.
+
+    Inputs:
+        Receives goal for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._wants_json.
+    """
     return bool(re.search(r"\bjson\b", str(goal or ""), re.IGNORECASE))
 
 
 def _describe_table_text(table: SqlTableRef) -> str:
+    """Handle the internal describe table text helper path for this module.
+
+    Inputs:
+        Receives table for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._describe_table_text.
+    """
     lines = [table.qualified_name]
     for column in table.columns:
         flags = []
@@ -828,6 +1107,17 @@ def _describe_table_text(table: SqlTableRef) -> str:
 
 
 def _sql_suggestions(*, database: str | None, catalog: SqlSchemaCatalog | None) -> list[str]:
+    """Handle the internal sql suggestions helper path for this module.
+
+    Inputs:
+        Receives database, catalog for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._sql_suggestions.
+    """
     db = database or (catalog.database if catalog is not None else "database")
     suggestions = [f"List all tables in {db}."]
     table = catalog.tables[0] if catalog is not None and catalog.tables else None
@@ -840,6 +1130,17 @@ def _sql_suggestions(*, database: str | None, catalog: SqlSchemaCatalog | None) 
 
 
 def _sql_repair_context(failure_context: dict[str, Any] | None) -> dict[str, str] | None:
+    """Handle the internal sql repair context helper path for this module.
+
+    Inputs:
+        Receives failure_context for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.capabilities.sql._sql_repair_context.
+    """
     if not isinstance(failure_context, dict):
         return None
     if str(failure_context.get("failed_step") or "").strip().lower() != "sql.query":

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.dataflow
+
+Purpose:
+    Resolve references between execution-plan steps.
+
+Responsibilities:
+    Canonicalize and dereference $ref values, default paths, formatter inputs, and runtime.return values.
+
+Data flow / Interfaces:
+    Consumes action arguments, prior StepLog results, and tool output contracts to produce concrete tool inputs.
+
+Boundaries:
+    Invalid references must fail before unsafe execution or user-visible Reference path errors.
+"""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -11,10 +26,32 @@ TEXTUAL_OUTPUT_PATH_ALIASES = {"text", "content", "value", "csv", "csv_string", 
 
 
 def is_step_reference(value: Any) -> bool:
+    """Is step reference for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow.is_step_reference.
+    """
     return isinstance(value, dict) and isinstance(value.get("$ref"), str) and str(value.get("$ref")).strip() != ""
 
 
 def collect_step_references(value: Any) -> set[str]:
+    """Collect step references for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow.collect_step_references.
+    """
     refs: set[str] = set()
     if is_step_reference(value):
         refs.add(str(value["$ref"]).strip())
@@ -29,6 +66,17 @@ def collect_step_references(value: Any) -> set[str]:
 
 
 def normalize_execution_plan_dataflow(plan: ExecutionPlan) -> ExecutionPlan:
+    """Normalize execution plan dataflow for the surrounding runtime workflow.
+
+    Inputs:
+        Receives plan for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow.normalize_execution_plan_dataflow.
+    """
     output_producers: dict[str, str] = {}
     for step in plan.steps:
         _normalize_python_inputs(step, output_producers)
@@ -60,6 +108,17 @@ def normalize_execution_plan_dataflow(plan: ExecutionPlan) -> ExecutionPlan:
 
 
 def resolve_step_value(value: Any, step_outputs: dict[str, Any]) -> Any:
+    """Resolve step value for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, step_outputs for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow.resolve_step_value.
+    """
     if is_step_reference(value):
         alias = str(value["$ref"]).strip()
         if alias not in step_outputs:
@@ -78,6 +137,17 @@ def resolve_step_value(value: Any, step_outputs: dict[str, Any]) -> Any:
 
 
 def resolve_execution_step(step: ExecutionStep, step_outputs: dict[str, Any]) -> ExecutionStep:
+    """Resolve execution step for the surrounding runtime workflow.
+
+    Inputs:
+        Receives step, step_outputs for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow.resolve_execution_step.
+    """
     resolved_args = resolve_step_value(step.args, step_outputs)
     if step.action == "fs.write":
         resolved_args = _normalize_fs_write_args(resolved_args)
@@ -93,6 +163,17 @@ def resolve_execution_step(step: ExecutionStep, step_outputs: dict[str, Any]) ->
 
 
 def _resolve_output_path(value: Any, path: str) -> Any:
+    """Handle the internal resolve output path helper path for this module.
+
+    Inputs:
+        Receives value, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._resolve_output_path.
+    """
     current = value
     for chunk in path.split("."):
         segment = chunk.strip()
@@ -141,6 +222,17 @@ def _resolve_output_path(value: Any, path: str) -> Any:
 
 
 def _canonicalize_reference_paths(value: Any, output_producers: dict[str, str]) -> Any:
+    """Handle the internal canonicalize reference paths helper path for this module.
+
+    Inputs:
+        Receives value, output_producers for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._canonicalize_reference_paths.
+    """
     if is_step_reference(value):
         normalized = dict(value)
         alias = str(normalized["$ref"]).strip()
@@ -163,6 +255,17 @@ def _canonicalize_reference_paths(value: Any, output_producers: dict[str, str]) 
 
 
 def _available_fields(value: Any) -> str:
+    """Handle the internal available fields helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._available_fields.
+    """
     if not isinstance(value, dict) or not value:
         return "<none>"
     fields = sorted(str(key) for key in value.keys())
@@ -173,6 +276,17 @@ def _available_fields(value: Any) -> str:
 
 
 def _normalize_python_inputs(step: ExecutionStep, output_producers: dict[str, str]) -> None:
+    """Handle the internal normalize python inputs helper path for this module.
+
+    Inputs:
+        Receives step, output_producers for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._normalize_python_inputs.
+    """
     if step.action != "python.exec":
         return
     args = dict(step.args)
@@ -195,10 +309,32 @@ def _normalize_python_inputs(step: ExecutionStep, output_producers: dict[str, st
 
 
 def _default_ref_path_for_action(action: str) -> str | None:
+    """Handle the internal default ref path for action helper path for this module.
+
+    Inputs:
+        Receives action for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._default_ref_path_for_action.
+    """
     return default_path_for_tool(action)
 
 
 def _normalize_fs_write_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Handle the internal normalize fs write args helper path for this module.
+
+    Inputs:
+        Receives args for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._normalize_fs_write_args.
+    """
     content = args.get("content")
     if isinstance(content, str):
         return args
@@ -208,6 +344,17 @@ def _normalize_fs_write_args(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _coerce_fs_write_content(value: Any) -> str:
+    """Handle the internal coerce fs write content helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._coerce_fs_write_content.
+    """
     if isinstance(value, str):
         return value
     if value is None:
@@ -236,18 +383,62 @@ def _coerce_fs_write_content(value: Any) -> str:
 
 
 def _looks_like_python_exec_result(value: dict[str, Any]) -> bool:
+    """Handle the internal looks like python exec result helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._looks_like_python_exec_result.
+    """
     return {"success", "result", "error"}.issubset(value.keys()) and "output" in value
 
 
 def _looks_like_runtime_return_result(value: dict[str, Any]) -> bool:
+    """Handle the internal looks like runtime return result helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._looks_like_runtime_return_result.
+    """
     return "output" in value and "value" in value and len(value.keys()) == 2
 
 
 def _looks_like_shell_result(value: dict[str, Any]) -> bool:
+    """Handle the internal looks like shell result helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._looks_like_shell_result.
+    """
     return {"stdout", "stderr", "returncode"}.issubset(value.keys())
 
 
 def _json_dumps_safe(value: Any) -> str:
+    """Handle the internal json dumps safe helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.dataflow._json_dumps_safe.
+    """
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     except TypeError:

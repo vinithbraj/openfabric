@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.config
+
+Purpose:
+    Define runtime Settings and environment-driven configuration defaults.
+
+Responsibilities:
+    Centralize workspace roots, model settings, SQL connections, artifact policy, lifecycle timeouts, and render flags.
+
+Data flow / Interfaces:
+    Consumes app config/environment variables and provides typed settings to engine, tools, and API layers.
+
+Boundaries:
+    Configuration values must be validated before they affect filesystem, worker lifecycle, or tool execution behavior.
+"""
+
 from __future__ import annotations
 
 import os
@@ -11,6 +26,17 @@ from aor_runtime.model_identity import DEFAULT_OPENAI_COMPAT_MODEL_NAME, normali
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
+    """Handle the internal env bool helper path for this module.
+
+    Inputs:
+        Receives name, default for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.config._env_bool.
+    """
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -18,6 +44,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 class Settings(BaseModel):
+    """Represent settings within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by Settings.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.config.Settings and related tests.
+    """
     workspace_root: Path = Field(default_factory=lambda: Path.cwd())
     prompts_root: Path = Field(default_factory=lambda: Path.cwd() / "prompts")
     run_store_path: Path = Field(default_factory=lambda: Path.cwd() / "artifacts" / "runtime.db")
@@ -101,6 +138,17 @@ class Settings(BaseModel):
 
     @property
     def available_nodes(self) -> list[str]:
+        """Available nodes for Settings instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by OpenFABRIC runtime support through Settings.available_nodes calls and related tests.
+        """
         raw_value = str(self.available_nodes_raw or "")
         nodes: list[str] = []
         seen: set[str] = set()
@@ -123,6 +171,17 @@ class Settings(BaseModel):
         return nodes
 
     def resolved_default_node(self) -> str | None:
+        """Resolved default node for Settings instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by OpenFABRIC runtime support through Settings.resolved_default_node calls and related tests.
+        """
         normalized_default = str(self.default_node or "").strip()
         if normalized_default:
             return normalized_default
@@ -132,6 +191,17 @@ class Settings(BaseModel):
         return None
 
     def resolve_node(self, node: str = "") -> str:
+        """Resolve node for Settings instances.
+
+        Inputs:
+            Receives node for this Settings method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by OpenFABRIC runtime support through Settings.resolve_node calls and related tests.
+        """
         requested = str(node or "").strip()
         if not requested:
             requested = str(self.resolved_default_node() or "").strip()
@@ -143,6 +213,17 @@ class Settings(BaseModel):
         return requested
 
     def resolve_gateway_url(self, node: str = "") -> str:
+        """Resolve gateway url for Settings instances.
+
+        Inputs:
+            Receives node for this Settings method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by OpenFABRIC runtime support through Settings.resolve_gateway_url calls and related tests.
+        """
         resolved_node = self.resolve_node(node)
         gateway_url = str(self.gateway_endpoints.get(resolved_node, "") or self.gateway_url or "").strip()
         if not gateway_url:
@@ -150,6 +231,17 @@ class Settings(BaseModel):
         return gateway_url
 
     def resolve_openai_compat_spec_path(self) -> Path:
+        """Resolve openai compat spec path for Settings instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by OpenFABRIC runtime support through Settings.resolve_openai_compat_spec_path calls and related tests.
+        """
         raw_path = str(self.openai_compat_spec_path or "").strip()
         candidate = Path(raw_path).expanduser()
         if candidate.is_absolute():
@@ -158,6 +250,17 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def validate_default_node(self) -> "Settings":
+        """Validate validate default node invariants before runtime data crosses this boundary.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the validated value or model instance after enforcing the declared invariant.
+
+        Used by:
+            Used by OpenFABRIC runtime support through Settings.validate_default_node calls and related tests.
+        """
         if self.server_port <= 0 or self.server_port > 65535:
             raise ValueError("server_port must be between 1 and 65535.")
         normalized_default = str(self.default_node or "").strip()
@@ -260,6 +363,17 @@ class Settings(BaseModel):
 
 @lru_cache(maxsize=8)
 def _cached_settings(config_path: str, cwd: str) -> Settings:
+    """Handle the internal cached settings helper path for this module.
+
+    Inputs:
+        Receives config_path, cwd for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.config._cached_settings.
+    """
     app_config, resolved_config_path = load_app_config(config_path=config_path or None, cwd=cwd or None)
     workspace_root = Path(cwd).resolve()
     run_store_path = workspace_root / "artifacts" / "runtime.db"
@@ -385,6 +499,17 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
 
 
 def get_settings(config_path: str | Path | None = None, cwd: str | Path | None = None) -> Settings:
+    """Get settings for the surrounding runtime workflow.
+
+    Inputs:
+        Receives config_path, cwd for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.config.get_settings.
+    """
     resolved_cwd = str(Path(cwd).resolve()) if cwd is not None else str(Path.cwd().resolve())
     resolved_config = str(Path(config_path).expanduser().resolve()) if config_path is not None else ""
     return _cached_settings(resolved_config, resolved_cwd).model_copy(deep=True)

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.llm.client
+
+Purpose:
+    Wrap LLM provider calls, structured response handling, and token accounting.
+
+Responsibilities:
+    Normalize configured provider access, model selection, token accounting, and structured response handling.
+
+Data flow / Interfaces:
+    Receives compact planner/presentation prompts and returns model responses plus usage metadata.
+
+Boundaries:
+    Must not be handed raw result rows or sensitive payloads except through explicitly sanitized prompt construction.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,7 +27,29 @@ from aor_runtime.core.utils import extract_json_object
 
 
 class LLMClient:
+    """Represent l l m client within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by LLMClient.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by LLM provider integration code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.llm.client.LLMClient and related tests.
+    """
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this LLMClient method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by LLM provider integration through LLMClient.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self._discovered_models: list[str] | None = None
         self.last_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -21,6 +58,17 @@ class LLMClient:
         self.total_tokens: int = 0
 
     def available_models(self) -> list[str]:
+        """Available models for LLMClient instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by LLM provider integration through LLMClient.available_models calls and related tests.
+        """
         if self._discovered_models is not None:
             return self._discovered_models
         try:
@@ -33,6 +81,17 @@ class LLMClient:
         return self._discovered_models
 
     def resolve_model(self, requested: str | None = None) -> str:
+        """Resolve model for LLMClient instances.
+
+        Inputs:
+            Receives requested for this LLMClient method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by LLM provider integration through LLMClient.resolve_model calls and related tests.
+        """
         requested_model = requested or self.settings.default_model
         available = self.available_models()
         if not available:
@@ -47,6 +106,17 @@ class LLMClient:
         return available[0]
 
     def _build_model(self, *, model: str | None = None, temperature: float | None = None) -> ChatOpenAI:
+        """Handle the internal build model helper path for this module.
+
+        Inputs:
+            Receives model, temperature for this LLMClient method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by LLM provider integration through LLMClient._build_model calls and related tests.
+        """
         return ChatOpenAI(
             model=self.resolve_model(model),
             temperature=self.settings.default_temperature if temperature is None else temperature,
@@ -57,6 +127,17 @@ class LLMClient:
         )
 
     def complete(self, *, system_prompt: str, user_prompt: str, model: str | None = None, temperature: float | None = None) -> str:
+        """Complete for LLMClient instances.
+
+        Inputs:
+            Receives system_prompt, user_prompt, model, temperature for this LLMClient method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by LLM provider integration through LLMClient.complete calls and related tests.
+        """
         llm = self._build_model(model=model, temperature=temperature)
         response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
         self._record_usage(response)
@@ -70,6 +151,17 @@ class LLMClient:
         model: str | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any]:
+        """Complete json for LLMClient instances.
+
+        Inputs:
+            Receives system_prompt, user_prompt, model, temperature for this LLMClient method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by LLM provider integration through LLMClient.complete_json calls and related tests.
+        """
         raw = self.complete(system_prompt=system_prompt, user_prompt=user_prompt, model=model, temperature=temperature)
         data = extract_json_object(raw)
         if not isinstance(data, dict):
@@ -77,6 +169,17 @@ class LLMClient:
         return data
 
     def load_prompt(self, path: str | None, fallback: str) -> str:
+        """Load prompt for LLMClient instances.
+
+        Inputs:
+            Receives path, fallback for this LLMClient method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by LLM provider integration through LLMClient.load_prompt calls and related tests.
+        """
         if not path:
             return fallback
         prompt_path = Path(path)
@@ -85,6 +188,17 @@ class LLMClient:
         return fallback
 
     def _record_usage(self, response: Any) -> None:
+        """Handle the internal record usage helper path for this module.
+
+        Inputs:
+            Receives response for this LLMClient method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by LLM provider integration through LLMClient._record_usage calls and related tests.
+        """
         usage = self._extract_usage(response)
         self.last_usage = usage
         self.total_prompt_tokens += usage["prompt_tokens"]
@@ -93,6 +207,17 @@ class LLMClient:
 
     @staticmethod
     def _extract_usage(response: Any) -> dict[str, int]:
+        """Handle the internal extract usage helper path for this module.
+
+        Inputs:
+            Receives response for this LLMClient method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by LLM provider integration through LLMClient._extract_usage calls and related tests.
+        """
         usage_metadata = getattr(response, "usage_metadata", None)
         if isinstance(usage_metadata, dict) and usage_metadata:
             prompt_tokens = _coerce_int(usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens"))
@@ -125,6 +250,17 @@ class LLMClient:
 
 
 def _coerce_int(value: Any) -> int:
+    """Handle the internal coerce int helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by LLM provider integration code paths that import or call aor_runtime.llm.client._coerce_int.
+    """
     try:
         return max(0, int(value or 0))
     except Exception:  # noqa: BLE001

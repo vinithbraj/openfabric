@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.tool_output_contracts
+
+Purpose:
+    Define registered tool output paths for dataflow, formatting, and validation.
+
+Responsibilities:
+    Declare default, scalar, collection, text, file, formatter, and return-value paths per tool.
+
+Data flow / Interfaces:
+    Used by action planning, dataflow canonicalization, output envelopes, and result-shape validation.
+
+Boundaries:
+    Keeps new tool integration registry-driven instead of scattered across ad hoc path maps.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +21,17 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class ToolOutputContract:
+    """Represent tool output contract within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ToolOutputContract.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.tool_output_contracts.ToolOutputContract and related tests.
+    """
     default_path: str | None = None
     collection_paths: tuple[str, ...] = ()
     scalar_paths: tuple[str, ...] = ()
@@ -17,6 +43,17 @@ class ToolOutputContract:
 
     @property
     def declared_paths(self) -> tuple[str, ...]:
+        """Declared paths for ToolOutputContract instances.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the computed property value for callers that need this runtime fact.
+
+        Used by:
+            Used by planning, execution, validation, and presentation through ToolOutputContract.declared_paths calls and related tests.
+        """
         paths: list[str] = []
         for path in (
             self.default_path,
@@ -123,15 +160,48 @@ TOOL_OUTPUT_CONTRACTS: dict[str, ToolOutputContract] = {
 
 
 def contract_for_tool(tool: str) -> ToolOutputContract | None:
+    """Contract for tool for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts.contract_for_tool.
+    """
     return TOOL_OUTPUT_CONTRACTS.get(str(tool or ""))
 
 
 def default_path_for_tool(tool: str) -> str | None:
+    """Default path for tool for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts.default_path_for_tool.
+    """
     contract = contract_for_tool(tool)
     return contract.default_path if contract else None
 
 
 def formatter_source_path_for_tool(tool: str) -> str | None:
+    """Formatter source path for tool for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts.formatter_source_path_for_tool.
+    """
     contract = contract_for_tool(tool)
     if contract is None:
         return None
@@ -139,6 +209,17 @@ def formatter_source_path_for_tool(tool: str) -> str | None:
 
 
 def return_value_path_for_tool(tool: str) -> str | None:
+    """Return value path for tool for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts.return_value_path_for_tool.
+    """
     contract = contract_for_tool(tool)
     if contract is None:
         return None
@@ -146,11 +227,33 @@ def return_value_path_for_tool(tool: str) -> str | None:
 
 
 def available_paths_for_tool(tool: str) -> tuple[str, ...]:
+    """Available paths for tool for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts.available_paths_for_tool.
+    """
     contract = contract_for_tool(tool)
     return contract.declared_paths if contract else ()
 
 
 def normalize_tool_ref_path(tool: str, path: str | None, *, use: RefUse = "default") -> str | None:
+    """Normalize tool ref path for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool, path, use for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts.normalize_tool_ref_path.
+    """
     contract = contract_for_tool(tool)
     if contract is None:
         return None if path is None else str(path).strip() or None
@@ -169,6 +272,17 @@ def normalize_tool_ref_path(tool: str, path: str | None, *, use: RefUse = "defau
 
 
 def path_is_declared_for_tool(tool: str, path: str | None) -> bool:
+    """Path is declared for tool for the surrounding runtime workflow.
+
+    Inputs:
+        Receives tool, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts.path_is_declared_for_tool.
+    """
     contract = contract_for_tool(tool)
     if contract is None:
         return True
@@ -181,6 +295,17 @@ def path_is_declared_for_tool(tool: str, path: str | None) -> bool:
 
 
 def root_path(path: str | None) -> str | None:
+    """Root path for the surrounding runtime workflow.
+
+    Inputs:
+        Receives path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts.root_path.
+    """
     normalized = None if path is None else str(path).strip()
     if not normalized:
         return None
@@ -188,5 +313,16 @@ def root_path(path: str | None) -> str | None:
 
 
 def _split_path(path: str) -> tuple[str, str]:
+    """Handle the internal split path helper path for this module.
+
+    Inputs:
+        Receives path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.tool_output_contracts._split_path.
+    """
     root, dot, suffix = str(path or "").strip().partition(".")
     return root, suffix if dot else ""

@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.runtime.output_contract
+
+Purpose:
+    Normalize and render explicit output contracts used by runtime.return and compatibility plans.
+
+Responsibilities:
+    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+
+Data flow / Interfaces:
+    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+
+Boundaries:
+    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+"""
+
 from __future__ import annotations
 
 import json
@@ -8,6 +23,17 @@ from pydantic import BaseModel
 
 
 class OutputContract(BaseModel):
+    """Represent output contract within the OpenFABRIC runtime. It extends BaseModel.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by OutputContract.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.runtime.output_contract.OutputContract and related tests.
+    """
     mode: Literal["text", "csv", "json", "count"]
     path_style: Literal["name", "relative", "absolute"] | None = None
     json_shape: Literal["matches", "rows", "count", "value"] | None = None
@@ -15,6 +41,17 @@ class OutputContract(BaseModel):
 
 
 def normalize_output(value: Any, contract: OutputContract) -> Any:
+    """Normalize output for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, contract for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract.normalize_output.
+    """
     if contract.mode == "count":
         count_value = _coerce_count(value)
         if contract.json_shape == "count":
@@ -52,6 +89,17 @@ def normalize_output(value: Any, contract: OutputContract) -> Any:
 
 
 def render_output(value: Any, contract: OutputContract) -> str:
+    """Render output for the surrounding runtime workflow.
+
+    Inputs:
+        Receives value, contract for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract.render_output.
+    """
     if contract.mode == "count":
         if isinstance(value, dict) and "count" in value:
             return str(value["count"])
@@ -80,6 +128,17 @@ def build_output_contract(
     json_shape: str | None = None,
     include_extra_text: bool = False,
 ) -> dict[str, Any]:
+    """Build output contract for the surrounding runtime workflow.
+
+    Inputs:
+        Receives mode, path_style, json_shape, include_extra_text for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract.build_output_contract.
+    """
     contract = OutputContract(
         mode=mode,
         path_style=path_style,
@@ -90,6 +149,17 @@ def build_output_contract(
 
 
 def _normalize_json_value(value: Any, contract: OutputContract) -> Any:
+    """Handle the internal normalize json value helper path for this module.
+
+    Inputs:
+        Receives value, contract for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._normalize_json_value.
+    """
     if contract.json_shape == "rows":
         return _coerce_rows(value)
     if contract.json_shape == "matches":
@@ -105,6 +175,17 @@ def _normalize_json_value(value: Any, contract: OutputContract) -> Any:
 
 
 def _coerce_rows(value: Any) -> list[Any]:
+    """Handle the internal coerce rows helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._coerce_rows.
+    """
     if isinstance(value, list):
         return value
     if isinstance(value, dict) and "rows" in value and isinstance(value["rows"], list):
@@ -117,6 +198,17 @@ def _coerce_rows(value: Any) -> list[Any]:
 
 
 def _coerce_count(value: Any) -> int:
+    """Handle the internal coerce count helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._coerce_count.
+    """
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -146,6 +238,17 @@ def _coerce_count(value: Any) -> int:
 
 
 def _coerce_sequence(value: Any, *, path_style: str | None = None) -> list[str]:
+    """Handle the internal coerce sequence helper path for this module.
+
+    Inputs:
+        Receives value, path_style for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._coerce_sequence.
+    """
     if isinstance(value, str):
         items = [line for line in value.splitlines() if line.strip()]
         if not items and value.strip():
@@ -177,6 +280,17 @@ def _coerce_sequence(value: Any, *, path_style: str | None = None) -> list[str]:
 
 
 def _apply_path_style(value: str, path_style: str) -> str:
+    """Handle the internal apply path style helper path for this module.
+
+    Inputs:
+        Receives value, path_style for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._apply_path_style.
+    """
     normalized = str(value).strip()
     if not normalized:
         return normalized
@@ -188,6 +302,17 @@ def _apply_path_style(value: str, path_style: str) -> str:
 
 
 def _is_single_column_rows(value: list[Any]) -> bool:
+    """Handle the internal is single column rows helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._is_single_column_rows.
+    """
     if not value or not all(isinstance(item, dict) and len(item) == 1 for item in value):
         return False
     first_key = next(iter(value[0]))
@@ -195,6 +320,17 @@ def _is_single_column_rows(value: list[Any]) -> bool:
 
 
 def _rows_to_csv(rows: list[Any]) -> str:
+    """Handle the internal rows to csv helper path for this module.
+
+    Inputs:
+        Receives rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._rows_to_csv.
+    """
     if not rows:
         return ""
     normalized_rows = [row for row in rows if isinstance(row, dict)]
@@ -211,6 +347,17 @@ def _rows_to_csv(rows: list[Any]) -> str:
 
 
 def _rows_to_text(rows: list[Any]) -> str:
+    """Handle the internal rows to text helper path for this module.
+
+    Inputs:
+        Receives rows for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._rows_to_text.
+    """
     if not rows:
         return ""
     normalized_rows = [row for row in rows if isinstance(row, dict)]
@@ -233,10 +380,32 @@ def _rows_to_text(rows: list[Any]) -> str:
 
 
 def _looks_like_json_value(value: str) -> bool:
+    """Handle the internal looks like json value helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._looks_like_json_value.
+    """
     return (value.startswith("{") and value.endswith("}")) or (value.startswith("[") and value.endswith("]"))
 
 
 def _json_dumps_safe(value: Any) -> str:
+    """Handle the internal json dumps safe helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.output_contract._json_dumps_safe.
+    """
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     except TypeError:

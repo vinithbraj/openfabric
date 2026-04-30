@@ -1,5 +1,7 @@
 # SLURM Capability Design
 
+This document describes SLURM domain behavior and helper capability logic. Normal user prompts reach SLURM through the validator-enforced LLM action planner selecting native `slurm.*` tools, followed by deterministic SLURM safety, semantic, temporal, and presentation checks. See [System Design](./SYSTEM_DESIGN.md).
+
 ## Implemented Today
 
 The runtime currently includes a read-only SLURM domain capability implemented by `SlurmCapabilityPack` and native `slurm.*` tools.
@@ -48,6 +50,7 @@ This is different from shell planning:
 
 - the planner and capability pack never expose raw `squeue`, `sinfo`, `sacct`, or `scontrol` commands to the user-facing plan surface
 - the pack compiles directly to structured `slurm.*` tools
+- the active action planner may choose `slurm.*` tool actions, but deterministic SLURM validators still own command construction and safety
 
 ## Fixture Mode
 
@@ -59,7 +62,7 @@ The tools support fixture mode via:
 
 In fixture mode, the tools read prepared outputs instead of calling a live gateway/cluster. This is how SLURM capability evals remain deterministic.
 
-## Capability-Pack Behavior
+## Capability-Pack Helper Behavior
 
 `SlurmCapabilityPack` is pack-local rather than a thin wrapper over the shared intent classifier/compiler.
 
@@ -73,7 +76,7 @@ It owns:
 - optional typed LLM intent extraction for fuzzy SLURM prompts
 - SLURM-specific safety rules
 
-The current flow is:
+When compatibility code calls the pack directly, the flow is:
 
 1. Extract a `SlurmSemanticFrame` from the prompt.
 2. Resolve every `SlurmRequest` into a read-only typed SLURM intent.

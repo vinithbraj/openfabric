@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.tools.python_exec
+
+Purpose:
+    Execute bounded Python snippets for explicitly allowed internal workflows.
+
+Responsibilities:
+    Expose typed tool arguments/results for filesystem, SQL, shell, SLURM, text formatting, Python, and runtime return operations.
+
+Data flow / Interfaces:
+    Receives validated tool arguments from the executor and returns structured result models for downstream contracts and presenters.
+
+Boundaries:
+    Does not decide user intent; every tool must preserve safety, allowed-root, read-only, timeout, and result-shape boundaries.
+"""
+
 from __future__ import annotations
 
 import ast
@@ -91,7 +106,29 @@ SAFE_IMPORT_MODULES = {
 
 
 class _AttrDict(dict):
+    """Represent attr dict within the OpenFABRIC runtime. It extends dict.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _AttrDict.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec._AttrDict and related tests.
+    """
     def __getattr__(self, name: str) -> Any:
+        """Handle the internal getattr helper path for this module.
+
+        Inputs:
+            Receives name for this _AttrDict method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the standard Python protocol value for __getattr__ when one is required.
+
+        Used by:
+            Used by registered tool execution through _AttrDict.__getattr__ calls and related tests.
+        """
         try:
             return self[name]
         except KeyError as exc:
@@ -99,20 +136,75 @@ class _AttrDict(dict):
 
 
 class _RowResult(_AttrDict):
+    """Represent row result within the OpenFABRIC runtime. It extends _AttrDict.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _RowResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec._RowResult and related tests.
+    """
     def __getitem__(self, key: Any) -> Any:
+        """Handle the internal getitem helper path for this module.
+
+        Inputs:
+            Receives key for this _RowResult method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the standard Python protocol value for __getitem__ when one is required.
+
+        Used by:
+            Used by registered tool execution through _RowResult.__getitem__ calls and related tests.
+        """
         if isinstance(key, int):
             return list(self.values())[key]
         return super().__getitem__(key)
 
 
 class _SqlResult(_AttrDict):
+    """Represent sql result within the OpenFABRIC runtime. It extends _AttrDict.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _SqlResult.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec._SqlResult and related tests.
+    """
     def __len__(self) -> int:
+        """Handle the internal len helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the standard Python protocol value for __len__ when one is required.
+
+        Used by:
+            Used by registered tool execution through _SqlResult.__len__ calls and related tests.
+        """
         row_count = self.get("row_count")
         if isinstance(row_count, int):
             return row_count
         return super().__len__()
 
     def __getitem__(self, key: Any) -> Any:
+        """Handle the internal getitem helper path for this module.
+
+        Inputs:
+            Receives key for this _SqlResult method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the standard Python protocol value for __getitem__ when one is required.
+
+        Used by:
+            Used by registered tool execution through _SqlResult.__getitem__ calls and related tests.
+        """
         if isinstance(key, int):
             rows = self.get("rows", [])
             if not isinstance(rows, list):
@@ -124,6 +216,17 @@ class _SqlResult(_AttrDict):
         return super().__getitem__(key)
 
     def __iter__(self):
+        """Handle the internal iter helper path for this module.
+
+        Inputs:
+            Uses module or instance state; no caller-supplied data parameters are required.
+
+        Returns:
+            Returns the standard Python protocol value for __iter__ when one is required.
+
+        Used by:
+            Used by registered tool execution through _SqlResult.__iter__ calls and related tests.
+        """
         rows = self.get("rows")
         if isinstance(rows, list):
             for row in rows:
@@ -136,43 +239,197 @@ class _SqlResult(_AttrDict):
 
 
 class _CompletedProcess(_AttrDict):
+    """Represent completed process within the OpenFABRIC runtime. It extends _AttrDict.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _CompletedProcess.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec._CompletedProcess and related tests.
+    """
     pass
 
 
 class _PythonFsFacade:
+    """Represent python fs facade within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _PythonFsFacade.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec._PythonFsFacade and related tests.
+    """
     def __init__(self, settings: Settings) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.__init__ calls and related tests.
+        """
         self.settings = settings
 
     def exists(self, path: str) -> bool:
+        """Exists for _PythonFsFacade instances.
+
+        Inputs:
+            Receives path for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.exists calls and related tests.
+        """
         return bool(fs_exists(self.settings, path)["exists"])
 
     def copy(self, src: str, dst: str) -> None:
+        """Copy for _PythonFsFacade instances.
+
+        Inputs:
+            Receives src, dst for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.copy calls and related tests.
+        """
         fs_copy(self.settings, src, dst)
 
     def read(self, path: str) -> str:
+        """Read for _PythonFsFacade instances.
+
+        Inputs:
+            Receives path for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.read calls and related tests.
+        """
         return str(fs_read(self.settings, path)["content"])
 
     def write(self, path: str, content: str) -> None:
+        """Write for _PythonFsFacade instances.
+
+        Inputs:
+            Receives path, content for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.write calls and related tests.
+        """
         fs_write(self.settings, path, content)
 
     def mkdir(self, path: str) -> None:
+        """Mkdir for _PythonFsFacade instances.
+
+        Inputs:
+            Receives path for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns None; side effects are limited to the local runtime operation described above.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.mkdir calls and related tests.
+        """
         fs_mkdir(self.settings, path)
 
     def list(self, path: str) -> list[str]:
+        """List for _PythonFsFacade instances.
+
+        Inputs:
+            Receives path for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.list calls and related tests.
+        """
         return list(fs_list(self.settings, path)["entries"])
 
     def find(self, path: str, pattern: str) -> list[str]:
+        """Find for _PythonFsFacade instances.
+
+        Inputs:
+            Receives path, pattern for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.find calls and related tests.
+        """
         return list(fs_find(self.settings, path, pattern)["matches"])
 
     def size(self, path: str) -> int:
+        """Size for _PythonFsFacade instances.
+
+        Inputs:
+            Receives path for this _PythonFsFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _PythonFsFacade.size calls and related tests.
+        """
         return int(fs_size(self.settings, path)["size_bytes"])
 
 
 class _PythonShellFacade:
+    """Represent python shell facade within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _PythonShellFacade.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec._PythonShellFacade and related tests.
+    """
     def __init__(self, settings: Settings) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this _PythonShellFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through _PythonShellFacade.__init__ calls and related tests.
+        """
         self.settings = settings
 
     def exec(self, command: str, node: str = "", timeout: int = 60, cwd: str = "") -> _AttrDict:
+        """Exec for _PythonShellFacade instances.
+
+        Inputs:
+            Receives command, node, timeout, cwd for this _PythonShellFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _PythonShellFacade.exec calls and related tests.
+        """
         if NETWORK_COMMAND_RE.search(command):
             raise ToolExecutionError("Network-oriented shell commands are not allowed inside python.exec.")
         if str(cwd or "").strip():
@@ -183,21 +440,87 @@ class _PythonShellFacade:
 
 
 class _PythonSqlFacade:
+    """Represent python sql facade within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _PythonSqlFacade.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec._PythonSqlFacade and related tests.
+    """
     def __init__(self, settings: Settings) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this _PythonSqlFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through _PythonSqlFacade.__init__ calls and related tests.
+        """
         self.settings = settings
 
     def query(self, query: str, database: str | None = None) -> _AttrDict:
+        """Query for _PythonSqlFacade instances.
+
+        Inputs:
+            Receives query, database for this _PythonSqlFacade method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _PythonSqlFacade.query calls and related tests.
+        """
         return _SqlResult(sql_query(self.settings, query=query, database=database))
 
 
 class _SubprocessModule:
+    """Represent subprocess module within the OpenFABRIC runtime.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by _SubprocessModule.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec._SubprocessModule and related tests.
+    """
     PIPE = -1
     STDOUT = -2
 
     def __init__(self, shell: _PythonShellFacade) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives shell for this _SubprocessModule method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through _SubprocessModule.__init__ calls and related tests.
+        """
         self._shell = shell
 
     def _normalize_command(self, command: Any, shell: bool) -> str:
+        """Handle the internal normalize command helper path for this module.
+
+        Inputs:
+            Receives command, shell for this _SubprocessModule method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _SubprocessModule._normalize_command calls and related tests.
+        """
         if isinstance(command, str):
             return command
         if isinstance(command, (list, tuple)):
@@ -221,6 +544,17 @@ class _SubprocessModule:
         stderr: Any = None,
         **_: Any,
     ) -> _CompletedProcess:
+        """Run for _SubprocessModule instances.
+
+        Inputs:
+            Receives command, capture_output, text, check, shell, timeout, cwd, stdout, ... for this _SubprocessModule method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _SubprocessModule.run calls and related tests.
+        """
         normalized_command = self._normalize_command(command, shell=shell)
         bounded_timeout = 5 if timeout is None else max(1, min(int(timeout), 5))
         del bounded_timeout
@@ -248,6 +582,17 @@ class _SubprocessModule:
         cwd: str = "",
         **kwargs: Any,
     ) -> str | bytes:
+        """Check output for _SubprocessModule instances.
+
+        Inputs:
+            Receives command, text, shell, timeout, cwd for this _SubprocessModule method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through _SubprocessModule.check_output calls and related tests.
+        """
         completed = self.run(
             command,
             capture_output=True,
@@ -265,10 +610,32 @@ class _SubprocessModule:
 
 
 def _shell_substitution(shell: _PythonShellFacade, command: str) -> str:
+    """Handle the internal shell substitution helper path for this module.
+
+    Inputs:
+        Receives shell, command for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.python_exec._shell_substitution.
+    """
     return str(shell.exec(command, timeout=5).get("stdout", "")).strip()
 
 
 def _rewrite_shell_substitutions(code: str) -> str:
+    """Handle the internal rewrite shell substitutions helper path for this module.
+
+    Inputs:
+        Receives code for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.python_exec._rewrite_shell_substitutions.
+    """
     rewritten = code
     for _ in range(4):
         updated = SHELL_SUB_RE.sub(lambda match: f"_shell_substitution({json.dumps(match.group(1).strip())})", rewritten)
@@ -279,6 +646,17 @@ def _rewrite_shell_substitutions(code: str) -> str:
 
 
 def _validate_code(code: str) -> tuple[ast.AST, str]:
+    """Handle the internal validate code helper path for this module.
+
+    Inputs:
+        Receives code for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.python_exec._validate_code.
+    """
     candidate = str(code or "")
     try:
         parsed = ast.parse(candidate, mode="exec")
@@ -306,6 +684,17 @@ def _safe_import(
     fromlist: tuple[str, ...] = (),
     level: int = 0,
 ):
+    """Handle the internal safe import helper path for this module.
+
+    Inputs:
+        Receives name, globals, locals, fromlist, level for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.python_exec._safe_import.
+    """
     if level != 0:
         raise ToolExecutionError("Relative imports are not allowed in python.exec.")
     root = name.split(".", 1)[0]
@@ -319,6 +708,17 @@ def _safe_import(
 
 
 def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any]) -> None:
+    """Handle the internal python exec worker helper path for this module.
+
+    Inputs:
+        Receives queue, code, settings_data for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns None; side effects are limited to the local runtime operation described above.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.python_exec._python_exec_worker.
+    """
     settings_payload = dict(settings_data)
     inputs = dict(settings_payload.pop("__python_inputs__", {}) or {})
     settings = Settings.model_validate(settings_payload)
@@ -355,6 +755,17 @@ def _python_exec_worker(queue: mp.Queue, code: str, settings_data: dict[str, Any
 
 
 def _json_dumps_safe(value: Any) -> str:
+    """Handle the internal json dumps safe helper path for this module.
+
+    Inputs:
+        Receives value for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.python_exec._json_dumps_safe.
+    """
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     except TypeError:
@@ -362,18 +773,62 @@ def _json_dumps_safe(value: Any) -> str:
 
 
 class PythonExecTool(BaseTool):
+    """Represent python exec tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by PythonExecTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.python_exec.PythonExecTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.python_exec.ToolArgs and related tests.
+        """
         code: str
         inputs: dict[str, Any] = Field(default_factory=dict)
         timeout: int = Field(default=5, ge=1, le=5)
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.python_exec.ToolResult and related tests.
+        """
         success: bool
         output: str | None = None
         result: Any | None = None
         error: str | None = None
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this PythonExecTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through PythonExecTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -392,12 +847,45 @@ class PythonExecTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for PythonExecTool instances.
+
+        Inputs:
+            Receives arguments for this PythonExecTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through PythonExecTool.run calls and related tests.
+        """
         return self._run(arguments, context=None)
 
     def run_with_context(self, arguments: ToolArgs, context: ToolInvocationContext) -> ToolResult:
+        """Run with context for PythonExecTool instances.
+
+        Inputs:
+            Receives arguments, context for this PythonExecTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through PythonExecTool.run_with_context calls and related tests.
+        """
         return self._run(arguments, context=context)
 
     def _run(self, arguments: ToolArgs, *, context: ToolInvocationContext | None) -> ToolResult:
+        """Handle the internal run helper path for this module.
+
+        Inputs:
+            Receives arguments, context for this PythonExecTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through PythonExecTool._run calls and related tests.
+        """
         code = arguments.code
         inputs = dict(arguments.inputs or {})
         timeout = arguments.timeout
@@ -456,6 +944,17 @@ class PythonExecTool(BaseTool):
         return self.ToolResult(success=True, output=output, result=result, error=None)
 
     def _expand_shell_substitutions(self, value: str) -> str:
+        """Handle the internal expand shell substitutions helper path for this module.
+
+        Inputs:
+            Receives value for this PythonExecTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through PythonExecTool._expand_shell_substitutions calls and related tests.
+        """
         expanded = str(value)
         shell = _PythonShellFacade(self.settings)
         for _ in range(4):

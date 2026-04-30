@@ -1,5 +1,7 @@
 # Runtime Architecture
 
+This document is a concise architecture map. For the complete current-state design and data-flow narrative, see [System Design](./SYSTEM_DESIGN.md).
+
 ## Overview
 
 OpenFabric / AOR is a validator-enforced LLM action-planning runtime for local and gateway-routed execution. The current architecture is centered on `ExecutionEngine`, `TaskPlanner`, `LLMActionPlanner`, deterministic validators, tool execution, local formatting, and final shaping through `runtime.return`.
@@ -74,16 +76,16 @@ Important engine events include:
 - `src/aor_runtime/api/app.py`: FastAPI API, session endpoints, SSE progress streaming, OpenAI-compatible chat surface.
 - `src/aor_runtime/runtime/engine.py`: orchestrates planning, execution, validation, finalization, and session persistence.
 
-### Planning and capabilities
+### Planning and domain helpers
 
 - `src/aor_runtime/runtime/planner.py`: `TaskPlanner`, active planning mode tracking, and final `ExecutionPlan` validation.
 - `src/aor_runtime/runtime/action_planner.py`: LLM action planning, normalization, canonicalization, and action validation.
-- `src/aor_runtime/runtime/capabilities/base.py`: capability interfaces and compile context types.
-- `src/aor_runtime/runtime/capabilities/registry.py`: pack ordering, classification, and compilation dispatch.
+- `src/aor_runtime/runtime/capabilities/base.py`: compatibility capability interfaces and compile context types.
+- `src/aor_runtime/runtime/capabilities/registry.py`: compatibility pack ordering and direct pack dispatch for tests/tools that still call packs explicitly.
 - `src/aor_runtime/runtime/intents.py`: shared typed intents and `IntentResult`.
-- `src/aor_runtime/runtime/intent_classifier.py`: shared deterministic intent parsing used by several packs.
-- `src/aor_runtime/runtime/intent_compiler.py`: shared deterministic plan builder used by several packs.
-- `src/aor_runtime/runtime/capabilities/slurm.py`: domain-specific pack-local classifier/compiler and optional typed LLM intent path.
+- `src/aor_runtime/runtime/intent_classifier.py`: shared deterministic intent parsing retained for helper/compatibility surfaces.
+- `src/aor_runtime/runtime/intent_compiler.py`: shared deterministic plan builders retained for helper/compatibility surfaces.
+- `src/aor_runtime/runtime/capabilities/slurm.py`: domain-specific helper logic and fixtures for SLURM semantics.
 
 ### Execution and shaping
 
@@ -116,24 +118,19 @@ Important engine events include:
 - `src/aor_runtime/runtime/eval_fixtures.py`: deterministic eval workspace and fixture generation.
 - `src/aor_runtime/runtime/capabilities/eval.py`: eval pack schemas and loaders.
 
-## Shared Infrastructure vs Pack-Local Logic
+## Capability Modules And Legacy Helpers
 
-Not every capability pack is fully pack-local today.
+Capability-pack modules, typed-intent helpers, deterministic classifiers, and pack compilers remain in the repository for domain logic, fixtures, validator support, direct unit tests, and compatibility utilities. They are not the top-level natural-language routing system.
 
-Current patterns:
+The active user-prompt path is:
 
-- Shared deterministic infrastructure:
-  - `FilesystemCapabilityPack`
-  - `SqlCapabilityPack`
-  - `ShellCapabilityPack`
-  - `FetchCapabilityPack`
-  - `CompoundCapabilityPack`
-  - these wrap `intent_classifier.py` and `intent_compiler.py`
-- Pack-local logic:
-  - `SlurmCapabilityPack`
-  - this defines its own intent types, classifier, compiler, safety rules, and optional typed LLM intent extraction path
+1. `TaskPlanner`
+2. `LLMActionPlanner`
+3. action canonicalization and deterministic validation
+4. `ExecutionPlan`
+5. tool execution and final presentation
 
-This means the capability-pack architecture is the active top-level routing model, while the older shared classifier/compiler modules remain active supporting infrastructure for several packs.
+If compatibility code calls a capability pack directly, that path must still obey the same tool safety, output contracts, and final presentation boundaries.
 
 ## Safety Boundaries
 
@@ -156,17 +153,9 @@ For SLURM specifically, only read-only inspection and metrics are supported. Mut
 
 ## Extensibility Model
 
-The system is extended in three layers:
+The system is extended by adding registered tools, tool output contracts, tool surface contracts, deterministic validators, presenters, and eval coverage. LLM planning may then select the new tool, but the runtime must be able to validate, execute, trace, and render it without raw payload leakage.
 
-1. Add or reuse typed intents
-2. Add or update a capability pack
-3. Add or reuse tool implementations and output shaping
-
-In practice:
-
-- if a new feature fits the existing shared intent model, a thin capability pack wrapper is often enough
-- if a new domain needs custom classification, safety rules, or output compilation, implement a pack-local capability like SLURM
-- every new capability should also get tests and a checked-in eval pack
+Compatibility capability packs may still be useful as helper libraries or test fixtures, but new user-facing behavior should be wired through the validator-enforced action-planner architecture described in [System Design](./SYSTEM_DESIGN.md).
 
 See:
 

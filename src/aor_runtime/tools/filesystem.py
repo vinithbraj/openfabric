@@ -1,3 +1,18 @@
+"""OpenFABRIC Runtime Module: aor_runtime.tools.filesystem
+
+Purpose:
+    Implement root-constrained filesystem tools.
+
+Responsibilities:
+    Read, write, list, glob, find, size, copy, mkdir, and existence-check paths under configured allowed roots.
+
+Data flow / Interfaces:
+    Receives validated filesystem arguments and returns structured file/path metadata.
+
+Boundaries:
+    Must prevent traversal, unsafe writes, and accidental exposure of ignored runtime artifacts unless explicitly requested.
+"""
+
 from __future__ import annotations
 
 import shutil
@@ -11,6 +26,17 @@ from aor_runtime.tools.base import BaseTool, ToolArgsModel, ToolExecutionError, 
 
 
 def resolve_path(settings: Settings, raw_path: str) -> Path:
+    """Resolve path for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, raw_path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.resolve_path.
+    """
     candidate = Path(str(raw_path)).expanduser()
     if candidate.is_absolute():
         return candidate.resolve()
@@ -18,6 +44,17 @@ def resolve_path(settings: Settings, raw_path: str) -> Path:
 
 
 def fs_exists(settings: Settings, path: str) -> dict[str, Any]:
+    """Fs exists for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_exists.
+    """
     resolved = resolve_path(settings, path)
     return {
         "path": str(resolved),
@@ -28,10 +65,32 @@ def fs_exists(settings: Settings, path: str) -> dict[str, Any]:
 
 
 def fs_not_exists(settings: Settings, path: str) -> dict[str, Any]:
+    """Fs not exists for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_not_exists.
+    """
     return fs_exists(settings, path)
 
 
 def fs_read(settings: Settings, path: str) -> dict[str, Any]:
+    """Fs read for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_read.
+    """
     resolved = resolve_path(settings, path)
     if not resolved.exists():
         raise ToolExecutionError(f"File does not exist: {resolved}")
@@ -41,6 +100,17 @@ def fs_read(settings: Settings, path: str) -> dict[str, Any]:
 
 
 def fs_write(settings: Settings, path: str, content: str) -> dict[str, Any]:
+    """Fs write for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path, content for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_write.
+    """
     resolved = resolve_path(settings, path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(content)
@@ -48,6 +118,17 @@ def fs_write(settings: Settings, path: str, content: str) -> dict[str, Any]:
 
 
 def fs_copy(settings: Settings, src: str, dst: str) -> dict[str, Any]:
+    """Fs copy for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, src, dst for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_copy.
+    """
     source = resolve_path(settings, src)
     target = resolve_path(settings, dst)
     if not source.exists():
@@ -60,12 +141,34 @@ def fs_copy(settings: Settings, src: str, dst: str) -> dict[str, Any]:
 
 
 def fs_mkdir(settings: Settings, path: str) -> dict[str, Any]:
+    """Fs mkdir for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_mkdir.
+    """
     resolved = resolve_path(settings, path)
     resolved.mkdir(parents=True, exist_ok=True)
     return {"path": str(resolved)}
 
 
 def fs_list(settings: Settings, path: str) -> dict[str, Any]:
+    """Fs list for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_list.
+    """
     resolved = resolve_path(settings, path)
     if not resolved.exists():
         raise ToolExecutionError(f"Directory does not exist: {resolved}")
@@ -84,6 +187,17 @@ def fs_glob(
     dir_only: bool = False,
     path_style: str = "relative",
 ) -> dict[str, Any]:
+    """Fs glob for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path, pattern, recursive, file_only, dir_only, path_style for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_glob.
+    """
     resolved = resolve_path(settings, path)
     if not resolved.exists():
         raise ToolExecutionError(f"Directory does not exist: {resolved}")
@@ -136,6 +250,17 @@ def fs_glob(
 
 
 def fs_find(settings: Settings, path: str, pattern: str) -> dict[str, Any]:
+    """Fs find for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path, pattern for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_find.
+    """
     resolved = resolve_path(settings, path)
     if not resolved.exists():
         raise ToolExecutionError(f"Directory does not exist: {resolved}")
@@ -149,6 +274,17 @@ def fs_find(settings: Settings, path: str, pattern: str) -> dict[str, Any]:
 
 
 def fs_size(settings: Settings, path: str) -> dict[str, Any]:
+    """Fs size for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_size.
+    """
     resolved = resolve_path(settings, path)
     if not resolved.exists():
         raise ToolExecutionError(f"File does not exist: {resolved}")
@@ -168,6 +304,17 @@ def fs_aggregate(
     size_unit: Literal["bytes", "kb", "mb", "gb", "auto"] = "auto",
     aggregate: Literal["total_size", "count", "count_and_total_size"] = "total_size",
 ) -> dict[str, Any]:
+    """Fs aggregate for the surrounding runtime workflow.
+
+    Inputs:
+        Receives settings, path, pattern, recursive, file_only, include_matches, path_style, size_unit, ... for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem.fs_aggregate.
+    """
     resolved = resolve_path(settings, path)
     if not resolved.exists():
         raise ToolExecutionError(f"Directory does not exist: {resolved}")
@@ -251,16 +398,60 @@ def fs_aggregate(
 
 
 class FileExistsTool(BaseTool):
+    """Represent file exists tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FileExistsTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.FileExistsTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         exists: bool
         is_file: bool
         is_dir: bool
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this FileExistsTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through FileExistsTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -271,20 +462,75 @@ class FileExistsTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for FileExistsTool instances.
+
+        Inputs:
+            Receives arguments for this FileExistsTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through FileExistsTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_exists(self.settings, arguments.path))
 
 
 class FileNotExistsTool(BaseTool):
+    """Represent file not exists tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FileNotExistsTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.FileNotExistsTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         exists: bool
         is_file: bool
         is_dir: bool
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this FileNotExistsTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through FileNotExistsTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -295,19 +541,74 @@ class FileNotExistsTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for FileNotExistsTool instances.
+
+        Inputs:
+            Receives arguments for this FileNotExistsTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through FileNotExistsTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_not_exists(self.settings, arguments.path))
 
 
 class FileCopyTool(BaseTool):
+    """Represent file copy tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FileCopyTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.FileCopyTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         src: str
         dst: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         src: str
         dst: str
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this FileCopyTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through FileCopyTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -322,18 +623,73 @@ class FileCopyTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for FileCopyTool instances.
+
+        Inputs:
+            Receives arguments for this FileCopyTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through FileCopyTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_copy(self.settings, arguments.src, arguments.dst))
 
 
 class FileReadTool(BaseTool):
+    """Represent file read tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FileReadTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.FileReadTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         content: str
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this FileReadTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through FileReadTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -344,19 +700,74 @@ class FileReadTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for FileReadTool instances.
+
+        Inputs:
+            Receives arguments for this FileReadTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through FileReadTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_read(self.settings, arguments.path))
 
 
 class FileWriteTool(BaseTool):
+    """Represent file write tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FileWriteTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.FileWriteTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
         content: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         bytes_written: int
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this FileWriteTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through FileWriteTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -371,17 +782,72 @@ class FileWriteTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for FileWriteTool instances.
+
+        Inputs:
+            Receives arguments for this FileWriteTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through FileWriteTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_write(self.settings, arguments.path, arguments.content))
 
 
 class MakeDirectoryTool(BaseTool):
+    """Represent make directory tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by MakeDirectoryTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.MakeDirectoryTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this MakeDirectoryTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through MakeDirectoryTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -392,18 +858,73 @@ class MakeDirectoryTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for MakeDirectoryTool instances.
+
+        Inputs:
+            Receives arguments for this MakeDirectoryTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through MakeDirectoryTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_mkdir(self.settings, arguments.path))
 
 
 class ListDirectoryTool(BaseTool):
+    """Represent list directory tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by ListDirectoryTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.ListDirectoryTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         entries: list[str]
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this ListDirectoryTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through ListDirectoryTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -414,11 +935,44 @@ class ListDirectoryTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for ListDirectoryTool instances.
+
+        Inputs:
+            Receives arguments for this ListDirectoryTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through ListDirectoryTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_list(self.settings, arguments.path))
 
 
 class GlobFilesTool(BaseTool):
+    """Represent glob files tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by GlobFilesTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.GlobFilesTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
         pattern: str = "*"
         recursive: bool = False
@@ -427,6 +981,17 @@ class GlobFilesTool(BaseTool):
         path_style: str = "relative"
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         pattern: str
         recursive: bool
@@ -435,6 +1000,17 @@ class GlobFilesTool(BaseTool):
         entries: list[dict[str, Any]]
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this GlobFilesTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through GlobFilesTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -456,6 +1032,17 @@ class GlobFilesTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for GlobFilesTool instances.
+
+        Inputs:
+            Receives arguments for this GlobFilesTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through GlobFilesTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(
             fs_glob(
                 self.settings,
@@ -470,6 +1057,17 @@ class GlobFilesTool(BaseTool):
 
 
 def _glob_matches(*, item: Path, root: Path, pattern: str) -> bool:
+    """Handle the internal glob matches helper path for this module.
+
+    Inputs:
+        Receives item, root, pattern for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem._glob_matches.
+    """
     relative_path = str(item.relative_to(root))
     if "/" in pattern or "\\" in pattern:
         normalized_relative = relative_path.replace("\\", "/")
@@ -479,6 +1077,17 @@ def _glob_matches(*, item: Path, root: Path, pattern: str) -> bool:
 
 
 def _format_glob_match(entry: dict[str, Any], *, path_style: str) -> str:
+    """Handle the internal format glob match helper path for this module.
+
+    Inputs:
+        Receives entry, path_style for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem._format_glob_match.
+    """
     if path_style == "name":
         return str(entry["name"])
     if path_style == "absolute":
@@ -494,6 +1103,17 @@ def _format_aggregate_summary(
     size_unit: Literal["bytes", "kb", "mb", "gb", "auto"],
     display_size: str,
 ) -> str:
+    """Handle the internal format aggregate summary helper path for this module.
+
+    Inputs:
+        Receives file_count, total_size_bytes, aggregate, size_unit, display_size for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem._format_aggregate_summary.
+    """
     label = "file" if file_count == 1 else "files"
     if aggregate == "count":
         return f"{file_count} {label}"
@@ -503,6 +1123,17 @@ def _format_aggregate_summary(
 
 
 def _format_aggregate_size(total_size_bytes: int, size_unit: Literal["bytes", "kb", "mb", "gb", "auto"]) -> str:
+    """Handle the internal format aggregate size helper path for this module.
+
+    Inputs:
+        Receives total_size_bytes, size_unit for this function; type hints and validators define accepted shapes.
+
+    Returns:
+        Returns the computed value described by the function name and type hints.
+
+    Used by:
+        Used by registered tool execution code paths that import or call aor_runtime.tools.filesystem._format_aggregate_size.
+    """
     if size_unit == "bytes" or total_size_bytes < 1024 and size_unit == "auto":
         return f"{total_size_bytes} bytes"
 
@@ -524,16 +1155,60 @@ def _format_aggregate_size(total_size_bytes: int, size_unit: Literal["bytes", "k
 
 
 class FindFilesTool(BaseTool):
+    """Represent find files tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FindFilesTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.FindFilesTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
         pattern: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         pattern: str
         matches: list[str]
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this FindFilesTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through FindFilesTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -548,18 +1223,73 @@ class FindFilesTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for FindFilesTool instances.
+
+        Inputs:
+            Receives arguments for this FindFilesTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through FindFilesTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_find(self.settings, arguments.path, arguments.pattern))
 
 
 class FileSizeTool(BaseTool):
+    """Represent file size tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FileSizeTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.FileSizeTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         size_bytes: int
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this FileSizeTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through FileSizeTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -570,11 +1300,44 @@ class FileSizeTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for FileSizeTool instances.
+
+        Inputs:
+            Receives arguments for this FileSizeTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through FileSizeTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(fs_size(self.settings, arguments.path))
 
 
 class FileAggregateTool(BaseTool):
+    """Represent file aggregate tool within the OpenFABRIC runtime. It extends BaseTool.
+
+    Responsibilities:
+        Encapsulates state, validation, or behavior owned by FileAggregateTool.
+
+    Data flow / Interfaces:
+        Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+    Used by:
+        Used by callers of aor_runtime.tools.filesystem.FileAggregateTool and related tests.
+    """
     class ToolArgs(ToolArgsModel):
+        """Represent tool args within the OpenFABRIC runtime. It extends ToolArgsModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolArgs.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolArgs and related tests.
+        """
         path: str
         pattern: str = "*"
         recursive: bool = True
@@ -585,12 +1348,34 @@ class FileAggregateTool(BaseTool):
         aggregate: Literal["total_size", "count", "count_and_total_size"] = "total_size"
 
     class AggregateMatch(ToolResultModel):
+        """Represent aggregate match within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by AggregateMatch.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.AggregateMatch and related tests.
+        """
         name: str
         path: str
         relative_path: str
         size_bytes: int
 
     class ToolResult(ToolResultModel):
+        """Represent tool result within the OpenFABRIC runtime. It extends ToolResultModel.
+
+        Responsibilities:
+            Encapsulates state, validation, or behavior owned by ToolResult.
+
+        Data flow / Interfaces:
+            Instances are created and consumed by registered tool execution code paths according to type hints and validators.
+
+        Used by:
+            Used by callers of aor_runtime.tools.filesystem.ToolResult and related tests.
+        """
         path: str
         pattern: str
         recursive: bool
@@ -601,6 +1386,17 @@ class FileAggregateTool(BaseTool):
         display_size: str
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Handle the internal initialize the object helper path for this module.
+
+        Inputs:
+            Receives settings for this FileAggregateTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Initializes the instance and returns None.
+
+        Used by:
+            Used by registered tool execution through FileAggregateTool.__init__ calls and related tests.
+        """
         self.settings = settings or get_settings()
         self.args_model = self.ToolArgs
         self.result_model = self.ToolResult
@@ -624,6 +1420,17 @@ class FileAggregateTool(BaseTool):
         )
 
     def run(self, arguments: ToolArgs) -> ToolResult:
+        """Run for FileAggregateTool instances.
+
+        Inputs:
+            Receives arguments for this FileAggregateTool method; type hints and validators define accepted shapes.
+
+        Returns:
+            Returns the computed value described by the function name and type hints.
+
+        Used by:
+            Used by registered tool execution through FileAggregateTool.run calls and related tests.
+        """
         return self.ToolResult.model_validate(
             fs_aggregate(
                 self.settings,

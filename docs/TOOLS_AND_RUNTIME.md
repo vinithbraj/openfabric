@@ -1,8 +1,10 @@
 # Tools and Runtime Behavior
 
+This document describes tool families and runtime behavior. For the full request path, LLM boundary, deterministic validation layers, and final-output lifecycle, see [System Design](./SYSTEM_DESIGN.md).
+
 ## Tool Registry
 
-The runtime tool registry is built in `src/aor_runtime/tools/factory.py`.
+The runtime tool registry is built in `src/aor_runtime/tools/factory.py`. Tool output contracts and tool surface contracts describe how each registered tool participates in dataflow, scalar/table detection, formatting, tracing, stats, and presentation.
 
 Current tool families:
 
@@ -31,6 +33,8 @@ Current tool families:
   - `shell.exec`
 - SQL
   - `sql.query`
+  - `sql.schema`
+  - `sql.validate`
 - internal
   - `python.exec`
   - `runtime.return`
@@ -121,12 +125,7 @@ The gateway layer is transport only. Shell capability planning remains separate 
 
 `sql.query` is the read-only database execution tool used by deterministic and schema-aware SQL intents. `sql.schema` exposes the same schema catalog used internally for inspection and cache refresh.
 
-The deterministic compiler emits:
-
-- `SqlCountIntent` -> `sql.query` -> `runtime.return`
-- `SqlSelectIntent` -> `sql.query` -> `runtime.return`
-
-For PostgreSQL, the SQL layer introspects non-system schemas, preserves mixed-case identifiers, normalizes relation quoting, and validates that generated SQL is a single read-only `SELECT`/`WITH` query. Broad schema-aware LLM SQL generation is gated by `AOR_ENABLE_SQL_LLM_GENERATION`.
+The LLM action planner proposes SQL actions. Before execution, deterministic SQL layers introspect non-system schemas, preserve mixed-case identifiers, normalize relation quoting, validate AST alias scope, and require a single read-only `SELECT`/`WITH` query. `sql.validate` validates generated SQL without executing user data queries.
 
 Before execution, schema-aware SQL extracts semantic constraints from the prompt and validates that the final SQL covers them. A prompt such as `count patients above age 70` must contain the resolved birth-date predicate, and `with 2 studies` must contain the related-row count predicate. If coverage fails, `sql.query` is not executed.
 
@@ -181,9 +180,11 @@ It returns:
 
 This tool is what turns structured intermediate results into stable user-facing output.
 
-## Output Contracts
+## Output Contracts And Shape Contracts
 
 `src/aor_runtime/runtime/output_contract.py` defines `OutputContract`.
+
+`src/aor_runtime/runtime/output_shape.py`, `src/aor_runtime/runtime/result_shape.py`, `src/aor_runtime/runtime/output_envelope.py`, and `src/aor_runtime/runtime/tool_output_contracts.py` define the broader final-output boundary. They distinguish scalar, grouped scalar, table/list, status, file/export, and raw/debug shapes.
 
 Fields:
 
@@ -255,7 +256,7 @@ Core concepts:
 - optional `path`
   - `{"$ref": "alias", "path": "rows.0.name"}`
 
-This is how later steps use outputs from earlier steps without relying on the LLM to wire the plan manually.
+This is how later steps use outputs from earlier steps without relying on the LLM to wire every path manually. Missing or null paths are canonicalized through tool output contracts; invalid non-empty paths fail before execution.
 
 ### Default ref paths
 
