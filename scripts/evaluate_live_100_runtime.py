@@ -36,6 +36,10 @@ DATA_UNAVAILABLE_RE = re.compile(
     r"No matching|0 rows|no rows|not available|unavailable|not found|does not appear|not present",
     re.IGNORECASE,
 )
+CAPABILITY_UNAVAILABLE_RE = re.compile(
+    r"capability (?:is )?unavailable|not configured|not supported|appears unavailable|could not inspect",
+    re.IGNORECASE,
+)
 SUGGESTIONS_RE = re.compile(r"Suggested prompts:", re.IGNORECASE)
 
 
@@ -202,8 +206,12 @@ def _classify(content: str, *, http_status: int, transport_error: str) -> tuple[
         hard_failure = True
     if SUGGESTIONS_RE.search(text):
         issues.append("formatting_presentation")
-    if DATA_UNAVAILABLE_RE.search(text):
+    if DATA_UNAVAILABLE_RE.search(text) and not (
+        REFERENCE_RE.search(text) or ARCHITECTURE_RE.search(text) or SQL_SCHEMA_RE.search(text)
+    ):
         issues.append("data_unavailable")
+    if CAPABILITY_UNAVAILABLE_RE.search(text):
+        issues.append("capability_unavailable")
     if len(text) > 30000 and "Output file:" not in text:
         issues.append("formatting_presentation")
 
@@ -214,6 +222,7 @@ def _classify(content: str, *, http_status: int, transport_error: str) -> tuple[
         "sql_cost_timeout",
         "slurm_temporal_schema",
         "formatting_presentation",
+        "tool_domain",
     }
     if hard_failure or any(issue in failure_issues for issue in issues):
         return "fail", sorted(set(issues))
