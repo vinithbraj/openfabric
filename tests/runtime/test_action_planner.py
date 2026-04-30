@@ -1364,6 +1364,43 @@ def test_sql_validator_repairs_min_max_avg_studies_per_patient_to_cte(tmp_path: 
     assert "AVG(related_count) AS average_studies_per_patient" in repaired
 
 
+def test_broad_diagnostic_prompt_gets_budget_context_and_bounded_dag(tmp_path: Path) -> None:
+    goal = (
+        "Run a read-only end-to-end diagnostic: summarize current workspace files, "
+        "active AOR config flags found in the repo, available SQL-related capabilities, "
+        "available filesystem capabilities, and available shell inspection capabilities."
+    )
+    llm = FakeLLM(
+        [
+            {
+                "goal": goal,
+                "actions": [
+                    {"id": "workspace", "tool": "fs.list", "inputs": {"path": "."}, "output_binding": "workspace"},
+                    {"id": "sql", "tool": "sql.schema", "inputs": {"database": "dicom"}, "output_binding": "schema"},
+                    {"id": "shell", "tool": "shell.exec", "inputs": {"command": "python --version"}, "output_binding": "shell"},
+                    {"id": "bad", "tool": "slurm.queue", "inputs": {}, "output_binding": "slurm_jobs"},
+                ],
+                "expected_final_shape": {"kind": "text"},
+            }
+        ]
+    )
+    settings = _settings(tmp_path)
+    planner = LLMActionPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
+
+    plan = planner.build_plan(
+        goal=goal,
+        planner=PlannerConfig(),
+        allowed_tools=["fs.list", "fs.search_content", "sql.query", "shell.exec", "slurm.queue"],
+        input_payload={},
+    )
+
+    context = planner.last_prompt
+    assert context is not None
+    assert context["diagnostic_orchestration"]["budget"]["max_actions"] == 8
+    assert "slurm.queue" not in [step.action for step in plan.steps]
+    assert any("Bounded broad diagnostic" in repair for repair in planner.last_canonicalization_repairs)
+
+
 def test_sql_validator_repairs_study_instance_count_through_series(tmp_path: Path, monkeypatch) -> None:
     _patch_relationship_catalog(monkeypatch)
     settings = _settings(tmp_path)

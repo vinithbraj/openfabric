@@ -14,6 +14,7 @@ from aor_runtime.core.contracts import ExecutionPlan, ExecutionStep, PlannerConf
 from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.dataflow import collect_step_references, normalize_execution_plan_dataflow
+from aor_runtime.runtime.diagnostic_orchestration import diagnostic_plan_for_goal
 from aor_runtime.runtime.output_shape import infer_goal_output_contract, is_shell_status_goal, scalar_field_for_tool
 from aor_runtime.runtime.semantic_obligations import apply_semantic_obligations_to_actions
 from aor_runtime.runtime.shell_safety import classify_shell_command
@@ -456,6 +457,16 @@ class LLMActionPlanner:
             },
             "failure_context": _compact_failure_context(failure_context or {}),
         }
+        diagnostic_plan = diagnostic_plan_for_goal(goal)
+        if diagnostic_plan is not None:
+            context["diagnostic_orchestration"] = {
+                **diagnostic_plan.model_dump(),
+                "rules": [
+                    "Use compact staged inspection actions only.",
+                    "Return summarized facts per section; do not stream raw lists or file contents.",
+                    "If the budget is not enough, return completed sections and a not-completed note.",
+                ],
+            }
         if _should_include_sql_schema(goal, allowed_tools, self.settings):
             context["sql_schema"] = _compact_sql_schema(self.settings)
         return context
@@ -687,6 +698,7 @@ class ActionPlanCanonicalizer:
         self._normalize_temporal_arguments(actions)
         self._apply_semantic_obligations(actions)
         self._canonicalize_tool_arguments(actions)
+        self._bound_broad_diagnostic_actions(actions)
         self._rewrite_schema_introspection_queries(actions)
         self._rewrite_explain_only_sql(actions)
         self._rewrite_bare_data_refs(actions)
@@ -966,6 +978,49 @@ class ActionPlanCanonicalizer:
             self.metadata["tool_argument_canonicalization"] = result.metadata
         for repair in result.repairs:
             self._repair("canonicalized_tool_arguments", repair)
+
+    def _bound_broad_diagnostic_actions(self, actions: list[dict[str, Any]]) -> None:
+        diagnostic_plan = diagnostic_plan_for_goal(self.goal)
+        if diagnostic_plan is None:
+            return
+        allowed = {tool for section in diagnostic_plan.sections for tool in section.allowed_tools}
+        allowed.update({"text.format", "runtime.return"})
+        bounded: list[dict[str, Any]] = []
+        seen_section_tools: set[str] = set()
+        pruned: list[str] = []
+        for action in actions:
+            tool = str(action.get("tool") or "")
+            action_id = str(action.get("id") or tool)
+            if tool not in allowed:
+                pruned.append(action_id)
+                continue
+            if tool not in {"text.format", "runtime.return"}:
+                if tool in seen_section_tools and tool != "fs.search_content":
+                    pruned.append(action_id)
+                    continue
+                seen_section_tools.add(tool)
+            bounded.append(action)
+            if len([item for item in bounded if item.get("tool") not in {"text.format", "runtime.return"}]) >= diagnostic_plan.budget.max_actions - 2:
+                break
+        if len(bounded) != len(actions):
+            if not bounded:
+                bounded.append(
+                    {
+                        "id": "workspace_summary",
+                        "tool": "fs.list",
+                        "purpose": "Summarize the workspace as the first diagnostic section.",
+                        "inputs": {"path": "."},
+                        "depends_on": [],
+                        "output_binding": "workspace_entries",
+                        "expected_result_shape": {"kind": "table"},
+                    }
+                )
+            actions[:] = bounded
+            self.metadata["diagnostic_orchestration"] = {
+                "budget": diagnostic_plan.budget.model_dump(),
+                "pruned_actions": pruned,
+            }
+            self._repair("bounded_diagnostic_plan", "Bounded broad diagnostic request to compact staged inspection actions.")
 
     def _rewrite_schema_introspection_queries(self, actions: list[dict[str, Any]]) -> None:
         if not _schema_question_goal(self.goal):
