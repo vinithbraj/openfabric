@@ -19,6 +19,15 @@ from aor_runtime.runtime.semantic_obligations import apply_semantic_obligations_
 from aor_runtime.runtime.shell_safety import classify_shell_command
 from aor_runtime.runtime.sql_safety import ensure_read_only_sql, normalize_pg_relation_quoting, validate_read_only_sql
 from aor_runtime.runtime.temporal import TemporalArgumentCanonicalizer, TemporalNormalizationError
+from aor_runtime.runtime.tool_output_contracts import (
+    TOOL_OUTPUT_CONTRACTS,
+    available_paths_for_tool,
+    default_path_for_tool,
+    formatter_source_path_for_tool,
+    normalize_tool_ref_path,
+    path_is_declared_for_tool,
+    return_value_path_for_tool,
+)
 from aor_runtime.runtime import temporal as temporal_runtime
 from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.filesystem import resolve_path
@@ -105,22 +114,9 @@ TOOL_ALIASES = {
     "write": "fs.write",
 }
 DATA_REF_PATHS = {
-    "fs.find": "matches",
-    "fs.glob": "matches",
-    "fs.list": "entries",
-    "fs.read": "content",
-    "fs.search_content": "matches",
-    "fs.write": "path",
-    "fs.size": "size_bytes",
-    "shell.exec": "stdout",
-    "slurm.accounting": "jobs",
-    "slurm.metrics": "payload",
-    "slurm.nodes": "nodes",
-    "slurm.partitions": "partitions",
-    "slurm.queue": "jobs",
-    "sql.query": "rows",
-    "sql.schema": "catalog",
-    "text.format": "content",
+    tool: contract.default_path
+    for tool, contract in TOOL_OUTPUT_CONTRACTS.items()
+    if tool not in {"python.exec", "runtime.return"} and contract.default_path
 }
 EXPORT_PATH_RE = re.compile(r"\b(?:to|as|at|into)\s+([^\s,;]+?\.(?:txt|csv|json|md|markdown))\b", re.IGNORECASE)
 
@@ -271,7 +267,7 @@ class PlanSymbolTable(BaseModel):
             action_id = _normalize_name(action.get("id") or "")
             output_binding = _normalize_name(action.get("output_binding") or "")
             tool = _normalize_tool_name(action.get("tool"))
-            default_path = DATA_REF_PATHS.get(tool)
+            default_path = default_path_for_tool(tool)
             canonical_name = output_binding or action_id
             if not action_id or not canonical_name:
                 continue
@@ -289,6 +285,27 @@ class PlanSymbolTable(BaseModel):
     def lookup(self, value: str) -> PlanSymbol | None:
         normalized = _normalize_name(value)
         return self.symbols.get(normalized)
+
+
+class PlanDataflowValidator:
+    def validate(self, plan: ActionPlan) -> list[str]:
+        symbols = PlanSymbolTable.from_actions([action.model_dump() for action in plan.actions])
+        errors: list[str] = []
+        for action in plan.actions:
+            for alias, path in _iter_action_refs_with_paths(action.inputs):
+                symbol = symbols.lookup(alias)
+                if symbol is None:
+                    continue
+                if path_is_declared_for_tool(symbol.tool, path):
+                    continue
+                available = ", ".join(available_paths_for_tool(symbol.tool)) or "<whole result>"
+                suggested = default_path_for_tool(symbol.tool)
+                suffix = f" Suggested path: {suggested}." if suggested else ""
+                errors.append(
+                    f"Invalid reference path for {alias}: {path}. "
+                    f"Producer {symbol.output_binding} uses {symbol.tool} and exposes: {available}.{suffix}"
+                )
+        return errors
 
 
 class LLMActionPlanner:
@@ -430,6 +447,7 @@ class ActionPlanValidator:
             errors.extend(self._validate_action_policy(action, goal=goal))
         if _has_cycle(plan):
             errors.append("Action plan contains a dependency cycle.")
+        errors.extend(PlanDataflowValidator().validate(plan))
         errors.extend(self._validate_goal_flow(plan, goal=goal))
         return ActionValidationResult(valid=not errors, errors=errors, repairable=True)
 
@@ -736,7 +754,7 @@ class ActionPlanCanonicalizer:
     ) -> dict[str, Any]:
         producer_id = str(producer["id"])
         producer_tool = str(producer["tool"])
-        path = DATA_REF_PATHS.get(producer_tool)
+        path = formatter_source_path_for_tool(producer_tool)
         source = f"${producer_id}.{path}" if path else f"${producer_id}"
         output_format = _format_for_goal(self.goal, producer=producer, output_path=output_path)
         inputs: dict[str, Any] = {"source": source, "format": output_format}
@@ -782,7 +800,7 @@ class ActionPlanCanonicalizer:
             return
         if producer is None:
             return
-        path = DATA_REF_PATHS.get(str(producer["tool"]))
+        path = formatter_source_path_for_tool(str(producer["tool"]))
         inputs["source"] = f"${producer['id']}.{path}" if path else f"${producer['id']}"
         formatter.setdefault("depends_on", []).append(producer["id"])
         self._repair("repaired_text_format_source", "Repaired text.format source reference.")
@@ -796,7 +814,7 @@ class ActionPlanCanonicalizer:
             elif source_tool == "fs.write":
                 value = f"${source['id']}.path"
             else:
-                path = DATA_REF_PATHS.get(source_tool)
+                path = return_value_path_for_tool(source_tool)
                 value = f"${source['id']}.{path}" if path else f"${source['id']}"
         depends_on = [dependency["id"]] if dependency is not None else ([source["id"]] if source is not None else [])
         return {
@@ -937,6 +955,8 @@ class ActionPlanCanonicalizer:
             expected_path = _ref_path_for_symbol(symbol, preferred_path)
             if not path or _is_generic_wrong_ref_path(path, symbol):
                 rewritten["path"] = expected_path
+            elif path_is_declared_for_tool(symbol.tool, path):
+                rewritten["path"] = normalize_tool_ref_path(symbol.tool, path)
             return rewritten
         if isinstance(value, dict):
             return {key: self._rewrite_data_value(nested, preferred_path=preferred_path) for key, nested in value.items()}
@@ -1718,19 +1738,19 @@ def _database_for_goal(goal: str, configured: dict[str, str]) -> str | None:
 
 def _ref_path_for_symbol(symbol: PlanSymbol, preferred_path: str | None) -> str | None:
     if preferred_path is None:
-        return symbol.default_path
-    if symbol.default_path is None or symbol.default_path == preferred_path:
+        return default_path_for_tool(symbol.tool)
+    if path_is_declared_for_tool(symbol.tool, preferred_path):
         return preferred_path
-    return symbol.default_path
+    return default_path_for_tool(symbol.tool)
 
 
 def _is_generic_wrong_ref_path(path: str, symbol: PlanSymbol) -> bool:
-    if not symbol.default_path:
+    if not default_path_for_tool(symbol.tool):
         return False
     normalized = str(path or "").strip()
     if not normalized:
         return True
-    if normalized == symbol.default_path or normalized.startswith(f"{symbol.default_path}."):
+    if path_is_declared_for_tool(symbol.tool, normalized):
         return False
     return normalized in {"value", "result", "output", "data", "content", "text"}
 

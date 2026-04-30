@@ -163,6 +163,71 @@ def test_shell_count_canonicalizer_returns_stdout() -> None:
     assert final.inputs["mode"] == "count"
 
 
+def test_bare_sql_alias_canonicalizes_to_rows() -> None:
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "Show patient study counts.",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "purpose": "Get patient study counts.",
+                    "inputs": {"database": "dicom", "query": "SELECT 1 AS study_count"},
+                    "output_binding": "patient_study_counts",
+                    "expected_result_shape": {"kind": "table"},
+                },
+                {
+                    "id": "format",
+                    "tool": "text.format",
+                    "purpose": "Format counts.",
+                    "inputs": {"source": "patient_study_counts", "format": "markdown"},
+                    "depends_on": ["query"],
+                    "output_binding": "formatted_output",
+                },
+            ],
+            "expected_final_shape": {"kind": "table"},
+        }
+    )
+
+    result = ActionPlanCanonicalizer(goal="Show patient study counts.").canonicalize(plan)
+    formatter = next(action for action in result.plan.actions if action.tool == "text.format")
+
+    assert formatter.inputs["source"] == {"$ref": "patient_study_counts", "path": "rows"}
+
+
+def test_invalid_dataflow_path_fails_before_execution(tmp_path: Path) -> None:
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "Show patient study counts.",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "purpose": "Get patient study counts.",
+                    "inputs": {"database": "dicom", "query": "SELECT 1 AS study_count"},
+                    "output_binding": "patient_study_counts",
+                    "expected_result_shape": {"kind": "table"},
+                },
+                {
+                    "id": "format",
+                    "tool": "text.format",
+                    "purpose": "Format counts.",
+                    "inputs": {"source": "$patient_study_counts.patient_study_counts", "format": "markdown"},
+                    "depends_on": ["query"],
+                    "output_binding": "formatted_output",
+                },
+            ],
+            "expected_final_shape": {"kind": "table"},
+        }
+    )
+    validator = ActionPlanValidator(settings=_settings(tmp_path), tools=build_tool_registry(_settings(tmp_path)), allowed_tools=["sql.query"])
+
+    result = validator.validate(plan, goal="Show patient study counts.")
+
+    assert not result.valid
+    assert any("Invalid reference path" in error and "Suggested path: rows" in error for error in result.errors)
+
+
 def test_task_planner_uses_action_planner_for_sql_count(tmp_path: Path, monkeypatch) -> None:
     _patch_catalog(monkeypatch)
     llm = FakeLLM(

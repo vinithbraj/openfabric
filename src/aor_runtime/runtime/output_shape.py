@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from aor_runtime.runtime.tool_output_contracts import TOOL_OUTPUT_CONTRACTS, root_path
+
 
 GoalOutputKind = Literal["scalar", "table", "file", "text", "json", "status", "unknown"]
 
@@ -57,40 +59,14 @@ class FinalOutputContractResult:
 
 
 TOOL_RESULT_SHAPES: dict[str, ToolResultShape] = {
-    "fs.aggregate": ToolResultShape(
-        scalar_fields=("file_count", "total_size_bytes"),
-        text_fields=("summary_text",),
-        default_field="summary_text",
-    ),
-    "fs.find": ToolResultShape(collection_fields=("matches",), default_field="matches"),
-    "fs.glob": ToolResultShape(collection_fields=("matches",), default_field="matches"),
-    "fs.list": ToolResultShape(collection_fields=("entries",), default_field="entries"),
-    "fs.read": ToolResultShape(text_fields=("content",), default_field="content"),
-    "fs.search_content": ToolResultShape(collection_fields=("matches", "entries"), default_field="matches"),
-    "fs.size": ToolResultShape(scalar_fields=("size_bytes",), default_field="size_bytes"),
-    "fs.write": ToolResultShape(file_fields=("path",), scalar_fields=("bytes_written",), default_field="path"),
-    "shell.exec": ToolResultShape(scalar_fields=("stdout", "returncode"), text_fields=("stdout",), default_field="stdout"),
-    "slurm.accounting": ToolResultShape(scalar_fields=("count", "total_count", "returned_count"), collection_fields=("jobs",), default_field="jobs"),
-    "slurm.accounting_aggregate": ToolResultShape(
-        scalar_fields=("count", "job_count", "count_longer_than", "total_count", "returned_count"),
-        collection_fields=("groups", "grouped"),
-        default_field="count",
-    ),
-    "slurm.metrics": ToolResultShape(
-        scalar_fields=("queue_count", "job_count", "pending_jobs", "running_jobs", "node_count", "problematic_nodes"),
-        collection_fields=("jobs", "nodes", "partitions"),
-        default_field="payload",
-    ),
-    "slurm.nodes": ToolResultShape(
-        scalar_fields=("unique_count", "partition_row_count", "count"),
-        collection_fields=("nodes",),
-        default_field="nodes",
-    ),
-    "slurm.partitions": ToolResultShape(scalar_fields=("count",), collection_fields=("partitions",), default_field="partitions"),
-    "slurm.queue": ToolResultShape(scalar_fields=("count", "total_count", "returned_count"), collection_fields=("jobs",), default_field="jobs"),
-    "sql.query": ToolResultShape(collection_fields=("rows",), default_field="rows"),
-    "sql.schema": ToolResultShape(collection_fields=("catalog", "tables"), default_field="catalog"),
-    "text.format": ToolResultShape(text_fields=("content",), default_field="content"),
+    name: ToolResultShape(
+        scalar_fields=contract.scalar_paths,
+        collection_fields=contract.collection_paths,
+        text_fields=contract.text_paths,
+        file_fields=contract.file_paths,
+        default_field=contract.default_path,
+    )
+    for name, contract in TOOL_OUTPUT_CONTRACTS.items()
 }
 
 
@@ -150,7 +126,7 @@ def is_collection_ref(tool: str, path: str | None) -> bool:
     shape = TOOL_RESULT_SHAPES.get(tool)
     if shape is None:
         return False
-    root = _root_path(path)
+    root = root_path(path)
     return bool(root and root in shape.collection_fields)
 
 
@@ -158,7 +134,7 @@ def is_scalar_ref(tool: str, path: str | None) -> bool:
     shape = TOOL_RESULT_SHAPES.get(tool)
     if shape is None:
         return False
-    root = _root_path(path)
+    root = root_path(path)
     return bool(root and root in shape.scalar_fields)
 
 
@@ -242,10 +218,6 @@ def _last_successful_action(history: list[Any], action: str) -> Any | None:
         if bool(getattr(item, "success", False)) and getattr(getattr(item, "step", None), "action", None) == action:
             return item
     return None
-
-
-def _root_path(path: str | None) -> str:
-    return str(path or "").split(".", 1)[0].strip()
 
 
 def _looks_like_json_collection(content: str) -> bool:

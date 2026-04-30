@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from aor_runtime.core.contracts import ExecutionPlan, ExecutionStep
+from aor_runtime.runtime.tool_output_contracts import default_path_for_tool, normalize_tool_ref_path
 
 TEXTUAL_OUTPUT_PATH_ALIASES = {"text", "content", "value", "csv", "csv_string", "json", "json_string", "summary_json"}
 
@@ -152,7 +153,7 @@ def _canonicalize_reference_paths(value: Any, output_producers: dict[str, str]) 
             else:
                 normalized.pop("path", None)
         else:
-            normalized["path"] = path
+            normalized["path"] = normalize_tool_ref_path(output_producers.get(alias, ""), path)
         return normalized
     if isinstance(value, dict):
         return {key: _canonicalize_reference_paths(nested, output_producers) for key, nested in value.items()}
@@ -194,43 +195,7 @@ def _normalize_python_inputs(step: ExecutionStep, output_producers: dict[str, st
 
 
 def _default_ref_path_for_action(action: str) -> str | None:
-    if action == "runtime.return":
-        return "value"
-    if action == "python.exec":
-        return "result"
-    if action == "shell.exec":
-        return "stdout"
-    if action == "sql.query":
-        return "rows"
-    if action == "sql.schema":
-        return "catalog"
-    if action == "text.format":
-        return "content"
-    if action == "fs.glob":
-        return "matches"
-    if action == "fs.search_content":
-        return "matches"
-    if action == "fs.find":
-        return "matches"
-    if action == "fs.list":
-        return "entries"
-    if action == "fs.read":
-        return "content"
-    if action == "fs.size":
-        return "size_bytes"
-    if action in {"fs.exists", "fs.not_exists"}:
-        return "exists"
-    if action in {"slurm.queue", "slurm.accounting"}:
-        return "jobs"
-    if action == "slurm.metrics":
-        return "payload"
-    if action == "slurm.nodes":
-        return "nodes"
-    if action == "slurm.partitions":
-        return "partitions"
-    if action in {"slurm.job_detail", "slurm.node_detail"}:
-        return "fields"
-    return None
+    return default_path_for_tool(action)
 
 
 def _normalize_fs_write_args(args: dict[str, Any]) -> dict[str, Any]:
