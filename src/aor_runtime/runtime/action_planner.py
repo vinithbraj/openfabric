@@ -1161,6 +1161,7 @@ class ActionPlanCanonicalizer:
         export_goal = bool(export_path or EXPORT_GOAL_RE.search(self.goal))
         self._repair_missing_scalar_count_sql(actions)
         self._repair_scalar_count_absence_query(actions)
+        self._repair_dicom_semantic_scalar_count_query(actions)
         self._repair_count_shape_query(actions)
 
         if export_goal:
@@ -1981,6 +1982,54 @@ class ActionPlanCanonicalizer:
         ]
         self._repair("inserted_scalar_count_query", "Inserted missing SQL aggregate for scalar database count goal.")
 
+    def _repair_dicom_semantic_scalar_count_query(self, actions: list[dict[str, Any]]) -> None:
+        """Replace drifted DICOM scalar-count SQL plans with one schema-grounded aggregate.
+
+        Inputs:
+            Receives mutable planned actions.
+
+        Returns:
+            Returns None after optionally replacing the SQL action list.
+
+        Used by:
+            ActionPlanCanonicalizer before final display canonicalization.
+        """
+        if self.settings is None or not _is_scalar_count_goal(self.goal) or not _looks_like_sql_goal(self.goal):
+            return
+        if not re.search(r"\bpatients?\b|\bpatieints?\b", str(self.goal or ""), re.IGNORECASE):
+            return
+        configured = resolve_sql_databases(self.settings)
+        database = _database_for_goal(self.goal, configured) if configured else None
+        if database is None and len(configured) == 1:
+            database = next(iter(configured))
+        if not database:
+            return
+        try:
+            catalog = get_sql_catalog(self.settings, database)
+        except Exception:
+            return
+        query = _dicom_patient_semantic_count_query(self.goal, catalog)
+        if not query:
+            return
+        sql_count = sum(1 for action in actions if action.get("tool") == "sql.query")
+        first_sql = _first_action_with_tool(actions, "sql.query")
+        current_query = str((first_sql or {}).get("inputs", {}).get("query") or "")
+        needs_repair = sql_count != 1 or "GROUP BY" in current_query.upper() or "COUNT(DISTINCT p.\"PatientID\")" not in current_query
+        if not needs_repair:
+            return
+        actions[:] = [
+            {
+                "id": "count_query",
+                "tool": "sql.query",
+                "purpose": "Count patients matching schema-grounded DICOM concepts.",
+                "inputs": {"database": database, "query": query},
+                "depends_on": [],
+                "output_binding": "count_result",
+                "expected_result_shape": {"kind": "scalar"},
+            }
+        ]
+        self._repair("repaired_dicom_semantic_scalar_count", "Repaired DICOM semantic count to one qualified SQL aggregate.")
+
 
 class ActionPlanCompiler:
     """Represent action plan compiler within the OpenFABRIC runtime.
@@ -2799,11 +2848,169 @@ def _scalar_count_query_from_goal(goal: str, catalog: Any) -> str | None:
     Used by:
         Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._scalar_count_query_from_goal.
     """
+    dicom_query = _dicom_patient_semantic_count_query(goal, catalog)
+    if dicom_query:
+        return dicom_query
     table = _first_table_mentioned_in_goal(goal, catalog)
     if table is None:
         return None
     relation = _quote_sql_relation(table.schema_name, table.table_name, dialect=catalog.dialect)
     return f"SELECT COUNT(*) AS count_value FROM {relation}"
+
+
+def _dicom_patient_semantic_count_query(goal: str, catalog: Any) -> str | None:
+    """Build one scalar patient-count query for DICOM concepts.
+
+    Inputs:
+        Receives user goal and SQL catalog.
+
+    Returns:
+        A schema-grounded aggregate SQL query, or None when unsupported.
+
+    Used by:
+        Scalar count insertion and DICOM semantic repair paths.
+    """
+    text = str(goal or "")
+    if not re.search(r"\bpatients?\b|\bpatieints?\b", text, re.IGNORECASE):
+        return None
+    patient = catalog.table_by_name(None, "Patient")
+    study = catalog.table_by_name(None, "Study")
+    series = catalog.table_by_name(None, "Series")
+    if patient is None or study is None or series is None:
+        return None
+    required = [
+        (patient, "PatientID"),
+        (study, "PatientID"),
+        (study, "StudyInstanceUID"),
+        (series, "StudyInstanceUID"),
+    ]
+    if any(table.column_by_name(column) is None for table, column in required):
+        return None
+    concept_terms = _dicom_text_concepts_from_goal(text)
+    modalities = _dicom_modalities_from_goal(text)
+    has_text_columns = bool(study.column_by_name("StudyDescription") and series.column_by_name("SeriesDescription"))
+    if concept_terms and not has_text_columns:
+        return None
+    if not concept_terms and not modalities:
+        return None
+    if _dicom_all_terms_policy(text) and len(concept_terms) > 1:
+        clauses = [
+            _dicom_patient_exists_clause_for_action_planner(
+                term=term,
+                modalities=modalities,
+                study_alias=f"st_{index}",
+                series_alias=f"se_{index}",
+            )
+            for index, term in enumerate(concept_terms, start=1)
+        ]
+        return 'SELECT COUNT(DISTINCT p."PatientID") AS patient_count\nFROM flathr."Patient" p\nWHERE ' + "\n  AND ".join(clauses)
+    predicates: list[str] = []
+    if modalities:
+        quoted = ", ".join(f"'{value}'" for value in modalities)
+        predicates.append(f'se."Modality" IN ({quoted})')
+    if concept_terms:
+        predicates.append("(" + " OR ".join(_dicom_description_predicate(term, study_alias="st", series_alias="se") for term in concept_terms) + ")")
+    if not predicates:
+        return None
+    return (
+        'SELECT COUNT(DISTINCT p."PatientID") AS patient_count\n'
+        'FROM flathr."Patient" p\n'
+        'JOIN flathr."Study" st ON st."PatientID" = p."PatientID"\n'
+        'JOIN flathr."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"\n'
+        "WHERE " + "\n  AND ".join(predicates)
+    )
+
+
+def _dicom_patient_exists_clause_for_action_planner(*, term: str, modalities: list[str], study_alias: str, series_alias: str) -> str:
+    """Build one correlated DICOM text EXISTS clause for patient counts.
+
+    Inputs:
+        Receives concept term, optional modalities, and aliases.
+
+    Returns:
+        SQL EXISTS clause correlated to patient alias p.
+
+    Used by:
+        _dicom_patient_semantic_count_query.
+    """
+    predicates = [_dicom_description_predicate(term, study_alias=study_alias, series_alias=series_alias)]
+    if modalities:
+        quoted = ", ".join(f"'{value}'" for value in modalities)
+        predicates.append(f'{series_alias}."Modality" IN ({quoted})')
+    return (
+        "EXISTS (\n"
+        "    SELECT 1\n"
+        f'    FROM flathr."Study" {study_alias}\n'
+        f'    JOIN flathr."Series" {series_alias} ON {series_alias}."StudyInstanceUID" = {study_alias}."StudyInstanceUID"\n'
+        f'    WHERE {study_alias}."PatientID" = p."PatientID"\n'
+        "      AND " + "\n      AND ".join(predicates) + "\n"
+        "  )"
+    )
+
+
+def _dicom_description_predicate(term: str, *, study_alias: str, series_alias: str) -> str:
+    """Build a predicate over DICOM study and series descriptions.
+
+    Inputs:
+        Receives concept term and aliases.
+
+    Returns:
+        SQL predicate string.
+
+    Used by:
+        DICOM scalar-count SQL builders.
+    """
+    escaped = str(term or "").replace("'", "''").lower()
+    return (
+        f"(LOWER({study_alias}.\"StudyDescription\") LIKE '%{escaped}%' "
+        f"OR LOWER({series_alias}.\"SeriesDescription\") LIKE '%{escaped}%')"
+    )
+
+
+def _dicom_text_concepts_from_goal(goal: str) -> list[str]:
+    """Extract supported DICOM description concepts from a goal.
+
+    Inputs:
+        Receives the user goal.
+
+    Returns:
+        Ordered concept terms.
+
+    Used by:
+        DICOM scalar-count SQL builders.
+    """
+    return [term for term in ("brain", "breast") if re.search(rf"\b{re.escape(term)}\b", goal, re.IGNORECASE)]
+
+
+def _dicom_modalities_from_goal(goal: str) -> list[str]:
+    """Extract DICOM modality targets from a goal.
+
+    Inputs:
+        Receives the user goal.
+
+    Returns:
+        Ordered uppercase modality names.
+
+    Used by:
+        DICOM scalar-count SQL builders.
+    """
+    return [value for value in ("CT", "MR", "RTSTRUCT", "RTPLAN", "RTDOSE", "PT") if re.search(rf"\b{re.escape(value)}\b", goal, re.IGNORECASE)]
+
+
+def _dicom_all_terms_policy(goal: str) -> bool:
+    """Detect all-terms semantics for DICOM text concepts.
+
+    Inputs:
+        Receives the user goal.
+
+    Returns:
+        True when both/all/and wording requires separate concept matches.
+
+    Used by:
+        DICOM scalar-count SQL builders.
+    """
+    text = str(goal or "").lower()
+    return bool(re.search(r"\b(?:both|all)\b", text) or re.search(r"\band\b", text))
 
 
 def _first_table_mentioned_in_goal(goal: str, catalog: Any) -> Any:

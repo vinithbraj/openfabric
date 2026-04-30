@@ -63,6 +63,84 @@ def test_slurm_policy_module_exposes_all_state_semantics(tmp_path: Path) -> None
     assert policy.default_state_applied is False
 
 
+def test_deterministic_sql_frame_extracts_dicom_text_concepts_as_scalar(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    result = deterministic_semantic_frame(
+        "count of patieints that have both brain and breast related studies in dicom",
+        settings,
+    )
+
+    assert result.matched
+    assert result.frame is not None
+    assert result.frame.domain == "sql"
+    assert result.frame.intent == "count"
+    assert result.frame.output.kind == "scalar"
+    assert [filter_.value for filter_ in result.frame.filters if filter_.field == "concept_term"] == ["brain", "breast"]
+    assert result.frame.filters[-1].field == "match_policy"
+    assert result.frame.filters[-1].value == "all_terms"
+
+
+def test_deterministic_sql_frame_keeps_single_modality_count_scalar(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    result = deterministic_semantic_frame("count of patients that have brain in RTPLAN in dicom", settings)
+
+    assert result.matched
+    assert result.frame is not None
+    assert result.frame.output.kind == "scalar"
+    assert result.frame.targets["modality"].values == ["RTPLAN"]
+    assert [filter_.value for filter_ in result.frame.filters if filter_.field == "concept_term"] == ["brain"]
+
+
+def test_deterministic_sql_frame_keeps_explicit_grouped_modality_table(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    result = deterministic_semantic_frame("count patients by RTPLAN and RTDOSE modality in dicom", settings)
+
+    assert result.matched
+    assert result.frame is not None
+    assert result.frame.output.kind == "table"
+    assert result.frame.dimensions == ["modality"]
+    assert result.frame.targets["modality"].values == ["RTPLAN", "RTDOSE"]
+
+
+def test_semantic_sql_compiler_builds_patient_concept_cooccurrence_query(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    frame = deterministic_semantic_frame(
+        "count of patieints that have both brain and breast related studies in dicom",
+        settings,
+    ).frame
+    assert frame is not None
+
+    compiled = SemanticFrameCompiler(settings=settings, allowed_tools=["sql.query"]).compile(frame)
+
+    assert compiled is not None
+    query = compiled.plan.steps[0].args["query"]
+    assert [step.action for step in compiled.plan.steps] == ["sql.query", "text.format", "runtime.return"]
+    assert 'COUNT(DISTINCT p."PatientID") AS patient_count' in query
+    assert query.count("EXISTS") == 2
+    assert "brain" in query
+    assert "breast" in query
+    assert 'p."PatientID"' in query
+    assert "GROUP BY" not in query.upper()
+
+
+def test_semantic_sql_compiler_builds_single_modality_scalar_query(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    frame = deterministic_semantic_frame("count of patients that have brain in RTPLAN in dicom", settings).frame
+    assert frame is not None
+
+    compiled = SemanticFrameCompiler(settings=settings, allowed_tools=["sql.query"]).compile(frame)
+
+    assert compiled is not None
+    query = compiled.plan.steps[0].args["query"]
+    assert 'COUNT(DISTINCT p."PatientID") AS patient_count' in query
+    assert 'se."Modality" IN (\'RTPLAN\')' in query
+    assert "brain" in query
+    assert "GROUP BY" not in query.upper()
+
+
 def test_slurm_domain_compiler_module_preserves_all_jobs_policy(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     frame = deterministic_semantic_frame("average runtime for all jobs in totalseg partition", settings).frame

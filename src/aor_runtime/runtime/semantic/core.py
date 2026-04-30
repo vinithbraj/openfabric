@@ -1997,16 +1997,21 @@ def _deterministic_sql_frame(text: str) -> SemanticFrame:
     database = _extract_database_target(text)
     filters = [SemanticFilter(field="database", value=database)] if database else []
     modalities = _extract_modality_targets(text)
+    concept_terms = _extract_dicom_concept_terms(text)
+    filters.extend(SemanticFilter(field="concept_term", value=term) for term in concept_terms)
+    if concept_terms and _all_terms_policy(text):
+        filters.append(SemanticFilter(field="match_policy", value="all_terms"))
     targets = {"modality": SemanticTargetSet(dimension="modality", values=modalities, mode="explicit")} if modalities else {}
+    grouped = _is_grouped_sql_count_goal(text)
     return SemanticFrame(
         domain="sql",
         intent=intent,
         entity="dicom",
         metric=SemanticMetric(name="count" if intent == "count" else "average"),
-        dimensions=["modality"] if len(modalities) > 1 else [],
+        dimensions=["modality"] if grouped and modalities else [],
         targets=targets,
         filters=filters,
-        output=SemanticOutputContract(kind="table" if modalities or intent == "aggregate_metric" else "scalar"),
+        output=SemanticOutputContract(kind="table" if grouped or intent == "aggregate_metric" else "scalar"),
         confidence=0.7,
         source="deterministic",
         rationale=text,
@@ -2984,7 +2989,10 @@ def _sql_query_for_frame(frame: SemanticFrame) -> str | None:
     """
     text = str(frame.rationale or "").lower()
     modalities = _target_set_values(frame.targets.get("modality"))
-    if frame.intent == "count" and modalities and "patient" in text:
+    concept_terms = _filter_values(frame, "concept_term")
+    if frame.intent == "count" and _mentions_patient_entity(text) and (concept_terms or (modalities and frame.output.kind == "scalar")):
+        return _dicom_patient_concept_count_query(concept_terms, modalities=modalities, match_policy=str(_filter_value(frame, "match_policy") or "any_term"))
+    if frame.intent == "count" and modalities and _mentions_patient_entity(text):
         quoted = ", ".join(f"'{value}'" for value in modalities)
         return f'SELECT se."Modality" AS modality, COUNT(DISTINCT st."PatientID") AS patient_count FROM flathr."Study" st JOIN flathr."Series" se ON st."StudyInstanceUID" = se."StudyInstanceUID" WHERE se."Modality" IN ({quoted}) GROUP BY se."Modality" ORDER BY patient_count DESC'
     if frame.intent == "aggregate_metric" and "studies per patient" in text:
@@ -2993,6 +3001,102 @@ def _sql_query_for_frame(frame: SemanticFrame) -> str | None:
         quoted = ", ".join(f"'{value}'" for value in modalities)
         return f'SELECT st."StudyInstanceUID", se."Modality", COUNT(DISTINCT i."SOPInstanceUID") AS instance_count FROM flathr."Study" st JOIN flathr."Series" se ON st."StudyInstanceUID" = se."StudyInstanceUID" LEFT JOIN flathr."Instance" i ON se."SeriesInstanceUID" = i."SeriesInstanceUID" WHERE se."Modality" IN ({quoted}) GROUP BY st."StudyInstanceUID", se."Modality" ORDER BY instance_count DESC LIMIT 10'
     return None
+
+
+def _dicom_patient_concept_count_query(
+    concept_terms: list[str],
+    *,
+    modalities: list[str],
+    match_policy: str = "any_term",
+) -> str | None:
+    """Build a scalar DICOM patient count query for text concepts and modalities.
+
+    Inputs:
+        Receives normalized text concepts, optional modality targets, and match policy.
+
+    Returns:
+        A single aggregate SQL query, or None when no semantic filter exists.
+
+    Used by:
+        _sql_query_for_frame for deterministic DICOM scalar-count compilation.
+    """
+    terms = [term for term in _dedupe_strings(concept_terms) if term]
+    normalized_modalities = [value.upper() for value in _dedupe_strings(modalities)]
+    if not terms and not normalized_modalities:
+        return None
+    if match_policy == "all_terms" and len(terms) > 1:
+        clauses = [
+            _dicom_patient_exists_clause(
+                term=term,
+                modalities=normalized_modalities if normalized_modalities else [],
+                alias=f"st_{index}",
+                series_alias=f"se_{index}",
+            )
+            for index, term in enumerate(terms, start=1)
+        ]
+        where_clause = "\n  AND ".join(clauses)
+        return f'SELECT COUNT(DISTINCT p."PatientID") AS patient_count\nFROM flathr."Patient" p\nWHERE {where_clause}'
+    predicates: list[str] = []
+    if normalized_modalities:
+        quoted = ", ".join(f"'{value}'" for value in normalized_modalities)
+        predicates.append(f'se."Modality" IN ({quoted})')
+    if terms:
+        predicates.append("(" + " OR ".join(_dicom_text_predicate(term, study_alias="st", series_alias="se") for term in terms) + ")")
+    where_clause = "\nWHERE " + "\n  AND ".join(predicates) if predicates else ""
+    return (
+        'SELECT COUNT(DISTINCT p."PatientID") AS patient_count\n'
+        'FROM flathr."Patient" p\n'
+        'JOIN flathr."Study" st ON st."PatientID" = p."PatientID"\n'
+        'JOIN flathr."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"'
+        f"{where_clause}"
+    )
+
+
+def _dicom_patient_exists_clause(*, term: str, modalities: list[str], alias: str, series_alias: str) -> str:
+    """Build one correlated EXISTS clause for a DICOM patient text concept.
+
+    Inputs:
+        Receives the concept term, modality targets, and SQL aliases.
+
+    Returns:
+        SQL EXISTS clause correlated to patient alias p.
+
+    Used by:
+        _dicom_patient_concept_count_query for all-terms patient counts.
+    """
+    predicates = [_dicom_text_predicate(term, study_alias=alias, series_alias=series_alias)]
+    if modalities:
+        quoted = ", ".join(f"'{value}'" for value in modalities)
+        predicates.append(f'{series_alias}."Modality" IN ({quoted})')
+    where = "\n      AND ".join(predicates)
+    return (
+        "EXISTS (\n"
+        "    SELECT 1\n"
+        f'    FROM flathr."Study" {alias}\n'
+        f'    JOIN flathr."Series" {series_alias} ON {series_alias}."StudyInstanceUID" = {alias}."StudyInstanceUID"\n'
+        f'    WHERE {alias}."PatientID" = p."PatientID"\n'
+        f"      AND {where}\n"
+        "  )"
+    )
+
+
+def _dicom_text_predicate(term: str, *, study_alias: str, series_alias: str) -> str:
+    """Build a schema-backed DICOM description predicate.
+
+    Inputs:
+        Receives one concept term and the study/series aliases to reference.
+
+    Returns:
+        SQL predicate over StudyDescription and SeriesDescription.
+
+    Used by:
+        DICOM patient scalar-count query builders.
+    """
+    escaped = str(term).replace("'", "''").lower()
+    return (
+        f"(LOWER({study_alias}.\"StudyDescription\") LIKE '%{escaped}%' "
+        f"OR LOWER({series_alias}.\"SeriesDescription\") LIKE '%{escaped}%')"
+    )
 
 
 def _extract_modality_targets(goal: str) -> list[str]:
@@ -3012,6 +3116,117 @@ def _extract_modality_targets(goal: str) -> list[str]:
         if re.search(rf"\b{re.escape(value)}\b", goal, re.IGNORECASE):
             modalities.append(value)
     return modalities
+
+
+def _extract_dicom_concept_terms(goal: str) -> list[str]:
+    """Extract simple DICOM text concept terms from patient/study prompts.
+
+    Inputs:
+        Receives the user goal.
+
+    Returns:
+        Ordered concept terms such as brain and breast.
+
+    Used by:
+        SQL semantic extraction and canonicalization backups.
+    """
+    terms: list[str] = []
+    for term in ("brain", "breast"):
+        if re.search(rf"\b{re.escape(term)}\b", goal, re.IGNORECASE):
+            terms.append(term)
+    return terms
+
+
+def _mentions_patient_entity(goal: str) -> bool:
+    """Detect patient wording with a small typo tolerance.
+
+    Inputs:
+        Receives the user goal.
+
+    Returns:
+        True when the goal mentions patients or common misspellings.
+
+    Used by:
+        SQL semantic query builders.
+    """
+    return bool(re.search(r"\b(?:patient|patients|patieint|patieints)\b", str(goal or ""), re.IGNORECASE))
+
+
+def _all_terms_policy(goal: str) -> bool:
+    """Detect whether all extracted DICOM concept terms are required.
+
+    Inputs:
+        Receives the user goal.
+
+    Returns:
+        True when terms are joined by all/both-style wording.
+
+    Used by:
+        SQL semantic extraction.
+    """
+    text = str(goal or "").lower()
+    return bool(re.search(r"\b(?:both|all)\b", text) or re.search(r"\band\b", text))
+
+
+def _is_grouped_sql_count_goal(goal: str) -> bool:
+    """Detect whether a SQL count prompt asks for grouped table output.
+
+    Inputs:
+        Receives the user goal.
+
+    Returns:
+        True for by/each/separately-style count requests.
+
+    Used by:
+        _deterministic_sql_frame.
+    """
+    return bool(re.search(r"\b(?:by|group(?:ed)?\s+by|per|each|separately)\b", str(goal or ""), re.IGNORECASE))
+
+
+def _filter_values(frame: SemanticFrame, field: str) -> list[str]:
+    """Read all semantic filter values for a field from a frame.
+
+    Inputs:
+        Receives a semantic frame and filter field name.
+
+    Returns:
+        Ordered string values.
+
+    Used by:
+        SQL semantic query builders.
+    """
+    values: list[str] = []
+    for filter_ in frame.filters:
+        if filter_.field != field:
+            continue
+        text = str(filter_.value or "").strip().lower()
+        if text:
+            values.append(text)
+    return values
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    """Dedupe strings while preserving order.
+
+    Inputs:
+        Receives candidate string values.
+
+    Returns:
+        Ordered unique non-empty strings.
+
+    Used by:
+        SQL semantic query builders.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
 
 
 def _rewrite_refs(value: Any, alias_map: dict[str, str]) -> Any:

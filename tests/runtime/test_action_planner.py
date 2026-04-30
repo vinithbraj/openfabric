@@ -105,9 +105,18 @@ def _dicom_relationship_catalog() -> SqlSchemaCatalog:
         tables=[
             SqlTableRef(
                 schema_name="flathr",
+                table_name="Patient",
+                columns=[
+                    SqlColumnRef(schema_name="flathr", table_name="Patient", column_name="PatientID", primary_key=True),
+                ],
+                primary_key_columns=["PatientID"],
+            ),
+            SqlTableRef(
+                schema_name="flathr",
                 table_name="Study",
                 columns=[
                     SqlColumnRef(schema_name="flathr", table_name="Study", column_name="StudyInstanceUID", primary_key=True),
+                    SqlColumnRef(schema_name="flathr", table_name="Study", column_name="PatientID"),
                     SqlColumnRef(schema_name="flathr", table_name="Study", column_name="StudyDescription"),
                 ],
                 primary_key_columns=["StudyInstanceUID"],
@@ -1467,6 +1476,87 @@ def test_sql_modality_relationship_repair_is_limited_to_grouping_goals(tmp_path:
 
     assert result.valid is True
     assert "COUNT(DISTINCT se.\"Modality\") AS modality_count" in plan.actions[0].inputs["query"]
+
+
+def test_action_planner_repairs_dicom_brain_breast_scalar_count_to_one_query(tmp_path: Path, monkeypatch) -> None:
+    _patch_relationship_catalog(monkeypatch)
+    llm = FakeLLM(
+        [
+            {
+                "goal": "count of patieints that have both brain and breast related studies in dicom",
+                "actions": [
+                    {
+                        "id": "brain_query",
+                        "tool": "sql.query",
+                        "inputs": {"database": "dicom", "query": 'SELECT DISTINCT PatientID FROM flathr."Study" WHERE LOWER("StudyDescription") LIKE \'%brain%\''},
+                        "output_binding": "brain_patients",
+                    },
+                    {
+                        "id": "breast_query",
+                        "tool": "sql.query",
+                        "inputs": {"database": "dicom", "query": 'SELECT DISTINCT PatientID FROM flathr."Study" WHERE LOWER("StudyDescription") LIKE \'%breast%\''},
+                        "output_binding": "breast_patients",
+                    },
+                    {"id": "return", "tool": "runtime.return", "inputs": {"value": "$brain_query.rows"}, "depends_on": ["brain_query", "breast_query"]},
+                ],
+            }
+        ]
+    )
+    settings = _settings(tmp_path)
+    planner = LLMActionPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
+
+    plan = planner.build_plan(
+        goal="count of patieints that have both brain and breast related studies in dicom",
+        planner=PlannerConfig(),
+        allowed_tools=["sql.query"],
+        input_payload={},
+    )
+
+    assert [step.action for step in plan.steps] == ["sql.query", "text.format", "runtime.return"]
+    query = plan.steps[0].args["query"]
+    assert 'COUNT(DISTINCT p."PatientID") AS patient_count' in query
+    assert query.count("EXISTS") == 2
+    assert "brain" in query
+    assert "breast" in query
+
+
+def test_action_planner_repairs_single_modality_scalar_count_to_aggregate(tmp_path: Path, monkeypatch) -> None:
+    _patch_relationship_catalog(monkeypatch)
+    llm = FakeLLM(
+        [
+            {
+                "goal": "count of patients that have brain in RTPLAN in dicom",
+                "actions": [
+                    {
+                        "id": "query",
+                        "tool": "sql.query",
+                        "inputs": {
+                            "database": "dicom",
+                            "query": 'SELECT se."Modality" AS modality, COUNT(DISTINCT st."PatientID") AS patient_count FROM flathr."Study" st JOIN flathr."Series" se ON st."StudyInstanceUID" = se."StudyInstanceUID" WHERE se."Modality" IN (\'RTPLAN\') GROUP BY se."Modality"',
+                        },
+                        "output_binding": "patient_counts",
+                    },
+                    {"id": "return", "tool": "runtime.return", "inputs": {"value": "$query.rows"}, "depends_on": ["query"]},
+                ],
+            }
+        ]
+    )
+    settings = _settings(tmp_path)
+    planner = LLMActionPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
+
+    plan = planner.build_plan(
+        goal="count of patients that have brain in RTPLAN in dicom",
+        planner=PlannerConfig(),
+        allowed_tools=["sql.query"],
+        input_payload={},
+    )
+
+    assert [step.action for step in plan.steps] == ["sql.query", "text.format", "runtime.return"]
+    query = plan.steps[0].args["query"]
+    assert 'COUNT(DISTINCT p."PatientID") AS patient_count' in query
+    assert 'se."Modality" IN (\'RTPLAN\')' in query
+    assert "brain" in query
+    assert "GROUP BY" not in query.upper()
 
 
 def test_action_planner_rewrites_generate_validate_explain_sql_to_nonexecuting_tool(tmp_path: Path, monkeypatch) -> None:
