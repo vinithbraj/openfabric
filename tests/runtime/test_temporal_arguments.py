@@ -242,6 +242,86 @@ def test_action_planner_normalizes_slurm_time_before_validation(tmp_path: Path, 
     assert planner.last_temporal_normalization_repairs
 
 
+def test_action_planner_strips_temporal_label_from_slurm_accounting_args(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "aor_runtime.runtime.temporal.current_local_datetime",
+        lambda settings=None: NOW,
+    )
+    planner = LLMActionPlanner(
+        llm=FakeLLM(
+            [
+                {
+                    "goal": "Show recent SLURM jobs for the last 24 hours.",
+                    "actions": [
+                        {
+                            "id": "recent_jobs",
+                            "tool": "slurm.accounting",
+                            "inputs": {"start": "last 24 hours", "time_window_label": "Last 24 hours"},
+                            "output_binding": "recent_jobs",
+                            "expected_result_shape": {"kind": "table"},
+                        }
+                    ],
+                    "expected_final_shape": {"kind": "table"},
+                }
+            ]
+        ),
+        tools=build_tool_registry(_settings(tmp_path)),
+        settings=_settings(tmp_path),
+    )
+
+    plan = planner.build_plan(
+        goal="Show recent SLURM jobs for the last 24 hours.",
+        planner=PlannerConfig(),
+        allowed_tools=["slurm.accounting"],
+        input_payload={},
+    )
+
+    assert plan.steps[0].action == "slurm.accounting"
+    assert plan.steps[0].args["start"] == "2026-04-28 10:30:00"
+    assert "time_window_label" not in plan.steps[0].args
+    assert any("time_window_label" in repair for repair in planner.last_canonicalization_repairs)
+    scrubbed = planner.last_tool_argument_canonicalization_metadata["scrubbed_arguments"]
+    assert scrubbed == [{"action_id": "recent_jobs", "tool": "slurm.accounting", "keys": ["time_window_label"]}]
+
+
+def test_action_planner_keeps_temporal_label_for_slurm_accounting_aggregate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "aor_runtime.runtime.temporal.current_local_datetime",
+        lambda settings=None: NOW,
+    )
+    planner = LLMActionPlanner(
+        llm=FakeLLM(
+            [
+                {
+                    "goal": "Summarize average runtime for the last 24 hours.",
+                    "actions": [
+                        {
+                            "id": "runtime_summary",
+                            "tool": "slurm.accounting_aggregate",
+                            "inputs": {"metric": "average_elapsed", "start": "last 24 hours"},
+                            "output_binding": "runtime_summary",
+                            "expected_result_shape": {"kind": "table"},
+                        }
+                    ],
+                    "expected_final_shape": {"kind": "table"},
+                }
+            ]
+        ),
+        tools=build_tool_registry(_settings(tmp_path)),
+        settings=_settings(tmp_path),
+    )
+
+    plan = planner.build_plan(
+        goal="Summarize average runtime for the last 24 hours.",
+        planner=PlannerConfig(),
+        allowed_tools=["slurm.accounting_aggregate"],
+        input_payload={},
+    )
+
+    assert plan.steps[0].action == "slurm.accounting_aggregate"
+    assert plan.steps[0].args["time_window_label"] == "Last 24 hours"
+
+
 def test_action_planner_prompt_includes_runtime_date_context(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "aor_runtime.runtime.temporal.current_local_datetime",

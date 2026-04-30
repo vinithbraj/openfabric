@@ -215,6 +215,7 @@ class TaskPlanner:
             "dataflow_canonicalization_repairs": action_planner.last_dataflow_canonicalization_repairs,
             "temporal_normalization_repairs": action_planner.last_temporal_normalization_repairs,
             "temporal_normalization_metadata": action_planner.last_temporal_normalization_metadata,
+            "tool_argument_canonicalization": action_planner.last_tool_argument_canonicalization_metadata,
             "action_validation_errors": action_planner.last_validation_errors,
             "contract_validation_errors": action_planner.last_contract_validation_errors,
             "domain_validation_errors": action_planner.last_domain_validation_errors,

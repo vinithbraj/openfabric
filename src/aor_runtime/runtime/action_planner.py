@@ -308,6 +308,49 @@ class PlanDataflowValidator:
         return errors
 
 
+@dataclass(frozen=True)
+class ToolArgumentCanonicalizationResult:
+    repairs: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class ToolArgumentCanonicalizer:
+    def __init__(self, tools: ToolRegistry) -> None:
+        self.tools = tools
+
+    def canonicalize(self, actions: list[dict[str, Any]]) -> ToolArgumentCanonicalizationResult:
+        repairs: list[str] = []
+        scrubbed: list[dict[str, Any]] = []
+        for action in actions:
+            tool_name = str(action.get("tool") or "")
+            try:
+                tool = self.tools.get(tool_name)
+            except KeyError:
+                continue
+            allowed = set(getattr(tool.args_model, "model_fields", {}).keys())
+            if not allowed:
+                continue
+            inputs = action.setdefault("inputs", {})
+            if not isinstance(inputs, dict):
+                continue
+            extra_keys = [
+                key
+                for key in list(inputs.keys())
+                if str(key) not in allowed and not str(key).startswith("__")
+            ]
+            if not extra_keys:
+                continue
+            for key in extra_keys:
+                inputs.pop(key, None)
+            action_id = str(action.get("id") or tool_name)
+            scrubbed.append({"action_id": action_id, "tool": tool_name, "keys": sorted(str(key) for key in extra_keys)})
+            repairs.append(
+                f"Removed metadata-only unsupported argument(s) from {tool_name}: {', '.join(sorted(str(key) for key in extra_keys))}."
+            )
+        metadata = {"scrubbed_arguments": scrubbed} if scrubbed else {}
+        return ToolArgumentCanonicalizationResult(repairs=repairs, metadata=metadata)
+
+
 class LLMActionPlanner:
     def __init__(self, *, llm: LLMClient, tools: ToolRegistry, settings: Settings) -> None:
         self.llm = llm
@@ -324,6 +367,7 @@ class LLMActionPlanner:
         self.last_temporal_normalization_repairs: list[str] = []
         self.last_temporal_normalization_metadata: dict[str, Any] = {}
         self.last_temporal_llm_calls: int = 0
+        self.last_tool_argument_canonicalization_metadata: dict[str, Any] = {}
         self.last_contract_validation_errors: list[str] = []
         self.last_domain_validation_errors: list[str] = []
         self.last_validation_errors: list[str] = []
@@ -359,6 +403,7 @@ class LLMActionPlanner:
             failure_context=failure_context,
             llm=self.llm,
             now=planning_now,
+            tools=self.tools,
         ).canonicalize(plan)
         plan = canonicalization.plan
         self.last_canonicalization_repairs = list(canonicalization.repairs)
@@ -370,6 +415,9 @@ class LLMActionPlanner:
         ]
         self.last_temporal_normalization_metadata = dict(canonicalization.metadata.get("temporal_normalization") or {})
         self.last_temporal_llm_calls = int(canonicalization.metadata.get("temporal_llm_calls") or 0)
+        self.last_tool_argument_canonicalization_metadata = dict(
+            canonicalization.metadata.get("tool_argument_canonicalization") or {}
+        )
         self.last_database_propagation_repairs = [
             repair for repair in canonicalization.repairs if "database" in repair.lower()
         ]
@@ -603,12 +651,14 @@ class ActionPlanCanonicalizer:
         failure_context: dict[str, Any] | None = None,
         llm: Any | None = None,
         now: Any | None = None,
+        tools: ToolRegistry | None = None,
     ) -> None:
         self.goal = goal
         self.settings = settings
         self.failure_context = failure_context or {}
         self.llm = llm
         self.now = now
+        self.tools = tools
         self.repairs: list[str] = []
         self.issues: list[PlanIssue] = []
         self.symbol_table: PlanSymbolTable | None = None
@@ -634,6 +684,7 @@ class ActionPlanCanonicalizer:
         self._propagate_sql_database(actions)
         self._normalize_temporal_arguments(actions)
         self._apply_semantic_obligations(actions)
+        self._canonicalize_tool_arguments(actions)
         self._rewrite_schema_introspection_queries(actions)
         self._rewrite_bare_data_refs(actions)
         export_path = _extract_export_path(self.goal)
@@ -903,6 +954,15 @@ class ActionPlanCanonicalizer:
             )
         for repair in result.repairs:
             self._repair("applied_semantic_obligation", repair)
+
+    def _canonicalize_tool_arguments(self, actions: list[dict[str, Any]]) -> None:
+        if self.tools is None:
+            return
+        result = ToolArgumentCanonicalizer(self.tools).canonicalize(actions)
+        if result.metadata:
+            self.metadata["tool_argument_canonicalization"] = result.metadata
+        for repair in result.repairs:
+            self._repair("canonicalized_tool_arguments", repair)
 
     def _rewrite_schema_introspection_queries(self, actions: list[dict[str, Any]]) -> None:
         if not _schema_question_goal(self.goal):
