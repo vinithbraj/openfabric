@@ -740,6 +740,7 @@ class ExecutionEngine:
                     for key, value in dict(getattr(self.planner, "last_capability_metadata", {}) or {}).items()
                     if str(key).startswith("sql_")
                     or str(key).startswith("action_")
+                    or str(key).startswith("semantic_")
                     or key
                     in {
                         "planning_mode",

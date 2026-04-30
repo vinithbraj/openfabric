@@ -200,6 +200,28 @@ def test_include_all_states_does_not_pass_state_to_sacct(monkeypatch, tmp_path: 
     assert "--state=COMPLETED" not in calls[0]
 
 
+def test_completed_aggregate_passes_state_to_sacct(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def fake_execute(settings, *, node: str, command: str):
+        calls.append(command)
+        return _gateway_result(
+            "1|alice|COMPLETED|totalseg|a|00:10:00|1|1G|"
+            "2026-04-26T00:00:00|2026-04-26T00:00:00|2026-04-26T00:10:00|0:0\n"
+        )
+
+    monkeypatch.setattr("aor_runtime.tools.slurm.execute_gateway_command", fake_execute)
+    slurm_accounting_aggregate(
+        _settings(tmp_path),
+        partition="totalseg",
+        state="COMPLETED",
+        metric="average_elapsed",
+        start="2026-04-21 00:00:00",
+    )
+
+    assert "--state=COMPLETED" in calls[0]
+
+
 def test_runtime_prompt_coverage_rejects_queue_and_partitions() -> None:
     frame = extract_slurm_semantic_frame("average runtime of completed jobs in slicer last 7 days")
 

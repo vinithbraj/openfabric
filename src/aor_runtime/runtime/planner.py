@@ -30,6 +30,7 @@ from aor_runtime.runtime.policies import (
     classify_plan_violations,
     validate_plan_contract,
 )
+from aor_runtime.runtime.semantic_frame import SemanticCompilationResult, SemanticFramePlanner, semantic_frame_mode
 from aor_runtime.tools.base import ToolRegistry
 from aor_runtime.tools.sql import resolve_sql_databases
 
@@ -203,6 +204,7 @@ class TaskPlanner:
         self.last_plan_repairs: list[str] = []
         self.last_plan_canonicalized: bool = False
         self.last_capability_metadata: dict[str, Any] = {}
+        self.last_semantic_compilation: SemanticCompilationResult | None = None
 
     def build_plan(
         self,
@@ -230,6 +232,26 @@ class TaskPlanner:
         self.last_policies_used = [ACTIVE_PLANNING_MODE]
         action_planner: LLMActionPlanner | None = None
         try:
+            semantic_result = self._try_semantic_frame_plan(
+                goal=goal,
+                planner=planner,
+                allowed_tools=allowed_tools,
+            )
+            if semantic_result is not None:
+                finalized_semantic_plan = self._finalize_plan(
+                    goal,
+                    semantic_result.plan,
+                    allowed_tools,
+                    extract_explicit_tool_intent(goal, allowed_tools),
+                    allow_internal_tools=INTERNAL_ALLOWED_TOOLS | {"text.format", "sql.schema", "sql.validate"},
+                )
+                self.last_capability_name = "semantic_frame"
+                self.last_policies_used = [ACTIVE_PLANNING_MODE, "semantic_frame"]
+                self.last_capability_metadata = self._semantic_frame_metadata(semantic_result)
+                self.last_llm_calls = int(semantic_result.metadata.get("semantic_llm_calls") or 0)
+                self.last_raw_planner_llm_calls = 0
+                self.last_error_stage = None
+                return finalized_semantic_plan
             action_planner = LLMActionPlanner(llm=self.llm, tools=self.tools, settings=self.settings)
             plan = action_planner.build_plan(
                 goal=goal,
@@ -293,6 +315,7 @@ class TaskPlanner:
         self.last_plan_repairs = []
         self.last_plan_canonicalized = False
         self.last_capability_metadata = {}
+        self.last_semantic_compilation = None
 
     def _action_planner_metadata(self, action_planner: LLMActionPlanner) -> dict[str, Any]:
         """Handle the internal action planner metadata helper path for this module.
@@ -322,6 +345,58 @@ class TaskPlanner:
             "action_validation_errors": action_planner.last_validation_errors,
             "contract_validation_errors": action_planner.last_contract_validation_errors,
             "domain_validation_errors": action_planner.last_domain_validation_errors,
+        }
+
+    def _try_semantic_frame_plan(
+        self,
+        *,
+        goal: str,
+        planner: PlannerConfig,
+        allowed_tools: list[str],
+    ) -> SemanticCompilationResult | None:
+        """Try to build an execution plan from a typed semantic frame.
+
+        Inputs:
+            Receives the user goal, planner config, and tool allow-list.
+
+        Returns:
+            A semantic compilation result, or None when fallback action planning should continue.
+
+        Used by:
+            TaskPlanner.build_plan before invoking the general LLM action planner.
+        """
+        if semantic_frame_mode(self.settings) == "off":
+            return None
+        semantic_planner = SemanticFramePlanner(settings=self.settings, llm=self.llm, allowed_tools=allowed_tools)
+        result = semantic_planner.try_build_plan(
+            goal=goal,
+            model=planner.model,
+            temperature=planner.temperature,
+        )
+        self.last_semantic_compilation = result
+        return result
+
+    def _semantic_frame_metadata(self, result: SemanticCompilationResult) -> dict[str, Any]:
+        """Build planner metadata for semantic-frame compiled plans.
+
+        Inputs:
+            Receives a semantic compilation result.
+
+        Returns:
+            Metadata safe to persist in planner events and stats surfaces.
+
+        Used by:
+            TaskPlanner.build_plan when semantic-frame compilation succeeds.
+        """
+        return {
+            "capability_pack": "semantic_frame",
+            "planning_mode": ACTIVE_PLANNING_MODE,
+            "semantic_frame_mode": result.metadata.get("semantic_frame_mode"),
+            "semantic_frame_source": result.metadata.get("semantic_frame_source"),
+            "semantic_strategy": result.metadata.get("semantic_strategy"),
+            "semantic_targets": result.metadata.get("semantic_targets"),
+            "semantic_frame": result.metadata.get("semantic_frame"),
+            "semantic_coverage": result.metadata.get("semantic_coverage"),
         }
 
     def _finalize_plan(

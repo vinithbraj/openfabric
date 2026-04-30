@@ -24,8 +24,9 @@ def test_accounting_aggregate_presents_all_states_note() -> None:
     )
 
     assert "SLURM Job Runtime" in rendered.markdown
-    assert "State filter | All states" in rendered.markdown
+    assert "State filter | All job states" in rendered.markdown
     assert "Included all job states" in rendered.markdown
+    assert "Defaulted to completed jobs" not in rendered.markdown
     assert "Queue" not in rendered.markdown
 
 

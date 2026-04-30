@@ -274,6 +274,49 @@ def test_long_slurm_command_display_wraps_in_commands_used() -> None:
     assert " \\\n" in rendered.markdown
 
 
+def test_slurm_accounting_aggregate_does_not_show_cluster_health_summary() -> None:
+    history = [
+        StepLog(
+            step=ExecutionStep(
+                id=1,
+                action="slurm.accounting_aggregate",
+                args={
+                    "partition": "totalseg",
+                    "include_all_states": True,
+                    "metric": "average_elapsed",
+                    "start": "2026-04-23 00:00:00",
+                },
+                output="runtime_stats",
+            ),
+            result={
+                "result_kind": "accounting_aggregate",
+                "metric": "average_elapsed",
+                "partition": "totalseg",
+                "include_all_states": True,
+                "default_state_applied": False,
+                "time_window_label": "Last 7 days",
+                "job_count": 0,
+                "average_elapsed_human": "Unknown",
+                "min_elapsed_human": "Unknown",
+                "max_elapsed_human": "Unknown",
+                "sum_elapsed_human": "0s",
+                "warnings": ["No matching accounting jobs were found."],
+            },
+            success=True,
+        )
+    ]
+
+    rendered = render_agent_response(
+        history[0].result,
+        execution_events=history,
+        context=ResponseRenderContext(source_action="slurm.accounting_aggregate"),
+    )
+
+    assert "SLURM Job Runtime" in rendered.markdown
+    assert "State filter | All job states" in rendered.markdown
+    assert "The SLURM cluster looks healthy" not in rendered.markdown
+
+
 def test_slurm_queue_rows_are_preserved_when_runtime_return_is_row_list() -> None:
     queue_result = {
         "jobs": [

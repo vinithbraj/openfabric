@@ -161,6 +161,8 @@ def generate_slurm_insights(facts: dict[str, Any]) -> InsightResult:
     accounting = dict(facts.get("accounting") or {})
     warnings = list(facts.get("warnings") or [])
     insights: list[Insight] = []
+    if facts.get("result_kind") == "accounting_aggregate":
+        return InsightResult(domain="slurm", summary="", insights=[], facts_used=facts, warnings=warnings)
 
     running = _int(queue.get("running_jobs"))
     pending = _int(queue.get("pending_jobs"))

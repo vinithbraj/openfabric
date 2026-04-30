@@ -28,6 +28,7 @@ from aor_runtime.runtime.lifecycle import CancellationError, ToolInvocationConte
 from aor_runtime.runtime.policies import infer_output_mode
 from aor_runtime.runtime.presentation import strip_internal_telemetry
 from aor_runtime.runtime.response_renderer import ResponseRenderContext, RenderedResponse, render_agent_response
+from aor_runtime.runtime.semantic_frame import project_semantic_result
 from aor_runtime.tools.base import ToolExecutionError, ToolRegistry
 
 
@@ -84,7 +85,7 @@ class PlanExecutor:
         tool = self.tools.get(step.action)
         preview_method = getattr(tool, "preview_command", None)
         if callable(preview_method):
-            validated_args = tool.args_model.model_validate(step.args)
+            validated_args = tool.args_model.model_validate(_strip_internal_step_args(step.args))
             described = str(preview_method(validated_args) or "").strip()
             if described:
                 preview["command"] = described
@@ -118,6 +119,7 @@ class PlanExecutor:
                 output = self._invoke_streaming_tool(resolved_step, event_sink, context=context)
             else:
                 output = self.tools.invoke(resolved_step.action, resolved_step.args, context=context)
+            output = project_semantic_result(resolved_step.action, resolved_step.args, output)
             if context is not None:
                 context.throw_if_cancelled()
             finished = datetime.now(timezone.utc).isoformat()
@@ -287,6 +289,25 @@ class PlanExecutor:
                 }
                 break
         return history, failure
+
+
+def _strip_internal_step_args(value: Any) -> Any:
+    """Remove internal semantic/planner arguments before preview validation.
+
+    Inputs:
+        Receives arbitrary step argument values.
+
+    Returns:
+        The same structure with keys beginning with double underscores removed.
+
+    Used by:
+        PlanExecutor.describe_step before calling tool preview helpers.
+    """
+    if isinstance(value, dict):
+        return {key: _strip_internal_step_args(nested) for key, nested in value.items() if not str(key).startswith("__")}
+    if isinstance(value, list):
+        return [_strip_internal_step_args(item) for item in value]
+    return value
 
 
 def summarize_final_output(

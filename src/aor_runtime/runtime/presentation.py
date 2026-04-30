@@ -730,10 +730,10 @@ def _slurm_runtime_state_label(state: Any, include_all_states: bool, default_sta
         Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.presentation._slurm_runtime_state_label.
     """
     if include_all_states:
-        return "All states"
+        return "All job states"
     normalized = str(state or "").strip()
     if not normalized:
-        return "All states"
+        return "All job states"
     if default_state_applied and normalized.upper() == "COMPLETED":
         return "Completed jobs (default)"
     return normalized
