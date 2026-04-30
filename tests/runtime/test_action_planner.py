@@ -1298,6 +1298,72 @@ def test_sql_modality_relationship_repair_is_limited_to_grouping_goals(tmp_path:
     assert "COUNT(DISTINCT se.\"Modality\") AS modality_count" in plan.actions[0].inputs["query"]
 
 
+def test_action_planner_rewrites_generate_validate_explain_sql_to_nonexecuting_tool(tmp_path: Path, monkeypatch) -> None:
+    _patch_catalog(monkeypatch)
+    llm = FakeLLM(
+        [
+            {
+                "goal": "Generate a read-only SQL query to count studies per patient, validate it, and explain what it would return.",
+                "actions": [
+                    {
+                        "id": "query",
+                        "tool": "sql.query",
+                        "inputs": {
+                            "database": "dicom",
+                            "query": 'SELECT "PatientID", COUNT("StudyInstanceUID") AS study_count FROM flathr."Study" GROUP BY "PatientID"',
+                        },
+                        "output_binding": "validated_sql",
+                        "expected_result_shape": {"kind": "text"},
+                    }
+                ],
+                "expected_final_shape": {"kind": "text"},
+            }
+        ]
+    )
+    settings = _settings(tmp_path)
+    planner = LLMActionPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
+
+    plan = planner.build_plan(
+        goal="Generate a read-only SQL query to count studies per patient, validate it, and explain what it would return.",
+        planner=PlannerConfig(),
+        allowed_tools=["sql.query"],
+        input_payload={},
+    )
+
+    assert [step.action for step in plan.steps] == ["sql.validate", "text.format", "runtime.return"]
+    assert plan.steps[0].args["query"] == 'SELECT "PatientID", COUNT("StudyInstanceUID") AS study_count FROM flathr."Study" GROUP BY "PatientID"'
+
+
+def test_sql_validator_repairs_min_max_avg_studies_per_patient_to_cte(tmp_path: Path, monkeypatch) -> None:
+    _patch_catalog(monkeypatch)
+    settings = _settings(tmp_path)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "Show min, max, and average number of studies per patient in dicom.",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "inputs": {"database": "dicom", "query": 'SELECT COUNT(*) FROM flathr."Study"'},
+                    "output_binding": "rows",
+                },
+                {"id": "format", "tool": "text.format", "inputs": {"source": "$query.rows"}, "depends_on": ["query"]},
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$format.content"}, "depends_on": ["format"]},
+            ],
+        }
+    )
+
+    result = validator.validate(plan, goal="Show min, max, and average number of studies per patient in dicom.")
+
+    assert result.valid is True
+    repaired = plan.actions[0].inputs["query"]
+    assert repaired.startswith("WITH grouped_counts AS")
+    assert 'LEFT JOIN "flathr"."Study" r ON r."PatientID" = b."PatientID"' in repaired
+    assert "MIN(related_count) AS min_studies_per_patient" in repaired
+    assert "AVG(related_count) AS average_studies_per_patient" in repaired
+
+
 def test_sql_validator_repairs_study_instance_count_through_series(tmp_path: Path, monkeypatch) -> None:
     _patch_relationship_catalog(monkeypatch)
     settings = _settings(tmp_path)

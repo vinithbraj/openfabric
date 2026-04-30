@@ -194,7 +194,7 @@ def _is_scalar_count_goal(goal: str) -> bool:
     text = str(goal or "").lower()
     if not COUNT_GOAL_RE.search(text):
         return False
-    if re.search(r"\bcount\b.+\bby\b|\b(?:count|counts?)\s+(?:by|per)\b|\bgroup(?:ed)?\s+by\b|\bby\s+number\s+of\b", text):
+    if re.search(r"\bcount\b[^.?!]*\b(?:by|per)\b|\b(?:count|counts?)\s+(?:by|per)\b|\bgroup(?:ed)?\s+by\b|\bby\s+number\s+of\b", text):
         return False
     if re.search(r"\b(?:show|list|display)\b", text) and re.search(
         r"\b(?:ids?|identifiers?)\b.*\bnumber\s+of\b|\bnumber\s+of\b.*\b(?:for|per)\b",

@@ -113,6 +113,11 @@ TOOL_OUTPUT_CONTRACTS: dict[str, ToolOutputContract] = {
     ),
     "sql.query": ToolOutputContract(default_path="rows", collection_paths=("rows",)),
     "sql.schema": ToolOutputContract(default_path="catalog", collection_paths=("catalog", "tables")),
+    "sql.validate": ToolOutputContract(
+        default_path="explanation",
+        scalar_paths=("valid",),
+        text_paths=("explanation", "query", "reason"),
+    ),
     "text.format": ToolOutputContract(default_path="content", text_paths=("content",), return_value_path="content"),
 }
 

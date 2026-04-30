@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from aor_runtime.config import Settings
-from aor_runtime.tools.sql import sql_query
+from aor_runtime.tools.sql import SQLValidateTool, sql_query
 
 
 def _settings_for_sqlite(tmp_path: Path, *, sql_row_limit: int = 1) -> Settings:
@@ -37,3 +37,15 @@ def test_sql_query_returns_all_rows_without_execution_cap(tmp_path: Path) -> Non
     assert result["rows"][-1] == {"id": 74, "name": "patient-74"}
     assert result["limit"] is None
     assert result["truncated"] is False
+
+
+def test_sql_validate_tool_validates_without_executing_query(tmp_path: Path) -> None:
+    settings = _settings_for_sqlite(tmp_path)
+    tool = SQLValidateTool(settings)
+
+    result = tool.invoke({"database": "dicom", "query": "SELECT COUNT(*) AS count_value FROM patients"})
+
+    assert result["database"] == "dicom"
+    assert result["valid"] is True
+    assert result["query"] == "SELECT COUNT(*) AS count_value FROM patients"
+    assert "was not executed" in result["explanation"]

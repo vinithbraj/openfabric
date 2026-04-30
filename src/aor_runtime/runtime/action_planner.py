@@ -56,6 +56,7 @@ Return JSON only matching ActionPlan:
 
 Use only listed tools. Do not emit ExecutionPlan. Do not use python.exec.
 Use sql.query for database reads. SQL must be SELECT-only.
+For requests to generate, validate, or explain a SQL query, emit the SQL action you would use; the runtime may convert it to non-executing sql.validate.
 Use text.format for data formatting. Use fs.write for file writes. Never use shell redirection for writes.
 For count/how-many/number-of questions, produce one aggregate scalar row, not one row per entity.
 If a count requires GROUP BY/HAVING, wrap the grouped query and SELECT COUNT(*) from it.
@@ -464,7 +465,7 @@ class ActionPlanValidator:
     def __init__(self, *, settings: Settings, tools: ToolRegistry, allowed_tools: list[str]) -> None:
         self.settings = settings
         self.tools = tools
-        self.allowed_tools = set(allowed_tools) | {"runtime.return", "text.format", "sql.schema"}
+        self.allowed_tools = set(allowed_tools) | {"runtime.return", "text.format", "sql.schema", "sql.validate"}
 
     def validate(self, plan: ActionPlan, *, goal: str) -> ActionValidationResult:
         errors: list[str] = []
@@ -509,7 +510,7 @@ class ActionPlanValidator:
         return []
 
     def _validate_action_policy(self, action: PlannedAction, *, goal: str) -> list[str]:
-        if action.tool == "sql.query":
+        if action.tool in {"sql.query", "sql.validate"}:
             return self._validate_sql_action(action, goal=goal)
         if action.tool == "shell.exec":
             command = str(action.inputs.get("command") or "")
@@ -605,7 +606,7 @@ class ActionPlanValidator:
         errors: list[str] = []
         if not actions or actions[-1] != "runtime.return":
             errors.append("Final action must be runtime.return.")
-        if _looks_like_sql_goal(goal) and not any(action.tool in {"sql.query", "sql.schema"} for action in plan.actions):
+        if _looks_like_sql_goal(goal) and not any(action.tool in {"sql.query", "sql.schema", "sql.validate"} for action in plan.actions):
             errors.append("Database-shaped goals must include a SQL action, not literal or precomputed data.")
         if _is_scalar_count_goal(goal) and sum(1 for action in plan.actions if action.tool == "sql.query") > 1:
             errors.append("Scalar count SQL goals must use one aggregate sql.query, not multiple SQL queries combined later.")
@@ -687,6 +688,7 @@ class ActionPlanCanonicalizer:
         self._apply_semantic_obligations(actions)
         self._canonicalize_tool_arguments(actions)
         self._rewrite_schema_introspection_queries(actions)
+        self._rewrite_explain_only_sql(actions)
         self._rewrite_bare_data_refs(actions)
         export_path = _extract_export_path(self.goal)
         export_goal = bool(export_path or EXPORT_GOAL_RE.search(self.goal))
@@ -980,6 +982,16 @@ class ActionPlanCanonicalizer:
             action["expected_result_shape"] = {"kind": "table"}
             self._repair("rewrote_schema_introspection_query", "Rewrote system-catalog SQL query to sql.schema.")
 
+    def _rewrite_explain_only_sql(self, actions: list[dict[str, Any]]) -> None:
+        if not _is_sql_explain_only_goal(self.goal):
+            return
+        for action in actions:
+            if action.get("tool") != "sql.query":
+                continue
+            action["tool"] = "sql.validate"
+            action["expected_result_shape"] = {"kind": "text"}
+            self._repair("rewrote_sql_execute_to_validate", "Rewrote SQL execution to non-executing sql.validate for explain-only request.")
+
     def _rewrite_bare_data_refs(self, actions: list[dict[str, Any]]) -> None:
         self._symbol_table(actions)
         for action in actions:
@@ -1226,6 +1238,19 @@ def build_tool_manifest(tools: ToolRegistry, allowed_tools: list[str]) -> list[d
             )
         except Exception:
             pass
+    if "sql.validate" not in {item["name"] for item in manifest}:
+        try:
+            spec = tools.get("sql.validate").spec.model_dump()
+            manifest.append(
+                {
+                    "name": "sql.validate",
+                    "description": spec.get("description"),
+                    "input_schema": spec.get("arguments_schema"),
+                    "constraints": _constraints_for_tool("sql.validate"),
+                }
+            )
+        except Exception:
+            pass
     if "runtime.return" not in {item["name"] for item in manifest}:
         try:
             spec = tools.get("runtime.return").spec.model_dump()
@@ -1247,6 +1272,8 @@ def _constraints_for_tool(name: str) -> list[str]:
         return ["SELECT-only", "known database", "known schema identifiers", "PostgreSQL mixed-case identifiers must be quoted"]
     if name == "sql.schema":
         return ["read-only schema inspection", "no row data"]
+    if name == "sql.validate":
+        return ["validate and explain SQL without executing", "SELECT-only", "known schema identifiers"]
     if name == "shell.exec":
         return ["read-only shell safety classifier", "destructive/admin commands blocked"]
     if name == "fs.write":
@@ -1538,7 +1565,7 @@ def _is_scalar_count_goal(goal: str) -> bool:
     text = str(goal or "").lower()
     if not COUNT_GOAL_RE.search(text):
         return False
-    if re.search(r"\bcount\b.+\bby\b|\b(?:count|counts?)\s+(?:by|per)\b|\bgroup(?:ed)?\s+by\b|\bby\s+number\s+of\b", text):
+    if re.search(r"\bcount\b[^.?!]*\b(?:by|per)\b|\b(?:count|counts?)\s+(?:by|per)\b|\bgroup(?:ed)?\s+by\b|\bby\s+number\s+of\b", text):
         return False
     if re.search(r"\b(?:show|list|display)\b", text) and re.search(
         r"\b(?:ids?|identifiers?)\b.*\bnumber\s+of\b|\bnumber\s+of\b.*\b(?:for|per)\b",
@@ -1559,6 +1586,15 @@ def _is_scalar_count_goal(goal: str) -> bool:
 
 def _looks_like_sql_goal(goal: str) -> bool:
     return bool(SQL_GOAL_RE.search(str(goal or "")))
+
+
+def _is_sql_explain_only_goal(goal: str) -> bool:
+    text = str(goal or "").lower()
+    if not re.search(r"\b(?:generate|write|draft|produce)\b", text):
+        return False
+    if not re.search(r"\bsql\b|\bquery\b", text):
+        return False
+    return bool(re.search(r"\b(?:validate|explain|what\s+it\s+would\s+return|would\s+return)\b", text))
 
 
 def _explicit_json_goal(goal: str) -> bool:
@@ -1884,6 +1920,9 @@ class SqlRelationshipGraph:
 
 def _repair_sql_relationship_query_from_goal(query: str, catalog: Any, *, goal: str) -> str | None:
     goal_text = str(goal or "").lower()
+    aggregate_repair = _aggregate_over_related_counts_query(catalog, goal=goal)
+    if aggregate_repair:
+        return aggregate_repair
     if _is_study_count_by_modality_goal(goal_text):
         repaired = _study_count_by_modality_query(catalog, goal=goal)
         if repaired:
@@ -1893,6 +1932,49 @@ def _repair_sql_relationship_query_from_goal(query: str, catalog: Any, *, goal: 
         if repaired:
             return repaired
     return None
+
+
+def _aggregate_over_related_counts_query(catalog: Any, *, goal: str) -> str | None:
+    text = str(goal or "").lower()
+    if not (re.search(r"\bmin(?:imum)?\b", text) and re.search(r"\bmax(?:imum)?\b", text) and re.search(r"\b(?:average|avg)\b", text)):
+        return None
+    relation: tuple[str, str, str] | None = None
+    if re.search(r"\bstud(?:y|ies)\s+per\s+patient\b|\bnumber\s+of\s+stud(?:y|ies)\s+per\s+patient\b", text):
+        relation = ("Patient", "Study", "studies_per_patient")
+    elif re.search(r"\bseries\s+per\s+stud(?:y|ies)\b|\bnumber\s+of\s+series\s+per\s+stud", text):
+        relation = ("Study", "Series", "series_per_study")
+    elif re.search(r"\binstances?\s+per\s+series\b|\bnumber\s+of\s+instances?\s+per\s+series\b", text):
+        relation = ("Series", "Instance", "instances_per_series")
+    if relation is None:
+        return None
+    base_name, related_name, label = relation
+    base = catalog.table_by_name(None, base_name)
+    related = catalog.table_by_name(None, related_name)
+    if base is None or related is None:
+        return None
+    graph = SqlRelationshipGraph(catalog)
+    join = graph.join_columns(base, related)
+    if join is None:
+        return None
+    base_join, related_join = join
+    base_id = _first_existing_column(base, [base_join, *base.primary_key_columns]) or base_join
+    base_relation = _quote_sql_relation(base.schema_name, base.table_name, dialect=catalog.dialect)
+    related_relation = _quote_sql_relation(related.schema_name, related.table_name, dialect=catalog.dialect)
+    base_join_q = _quote_sql_identifier(base_join, dialect=catalog.dialect)
+    related_join_q = _quote_sql_identifier(related_join, dialect=catalog.dialect)
+    base_id_q = _quote_sql_identifier(base_id, dialect=catalog.dialect)
+    return (
+        "WITH grouped_counts AS (\n"
+        f"  SELECT b.{base_id_q} AS entity_id, COUNT(r.{related_join_q}) AS related_count\n"
+        f"  FROM {base_relation} b\n"
+        f"  LEFT JOIN {related_relation} r ON r.{related_join_q} = b.{base_join_q}\n"
+        f"  GROUP BY b.{base_id_q}\n"
+        ")\n"
+        f"SELECT MIN(related_count) AS min_{label},\n"
+        f"       MAX(related_count) AS max_{label},\n"
+        f"       AVG(related_count) AS average_{label}\n"
+        "FROM grouped_counts"
+    )
 
 
 def _is_study_count_by_modality_goal(goal_text: str) -> bool:

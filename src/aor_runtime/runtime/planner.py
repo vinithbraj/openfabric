@@ -166,7 +166,7 @@ class TaskPlanner:
                 plan,
                 allowed_tools,
                 extract_explicit_tool_intent(goal, allowed_tools),
-                allow_internal_tools=INTERNAL_ALLOWED_TOOLS | {"text.format", "sql.schema"},
+                allow_internal_tools=INTERNAL_ALLOWED_TOOLS | {"text.format", "sql.schema", "sql.validate"},
             )
             self.last_error_stage = None
             return finalized_plan

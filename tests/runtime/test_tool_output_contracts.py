@@ -17,6 +17,7 @@ def test_core_tool_output_contract_defaults() -> None:
     assert default_path_for_tool("shell.exec") == "stdout"
     assert default_path_for_tool("slurm.metrics") == "payload"
     assert default_path_for_tool("fs.search_content") == "matches"
+    assert default_path_for_tool("sql.validate") == "explanation"
 
 
 def test_formatter_and_return_paths_use_declared_contracts() -> None:

@@ -496,3 +496,65 @@ class SQLSchemaTool(BaseTool):
     def run(self, arguments: ToolArgs) -> ToolResult:
         catalog = get_sql_catalog(self.settings, arguments.database, refresh=arguments.refresh)
         return self.ToolResult.model_validate({"catalog": catalog.model_dump()})
+
+
+class SQLValidateTool(BaseTool):
+    class ToolArgs(ToolArgsModel):
+        database: str | None = None
+        query: str
+
+    class ToolResult(ToolResultModel):
+        database: str
+        query: str
+        valid: bool
+        reason: str | None = None
+        explanation: str
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.args_model = self.ToolArgs
+        self.result_model = self.ToolResult
+        self.spec = ToolSpec(
+            name="sql.validate",
+            description="Validate read-only SQL against the configured catalog without executing the query.",
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "database": {"type": ["string", "null"]},
+                    "query": {"type": "string"},
+                },
+                "required": ["query"],
+            },
+        )
+
+    def run(self, arguments: ToolArgs) -> ToolResult:
+        database_name, _database_url = resolve_database_selection(self.settings, arguments.database)
+        safe_query = _normalize_and_validate_query(self.settings, database_name, arguments.query)
+        validation = validate_read_only_sql(safe_query)
+        valid = bool(validation.valid)
+        reason = None if valid else validation.reason
+        explanation = _explain_validated_sql(str(validation.normalized_sql or safe_query), valid=valid, reason=reason)
+        return self.ToolResult.model_validate(
+            {
+                "database": database_name,
+                "query": str(validation.normalized_sql or safe_query),
+                "valid": valid,
+                "reason": reason,
+                "explanation": explanation,
+            }
+        )
+
+
+def _explain_validated_sql(query: str, *, valid: bool, reason: str | None = None) -> str:
+    if not valid:
+        return f"The SQL was not executed. Validation failed: {reason or 'unknown reason'}"
+    summary = "The SQL was validated as a single read-only SELECT/WITH statement and was not executed."
+    if re.search(r"(?is)\bgroup\s+by\b", query):
+        summary += " It groups rows and returns aggregate rows for each group."
+    elif re.search(r"(?is)\bcount\s*\(", query):
+        summary += " It returns an aggregate count."
+    elif re.search(r"(?is)\bmin\s*\(|\bmax\s*\(|\bavg\s*\(", query):
+        summary += " It returns aggregate summary values."
+    else:
+        summary += " It returns rows selected by the query."
+    return summary
