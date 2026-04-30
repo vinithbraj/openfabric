@@ -1996,6 +1996,21 @@ def _deterministic_sql_frame(text: str) -> SemanticFrame:
     intent: SemanticIntent = "aggregate_metric" if re.search(r"\b(?:average|avg|min|max)\b", text, re.IGNORECASE) else "count"
     database = _extract_database_target(text)
     filters = [SemanticFilter(field="database", value=database)] if database else []
+    count_entities = _extract_dicom_count_entities(text)
+    if len(count_entities) > 1:
+        return SemanticFrame(
+            domain="sql",
+            intent="count",
+            entity="dicom_counts",
+            metric=SemanticMetric(name="count"),
+            dimensions=["entity"],
+            targets={"entity": SemanticTargetSet(dimension="entity", values=count_entities, mode="explicit")},
+            filters=filters,
+            output=SemanticOutputContract(kind="table"),
+            confidence=0.82,
+            source="deterministic",
+            rationale=text,
+        )
     modalities = _extract_modality_targets(text)
     concept_terms = _extract_dicom_concept_terms(text)
     filters.extend(SemanticFilter(field="concept_term", value=term) for term in concept_terms)
@@ -2988,6 +3003,9 @@ def _sql_query_for_frame(frame: SemanticFrame) -> str | None:
         SemanticFrameCompiler._compile_sql_query.
     """
     text = str(frame.rationale or "").lower()
+    count_entities = _target_set_values(frame.targets.get("entity"))
+    if frame.intent == "count" and frame.entity == "dicom_counts" and len(count_entities) > 1:
+        return _dicom_multi_entity_count_query(count_entities)
     modalities = _target_set_values(frame.targets.get("modality"))
     concept_terms = _filter_values(frame, "concept_term")
     if frame.intent == "count" and _mentions_patient_entity(text) and (concept_terms or (modalities and frame.output.kind == "scalar")):
@@ -3001,6 +3019,36 @@ def _sql_query_for_frame(frame: SemanticFrame) -> str | None:
         quoted = ", ".join(f"'{value}'" for value in modalities)
         return f'SELECT st."StudyInstanceUID", se."Modality", COUNT(DISTINCT i."SOPInstanceUID") AS instance_count FROM flathr."Study" st JOIN flathr."Series" se ON st."StudyInstanceUID" = se."StudyInstanceUID" LEFT JOIN flathr."Instance" i ON se."SeriesInstanceUID" = i."SeriesInstanceUID" WHERE se."Modality" IN ({quoted}) GROUP BY st."StudyInstanceUID", se."Modality" ORDER BY instance_count DESC LIMIT 10'
     return None
+
+
+def _dicom_multi_entity_count_query(entities: list[str]) -> str | None:
+    """Build one SQL row containing several DICOM count aggregates.
+
+    Inputs:
+        Receives normalized DICOM entity labels requested by the user.
+
+    Returns:
+        A read-only SQL query with one aggregate column per requested entity.
+
+    Used by:
+        _sql_query_for_frame for multi-scalar DICOM count prompts.
+    """
+    columns: list[str] = []
+    for entity in _dedupe_strings(entities):
+        normalized = entity.lower()
+        if normalized == "patients":
+            columns.append('(SELECT COUNT(*) FROM flathr."Patient") AS patient_count')
+        elif normalized == "studies":
+            columns.append('(SELECT COUNT(*) FROM flathr."Study") AS study_count')
+        elif normalized == "series":
+            columns.append('(SELECT COUNT(*) FROM flathr."Series") AS series_count')
+        elif normalized == "instances":
+            columns.append('(SELECT COUNT(*) FROM flathr."Instance") AS instance_count')
+        elif normalized in {"rtplan", "rtdose", "rtstruct", "ct", "mr", "pt"}:
+            columns.append(f'(SELECT COUNT(*) FROM flathr."Series" se WHERE se."Modality" = \'{normalized.upper()}\') AS {normalized}_count')
+    if len(columns) < 2:
+        return None
+    return "SELECT\n  " + ",\n  ".join(columns)
 
 
 def _dicom_patient_concept_count_query(
@@ -3135,6 +3183,41 @@ def _extract_dicom_concept_terms(goal: str) -> list[str]:
         if re.search(rf"\b{re.escape(term)}\b", goal, re.IGNORECASE):
             terms.append(term)
     return terms
+
+
+def _extract_dicom_count_entities(goal: str) -> list[str]:
+    """Extract independently requested DICOM count entities.
+
+    Inputs:
+        Receives the user goal.
+
+    Returns:
+        Ordered labels for entity-count dashboard queries.
+
+    Used by:
+        _deterministic_sql_frame.
+    """
+    text = str(goal or "").lower()
+    if not COUNT_GOAL_RE.search(text) or "dicom" not in text:
+        return []
+    if re.search(r"\b(?:by|group(?:ed)?\s+by|per|each|separately|that\s+have|with|having|where)\b", text):
+        return []
+    entities: list[str] = []
+    patterns = [
+        ("patients", r"\b(?:patients?|patieints?)\b"),
+        ("studies", r"\bstudies\b"),
+        ("series", r"\bseries\b"),
+        ("instances", r"\binstances?\b"),
+        ("rtplan", r"\brtplans?\b"),
+        ("rtdose", r"\brtdoses?\b"),
+        ("rtstruct", r"\brtstructs?\b"),
+    ]
+    for label, pattern in patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            entities.append(label)
+    if len(entities) < 2:
+        return []
+    return entities
 
 
 def _mentions_patient_entity(goal: str) -> bool:

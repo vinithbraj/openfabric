@@ -61,5 +61,9 @@ def test_grouped_count_goals_infer_table_contract() -> None:
     assert infer_goal_output_contract("count jobs per user").kind == "table"
 
 
+def test_multi_scalar_count_goals_infer_table_contract() -> None:
+    assert infer_goal_output_contract("count of all patients, studies, series, RTPLANS in dicom").kind == "table"
+
+
 def test_filtered_count_goal_stays_scalar_contract() -> None:
     assert infer_goal_output_contract("count of jobs in totalseg partition").kind == "scalar"

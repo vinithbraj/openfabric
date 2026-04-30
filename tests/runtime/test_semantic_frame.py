@@ -105,6 +105,21 @@ def test_deterministic_sql_frame_keeps_explicit_grouped_modality_table(tmp_path:
     assert result.frame.targets["modality"].values == ["RTPLAN", "RTDOSE"]
 
 
+def test_deterministic_sql_frame_extracts_multi_entity_counts_as_table(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    result = deterministic_semantic_frame("count of all patients, studies, series, RTPLANS in dicom", settings)
+
+    assert result.matched
+    assert result.frame is not None
+    assert result.frame.domain == "sql"
+    assert result.frame.intent == "count"
+    assert result.frame.entity == "dicom_counts"
+    assert result.frame.output.kind == "table"
+    assert result.frame.dimensions == ["entity"]
+    assert result.frame.targets["entity"].values == ["patients", "studies", "series", "rtplan"]
+
+
 def test_semantic_sql_compiler_builds_patient_concept_cooccurrence_query(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     frame = deterministic_semantic_frame(
@@ -124,6 +139,22 @@ def test_semantic_sql_compiler_builds_patient_concept_cooccurrence_query(tmp_pat
     assert "breast" in query
     assert 'p."PatientID"' in query
     assert "GROUP BY" not in query.upper()
+
+
+def test_semantic_sql_compiler_builds_multi_entity_count_query(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    frame = deterministic_semantic_frame("count of all patients, studies, series, RTPLANS in dicom", settings).frame
+    assert frame is not None
+
+    compiled = SemanticFrameCompiler(settings=settings, allowed_tools=["sql.query"]).compile(frame)
+
+    assert compiled is not None
+    query = compiled.plan.steps[0].args["query"]
+    assert '(SELECT COUNT(*) FROM flathr."Patient") AS patient_count' in query
+    assert '(SELECT COUNT(*) FROM flathr."Study") AS study_count' in query
+    assert '(SELECT COUNT(*) FROM flathr."Series") AS series_count' in query
+    assert "rtplan_count" in query
+    assert [step.action for step in compiled.plan.steps] == ["sql.query", "text.format", "runtime.return"]
 
 
 def test_semantic_sql_compiler_builds_single_modality_scalar_query(tmp_path: Path) -> None:

@@ -28,6 +28,10 @@ GoalOutputKind = Literal["scalar", "table", "file", "text", "json", "status", "u
 
 COUNT_GOAL_RE = re.compile(r"\b(?:count|how\s+many|number\s+of|total\s+number\s+of)\b", re.IGNORECASE)
 EXPORT_GOAL_RE = re.compile(r"\b(?:save|write|export)\b.+\b[\w.-]+\.(?:txt|csv|json|md|markdown)\b", re.IGNORECASE)
+DICOM_MULTI_COUNT_ENTITY_RE = re.compile(
+    r"\b(?:patients?|patieints?|studies|series|instances?|rtplans?|rtdoses?|rtstructs?)\b",
+    re.IGNORECASE,
+)
 
 
 SHAPE_KIND_ALIASES: dict[str, GoalOutputKind] = {
@@ -150,6 +154,8 @@ def infer_goal_output_contract(goal: str, expected_kind: Any = None, *, output_f
     """
     expected = normalize_shape_kind(expected_kind)
     goal_text = str(goal or "")
+    if is_multi_scalar_count_goal(goal_text):
+        return GoalOutputContract(kind="table", format=output_format, reason="multi_scalar_count_goal")
     if is_grouped_count_goal(goal_text):
         return GoalOutputContract(kind="table", format=output_format, reason="grouped_count_goal")
     if is_scalar_count_goal(goal_text):
@@ -385,6 +391,8 @@ def is_scalar_count_goal(goal: str) -> bool:
     text = str(goal or "").lower()
     if not COUNT_GOAL_RE.search(text):
         return False
+    if is_multi_scalar_count_goal(text):
+        return False
     if is_grouped_count_goal(text):
         return False
     if re.search(r"\bcount\b[^.?!]*\b(?:by|per)\b|\b(?:count|counts?)\s+(?:by|per)\b|\bgroup(?:ed)?\s+by\b|\bby\s+number\s+of\b", text):
@@ -404,6 +412,33 @@ def is_scalar_count_goal(goal: str) -> bool:
     if re.search(r"\b(?:show|list|display|return)\b", text) and re.search(r"\b(?:counts|study counts|series counts)\b", text):
         return False
     return True
+
+
+def is_multi_scalar_count_goal(goal: str) -> bool:
+    """Detect count prompts asking for several independent scalar counts.
+
+    Inputs:
+        Receives a user goal.
+
+    Returns:
+        True when the goal asks for multiple count values that should be displayed as a table/dashboard.
+
+    Used by:
+        infer_goal_output_contract and is_scalar_count_goal.
+    """
+    text = str(goal or "").lower()
+    if not COUNT_GOAL_RE.search(text):
+        return False
+    if re.search(r"\b(?:by|group(?:ed)?\s+by|per|each|separately)\b", text):
+        return False
+    if re.search(r"\b(?:that\s+have|with|having|where)\b", text):
+        return False
+    if "dicom" not in text:
+        return False
+    entities = {match.group(0).lower() for match in DICOM_MULTI_COUNT_ENTITY_RE.finditer(text)}
+    if len(entities) < 2:
+        return False
+    return "," in text or bool(re.search(r"\b(?:and|,)\b", text))
 
 
 def _is_scalar_count_goal(goal: str) -> bool:

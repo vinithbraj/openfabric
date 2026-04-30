@@ -1559,6 +1559,49 @@ def test_action_planner_repairs_single_modality_scalar_count_to_aggregate(tmp_pa
     assert "GROUP BY" not in query.upper()
 
 
+def test_action_planner_repairs_dicom_multi_entity_counts_to_one_query(tmp_path: Path, monkeypatch) -> None:
+    _patch_relationship_catalog(monkeypatch)
+    llm = FakeLLM(
+        [
+            {
+                "goal": "count of all patients, studies, series, RTPLANS in dicom",
+                "actions": [
+                    {
+                        "id": "patients",
+                        "tool": "sql.query",
+                        "inputs": {"database": "dicom", "query": 'SELECT COUNT(*) AS patient_count FROM flathr."Patient"'},
+                        "output_binding": "patient_count",
+                    },
+                    {
+                        "id": "studies",
+                        "tool": "sql.query",
+                        "inputs": {"database": "dicom", "query": 'SELECT COUNT(*) AS study_count FROM flathr."Study"'},
+                        "output_binding": "study_count",
+                    },
+                    {"id": "return", "tool": "runtime.return", "inputs": {"value": "$patients.rows"}, "depends_on": ["patients", "studies"]},
+                ],
+            }
+        ]
+    )
+    settings = _settings(tmp_path)
+    planner = LLMActionPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
+
+    plan = planner.build_plan(
+        goal="count of all patients, studies, series, RTPLANS in dicom",
+        planner=PlannerConfig(),
+        allowed_tools=["sql.query"],
+        input_payload={},
+    )
+
+    assert [step.action for step in plan.steps] == ["sql.query", "text.format", "runtime.return"]
+    query = plan.steps[0].args["query"]
+    assert '(SELECT COUNT(*) FROM flathr."Patient") AS patient_count' in query
+    assert '(SELECT COUNT(*) FROM flathr."Study") AS study_count' in query
+    assert '(SELECT COUNT(*) FROM flathr."Series") AS series_count' in query
+    assert 'se."Modality" = \'RTPLAN\'' in query
+    assert plan.steps[1].args["format"] == "markdown"
+
+
 def test_action_planner_rewrites_generate_validate_explain_sql_to_nonexecuting_tool(tmp_path: Path, monkeypatch) -> None:
     _patch_catalog(monkeypatch)
     llm = FakeLLM(

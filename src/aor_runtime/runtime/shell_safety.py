@@ -51,6 +51,7 @@ SAFE_READ_ONLY_COMMANDS = {
     "cut",
     "curl",
     "df",
+    "docker",
     "du",
     "env",
     "file",
@@ -132,7 +133,24 @@ SYSTEMCTL_READONLY = {"status", "show", "is-active", "is-enabled", "list-units",
 SYSTEMCTL_MUTATING = {"restart", "start", "stop", "reload", "enable", "disable", "mask", "unmask"}
 SERVICE_MUTATING = {"restart", "start", "stop", "reload"}
 GIT_MUTATING = {"clean", "reset", "checkout", "switch", "restore", "commit", "push", "pull", "merge", "rebase"}
-DOCKER_MUTATING = {"rm", "rmi", "stop", "restart", "kill", "exec", "run"}
+DOCKER_MUTATING = {"build", "create", "exec", "import", "kill", "load", "prune", "pull", "push", "restart", "rm", "rmi", "run", "save", "stop", "tag"}
+DOCKER_READONLY = {"ps", "images", "info", "version", "stats", "logs", "inspect"}
+DOCKER_GROUP_READONLY = {
+    "container": {"ls", "ps", "inspect", "top", "stats", "logs"},
+    "image": {"ls", "images", "inspect", "history"},
+    "network": {"ls", "inspect"},
+    "volume": {"ls", "inspect"},
+    "context": {"ls", "inspect", "show"},
+    "system": {"df", "info"},
+}
+DOCKER_GROUP_MUTATING = {
+    "compose": {"build", "create", "down", "exec", "kill", "pause", "pull", "push", "restart", "rm", "run", "start", "stop", "unpause", "up"},
+    "container": {"create", "exec", "kill", "pause", "prune", "rename", "restart", "rm", "run", "start", "stop", "unpause", "update"},
+    "image": {"build", "import", "load", "prune", "pull", "push", "rm", "rmi", "save", "tag"},
+    "network": {"connect", "create", "disconnect", "prune", "rm"},
+    "volume": {"create", "prune", "rm"},
+    "system": {"prune"},
+}
 KUBECTL_MUTATING = {"apply", "delete", "patch", "replace", "scale", "cordon", "drain"}
 
 CHAIN_RE = re.compile(r"(?:;|&&|\|\||\n)")
@@ -235,8 +253,8 @@ def _segment_risk(command_name: str, tokens: list[str]) -> tuple[ShellRiskLevel,
         return "medium_risk", "service command is not recognized as read-only."
     if command_name == "git" and any(token in GIT_MUTATING for token in tokens[1:]):
         return "high_risk", "git mutation commands require approval."
-    if command_name == "docker" and any(token in DOCKER_MUTATING for token in tokens[1:]):
-        return "high_risk", "docker mutation commands require approval."
+    if command_name == "docker":
+        return _docker_segment_risk(tokens)
     if command_name == "kubectl" and any(token in KUBECTL_MUTATING for token in tokens[1:]):
         return "high_risk", "kubectl mutation commands require approval."
     if command_name == "xargs" and any(_base_command(token) in MUTATING_COMMANDS | FORBIDDEN_COMMANDS for token in tokens[1:]):
@@ -250,6 +268,43 @@ def _segment_risk(command_name: str, tokens: list[str]) -> tuple[ShellRiskLevel,
     if command_name in {"curl", "wget"} and _pipes_to_shell(tokens):
         return "forbidden", "Piping downloaded content to a shell is forbidden."
     return "safe_read_only", "Read-only command."
+
+
+def _docker_segment_risk(tokens: list[str]) -> tuple[ShellRiskLevel, str]:
+    """Classify Docker commands with explicit read-only subcommand allowlisting.
+
+    Inputs:
+        Receives parsed shell tokens beginning with docker.
+
+    Returns:
+        A shell risk level and human-readable policy reason.
+
+    Used by:
+        _segment_risk when docker is the command being classified.
+    """
+    action = _first_non_option(tokens[1:])
+    if not action:
+        return "medium_risk", "docker action is not recognized as read-only."
+    if action in DOCKER_MUTATING:
+        return "high_risk", "docker mutation commands require approval."
+    if action == "stats" and "--no-stream" not in tokens[1:]:
+        return "medium_risk", "docker stats must use --no-stream for automatic read-only execution."
+    if action in DOCKER_READONLY:
+        return "safe_read_only", "Read-only docker inspection."
+    if action in DOCKER_GROUP_MUTATING or action in DOCKER_GROUP_READONLY:
+        try:
+            action_index = next(index for index, token in enumerate(tokens[1:], start=1) if not token.startswith("-") and token.lower() == action)
+        except StopIteration:
+            return "medium_risk", "docker action is not recognized as read-only."
+        subaction = _first_non_option(tokens[action_index + 1 :])
+        if subaction in DOCKER_GROUP_MUTATING.get(action, set()):
+            return "high_risk", "docker mutation commands require approval."
+        if subaction == "stats" and "--no-stream" not in tokens[action_index + 1 :]:
+            return "medium_risk", "docker stats must use --no-stream for automatic read-only execution."
+        if subaction in DOCKER_GROUP_READONLY.get(action, set()):
+            return "safe_read_only", "Read-only docker inspection."
+        return "medium_risk", "docker subcommand is not recognized as read-only."
+    return "medium_risk", "docker action is not recognized as read-only."
 
 
 def _policy_for_risk(
