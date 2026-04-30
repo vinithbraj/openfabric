@@ -906,7 +906,6 @@ class SemanticFrameCompiler:
             "start": time_window.start,
             "end": time_window.end,
             "time_window_label": time_window.label,
-            "limit": 1000,
         }
         state_policy = _slurm_accounting_state_policy(frame)
         if state_policy.include_all_states:
@@ -3249,12 +3248,33 @@ def _project_slurm_accounting_groups(result: dict[str, Any], target_values: list
     projected = dict(result)
     projected["groups"] = groups
     projected["semantic_projection"] = {"field": "partition", "values": target_values, "matched_groups": len(groups)}
+    _preserve_projection_source_counts(projected, result)
     projected["warnings"] = [str(warning) for warning in result.get("warnings") or [] if str(warning)]
+    if bool(projected.get("source_truncated")) and not any("returned accounting rows only" in warning for warning in projected["warnings"]):
+        projected["warnings"].append("Projected aggregate is over returned accounting rows only because the source result was truncated.")
     missing = [value for value in target_values if value.lower() not in {str(group.get("key") or "").lower() for group in groups}]
     if missing:
         projected["warnings"].append(f"No matching accounting groups were found for: {', '.join(missing)}.")
     _recompute_projected_aggregate(projected, groups)
     return projected
+
+
+def _preserve_projection_source_counts(projected: dict[str, Any], source: dict[str, Any]) -> None:
+    """Preserve pre-projection fetch counts separately from projected result counts.
+
+    Inputs:
+        Receives a mutable projected result plus the original aggregate payload.
+
+    Returns:
+        Mutates projected with source_* metadata used for warnings and validation.
+
+    Used by:
+        _project_slurm_accounting_groups before recomputing projected top-level counts.
+    """
+    projected["source_total_count"] = source.get("source_total_count", source.get("total_count", source.get("job_count")))
+    projected["source_returned_count"] = source.get("source_returned_count", source.get("returned_count", source.get("job_count")))
+    projected["source_limit"] = source.get("source_limit", source.get("limit"))
+    projected["source_truncated"] = bool(source.get("source_truncated", source.get("truncated")))
 
 
 def _recompute_projected_aggregate(result: dict[str, Any], groups: list[dict[str, Any]]) -> None:
@@ -3280,6 +3300,8 @@ def _recompute_projected_aggregate(result: dict[str, Any], groups: list[dict[str
     result["job_count"] = total_jobs
     result["total_count"] = total_jobs
     result["returned_count"] = total_jobs
+    result["limit"] = None
+    result["truncated"] = False
     result["average_elapsed_seconds"] = average
     result["average_elapsed_human"] = format_elapsed_seconds(average)
     result["min_elapsed_seconds"] = minimum

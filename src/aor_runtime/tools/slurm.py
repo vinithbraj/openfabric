@@ -334,7 +334,7 @@ def slurm_accounting_aggregate(
     metric: str = "average_elapsed",
     group_by: str | None = None,
     threshold_seconds: int | None = None,
-    limit: int | None = 1000,
+    limit: int | None = None,
     gateway_node: str | None = None,
     time_window_label: str | None = None,
 ) -> dict[str, Any]:
@@ -2004,7 +2004,7 @@ class SlurmAccountingAggregateTool(BaseTool):
         metric: str = "average_elapsed"
         group_by: str | None = None
         threshold_seconds: int | None = None
-        limit: int | None = 1000
+        limit: int | None = None
         gateway_node: str | None = None
         time_window_label: str | None = None
 
@@ -2055,6 +2055,10 @@ class SlurmAccountingAggregateTool(BaseTool):
         returned_count: int | None = None
         limit: int | None = None
         truncated: bool = False
+        source_total_count: int | None = None
+        source_returned_count: int | None = None
+        source_limit: int | None = None
+        source_truncated: bool = False
 
     def __init__(self, settings: Settings | None = None) -> None:
         """Handle the internal initialize the object helper path for this module.

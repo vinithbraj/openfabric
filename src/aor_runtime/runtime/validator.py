@@ -723,6 +723,15 @@ class RuntimeValidator:
             return False, "slurm accounting aggregate total_count is less than returned_count"
         if bool(result.get("truncated")) and total_count <= returned_count:
             return False, "slurm accounting aggregate truncated flag is inconsistent"
+        if any(result.get(field) is not None for field in ("source_total_count", "source_returned_count", "source_truncated")):
+            source_total = int(result.get("source_total_count") or 0)
+            source_returned = int(result.get("source_returned_count") or 0)
+            if source_total < 0 or source_returned < 0:
+                return False, "slurm accounting aggregate source counts must be non-negative"
+            if source_total < source_returned:
+                return False, "slurm accounting aggregate source_total_count is less than source_returned_count"
+            if bool(result.get("source_truncated")) and source_total <= source_returned:
+                return False, "slurm accounting aggregate source truncated flag is inconsistent"
         for field in ("average_elapsed_seconds", "min_elapsed_seconds", "max_elapsed_seconds", "sum_elapsed_seconds"):
             value = result.get(field)
             if value is not None and float(value) < 0:

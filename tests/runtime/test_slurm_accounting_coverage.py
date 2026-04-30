@@ -127,3 +127,68 @@ def test_live_accounting_aggregate_validator_is_semantic_not_exact(monkeypatch: 
 
     assert validation.success is True
     assert checks[0]["success"] is True
+
+
+def test_projected_source_truncated_accounting_aggregate_passes_validation(tmp_path) -> None:
+    result = {
+        "result_kind": "accounting_aggregate",
+        "source": "sacct",
+        "metric": "average_elapsed",
+        "group_by": "partition",
+        "state": None,
+        "include_all_states": True,
+        "job_count": 5,
+        "total_count": 5,
+        "returned_count": 5,
+        "truncated": False,
+        "source_total_count": 1200,
+        "source_returned_count": 1000,
+        "source_limit": 1000,
+        "source_truncated": True,
+        "average_elapsed_seconds": 16.0,
+        "min_elapsed_seconds": 8,
+        "max_elapsed_seconds": 40,
+        "sum_elapsed_seconds": 80,
+    }
+    log = StepLog(
+        step=ExecutionStep(
+            id=1,
+            action="slurm.accounting_aggregate",
+            args={"metric": "average_elapsed", "group_by": "partition", "include_all_states": True},
+        ),
+        result=result,
+        success=True,
+    )
+
+    validation, checks = RuntimeValidator(Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")).validate([log])
+
+    assert validation.success is True
+    assert checks[0]["success"] is True
+
+
+def test_inconsistent_top_level_accounting_truncation_still_fails(tmp_path) -> None:
+    result = {
+        "result_kind": "accounting_aggregate",
+        "source": "sacct",
+        "metric": "average_elapsed",
+        "group_by": "partition",
+        "include_all_states": True,
+        "job_count": 5,
+        "total_count": 5,
+        "returned_count": 5,
+        "truncated": True,
+    }
+    log = StepLog(
+        step=ExecutionStep(
+            id=1,
+            action="slurm.accounting_aggregate",
+            args={"metric": "average_elapsed", "group_by": "partition", "include_all_states": True},
+        ),
+        result=result,
+        success=True,
+    )
+
+    validation, checks = RuntimeValidator(Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db")).validate([log])
+
+    assert validation.success is False
+    assert checks[0]["detail"] == "slurm accounting aggregate truncated flag is inconsistent"

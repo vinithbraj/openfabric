@@ -115,6 +115,7 @@ def test_semantic_frame_compiler_uses_grouped_partition_pushdown(tmp_path: Path)
     assert first.args["metric"] == "average_elapsed"
     assert first.args["group_by"] == "partition"
     assert "__semantic_projection" not in first.args
+    assert "limit" not in first.args
     assert first.metadata["semantic_projection"]["values"] == ["slicer", "totalseg"]
     assert first.args["start"].endswith("00:00:00")
 
@@ -154,6 +155,7 @@ def test_slurm_all_jobs_multi_partition_projection_uses_step_metadata(tmp_path: 
     assert first.args["group_by"] == "partition"
     assert first.args["include_all_states"] is True
     assert "state" not in first.args
+    assert "limit" not in first.args
     assert "__semantic_projection" not in first.args
     assert first.metadata["semantic_projection"] == {
         "field": "partition",
@@ -261,6 +263,10 @@ def test_semantic_projection_filters_groups_and_recomputes_summary() -> None:
         "metric": "average_elapsed",
         "group_by": "partition",
         "job_count": 10,
+        "total_count": 1200,
+        "returned_count": 1000,
+        "limit": 1000,
+        "truncated": True,
         "groups": [
             {
                 "key": "hpc",
@@ -298,6 +304,14 @@ def test_semantic_projection_filters_groups_and_recomputes_summary() -> None:
 
     assert [row["key"] for row in projected["groups"]] == ["slicer", "totalseg"]
     assert projected["job_count"] == 5
+    assert projected["total_count"] == 5
+    assert projected["returned_count"] == 5
+    assert projected["limit"] is None
+    assert projected["truncated"] is False
+    assert projected["source_total_count"] == 1200
+    assert projected["source_returned_count"] == 1000
+    assert projected["source_limit"] == 1000
+    assert projected["source_truncated"] is True
     assert projected["sum_elapsed_seconds"] == 80
     assert projected["average_elapsed_seconds"] == 16
     assert projected["min_elapsed_seconds"] == 8

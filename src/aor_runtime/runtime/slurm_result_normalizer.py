@@ -409,6 +409,10 @@ def _normalize_accounting_aggregate(payload: dict[str, Any]) -> NormalizedSlurmR
         "value_seconds": payload.get("value_seconds"),
         "value_human": payload.get("value_human"),
         "truncated": payload.get("truncated"),
+        "source_total_count": payload.get("source_total_count"),
+        "source_returned_count": payload.get("source_returned_count"),
+        "source_limit": payload.get("source_limit"),
+        "source_truncated": payload.get("source_truncated"),
     }
     groups = list(payload.get("groups") or [])
     return NormalizedSlurmResult(

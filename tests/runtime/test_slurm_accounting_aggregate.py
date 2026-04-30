@@ -15,7 +15,7 @@ from aor_runtime.runtime.slurm_aggregations import aggregate_slurm_accounting_jo
 from aor_runtime.runtime.slurm_coverage import validate_slurm_coverage
 from aor_runtime.runtime.slurm_semantics import extract_slurm_semantic_frame
 from aor_runtime.tools.gateway import GatewayExecResult
-from aor_runtime.tools.slurm import parse_elapsed_to_seconds, slurm_accounting_aggregate
+from aor_runtime.tools.slurm import SlurmAccountingAggregateTool, parse_elapsed_to_seconds, slurm_accounting_aggregate
 
 
 SLURM_ALLOWED_TOOLS = [
@@ -118,9 +118,15 @@ def test_slurm_accounting_aggregate_tool_uses_sacct(monkeypatch, tmp_path: Path)
 
     assert result["job_count"] == 2
     assert result["average_elapsed_seconds"] == 900
+    assert result["limit"] is None
+    assert result["truncated"] is False
     assert "--partition=totalseg" in calls[0]
     assert "--state=COMPLETED" in calls[0]
     assert calls[0].startswith("sacct ")
+
+
+def test_slurm_accounting_aggregate_tool_default_is_unbounded() -> None:
+    assert SlurmAccountingAggregateTool.ToolArgs().limit is None
 
 
 def test_runtime_prompt_routes_to_accounting_aggregate(tmp_path: Path) -> None:
@@ -271,6 +277,40 @@ def test_accounting_aggregate_presentation() -> None:
     assert "Average runtime on `totalseg`" in rendered.markdown
     assert "15m" in rendered.markdown
     assert "Queue" not in rendered.markdown
+
+
+def test_accounting_aggregate_presentation_notes_source_truncation() -> None:
+    rendered = present_slurm_result(
+        {
+            "result_kind": "accounting_aggregate",
+            "metric": "average_elapsed",
+            "group_by": "partition",
+            "include_all_states": True,
+            "time_window_label": "Last 7 days",
+            "job_count": 5,
+            "total_count": 5,
+            "returned_count": 5,
+            "truncated": False,
+            "source_total_count": 1200,
+            "source_returned_count": 1000,
+            "source_limit": 1000,
+            "source_truncated": True,
+            "average_elapsed_human": "16s",
+            "min_elapsed_human": "8s",
+            "max_elapsed_human": "40s",
+            "sum_elapsed_human": "1m 20s",
+            "groups": [
+                {"key": "totalseg", "job_count": 3, "average_elapsed_human": "20s", "min_elapsed_human": "10s", "max_elapsed_human": "40s", "sum_elapsed_human": "1m"},
+                {"key": "slicer", "job_count": 2, "average_elapsed_human": "10s", "min_elapsed_human": "8s", "max_elapsed_human": "12s", "sum_elapsed_human": "20s"},
+            ],
+        },
+        PresentationContext(mode="user", source_action="slurm.accounting_aggregate"),
+    )
+
+    assert "totalseg" in rendered.markdown
+    assert "slicer" in rendered.markdown
+    assert "returned accounting rows only" in rendered.markdown
+    assert "Validation failed" not in rendered.markdown
 
 
 def test_median_runtime_fails_safely(tmp_path: Path) -> None:

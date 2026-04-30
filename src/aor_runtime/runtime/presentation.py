@@ -506,6 +506,8 @@ def _render_slurm_accounting_aggregate(normalized: NormalizedSlurmResult, contex
         normalized.warnings.append("Included all job states; no completed-only filter was applied.")
     elif default_state_applied:
         normalized.warnings.append("Defaulted to completed jobs for runtime calculation.")
+    if summary.get("source_truncated") and not any("returned accounting rows only" in warning for warning in normalized.warnings):
+        normalized.warnings.append("Projected aggregate is over returned accounting rows only because the source result was truncated.")
     _append_slurm_notes(lines, normalized.warnings)
     return lines
 
