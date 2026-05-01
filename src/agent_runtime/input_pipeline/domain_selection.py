@@ -132,6 +132,12 @@ def _preferred_capability_bias(task: TaskFrame, manifest: CapabilityManifest) ->
         return 10
     if manifest.capability_id == "shell.git_status" and object_family == "git.repository":
         return 10
+    if manifest.capability_id == "filesystem.write_file" and task.semantic_verb in {"create", "update", "render"}:
+        save_markers = ("save", "write", "export", "persist", "report", "file", "disk")
+        if object_family in {"filesystem.file", "report", "document", "markdown", "json"}:
+            return 10
+        if any(marker in lowered for marker in save_markers):
+            return 8
     if manifest.capability_id == "filesystem.list_directory" and any(marker in lowered for marker in ("list files", "this directory", "this folder", "current directory")):
         return 6
     if manifest.capability_id == "filesystem.read_file" and any(marker in lowered for marker in ("read file", "readme", "open file")):

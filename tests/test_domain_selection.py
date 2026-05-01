@@ -10,6 +10,7 @@ from agent_runtime.capabilities import (
     ReadQueryCapability,
     SearchFilesCapability,
     TransformTableCapability,
+    WriteFileCapability,
 )
 from agent_runtime.core.types import TaskFrame
 from agent_runtime.input_pipeline.domain_selection import CapabilitySelectionResult, select_capabilities
@@ -37,6 +38,7 @@ def _registry() -> CapabilityRegistry:
     registry.register(ListDirectoryCapability())
     registry.register(ReadFileCapability())
     registry.register(SearchFilesCapability())
+    registry.register(WriteFileCapability())
     registry.register(ReadQueryCapability())
     registry.register(TransformTableCapability())
     registry.register(MarkdownRenderCapability())
@@ -130,6 +132,24 @@ def _client() -> FakeLLMClient:
                 },
                 "unresolved_reason": None,
             },
+            "save the report to report.txt": {
+                "task_id": "task-write-report",
+                "candidates": [
+                    {
+                        "capability_id": "filesystem.write_file",
+                        "operation_id": "write_file",
+                        "confidence": 0.96,
+                        "reason": "Saving a report to disk requires a bounded file-write capability.",
+                    }
+                ],
+                "selected": {
+                    "capability_id": "filesystem.write_file",
+                    "operation_id": "write_file",
+                    "confidence": 0.96,
+                    "reason": "Saving a report to disk requires a bounded file-write capability.",
+                },
+                "unresolved_reason": None,
+            },
             "teleport the repository into another galaxy": {
                 "task_id": "task-unknown",
                 "candidates": [
@@ -189,6 +209,15 @@ def test_select_markdown_render_capability() -> None:
 
     assert results[0].selected is not None
     assert results[0].selected.capability_id == "markdown.render"
+
+
+def test_select_write_file_capability() -> None:
+    task = _task("task-write-report", "save the report to report.txt", "create", "filesystem.file")
+
+    results = select_capabilities([task], _registry(), _client())
+
+    assert results[0].selected is not None
+    assert results[0].selected.capability_id == "filesystem.write_file"
 
 
 def test_unknown_task_becomes_unresolved() -> None:

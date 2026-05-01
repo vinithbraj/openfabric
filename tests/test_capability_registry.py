@@ -8,6 +8,7 @@ from agent_runtime.capabilities import (
     ReadQueryCapability,
     SearchFilesCapability,
     TransformTableCapability,
+    WriteFileCapability,
 )
 
 
@@ -16,6 +17,7 @@ def _registry() -> CapabilityRegistry:
     registry.register(ListDirectoryCapability())
     registry.register(ReadFileCapability())
     registry.register(SearchFilesCapability())
+    registry.register(WriteFileCapability())
     registry.register(ReadQueryCapability())
     registry.register(TransformTableCapability())
     registry.register(MarkdownRenderCapability())
@@ -34,9 +36,10 @@ def test_register_and_lookup_capability() -> None:
 def test_list_manifests_returns_registered_manifests() -> None:
     manifests = _registry().list_manifests()
 
-    assert len(manifests) == 6
+    assert len(manifests) == 7
     assert {manifest.capability_id for manifest in manifests} >= {
         "filesystem.list_directory",
+        "filesystem.write_file",
         "sql.read_query",
         "markdown.render",
     }
@@ -49,13 +52,17 @@ def test_find_by_domain_filters_manifests() -> None:
         "filesystem.list_directory",
         "filesystem.read_file",
         "filesystem.search_files",
+        "filesystem.write_file",
     }
 
 
 def test_find_by_semantic_verb_filters_manifests() -> None:
     manifests = _registry().find_by_semantic_verb("render")
 
-    assert [manifest.capability_id for manifest in manifests] == ["markdown.render"]
+    assert {manifest.capability_id for manifest in manifests} == {
+        "filesystem.write_file",
+        "markdown.render",
+    }
 
 
 def test_export_llm_manifest_is_compact_and_safe() -> None:

@@ -175,6 +175,65 @@ def _extract_limit_from_text(text: str) -> int | None:
     return None
 
 
+def _extract_output_path(task: TaskFrame) -> str | None:
+    """Extract an intended output file path from task text or global constraints."""
+
+    global_constraints = task.constraints.get("global_constraints", task.constraints)
+    output_file = global_constraints.get("output_file")
+    if isinstance(output_file, str) and output_file.strip():
+        return output_file.strip()
+
+    description = str(task.description or "")
+    patterns = [
+        r"\bfile named\s+([A-Za-z0-9._/\-]+)",
+        r"\bsave(?: the [^ ]+)? to\s+([A-Za-z0-9._/\-]+)",
+        r"\bwrite(?: the [^ ]+)? to\s+([A-Za-z0-9._/\-]+)",
+        r"\bas\s+([A-Za-z0-9._/\-]+\.[A-Za-z0-9]+)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, description, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _infer_write_format(task: TaskFrame, path_value: str | None) -> str | None:
+    """Infer one write-file format from the path extension or task wording."""
+
+    if path_value:
+        suffix = Path(path_value).suffix.lower()
+        if suffix == ".md":
+            return "markdown"
+        if suffix == ".json":
+            return "json"
+        if suffix:
+            return "text"
+
+    lowered = " ".join(str(part or "") for part in (task.description, task.raw_evidence)).lower()
+    if "markdown" in lowered or "md file" in lowered:
+        return "markdown"
+    if "json" in lowered:
+        return "json"
+    if any(marker in lowered for marker in ("save", "write", "report", "file")):
+        return "text"
+    return None
+
+
+def _explicit_overwrite_requested(task: TaskFrame) -> bool:
+    """Return whether the task explicitly asks to overwrite an existing file."""
+
+    lowered = " ".join(str(part or "") for part in (task.description, task.raw_evidence)).lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "overwrite",
+            "overwrite the file",
+            "replace the file",
+            "replace file",
+        )
+    )
+
+
 def _supports_argument(manifest: CapabilityManifest, argument_name: str) -> bool:
     """Return whether a capability manifest allows one argument name."""
 
@@ -228,6 +287,18 @@ def _apply_deterministic_normalization(
             arguments["limit"] = explicit_limit
         elif _is_table_like_read(task, manifest):
             arguments["limit"] = 100
+
+    if manifest.capability_id == "filesystem.write_file":
+        if "path" not in arguments:
+            inferred_path = _extract_output_path(task)
+            if inferred_path is not None:
+                arguments["path"] = inferred_path
+        if "format" not in arguments:
+            inferred_format = _infer_write_format(task, arguments.get("path"))
+            if inferred_format is not None:
+                arguments["format"] = inferred_format
+        if "overwrite" not in arguments and _explicit_overwrite_requested(task):
+            arguments["overwrite"] = True
 
     for key in list(arguments):
         if key == "path" or key.endswith("_path"):

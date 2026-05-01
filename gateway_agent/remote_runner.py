@@ -31,6 +31,10 @@ OPERATION_SPECS: dict[str, dict[str, set[str]]] = {
         "required": {"path", "pattern"},
         "optional": {"recursive", "limit"},
     },
+    "filesystem.write_file": {
+        "required": {"path", "format"},
+        "optional": {"content", "input_ref", "overwrite"},
+    },
     "shell.which": {
         "required": {"program"},
         "optional": set(),
@@ -225,6 +229,141 @@ def _search_files(arguments: dict[str, Any], workspace_root: Path) -> dict[str, 
             "truncated": len(matches) >= limit,
         },
         "metadata": {"match_count": len(matches)},
+    }
+
+
+def _rows_from_value(value: Any) -> list[dict[str, Any]]:
+    """Extract row-like dictionaries from supported structured payloads."""
+
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return [dict(item) for item in value]
+    if isinstance(value, dict):
+        for key in ("rows", "entries", "processes", "listeners"):
+            rows = value.get(key)
+            if isinstance(rows, list) and all(isinstance(item, dict) for item in rows):
+                return [dict(item) for item in rows]
+        matches = value.get("matches")
+        if isinstance(matches, list):
+            return [{"path": item} for item in matches]
+    return []
+
+
+def _markdown_table(rows: list[dict[str, Any]]) -> str:
+    """Render row dictionaries as a deterministic Markdown table."""
+
+    if not rows:
+        return "_No rows available._"
+    headers = list(rows[0].keys())
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    lines.extend(
+        "| " + " | ".join(str(row.get(header, "")) for header in headers) + " |"
+        for row in rows
+    )
+    return "\n".join(lines)
+
+
+def _render_markdown_from_value(value: Any) -> str:
+    """Render one structured value into deterministic Markdown."""
+
+    if isinstance(value, str):
+        return value
+    rows = _rows_from_value(value)
+    if rows:
+        return _markdown_table(rows)
+    if isinstance(value, dict):
+        return "\n".join(f"- **{key}**: {item}" for key, item in value.items())
+    if isinstance(value, list):
+        return "\n".join(f"- {item}" for item in value)
+    return str(value)
+
+
+def _render_text_from_value(value: Any) -> str:
+    """Render one structured value into deterministic plain text."""
+
+    if isinstance(value, str):
+        return value
+    rows = _rows_from_value(value)
+    if rows:
+        headers = list(rows[0].keys())
+        lines = ["\t".join(headers)]
+        lines.extend("\t".join(str(row.get(header, "")) for header in headers) for row in rows)
+        return "\n".join(lines)
+    if isinstance(value, dict):
+        return "\n".join(f"{key}: {item}" for key, item in value.items())
+    if isinstance(value, list):
+        return "\n".join(f"- {item}" for item in value)
+    return str(value)
+
+
+def _serialize_write_payload(file_format: str, value: Any) -> str:
+    """Serialize one direct or upstream value into UTF-8 text for disk."""
+
+    if file_format == "json":
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, indent=2, sort_keys=True, default=str, ensure_ascii=False)
+    if file_format == "markdown":
+        return _render_markdown_from_value(value)
+    return _render_text_from_value(value)
+
+
+def _write_file(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Write one UTF-8 text file inside the workspace root."""
+
+    path = str(arguments.get("path") or "").strip()
+    file_format = str(arguments.get("format") or "").strip().lower()
+    overwrite = bool(arguments.get("overwrite", False))
+    has_content = "content" in arguments and arguments.get("content") is not None
+    has_input_ref = "input_ref" in arguments and arguments.get("input_ref") is not None
+
+    if file_format not in {"text", "json", "markdown"}:
+        raise RemoteToolError("format must be one of: text, json, markdown")
+    if has_content == has_input_ref:
+        raise RemoteToolError("exactly one of content or input_ref is required")
+
+    file_path, relative_path = _normalize_workspace_path(path, workspace_root)
+    if _is_secret_path(file_path):
+        raise RemoteToolError(f"access to secret path is blocked: {relative_path}")
+
+    parent = file_path.parent
+    try:
+        parent.relative_to(workspace_root)
+    except ValueError as exc:
+        raise RemoteToolError(f"path escapes workspace root: {path}") from exc
+
+    existed = file_path.exists()
+    if existed and file_path.is_dir():
+        raise RemoteToolError(f"path is a directory, not a file: {relative_path}")
+    if existed and not overwrite:
+        raise RemoteToolError(f"file already exists and overwrite is disabled: {relative_path}")
+
+    value = arguments.get("content") if has_content else arguments.get("input_ref")
+    serialized = _serialize_write_payload(file_format, value)
+    parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(serialized, encoding="utf-8")
+    bytes_written = len(serialized.encode("utf-8"))
+
+    action = "overwritten" if existed else "created"
+    return {
+        "data_preview": {
+            "message": f"Saved file to `{relative_path}` ({bytes_written} bytes, {file_format}).",
+            "path": relative_path,
+            "format": file_format,
+            "bytes_written": bytes_written,
+            "created": not existed,
+            "overwritten": existed,
+        },
+        "metadata": {
+            "path": relative_path,
+            "format": file_format,
+            "bytes_written": bytes_written,
+            "created": not existed,
+            "overwritten": existed,
+            "action": action,
+        },
     }
 
 
@@ -727,6 +866,7 @@ def run_remote_operation(
         "filesystem.list_directory": _list_directory,
         "filesystem.read_file": _read_file,
         "filesystem.search_files": _search_files,
+        "filesystem.write_file": _write_file,
         "shell.which": _which,
         "shell.pwd": _pwd,
         "shell.list_processes": _list_processes,

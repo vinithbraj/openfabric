@@ -136,7 +136,8 @@ def test_assign_semantic_verbs_for_create_report() -> None:
     )
 
     assert tasks[0].semantic_verb in {"create", "render"}
-    assert tasks[0].object_type == "report"
+    assert tasks[0].object_type in {"report", "filesystem.file"}
+    assert tasks[0].requires_confirmation is True
 
 
 def test_assign_semantic_verbs_for_run_tests_bumps_risk() -> None:
@@ -188,3 +189,31 @@ def test_assign_semantic_verbs_normalizes_free_form_memory_information() -> None
     )
 
     assert tasks[0].object_type == "system.memory"
+
+
+def test_assign_semantic_verbs_for_save_report_prefers_filesystem_file() -> None:
+    client = FakeLLMClient(
+        {
+            "save the report": {
+                "assignments": [
+                    {
+                        "task_id": "task-save",
+                        "semantic_verb": "create",
+                        "object_type": "system memory report file",
+                        "intent_confidence": 0.93,
+                        "risk_level": "low",
+                        "requires_confirmation": False,
+                    }
+                ]
+            }
+        }
+    )
+
+    tasks = assign_semantic_verbs(
+        [_task("task-save", "save the report to report.txt")],
+        client,
+        build_default_registry(),
+    )
+
+    assert tasks[0].object_type == "filesystem.file"
+    assert tasks[0].requires_confirmation is True

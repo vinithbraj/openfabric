@@ -160,7 +160,7 @@ class MixedSystemSaveLLMClient:
                 "risk_level": "low",
                 "needs_clarification": False,
                 "clarification_question": None,
-                "reason": "The prompt asks for safe system inspection plus saving the result.",
+                "reason": "The prompt asks for safe system inspection plus a follow-up action.",
                 "confidence": 0.97,
                 "assumptions": [],
             }
@@ -181,18 +181,18 @@ class MixedSystemSaveLLMClient:
                     },
                     {
                         "id": "task_2",
-                        "description": "Save the system memory report to a file named report.txt",
+                        "description": "Email the system memory report to ops@example.com",
                         "semantic_verb": "create",
-                        "object_type": "filesystem.file",
+                        "object_type": "message",
                         "intent_confidence": 0.96,
-                        "constraints": {"path": "report.txt"},
+                        "constraints": {"recipient": "ops@example.com"},
                         "dependencies": ["task_1"],
-                        "raw_evidence": "save the report to file named report.txt",
+                        "raw_evidence": "email the report to ops@example.com",
                         "requires_confirmation": False,
                         "risk_level": "low",
                     },
                 ],
-                "global_constraints": {"output_file": "report.txt"},
+                "global_constraints": {"recipient": "ops@example.com"},
                 "unresolved_references": [],
                 "assumptions": [],
             }
@@ -210,7 +210,7 @@ class MixedSystemSaveLLMClient:
                     {
                         "task_id": "task_2",
                         "semantic_verb": "create",
-                        "object_type": "filesystem.file",
+                        "object_type": "message",
                         "intent_confidence": 0.96,
                         "risk_level": "low",
                         "requires_confirmation": False,
@@ -249,11 +249,11 @@ class MixedSystemSaveLLMClient:
                         "operation_id": operation_id,
                         "fits": False,
                         "confidence": 0.96,
-                        "reason": "The runtime does not have a safe file-writing capability for this task.",
-                        "domain_reason": "A save-to-file request needs a write-capable tool.",
-                        "object_type_reason": "Reading or searching files is not the same as creating a report file.",
-                        "argument_reason": "The candidate does not accept the write arguments this task needs.",
-                        "risk_reason": "Rejecting avoids pretending a read-only tool can mutate state.",
+                        "reason": "The runtime does not have a safe messaging or email capability for this task.",
+                        "domain_reason": "An email request needs a messaging-capable tool.",
+                        "object_type_reason": "Filesystem and system inspection tools are not the same as sending a message.",
+                        "argument_reason": "The candidate does not accept recipient or delivery arguments.",
+                        "risk_reason": "Rejecting avoids pretending an unrelated tool can send a message.",
                         "missing_arguments_likely": [],
                     }
                 ],
@@ -520,7 +520,7 @@ def test_completed_status_is_partial_for_mixed_supported_and_unsupported_tasks(t
     runtime = AgentRuntime(MixedSystemSaveLLMClient(), registry, engine, OutputPipelineOrchestrator())
 
     response = runtime.handle_request(
-        "how much free memory do i have on this system ? and save the report to file named report.txt",
+        "how much free memory do i have on this system ? and email the report to ops@example.com",
         {
             "workspace_root": str(tmp_path),
             "observability": {"enabled": True, "sink": sink},

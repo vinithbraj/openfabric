@@ -56,6 +56,80 @@ def test_remote_runner_searches_files(tmp_path: Path) -> None:
     assert result["data_preview"]["matches"] == ["nested/two.py", "one.py"]
 
 
+def test_remote_runner_writes_text_json_and_markdown_files(tmp_path: Path) -> None:
+    text_result = run_remote_operation(
+        "filesystem.write_file",
+        {"path": "report.txt", "format": "text", "content": "hello world"},
+        workspace_root=tmp_path,
+    )
+    assert text_result["status"] == "success"
+    assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "hello world"
+
+    json_result = run_remote_operation(
+        "filesystem.write_file",
+        {
+            "path": "report.json",
+            "format": "json",
+            "input_ref": {"rows": [{"name": "alice", "score": 10}]},
+        },
+        workspace_root=tmp_path,
+    )
+    json_text = (tmp_path / "report.json").read_text(encoding="utf-8")
+    assert '"name": "alice"' in json_text
+    assert json_result["data_preview"]["format"] == "json"
+
+    markdown_result = run_remote_operation(
+        "filesystem.write_file",
+        {
+            "path": "reports/report.md",
+            "format": "markdown",
+            "input_ref": {"rows": [{"name": "alice", "score": 10}]},
+        },
+        workspace_root=tmp_path,
+    )
+    markdown_text = (tmp_path / "reports" / "report.md").read_text(encoding="utf-8")
+    assert "| name | score |" in markdown_text
+    assert markdown_result["data_preview"]["path"] == "reports/report.md"
+
+
+def test_remote_runner_write_file_rejects_traversal_secrets_and_overwrite(tmp_path: Path) -> None:
+    (tmp_path / "existing.txt").write_text("before", encoding="utf-8")
+
+    with pytest.raises(RemoteToolError):
+        run_remote_operation(
+            "filesystem.write_file",
+            {"path": "../outside.txt", "format": "text", "content": "oops"},
+            workspace_root=tmp_path,
+        )
+
+    with pytest.raises(RemoteToolError):
+        run_remote_operation(
+            "filesystem.write_file",
+            {"path": ".env", "format": "text", "content": "SECRET=1"},
+            workspace_root=tmp_path,
+        )
+
+    with pytest.raises(RemoteToolError):
+        run_remote_operation(
+            "filesystem.write_file",
+            {"path": "existing.txt", "format": "text", "content": "after"},
+            workspace_root=tmp_path,
+        )
+
+    overwrite_result = run_remote_operation(
+        "filesystem.write_file",
+        {
+            "path": "existing.txt",
+            "format": "text",
+            "content": "after",
+            "overwrite": True,
+        },
+        workspace_root=tmp_path,
+    )
+    assert overwrite_result["data_preview"]["overwritten"] is True
+    assert (tmp_path / "existing.txt").read_text(encoding="utf-8") == "after"
+
+
 def test_remote_runner_lists_processes_and_checks_ports() -> None:
     process_result = run_remote_operation("shell.list_processes", {"pattern": "python", "limit": 5})
 

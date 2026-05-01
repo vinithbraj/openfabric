@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agent_runtime.capabilities.base import GatewayBackedCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
+from agent_runtime.core.errors import ValidationError
 
 
 class ListDirectoryCapability(GatewayBackedCapability):
@@ -82,3 +85,79 @@ class SearchFilesCapability(GatewayBackedCapability):
         examples=[{"arguments": {"pattern": "*.py", "path": "src"}}],
         safety_notes=["Read-only filesystem search through the gateway."],
     )
+
+
+class WriteFileCapability(GatewayBackedCapability):
+    """Write UTF-8 text content to one workspace-bounded file through the gateway."""
+
+    manifest = CapabilityManifest(
+        capability_id="filesystem.write_file",
+        domain="filesystem",
+        operation_id="write_file",
+        name="Write File",
+        description="Write text, JSON, or Markdown content to one file inside the workspace.",
+        semantic_verbs=["create", "update", "render"],
+        object_types=["filesystem.file", "report", "document", "markdown", "json"],
+        argument_schema={
+            "path": {"type": "string"},
+            "format": {"type": "string"},
+            "content": {"type": "string"},
+            "input_ref": {"type": "string"},
+            "overwrite": {"type": "boolean"},
+        },
+        required_arguments=["path", "format"],
+        optional_arguments=["content", "input_ref", "overwrite"],
+        output_schema={
+            "message": {"type": "string"},
+            "path": {"type": "string"},
+            "format": {"type": "string"},
+            "bytes_written": {"type": "integer"},
+            "created": {"type": "boolean"},
+            "overwritten": {"type": "boolean"},
+        },
+        execution_backend="gateway",
+        backend_operation="filesystem.write_file",
+        risk_level="low",
+        read_only=False,
+        mutates_state=True,
+        requires_confirmation=True,
+        examples=[
+            {"arguments": {"path": "report.txt", "format": "text", "content": "hello"}},
+            {
+                "arguments": {
+                    "path": "report.md",
+                    "format": "markdown",
+                    "input_ref": "node::task_1",
+                }
+            },
+        ],
+        safety_notes=[
+            "Writes are limited to the configured workspace root.",
+            "Explicit confirmation is always required.",
+            "Existing files are not overwritten unless overwrite=true is provided.",
+        ],
+    )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Validate write-file arguments including cross-field constraints."""
+
+        payload = super().validate_arguments(arguments)
+        file_format = str(payload.get("format") or "").strip().lower()
+        if file_format not in {"text", "json", "markdown"}:
+            raise ValidationError(
+                "filesystem.write_file format must be one of: text, json, markdown"
+            )
+        has_content = "content" in payload and payload.get("content") is not None
+        has_input_ref = "input_ref" in payload and payload.get("input_ref") is not None
+        if has_content == has_input_ref:
+            raise ValidationError(
+                "filesystem.write_file requires exactly one of content or input_ref"
+            )
+        if has_content and not isinstance(payload.get("content"), str):
+            raise ValidationError("filesystem.write_file content must be a string")
+        if "path" in payload and (not isinstance(payload["path"], str) or not payload["path"].strip()):
+            raise ValidationError("filesystem.write_file path must be a non-empty string")
+        if "overwrite" in payload:
+            payload["overwrite"] = bool(payload["overwrite"])
+        payload["format"] = file_format
+        return payload

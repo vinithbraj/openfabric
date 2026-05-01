@@ -9,6 +9,7 @@ from agent_runtime.capabilities.filesystem import (
     ListDirectoryCapability,
     ReadFileCapability,
     SearchFilesCapability,
+    WriteFileCapability,
 )
 from agent_runtime.capabilities.markdown import MarkdownRenderCapability
 from agent_runtime.capabilities.python_data import TransformTableCapability
@@ -90,6 +91,23 @@ def test_filesystem_search_files_runs_through_gateway_runner(tmp_path: Path) -> 
     )
 
     assert result["data_preview"]["matches"] == ["nested/three.py", "one.py"]
+
+
+def test_filesystem_write_file_runs_through_gateway_runner(tmp_path: Path) -> None:
+    with pytest.raises(SafetyError):
+        WriteFileCapability().execute(
+            {"path": "report.txt", "format": "text", "content": "hello"},
+            _context(tmp_path),
+        )
+
+    result = run_remote_operation(
+        "filesystem.write_file",
+        {"path": "report.txt", "format": "text", "content": "hello"},
+        workspace_root=tmp_path,
+    )
+
+    assert result["data_preview"]["path"] == "report.txt"
+    assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "hello"
 
 
 def test_shell_capabilities_run_through_gateway_runner(tmp_path: Path) -> None:

@@ -126,20 +126,36 @@ def _normalize_assigned_object_type(
     raw_object_type: str,
     task: TaskFrame,
     allowed_object_types: list[str],
+    semantic_verb: str,
 ) -> str:
     """Normalize one assigned object type into the runtime-owned vocabulary."""
 
     allowed = set(allowed_object_types)
+    combined_text = " ".join(
+        part
+        for part in (
+            raw_object_type,
+            task.description,
+            task.raw_evidence or "",
+        )
+        if str(part).strip()
+    )
+    lowered_combined = combined_text.lower()
+    if (
+        semantic_verb in {"create", "update"}
+        and "filesystem.file" in allowed
+        and (
+            " file" in f" {lowered_combined}"
+            or ".txt" in lowered_combined
+            or ".md" in lowered_combined
+            or ".json" in lowered_combined
+            or "save" in lowered_combined
+            or "write" in lowered_combined
+        )
+    ):
+        return "filesystem.file"
     inferred = match_object_family_from_text(
-        " ".join(
-            part
-            for part in (
-                raw_object_type,
-                task.description,
-                task.raw_evidence or "",
-            )
-            if str(part).strip()
-        ),
+        combined_text,
         allowed_object_types,
     )
     canonical = canonical_object_family(raw_object_type)
@@ -201,11 +217,11 @@ def _post_process_assignment(task: TaskFrame) -> TaskFrame:
     low_risk_verbs = {"read", "search", "analyze", "summarize", "render"}
     if task.semantic_verb == "delete" and not dry_run:
         task.requires_confirmation = True
+    if task.semantic_verb in {"create", "update"} and not dry_run:
+        task.requires_confirmation = True
     if task.semantic_verb in low_risk_verbs and not elevated_risk:
         task.risk_level = "low"
         task.requires_confirmation = False
-    if task.semantic_verb in {"create", "update"} and task.risk_level in {"high", "critical"}:
-        task.requires_confirmation = True
     if task.semantic_verb == "execute" and task.risk_level == "low":
         task.risk_level = "medium"
     if task.semantic_verb == "execute" and bool(task.constraints.get("read_only_capability")):
@@ -255,6 +271,7 @@ def assign_semantic_verbs(
             assignment.object_type,
             task,
             allowed_object_types,
+            assignment.semantic_verb,
         )
         updated_task = task.model_copy(
             update={

@@ -7,6 +7,7 @@ from agent_runtime.capabilities import (
     ListDirectoryCapability,
     ReadQueryCapability,
     ShellCheckPortCapability,
+    WriteFileCapability,
 )
 from agent_runtime.capabilities.base import BaseCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
@@ -114,6 +115,7 @@ def _engine() -> ExecutionEngine:
 def _registry() -> CapabilityRegistry:
     registry = CapabilityRegistry()
     registry.register(ListDirectoryCapability())
+    registry.register(WriteFileCapability())
     registry.register(ReadQueryCapability())
     registry.register(ShellCheckPortCapability())
     registry.register(DeleteFileCapability())
@@ -236,6 +238,30 @@ def test_delete_requires_confirmation() -> None:
     assert decision.requires_confirmation is True
     assert decision.sanitized_dag is not None
     assert "requires-confirmation" in decision.sanitized_dag.nodes[0].safety_labels
+
+
+def test_write_file_requires_confirmation_and_normalizes_path() -> None:
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-write",
+                task_id="task-write",
+                description="save report to report.txt",
+                semantic_verb="create",
+                capability_id="filesystem.write_file",
+                operation_id="write_file",
+                arguments={"path": "./reports/report.txt", "format": "text", "content": "hello"},
+                safety_labels=[],
+            )
+        ]
+    )
+
+    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig(gateway_url="http://gateway"))
+
+    assert decision.allowed is True
+    assert decision.requires_confirmation is True
+    assert decision.sanitized_dag is not None
+    assert decision.sanitized_dag.nodes[0].arguments["path"] == "reports/report.txt"
 
 
 def test_shell_command_is_blocked_by_default() -> None:

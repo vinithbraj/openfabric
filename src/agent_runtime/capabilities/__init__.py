@@ -10,6 +10,7 @@ from agent_runtime.capabilities.filesystem import (
     ListDirectoryCapability,
     ReadFileCapability,
     SearchFilesCapability,
+    WriteFileCapability,
 )
 from agent_runtime.capabilities.markdown import MarkdownRenderCapability
 from agent_runtime.capabilities.python_data import TransformTableCapability
@@ -53,6 +54,7 @@ def build_default_registry() -> CapabilityRegistry:
     registry.register(ListDirectoryCapability())
     registry.register(ReadFileCapability())
     registry.register(SearchFilesCapability())
+    registry.register(WriteFileCapability())
     registry.register(ReadQueryCapability())
     registry.register(TransformTableCapability())
     registry.register(MarkdownRenderCapability())
@@ -99,4 +101,5 @@ __all__ = [
     "SystemMemoryStatusCapability",
     "SystemUptimeCapability",
     "TransformTableCapability",
+    "WriteFileCapability",
 ]

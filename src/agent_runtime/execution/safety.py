@@ -135,6 +135,12 @@ def _is_update_or_create(node: ActionNode, capability: BaseCapability) -> bool:
     )
 
 
+def _always_requires_confirmation(capability: BaseCapability) -> bool:
+    """Return whether one capability must always pause for explicit confirmation."""
+
+    return capability.manifest.capability_id == "filesystem.write_file"
+
+
 def _is_network_operation(capability: BaseCapability, node: ActionNode) -> bool:
     """Return whether a capability should be treated as a network operation."""
 
@@ -358,7 +364,9 @@ def evaluate_dag_safety(
                 f"Clamped preview bytes to {config.max_output_preview_bytes} on node {node.id}.",
             )
 
-        if _is_delete_operation(node, capability):
+        if _always_requires_confirmation(capability):
+            requires_confirmation = True
+        elif _is_delete_operation(node, capability):
             requires_confirmation = True
         elif _is_update_or_create(node, capability):
             allowlisted = (

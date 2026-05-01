@@ -1,6 +1,0 @@
-Legacy planner prompt retired.
-
-The runtime no longer loads this file for natural-language planning.
-All user requests go through the validator-enforced LLM action planner,
-which emits structured tool actions that are canonicalized, validated,
-executed, and rendered by deterministic runtime components.

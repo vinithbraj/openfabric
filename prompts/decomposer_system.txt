@@ -1,6 +1,0 @@
-Legacy decomposer prompt retired.
-
-The old direct/hierarchical planner and GoalDecomposer route are no longer
-part of default runtime execution. Any future recursive planning should be
-implemented inside the validator-enforced action-planner pipeline, with JSON
-action plans and deterministic validation at every boundary.
