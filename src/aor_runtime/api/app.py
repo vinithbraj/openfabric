@@ -23,10 +23,12 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -79,6 +81,58 @@ class ChatCompletionsRequest(BaseModel):
     model: str
     messages: list[ChatMessage] = Field(default_factory=list)
     stream: bool = False
+
+
+@dataclass
+class PendingConfirmation:
+    confirmation_id: str
+    trace: Any
+    prompt: str
+    workspace_root: str
+    created_at: float
+
+
+class PendingConfirmationStore:
+    """In-memory store for pause/resume confirmation handshakes."""
+
+    def __init__(self, ttl_seconds: int = 3600) -> None:
+        self.ttl_seconds = max(60, int(ttl_seconds))
+        self._items: dict[str, PendingConfirmation] = {}
+        self._lock = threading.Lock()
+
+    def _purge_expired(self) -> None:
+        now = time.time()
+        expired = [
+            key
+            for key, item in self._items.items()
+            if (now - item.created_at) > self.ttl_seconds
+        ]
+        for key in expired:
+            self._items.pop(key, None)
+
+    def create(self, *, trace: Any, prompt: str, workspace_root: str) -> PendingConfirmation:
+        with self._lock:
+            self._purge_expired()
+            confirmation_id = f"confirm-{uuid.uuid4().hex[:10]}"
+            item = PendingConfirmation(
+                confirmation_id=confirmation_id,
+                trace=trace,
+                prompt=prompt,
+                workspace_root=workspace_root,
+                created_at=time.time(),
+            )
+            self._items[confirmation_id] = item
+            return item
+
+    def get(self, confirmation_id: str) -> PendingConfirmation | None:
+        with self._lock:
+            self._purge_expired()
+            return self._items.get(confirmation_id)
+
+    def pop(self, confirmation_id: str) -> PendingConfirmation | None:
+        with self._lock:
+            self._purge_expired()
+            return self._items.pop(confirmation_id, None)
 
 
 def json_dumps(payload: Any) -> str:
@@ -164,6 +218,57 @@ def _messages_to_task(messages: list[ChatMessage]) -> str:
     return ""
 
 
+_CONFIRMATION_DIRECTIVE_RE = re.compile(
+    r"^\s*(?P<action>approve|confirm|proceed|cancel|reject)\b(?:[\s:]+`?(?P<token>confirm-[a-z0-9]+)`?)?\s*$",
+    re.IGNORECASE,
+)
+_CONFIRMATION_TOKEN_RE = re.compile(r"Confirmation ID:\s*`?(confirm-[a-z0-9]+)`?", re.IGNORECASE)
+
+
+def _parse_confirmation_directive(text: str) -> tuple[str, str | None] | None:
+    """Return a typed confirmation directive when the user message is approval-like."""
+
+    match = _CONFIRMATION_DIRECTIVE_RE.match(str(text or "").strip())
+    if not match:
+        return None
+    action = str(match.group("action") or "").strip().lower()
+    token = str(match.group("token") or "").strip().lower() or None
+    return action, token
+
+
+def _extract_confirmation_token_from_messages(messages: list[ChatMessage]) -> str | None:
+    """Extract the most recent confirmation id mentioned by the assistant."""
+
+    for message in reversed(messages):
+        if message.role != "assistant":
+            continue
+        text = _message_content_to_text(message.content)
+        match = _CONFIRMATION_TOKEN_RE.search(text)
+        if match:
+            return str(match.group(1)).strip().lower()
+    return None
+
+
+def _augment_confirmation_content(content: str, confirmation_id: str) -> str:
+    """Append generic approval instructions to a confirmation-required response."""
+
+    base = str(content or "").strip() or "## Confirmation Required"
+    return "\n\n".join(
+        [
+            base,
+            f"Confirmation ID: `{confirmation_id}`",
+            "Reply with `approve` to continue or `cancel` to stop.",
+        ]
+    )
+
+
+def _confirmation_required_from_runtime(runtime: Any) -> bool:
+    """Return whether the runtime ended in a confirmation-required pause state."""
+
+    summary = getattr(runtime, "last_failure_summary", None)
+    return isinstance(summary, dict) and summary.get("category") == "confirmation_required"
+
+
 def _chat_chunk(response_id: str, model: str, created: int, delta: dict[str, Any], finish_reason: str | None = None) -> str:
     """Build one OpenAI-compatible streaming chunk.
 
@@ -214,6 +319,7 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
     configured_settings = settings or get_settings(config_path=os.getenv(APP_CONFIG_PATH_ENV) or None)
     engine = ExecutionEngine(configured_settings)
     runtime = agent_runtime
+    pending_confirmations = PendingConfirmationStore()
     if runtime is None:
         default_gateway_node, resolved_gateway_url = _resolve_agent_gateway_settings(configured_settings)
         registry = build_default_registry()
@@ -404,6 +510,73 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
 
         created = int(time.time())
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
+        directive = _parse_confirmation_directive(task)
+        directive_token = _extract_confirmation_token_from_messages(request.messages)
+        pending = None
+        if directive is not None:
+            action, token = directive
+            confirmation_id = token or directive_token
+            if confirmation_id:
+                pending = pending_confirmations.get(confirmation_id)
+            if action in {"cancel", "reject"}:
+                if confirmation_id:
+                    pending_confirmations.pop(confirmation_id)
+                content = (
+                    "## Confirmation Cancelled\n\nI cancelled the pending confirmation-gated action."
+                    if confirmation_id
+                    else "I couldn't find a pending confirmation to cancel."
+                )
+                return {
+                    "id": response_id,
+                    "object": "chat.completion",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            if action in {"approve", "confirm", "proceed"} and confirmation_id and pending is not None and not request.stream:
+                pending_confirmations.pop(confirmation_id)
+                content = runtime.replay_from_trace(
+                    pending.trace,
+                    context={
+                        "workspace_root": pending.workspace_root,
+                        "confirmation": True,
+                        "allow_full_output_access": False,
+                    },
+                )
+                return {
+                    "id": response_id,
+                    "object": "chat.completion",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            if action in {"approve", "confirm", "proceed"} and (confirmation_id is None or pending is None) and not request.stream:
+                content = "I couldn't find a pending confirmation to approve. Please run the original request again."
+                return {
+                    "id": response_id,
+                    "object": "chat.completion",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
         if not request.stream:
             content = runtime.handle_request(
                 task,
@@ -413,6 +586,15 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
                     "allow_full_output_access": False,
                 },
             )
+            if _confirmation_required_from_runtime(runtime):
+                trace = getattr(runtime, "last_planning_trace", None)
+                if trace is not None:
+                    pending_item = pending_confirmations.create(
+                        trace=trace,
+                        prompt=task,
+                        workspace_root=str(configured_settings.workspace_root),
+                    )
+                    content = _augment_confirmation_content(content, pending_item.confirmation_id)
             return {
                 "id": response_id,
                 "object": "chat.completion",
@@ -439,19 +621,80 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
 
             def _worker() -> None:
                 try:
-                    outcome["content"] = runtime.handle_request(
-                        task,
-                        context={
-                            "workspace_root": str(configured_settings.workspace_root),
-                            "confirmation": False,
-                            "allow_full_output_access": False,
-                            "event_callback": _event_callback,
-                            "observability": {
-                                "enabled": True,
-                                "debug": False,
+                    if directive is not None:
+                        action, token = directive
+                        confirmation_id = token or directive_token
+                        pending_item = (
+                            pending_confirmations.pop(confirmation_id)
+                            if confirmation_id and action in {"approve", "confirm", "proceed"}
+                            else None
+                        )
+                        if action in {"approve", "confirm", "proceed"} and confirmation_id and pending_item is not None:
+                            outcome["content"] = runtime.replay_from_trace(
+                                pending_item.trace,
+                                context={
+                                    "workspace_root": pending_item.workspace_root,
+                                    "confirmation": True,
+                                    "allow_full_output_access": False,
+                                    "event_callback": _event_callback,
+                                    "observability": {
+                                        "enabled": True,
+                                        "debug": False,
+                                    },
+                                },
+                            )
+                        elif action in {"cancel", "reject"}:
+                            if confirmation_id:
+                                pending_confirmations.pop(confirmation_id)
+                            outcome["content"] = (
+                                "## Confirmation Cancelled\n\nI cancelled the pending confirmation-gated action."
+                                if confirmation_id
+                                else "I couldn't find a pending confirmation to cancel."
+                            )
+                        elif action in {"approve", "confirm", "proceed"}:
+                            outcome["content"] = (
+                                "I couldn't find a pending confirmation to approve. Please run the original request again."
+                            )
+                        else:
+                            outcome["content"] = runtime.handle_request(
+                                task,
+                                context={
+                                    "workspace_root": str(configured_settings.workspace_root),
+                                    "confirmation": False,
+                                    "allow_full_output_access": False,
+                                    "event_callback": _event_callback,
+                                    "observability": {
+                                        "enabled": True,
+                                        "debug": False,
+                                    },
+                                },
+                            )
+                    else:
+                        outcome["content"] = runtime.handle_request(
+                            task,
+                            context={
+                                "workspace_root": str(configured_settings.workspace_root),
+                                "confirmation": False,
+                                "allow_full_output_access": False,
+                                "event_callback": _event_callback,
+                                "observability": {
+                                    "enabled": True,
+                                    "debug": False,
+                                },
                             },
-                        },
-                    )
+                        )
+                    if directive is None and _confirmation_required_from_runtime(runtime):
+                        trace = getattr(runtime, "last_planning_trace", None)
+                        if trace is not None:
+                            pending_item = pending_confirmations.create(
+                                trace=trace,
+                                prompt=task,
+                                workspace_root=str(configured_settings.workspace_root),
+                            )
+                            outcome["content"] = _augment_confirmation_content(
+                                outcome["content"],
+                                pending_item.confirmation_id,
+                            )
                 except Exception:
                     outcome["content"] = "I hit an internal error while handling that request."
                 finally:

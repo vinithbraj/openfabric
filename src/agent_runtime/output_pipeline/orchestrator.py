@@ -214,6 +214,38 @@ def _render_error_bundle(result_bundle: ResultBundle) -> str:
     return "\n".join(lines)
 
 
+def _render_confirmation_bundle(result_bundle: ResultBundle) -> str:
+    """Render a confirmation-required bundle as a pause/resume prompt."""
+
+    lines = [
+        "## Confirmation Required",
+        "",
+        "I planned one or more confirmation-gated actions and I am waiting for your approval before executing them.",
+    ]
+    actions = result_bundle.metadata.get("confirmation_actions")
+    if isinstance(actions, list) and actions:
+        lines.extend(["", "### Pending Actions"])
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            capability_id = str(action.get("capability_id") or "unknown")
+            operation_id = str(action.get("operation_id") or "unknown")
+            description = str(action.get("description") or "").strip()
+            lines.append(f"- `{capability_id}` via `{operation_id}`")
+            if description:
+                lines.append(f"  - Details: `{description}`")
+            arguments = action.get("arguments")
+            if isinstance(arguments, dict) and arguments:
+                for key, value in arguments.items():
+                    rendered_value = value if isinstance(value, (int, float, bool)) else str(value)
+                    lines.append(f"  - {_safe_summary_text(str(key).replace('_', ' ').title())}: `{rendered_value}`")
+
+    safe_summary = _safe_summary_text(result_bundle.safe_summary)
+    if safe_summary:
+        lines.extend(["", safe_summary])
+    return "\n".join(lines)
+
+
 def _render_partial_bundle(result_bundle: ResultBundle) -> str:
     """Render a partial bundle deterministically."""
 
@@ -352,6 +384,29 @@ def compose_output(
     """Compose final user-facing output from a DAG and result bundle."""
 
     observability = _observability_from_request(user_request)
+    if bool(result_bundle.metadata.get("confirmation_required", False)):
+        if observability is not None:
+            observability.stage_started(
+                STAGE_RENDERING,
+                "Rendering started",
+                "The runtime is rendering a confirmation prompt deterministically.",
+            )
+        content = _render_confirmation_bundle(result_bundle)
+        if observability is not None:
+            observability.info(
+                STAGE_RENDERING,
+                EVENT_RENDERING_COMPLETED,
+                "Rendering completed",
+                "The runtime rendered a confirmation-required response deterministically.",
+                details={"content_length": len(content)},
+            )
+            observability.stage_completed(
+                STAGE_RENDERING,
+                "Rendering completed",
+                "Rendering finished with a confirmation-required view.",
+                details={"content_length": len(content)},
+            )
+        return content
     if result_bundle.status == "error":
         if observability is not None:
             observability.stage_started(
@@ -560,6 +615,29 @@ class OutputPipelineOrchestrator:
                 metadata={},
             )
             return self.summarizer.summarize(rendered)
+
+        if bool(bundle.metadata.get("confirmation_required", False)):
+            display_plan = self.display_selector.select(
+                DisplaySelectionInput(
+                    original_prompt="",
+                    dag_summary={},
+                    result_summary=_summarize_results(bundle),
+                    safe_previews=[],
+                    available_display_types=[
+                        "plain_text",
+                        "markdown",
+                        "table",
+                        "json",
+                        "code_block",
+                        "multi_section",
+                    ],
+                )
+            )
+            return RenderedOutput(
+                content=_render_confirmation_bundle(bundle),
+                display_plan=display_plan,
+                metadata={},
+            )
 
         safe_previews = _build_safe_previews(bundle, self.redactor)
         selection_input = DisplaySelectionInput(

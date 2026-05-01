@@ -138,6 +138,27 @@ def test_read_file_renders_as_code_block() -> None:
     assert "print('hello')" in output
 
 
+def test_write_file_prefers_absolute_path_in_rendered_message() -> None:
+    result = ExecutionResult(
+        node_id="node-1",
+        status="success",
+        data_preview={
+            "path": "report.txt",
+            "absolute_path": "/workspace/report.txt",
+            "format": "text",
+            "bytes_written": 42,
+        },
+        metadata={"capability_id": "filesystem.write_file", "operation_id": "write_file"},
+    )
+
+    normalized = normalize_execution_result(result)
+
+    assert normalized.shape_type == "text"
+    assert normalized.text == "Saved file to `/workspace/report.txt` (42 bytes, text)."
+    assert normalized.metadata["path"] == "report.txt"
+    assert normalized.metadata["absolute_path"] == "/workspace/report.txt"
+
+
 def test_process_rows_render_as_markdown_table() -> None:
     bundle = ResultBundle(
         dag_id="dag-1",

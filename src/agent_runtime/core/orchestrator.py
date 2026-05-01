@@ -7,7 +7,7 @@ from typing import Any
 from agent_runtime.capabilities import CapabilityRegistry
 from agent_runtime.core.errors import AgentRuntimeError, ValidationError
 from agent_runtime.core.logging import get_logger, log_event
-from agent_runtime.core.types import ActionDAG, ResultBundle, UserRequest
+from agent_runtime.core.types import ActionDAG, InputRef, ResultBundle, UserRequest
 from agent_runtime.execution.engine import ExecutionEngine
 from agent_runtime.execution.failure_repair import attempt_failure_repair
 from agent_runtime.execution.safety import evaluate_dag_safety
@@ -185,6 +185,78 @@ class AgentRuntime:
             },
         }
 
+    @staticmethod
+    def _safe_confirmation_argument_value(value: Any) -> Any:
+        """Return a compact, non-sensitive preview for one confirmation-gated argument."""
+
+        if isinstance(value, InputRef):
+            source = str(value.source_node_id)
+            if value.output_key:
+                return f"upstream data from {source}.{value.output_key}"
+            return f"upstream data from {source}"
+        if isinstance(value, dict):
+            if "source_node_id" in value:
+                source = str(value.get("source_node_id") or "upstream")
+                output_key = value.get("output_key")
+                return (
+                    f"upstream data from {source}.{output_key}"
+                    if output_key
+                    else f"upstream data from {source}"
+                )
+            return f"<object with {len(value)} fields>"
+        if isinstance(value, list):
+            return f"<list with {len(value)} items>"
+        if isinstance(value, str):
+            trimmed = value.strip()
+            if len(trimmed) > 120:
+                return f"<{len(trimmed)} chars>"
+            return trimmed
+        return value
+
+    @classmethod
+    def _safe_confirmation_arguments(cls, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Return one user-safe confirmation preview of action arguments."""
+
+        sensitive_keys = {
+            "content",
+            "command",
+            "query",
+            "query_intent",
+            "stdin",
+            "stdout",
+            "stderr",
+        }
+        sanitized: dict[str, Any] = {}
+        for key, value in dict(arguments or {}).items():
+            lowered = str(key).strip().lower()
+            if lowered in sensitive_keys:
+                sanitized[key] = "<omitted>"
+                continue
+            sanitized[key] = cls._safe_confirmation_argument_value(value)
+        return sanitized
+
+    @classmethod
+    def _confirmation_actions_for_dag(cls, dag: ActionDAG) -> list[dict[str, Any]]:
+        """Return safe summaries of confirmation-gated nodes in one DAG."""
+
+        actions: list[dict[str, Any]] = []
+        for node in dag.nodes:
+            labels = {label.strip().lower() for label in node.safety_labels}
+            if "requires-confirmation" not in labels:
+                continue
+            actions.append(
+                {
+                    "node_id": node.id,
+                    "task_id": node.task_id,
+                    "capability_id": node.capability_id,
+                    "operation_id": node.operation_id,
+                    "semantic_verb": node.semantic_verb,
+                    "description": node.description,
+                    "arguments": cls._safe_confirmation_arguments(node.arguments),
+                }
+            )
+        return actions
+
     def _build_user_request(self, raw_prompt: str, context: dict[str, Any]) -> UserRequest:
         """Build a typed user request with runtime-owned safety context."""
 
@@ -357,6 +429,8 @@ class AgentRuntime:
         fallback renderer.
         """
 
+        if bool(result_bundle.metadata.get("confirmation_required", False)):
+            return "confirmation_required"
         if result_bundle.status == "error":
             return "error"
         if result_bundle.status == "partial":
@@ -1129,6 +1203,7 @@ class AgentRuntime:
                         "blocked_reasons": [],
                         "warnings": list(safety_decision.warnings),
                         "confirmation_required": True,
+                        "confirmation_actions": self._confirmation_actions_for_dag(ready_dag),
                     },
                 )
                 self._record_last_failure(
@@ -1152,6 +1227,7 @@ class AgentRuntime:
             if (
                 result_bundle.status in {"error", "partial"}
                 and not bool(execution_context.get("repair_attempted", False))
+                and not bool(result_bundle.metadata.get("confirmation_required", False))
             ):
                 observability.stage_started(
                     STAGE_FAILURE_REPAIR,
@@ -1257,7 +1333,9 @@ class AgentRuntime:
                     "result_count": len(result_bundle.results),
                 },
             )
-            if result_bundle.status in {"error", "partial"}:
+            if result_bundle.status in {"error", "partial"} and not bool(
+                result_bundle.metadata.get("confirmation_required", False)
+            ):
                 first_error = next((result.error for result in result_bundle.results if result.error), None)
                 self._record_last_failure(
                     request_id=user_request.request_id,
@@ -1293,9 +1371,17 @@ class AgentRuntime:
             )
             observability.stage_completed(
                 STAGE_COMPLETED,
-                "Request partially completed" if final_request_status == "partial" else "Request completed",
                 (
-                    "The runtime rendered the supported subset of the request."
+                    "Request awaiting confirmation"
+                    if final_request_status == "confirmation_required"
+                    else "Request partially completed"
+                    if final_request_status == "partial"
+                    else "Request completed"
+                ),
+                (
+                    "The runtime is waiting for explicit confirmation before running the approved plan."
+                    if final_request_status == "confirmation_required"
+                    else "The runtime rendered the supported subset of the request."
                     if final_request_status == "partial"
                     else "The request completed and a final response was rendered."
                 ),
@@ -1345,6 +1431,30 @@ class AgentRuntime:
     def replay_from_trace(self, trace: PlanningTrace, context: dict[str, Any] | None = None) -> str:
         """Replay a validated DAG from trace without calling the LLM again."""
 
-        result_bundle = replay_from_validated_dag(trace, self.execution_engine, dict(context or {}))
-        rendered = self.output_orchestrator.render(result_bundle)
+        from agent_runtime.core.types import ActionDAG
+
+        execution_context = dict(context or {})
+        observability = build_observability_context(trace.request_id, execution_context)
+        execution_context["observability"] = observability
+        result_bundle = replay_from_validated_dag(
+            trace,
+            self.execution_engine,
+            {**execution_context, "trusted_replay": True},
+        )
+        if not bool(result_bundle.metadata.get("confirmation_required", False)) and result_bundle.status == "success":
+            self.last_failure_summary = None
+        user_request = self._build_user_request(trace.raw_prompt, execution_context).model_copy(
+            update={"request_id": trace.request_id}
+        )
+        user_request.safety_context["planning_trace"] = trace
+        user_request.safety_context["observability"] = observability
+        user_request.session_context["observability"] = observability
+        dag_payload = trace.dag_validated or trace.validated_dag
+        dag = ActionDAG.model_validate(dag_payload or {})
+        rendered = self.output_orchestrator.render(
+            result_bundle,
+            user_request=user_request,
+            dag=dag,
+            llm_client=self.llm_client,
+        )
         return rendered.content

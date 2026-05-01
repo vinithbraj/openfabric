@@ -630,7 +630,9 @@ def test_memory_prompt_and_save_report_requires_confirmation(tmp_path: Path) -> 
         {"workspace_root": str(tmp_path)},
     )
 
-    assert "confirmation" in response.lower()
+    assert "confirmation required" in response.lower()
+    assert "execution failed" not in response.lower()
+    assert "filesystem.write_file" in response
     assert not (tmp_path / "report.txt").exists()
 
 

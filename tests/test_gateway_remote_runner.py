@@ -64,6 +64,9 @@ def test_remote_runner_writes_text_json_and_markdown_files(tmp_path: Path) -> No
     )
     assert text_result["status"] == "success"
     assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "hello world"
+    assert text_result["data_preview"]["path"] == "report.txt"
+    assert text_result["data_preview"]["absolute_path"] == str((tmp_path / "report.txt").resolve())
+    assert str((tmp_path / "report.txt").resolve()) in text_result["data_preview"]["message"]
 
     json_result = run_remote_operation(
         "filesystem.write_file",

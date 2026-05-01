@@ -207,11 +207,13 @@ def normalize_execution_result(result: ExecutionResult, result_store=None) -> Re
 
     if capability_id == "filesystem.write_file" and isinstance(payload, dict):
         path = str(payload.get("path") or "").strip()
+        absolute_path = str(payload.get("absolute_path") or "").strip()
+        display_path = absolute_path or path
         file_format = str(payload.get("format") or "").strip()
         bytes_written = payload.get("bytes_written")
         message = str(payload.get("message") or "").strip()
         if not message:
-            message = f"Saved file to `{path}`"
+            message = f"Saved file to `{display_path}`"
             if bytes_written is not None:
                 message += f" ({bytes_written} bytes"
                 if file_format:
@@ -227,6 +229,8 @@ def normalize_execution_result(result: ExecutionResult, result_store=None) -> Re
             text=message,
             metadata={
                 "path": path,
+                "absolute_path": absolute_path or None,
+                "display_path": display_path or None,
                 "format": file_format or None,
                 "bytes_written": bytes_written,
                 "created": bool(payload.get("created", False)),

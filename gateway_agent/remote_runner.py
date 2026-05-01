@@ -347,10 +347,12 @@ def _write_file(arguments: dict[str, Any], workspace_root: Path) -> dict[str, An
     bytes_written = len(serialized.encode("utf-8"))
 
     action = "overwritten" if existed else "created"
+    absolute_path = str(file_path)
     return {
         "data_preview": {
-            "message": f"Saved file to `{relative_path}` ({bytes_written} bytes, {file_format}).",
+            "message": f"Saved file to `{absolute_path}` ({bytes_written} bytes, {file_format}).",
             "path": relative_path,
+            "absolute_path": absolute_path,
             "format": file_format,
             "bytes_written": bytes_written,
             "created": not existed,
@@ -358,6 +360,7 @@ def _write_file(arguments: dict[str, Any], workspace_root: Path) -> dict[str, An
         },
         "metadata": {
             "path": relative_path,
+            "absolute_path": absolute_path,
             "format": file_format,
             "bytes_written": bytes_written,
             "created": not existed,

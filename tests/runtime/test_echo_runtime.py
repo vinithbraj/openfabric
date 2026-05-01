@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from agent_runtime.core.orchestrator import AgentRuntime
@@ -17,6 +19,29 @@ class FakeAgentRuntime:
         if callable(callback):
             callback("[Prompt Classification] Started\n\nPlanning is underway.\n\n")
         return f"handled: {raw_prompt}"
+
+
+class ConfirmingRuntime:
+    """Fake runtime that pauses for confirmation and can resume from a stored trace."""
+
+    def __init__(self) -> None:
+        self.last_failure_summary: dict | None = None
+        self.last_planning_trace = None
+
+    def handle_request(self, raw_prompt: str, context: dict | None = None) -> str:
+        payload = dict(context or {})
+        if payload.get("confirmation"):
+            self.last_failure_summary = None
+            return f"approved: {raw_prompt}"
+        self.last_failure_summary = {"category": "confirmation_required"}
+        self.last_planning_trace = SimpleNamespace(raw_prompt=raw_prompt)
+        return "## Confirmation Required\n\nI am waiting for approval."
+
+    def replay_from_trace(self, trace, context: dict | None = None) -> str:
+        _ = trace
+        payload = dict(context or {})
+        assert payload.get("confirmation") is True
+        return "approved from trace"
 
 
 def _client() -> TestClient:
@@ -122,6 +147,66 @@ def test_openai_chat_completion_stream_echoes_prompt_and_done() -> None:
     assert "[Prompt Classification] Started" in body
     assert "handled: hello stream" in body
     assert "data: [DONE]" in body
+
+
+def test_openai_chat_completion_confirmation_flow_round_trips() -> None:
+    client = TestClient(create_app(Settings(openai_compat_model_name="OpenFABRIC Echo"), agent_runtime=ConfirmingRuntime()))
+
+    initial = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [{"role": "user", "content": "delete the file"}],
+        },
+    )
+
+    assert initial.status_code == 200
+    confirmation_content = initial.json()["choices"][0]["message"]["content"]
+    assert "Confirmation Required" in confirmation_content
+    assert "Confirmation ID:" in confirmation_content
+
+    approved = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [
+                {"role": "user", "content": "delete the file"},
+                {"role": "assistant", "content": confirmation_content},
+                {"role": "user", "content": "approve"},
+            ],
+        },
+    )
+
+    assert approved.status_code == 200
+    assert approved.json()["choices"][0]["message"]["content"] == "approved from trace"
+
+
+def test_openai_chat_completion_confirmation_can_be_cancelled() -> None:
+    client = TestClient(create_app(Settings(openai_compat_model_name="OpenFABRIC Echo"), agent_runtime=ConfirmingRuntime()))
+
+    initial = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [{"role": "user", "content": "delete the file"}],
+        },
+    )
+    confirmation_content = initial.json()["choices"][0]["message"]["content"]
+
+    cancelled = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [
+                {"role": "user", "content": "delete the file"},
+                {"role": "assistant", "content": confirmation_content},
+                {"role": "user", "content": "cancel"},
+            ],
+        },
+    )
+
+    assert cancelled.status_code == 200
+    assert "Confirmation Cancelled" in cancelled.json()["choices"][0]["message"]["content"]
 
 
 def test_run_endpoint_echoes_prompt() -> None:
