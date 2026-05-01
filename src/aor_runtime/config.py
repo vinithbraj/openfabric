@@ -1,16 +1,20 @@
 """OpenFABRIC Runtime Module: aor_runtime.config
 
 Purpose:
-    Define runtime Settings and environment-driven configuration defaults.
+    Define runtime Settings and environment-driven configuration defaults for
+    the reset API shell.
 
 Responsibilities:
-    Centralize workspace roots, model settings, SQL connections, artifact policy, lifecycle timeouts, and render flags.
+    Preserve existing configuration keys so deployments and config files remain
+    compatible while the active runtime only echoes prompts.
 
 Data flow / Interfaces:
-    Consumes app config/environment variables and provides typed settings to engine, tools, and API layers.
+    Consumes app config/environment variables and provides typed settings to the
+    CLI and API layers.
 
 Boundaries:
-    Configuration values must be validated before they affect filesystem, worker lifecycle, or tool execution behavior.
+    Configuration values are validated for compatibility, but no tool execution
+    is performed by the reset runtime.
 """
 
 from __future__ import annotations

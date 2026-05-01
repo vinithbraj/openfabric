@@ -1,2075 +1,271 @@
-"""OpenFABRIC Runtime Module: aor_runtime.runtime.engine
+"""Minimal echo runtime engine for the V10 reset.
 
 Purpose:
-    Orchestrate request execution from planning through final response.
+    Provide a deliberately small pass-through runtime while the next architecture
+    is designed from a clean base.
 
 Responsibilities:
-    Manage sessions, active run handles, planning, execution, validation, auto-artifacts, final presentation, and persistence.
+    Extract prompt text from supported request payloads, echo it as the final
+    answer, and keep a lightweight in-memory record of runs and events for API
+    compatibility.
 
 Data flow / Interfaces:
-    Receives user tasks from CLI/API surfaces and emits session state, events, final outputs, and OpenWebUI-compatible results.
+    Called by the FastAPI app and CLI. Inputs are plain dictionaries containing
+    fields such as ``task`` or ``prompt``. Outputs are JSON-serializable session
+    dictionaries with ``final_output.content`` equal to the extracted prompt.
 
 Boundaries:
-    Owns lifecycle cancellation and the final user-mode boundary where raw payloads must be rendered, artifacted, or rejected.
+    This module performs no planning, no LLM calls, no tool invocation, and no
+    filesystem/database/shell access beyond in-memory bookkeeping.
 """
 
 from __future__ import annotations
 
-import json
-import re
-import sys
-import uuid
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from threading import Lock
 from typing import Any
+from uuid import uuid4
 
-from aor_runtime import __version__
 from aor_runtime.config import Settings, get_settings
-from aor_runtime.core.contracts import AgentSession, ExecutionPlan, ExecutionStep, FinalOutput, RunMetrics
-from aor_runtime.core.utils import ensure_jsonable
-from aor_runtime.dsl.loader import load_runtime_spec
-from aor_runtime.dsl.models import CompiledRuntimeSpec
-from aor_runtime.llm.client import LLMClient
-from aor_runtime.runtime.compiler import GraphCompiler
-from aor_runtime.runtime.auto_artifact import AutoArtifactMaterializer
-from aor_runtime.runtime.dataflow import resolve_execution_step
-from aor_runtime.runtime.error_normalization import normalize_planner_error, normalize_runtime_failure
-from aor_runtime.runtime.executor import PlanExecutor, summarize_final_output
-from aor_runtime.runtime.failure_classifier import classify_failure, generate_prompt_suggestions
-from aor_runtime.runtime.lifecycle import ActiveRunRegistry, CancellationError, CancellationToken, ToolInvocationContext
-from aor_runtime.runtime.planner import ACTIVE_PLANNING_MODE, TaskPlanner, summarize_plan, summarize_planner_raw_output
-from aor_runtime.runtime.policies import PlanContractViolation
-from aor_runtime.runtime.prompt_suggestions import append_prompt_suggestions
-from aor_runtime.runtime.response_renderer import ResponseRenderContext, render_agent_response
-from aor_runtime.runtime.response_stats import append_response_stats
-from aor_runtime.runtime.result_shape import validate_result_shape
-from aor_runtime.runtime.semantic_obligations import maybe_apply_semantic_fallback
-from aor_runtime.runtime.sessions import SessionManager
-from aor_runtime.runtime.state import RuntimeState
-from aor_runtime.runtime.store import SQLiteRunStore
-from aor_runtime.runtime.validator import RuntimeValidator
-from aor_runtime.tools.factory import build_tool_registry
-from aor_runtime.tools.filesystem import resolve_path
-from aor_runtime.tools.gateway import resolve_execution_node
 
 
-TERMINAL_STATUSES = {"completed", "failed"}
-DANGEROUS_SHELL_PATTERN = re.compile(r"(?:^|&&|\|\||;|\|)\s*(?:sudo\s+)?(?:rm|rmdir|unlink)\b")
-FAILURE_SUMMARY_MAX_STEPS = 3
-FAILURE_SUMMARY_MAX_BYTES = 4096
-FAILURE_SUMMARY_MAX_STRING = 240
-NON_RETRYABLE_FAILURE_MESSAGES = {
-    "Unsafe query",
-    "Only SELECT and WITH queries are allowed.",
-    "Multiple SQL statements are not allowed.",
-    "Empty SQL query.",
-}
-STARTUP_BANNER = r"""
-   ____                  ______      __         _
-  / __ \____  ___  ____ / ____/___ _/ /_  _____(_)____
- / / / / __ \/ _ \/ __ `/ /_  / __ `/ __ \/ ___/ / ___/
-/ /_/ / /_/ /  __/ / / / __/ / /_/ / /_/ / /  / / /__
-\____/ .___/\___/_/ /_/_/    \__,_/_.___/_/  /_/\___/
-    /_/
-""".strip("\n")
-
-
-def render_startup_banner() -> str:
-    """Render startup banner for the surrounding runtime workflow.
-
-    Inputs:
-        Uses module or instance state; no caller-supplied data parameters are required.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
+def _utc_now() -> str:
+    """Return an ISO timestamp for run and event metadata.
 
     Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine.render_startup_banner.
+        EchoEngine event/session creation.
     """
-    return f"{STARTUP_BANNER}\nOpenFABRIC v{__version__}"
+
+    return datetime.now(UTC).isoformat()
 
 
-def _safe_execution_plan(plan_data: Any) -> ExecutionPlan | None:
-    """Handle the internal safe execution plan helper path for this module.
+def extract_prompt(input_payload: dict[str, Any] | None) -> str:
+    """Extract the user prompt from a runtime input payload.
 
     Inputs:
-        Receives plan_data for this function; type hints and validators define accepted shapes.
+        A dictionary that may contain ``task``, ``prompt``, ``query``,
+        ``message``, ``text``, or ``input``.
 
     Returns:
-        Returns the computed value described by the function name and type hints.
+        The first non-empty string value found, stripped of leading/trailing
+        whitespace. Non-string values are converted to strings only as a final
+        compatibility fallback.
 
     Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._safe_execution_plan.
+        ExecutionEngine, CLI commands, and API run/chat endpoints.
     """
-    if not isinstance(plan_data, dict) or not plan_data:
-        return None
-    try:
-        return ExecutionPlan.model_validate(plan_data)
-    except Exception:  # noqa: BLE001
-        return None
+
+    payload = dict(input_payload or {})
+    for key in ("task", "prompt", "query", "message", "text", "input"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for value in payload.values():
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(payload.get("task") or payload.get("prompt") or "").strip()
 
 
-def _strip_prompt_suggestions(content: str) -> str:
-    """Handle the internal strip prompt suggestions helper path for this module.
-
-    Inputs:
-        Receives content for this function; type hints and validators define accepted shapes.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
+@dataclass
+class EchoEventStore:
+    """Store run events in memory for the compatibility API.
 
     Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._strip_prompt_suggestions.
+        Session and run event endpoints exposed from ``aor_runtime.api.app``.
     """
-    text = str(content or "")
-    if "Suggested prompts:" not in text:
-        return text
-    return re.split(r"\n\s*Suggested prompts:\s*\n", text, maxsplit=1)[0].rstrip()
 
+    _events: list[dict[str, Any]] = field(default_factory=list)
+    _next_id: int = 1
+    _lock: Lock = field(default_factory=Lock)
 
-def summarize_failure_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Summarize failure history for the surrounding runtime workflow.
+    def append_event(self, session_id: str, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Append an event and return the stored event dictionary.
 
-    Inputs:
-        Receives history for this function; type hints and validators define accepted shapes.
+        Used by:
+            ExecutionEngine when creating or completing echo sessions.
+        """
 
-    Returns:
-        Returns the computed value described by the function name and type hints.
-
-    Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine.summarize_failure_history.
-    """
-    summary: list[dict[str, Any]] = []
-    for item in list(history or [])[-FAILURE_SUMMARY_MAX_STEPS:]:
-        payload = dict(item or {})
-        step_payload = dict(payload.get("step") or {})
-        result = payload.get("result")
-        summary.append(
-            {
-                "step_id": step_payload.get("id"),
-                "action": step_payload.get("action"),
-                "success": bool(payload.get("success")),
-                "result_type": type(result).__name__,
-                "result_keys": sorted(str(key) for key in result.keys())[:8] if isinstance(result, dict) else None,
-                "size_hint": _value_size_hint(result),
-                "error_excerpt": _truncate_string(payload.get("error")),
+        with self._lock:
+            event = {
+                "id": self._next_id,
+                "session_id": session_id,
+                "node_name": "echo",
+                "event_type": event_type,
+                "payload": dict(payload or {}),
+                "created_at": _utc_now(),
             }
-        )
-    return summary
+            self._next_id += 1
+            self._events.append(event)
+            return dict(event)
 
+    def get_events_after(self, session_id: str, after_id: int | None = None) -> list[dict[str, Any]]:
+        """Return events for a session after an optional event id.
 
-def _value_size_hint(value: Any) -> int | None:
-    """Handle the internal value size hint helper path for this module.
+        Used by:
+            API polling and streaming endpoints.
+        """
 
-    Inputs:
-        Receives value for this function; type hints and validators define accepted shapes.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
-
-    Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._value_size_hint.
-    """
-    if value is None:
-        return None
-    try:
-        return len(value)  # type: ignore[arg-type]
-    except TypeError:
-        return None
-
-
-def _truncate_string(value: Any, limit: int = FAILURE_SUMMARY_MAX_STRING) -> str | None:
-    """Handle the internal truncate string helper path for this module.
-
-    Inputs:
-        Receives value, limit for this function; type hints and validators define accepted shapes.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
-
-    Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._truncate_string.
-    """
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if len(text) <= limit:
-        return text
-    return f"{text[: max(0, limit - 13)]}...[truncated]"
-
-
-def _summarize_step_payload(step_payload: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Handle the internal summarize step payload helper path for this module.
-
-    Inputs:
-        Receives step_payload for this function; type hints and validators define accepted shapes.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
-
-    Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._summarize_step_payload.
-    """
-    if not isinstance(step_payload, dict) or not step_payload:
-        return None
-    summary: dict[str, Any] = {}
-    if "id" in step_payload:
-        summary["id"] = step_payload.get("id")
-    if "action" in step_payload:
-        summary["action"] = step_payload.get("action")
-    raw_args = step_payload.get("args")
-    if isinstance(raw_args, dict) and raw_args:
-        summarized_args: dict[str, Any] = {}
-        for key in ("database", "node", "path", "src", "dst", "command", "query"):
-            if key not in raw_args:
-                continue
-            value = raw_args.get(key)
-            if isinstance(value, str):
-                summarized_args[key] = _truncate_string(value)
-            elif isinstance(value, (int, float, bool)) or value is None:
-                summarized_args[key] = value
-            else:
-                summarized_args[key] = type(value).__name__
-        if not summarized_args:
-            summarized_args["arg_keys"] = sorted(str(key) for key in raw_args.keys() if not str(key).startswith("__"))[:8]
-        summary["args"] = summarized_args
-    return summary
-
-
-def _serialized_size(value: Any) -> int:
-    """Handle the internal serialized size helper path for this module.
-
-    Inputs:
-        Receives value for this function; type hints and validators define accepted shapes.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
-
-    Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._serialized_size.
-    """
-    return len(json.dumps(value, default=str, ensure_ascii=False, sort_keys=True))
-
-
-def _cap_failure_context_size(failure_context: dict[str, Any], *, limit: int = FAILURE_SUMMARY_MAX_BYTES) -> dict[str, Any]:
-    """Handle the internal cap failure context size helper path for this module.
-
-    Inputs:
-        Receives failure_context, limit for this function; type hints and validators define accepted shapes.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
-
-    Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._cap_failure_context_size.
-    """
-    capped = dict(failure_context)
-    if _serialized_size(capped) <= limit:
-        return capped
-
-    summary = list(capped.get("summary") or [])
-    while summary and _serialized_size(capped) > limit:
-        summary = summary[1:]
-        capped["summary"] = summary
-    if _serialized_size(capped) <= limit:
-        return capped
-
-    capped = _truncate_failure_context_strings(capped)
-    if _serialized_size(capped) <= limit:
-        return capped
-
-    if summary:
-        capped["summary"] = [{"truncated": True}]
-    if isinstance(capped.get("step"), dict):
-        step_summary = dict(capped["step"])
-        step_summary.pop("args", None)
-        step_summary["truncated"] = True
-        capped["step"] = step_summary
-    if _serialized_size(capped) <= limit:
-        return capped
-
-    return {
-        "reason": capped.get("reason"),
-        "error": _truncate_string(capped.get("error"), limit=512),
-        "failed_step": capped.get("failed_step"),
-        "summary": [{"truncated": True}],
-        "truncated": True,
-        **{key: capped[key] for key in ("error_source", "error_kind", "error_target", "error_detail") if key in capped},
-    }
-
-
-def _truncate_failure_context_strings(value: Any) -> Any:
-    """Handle the internal truncate failure context strings helper path for this module.
-
-    Inputs:
-        Receives value for this function; type hints and validators define accepted shapes.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
-
-    Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._truncate_failure_context_strings.
-    """
-    if isinstance(value, dict):
-        return {key: _truncate_failure_context_strings(nested) for key, nested in value.items()}
-    if isinstance(value, list):
-        return [_truncate_failure_context_strings(item) for item in value]
-    if isinstance(value, str):
-        return _truncate_string(value)
-    return value
-
-
-def _is_non_retryable_failure(reason: str, detail: str, extra_context: dict[str, Any]) -> bool:
-    """Handle the internal is non retryable failure helper path for this module.
-
-    Inputs:
-        Receives reason, detail, extra_context for this function; type hints and validators define accepted shapes.
-
-    Returns:
-        Returns the computed value described by the function name and type hints.
-
-    Used by:
-        Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine._is_non_retryable_failure.
-    """
-    if str(extra_context.get("violation_tier") or "").strip().lower() == "hard":
-        return True
-    normalized = str(detail or "").strip()
-    if normalized in NON_RETRYABLE_FAILURE_MESSAGES:
-        return True
-    if reason == "planner_contract_failed":
-        return True
-    return False
+        after = int(after_id or 0)
+        with self._lock:
+            return [
+                dict(event)
+                for event in self._events
+                if event["session_id"] == session_id and int(event["id"]) > after
+            ]
 
 
 class ExecutionEngine:
-    """Represent execution engine within the OpenFABRIC runtime.
-
-    Responsibilities:
-        Encapsulates state, validation, or behavior owned by ExecutionEngine.
-
-    Data flow / Interfaces:
-        Instances are created and consumed by planning, execution, validation, and presentation code paths according to type hints and validators.
+    """Run the reset runtime in echo-only mode.
 
     Used by:
-        Used by callers of aor_runtime.runtime.engine.ExecutionEngine and related tests.
+        FastAPI and CLI entrypoints that need a stable engine object.
     """
+
     def __init__(self, settings: Settings | None = None) -> None:
-        """Handle the internal initialize the object helper path for this module.
-
-        Inputs:
-            Receives settings for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Initializes the instance and returns None.
+        """Create an engine with in-memory run/session state.
 
         Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.__init__ calls and related tests.
+            ``create_app`` and CLI command handlers.
         """
-        self._emit_startup_banner()
-        self.base_settings = settings or get_settings()
-        self.settings = self.base_settings
-        self.store = SQLiteRunStore(self.settings.run_store_path)
-        self.session_manager = SessionManager(self.store)
-        self.llm = LLMClient(self.settings)
-        self.tool_registry = build_tool_registry(self.settings)
-        self.compiler = GraphCompiler()
-        self.planner = TaskPlanner(llm=self.llm, tools=self.tool_registry, settings=self.settings)
-        self.executor = PlanExecutor(self.tool_registry)
-        self.validator = RuntimeValidator(self.settings, tools=self.tool_registry)
-        self.active_runs = ActiveRunRegistry(
-            shutdown_grace_seconds=self.settings.shutdown_grace_seconds,
-            process_kill_grace_seconds=self.settings.tool_process_kill_grace_seconds,
-        )
 
-    def _emit_startup_banner(self) -> None:
-        """Handle the internal emit startup banner helper path for this module.
+        self.settings = settings or get_settings()
+        self.store = EchoEventStore()
+        self._sessions: dict[str, dict[str, Any]] = {}
+        self._lock = Lock()
 
-        Inputs:
-            Uses module or instance state; no caller-supplied data parameters are required.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
+    def validate_spec(self, spec_path: str) -> dict[str, Any]:
+        """Return a compatibility validation result for a runtime spec path.
 
         Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._emit_startup_banner calls and related tests.
+            ``POST /compile`` and CLI diagnostics.
         """
-        sys.stderr.write(f"{render_startup_banner()}\n")
-        sys.stderr.flush()
 
-    def run_spec(self, spec_path: str, input_payload: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
-        """Run spec for ExecutionEngine instances.
-
-        Inputs:
-            Receives spec_path, input_payload, dry_run for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.run_spec calls and related tests.
-        """
-        session = self.create_session(spec_path, input_payload, trigger="manual", dry_run=dry_run)
-        return self.resume_session(session["id"], trigger="manual")
-
-    def create_session(
-        self,
-        spec_path: str,
-        input_payload: dict[str, Any],
-        trigger: str = "manual",
-        dry_run: bool = False,
-        stream_shell_output: bool = False,
-    ) -> dict[str, Any]:
-        """Create session for ExecutionEngine instances.
-
-        Inputs:
-            Receives spec_path, input_payload, trigger, dry_run, stream_shell_output for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.create_session calls and related tests.
-        """
-        spec = load_runtime_spec(spec_path)
-        compiled = self.compiler.compile(spec)
-        session_id = self._new_session_id()
-        session = self.session_manager.create_session(
-            session_id=session_id,
-            spec_path=spec_path,
-            compiled=compiled,
-            input_payload=input_payload,
-            trigger=trigger,
-        )
-        session.state["dry_run"] = bool(dry_run)
-        session.state["awaiting_confirmation"] = False
-        session.state["confirmation_kind"] = None
-        session.state["confirmation_step"] = None
-        session.state["confirmation_message"] = None
-        session.state["policies_used"] = []
-        session.state["stream_shell_output"] = bool(stream_shell_output)
-        self.store.append_event(
-            session_id=session.id,
-            node_name="session",
-            event_type="session.created",
-            payload={"input": input_payload, "spec": compiled.name, "trigger": trigger},
-        )
-        self.session_manager.persist_session(session, node_name="session")
-        return session.model_dump()
-
-    def resume_session(
-        self,
-        session_id: str,
-        trigger: str = "manual",
-        max_cycles: int | None = None,
-        approve_dangerous: bool = False,
-        stream_shell_output: bool = False,
-        runtime_context: ToolInvocationContext | None = None,
-    ) -> dict[str, Any]:
-        """Resume session for ExecutionEngine instances.
-
-        Inputs:
-            Receives session_id, trigger, max_cycles, approve_dangerous, stream_shell_output, runtime_context for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.resume_session calls and related tests.
-        """
-        session = self._get_required_session(session_id)
-        if self._is_done(session.state):
-            return ensure_jsonable(session.state)
-        context = runtime_context or self.create_invocation_context()
-
-        approved_dangerous_step_id: int | None = None
-        if bool(session.state.get("awaiting_confirmation")):
-            confirmation_kind = str(session.state.get("confirmation_kind") or "")
-            if confirmation_kind == "dangerous_step":
-                if not approve_dangerous:
-                    return ensure_jsonable(session.state)
-                confirmation_step = session.state.get("confirmation_step") or {}
-                if isinstance(confirmation_step.get("id"), int):
-                    approved_dangerous_step_id = int(confirmation_step["id"])
-            self._clear_confirmation_state(session.state)
-            session.state["dry_run"] = False
-        session.current_trigger = trigger
-        session.state["trigger"] = trigger
-        session.state["stream_shell_output"] = bool(session.state.get("stream_shell_output", False) or stream_shell_output)
-        self._touch_state(session.state)
-        self.store.append_event(
-            session_id=session.id,
-            node_name="session",
-            event_type="session.triggered",
-            payload={"trigger": trigger, "status": session.status},
-        )
-        self.session_manager.persist_session(session, node_name="session")
-
-        cycles = 0
-        while not self._is_done(session.state):
-            try:
-                context.throw_if_cancelled()
-            except CancellationError as exc:
-                self._mark_session_cancelled(session, str(exc) or "Request cancelled.")
-                break
-            if max_cycles is not None and cycles >= max_cycles:
-                break
-            action = self._decide_next_action(session.state)
-            try:
-                if action == "planner":
-                    self._run_planner(session, runtime_context=context)
-                elif action == "executor":
-                    self._run_executor_step(session, approved_dangerous_step_id=approved_dangerous_step_id, runtime_context=context)
-                    approved_dangerous_step_id = None
-                elif action == "validator":
-                    self._run_validator(session)
-                else:
-                    session.state["status"] = "failed"
-                    session.state["error"] = f"Unknown next action: {action}"
-                    session.state["done"] = True
-                    break
-            except CancellationError as exc:
-                self._mark_session_cancelled(session, str(exc) or "Request cancelled.")
-                break
-            if bool(session.state.get("awaiting_confirmation")):
-                break
-            cycles += 1
-            try:
-                context.throw_if_cancelled()
-            except CancellationError as exc:
-                self._mark_session_cancelled(session, str(exc) or "Request cancelled.")
-                break
-
-        if self._is_done(session.state):
-            self._finalize_session(session)
-        else:
-            self.session_manager.persist_session(session, node_name="loop")
-        if bool(session.state.get("awaiting_confirmation")) and str(session.state.get("confirmation_kind") or "") == "dry_run":
-            return self._dry_run_preview(session.state)
-        return ensure_jsonable(session.state)
-
-    def trigger_session(
-        self,
-        session_id: str,
-        trigger: str = "manual",
-        max_cycles: int | None = None,
-        approve_dangerous: bool = False,
-        stream_shell_output: bool = False,
-    ) -> dict[str, Any]:
-        """Trigger session for ExecutionEngine instances.
-
-        Inputs:
-            Receives session_id, trigger, max_cycles, approve_dangerous, stream_shell_output for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.trigger_session calls and related tests.
-        """
-        return self.resume_session(
-            session_id,
-            trigger=trigger,
-            max_cycles=max_cycles,
-            approve_dangerous=approve_dangerous,
-            stream_shell_output=stream_shell_output,
-        )
-
-    def get_session(self, session_id: str) -> dict[str, Any] | None:
-        """Get session for ExecutionEngine instances.
-
-        Inputs:
-            Receives session_id for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.get_session calls and related tests.
-        """
-        session = self.session_manager.get_session(session_id)
-        if session is None:
-            return None
         return {
-            "session": session.model_dump(),
-            "events": self.store.get_events(session_id),
-            "latest_snapshot": self.store.get_latest_snapshot(session_id),
+            "valid": True,
+            "spec_path": str(spec_path),
+            "mode": "echo",
+            "message": "V10 reset runtime accepts requests and echoes the prompt.",
         }
+
+    def create_session(self, spec_path: str, input_payload: dict[str, Any] | None, **_: Any) -> dict[str, Any]:
+        """Create a pending echo session.
+
+        Inputs:
+            ``spec_path`` is retained for compatibility; ``input_payload`` holds
+            the prompt-like value to echo.
+
+        Returns:
+            A session dictionary that can be resumed or inspected.
+
+        Used by:
+            API session/run endpoints and streaming compatibility paths.
+        """
+
+        session_id = uuid4().hex
+        prompt = extract_prompt(input_payload)
+        session = {
+            "id": session_id,
+            "spec_path": str(spec_path),
+            "status": "pending",
+            "input": dict(input_payload or {}),
+            "prompt": prompt,
+            "created_at": _utc_now(),
+            "updated_at": _utc_now(),
+            "final_output": None,
+            "latest_snapshot": {},
+        }
+        with self._lock:
+            self._sessions[session_id] = session
+        self.store.append_event(session_id, "run.created", {"mode": "echo"})
+        return dict(session)
+
+    def resume_session(self, session_id: str, **_: Any) -> dict[str, Any]:
+        """Complete a pending session by echoing its prompt.
+
+        Used by:
+            API session trigger/resume endpoints and run helpers.
+        """
+
+        with self._lock:
+            if session_id not in self._sessions:
+                raise KeyError(f"Session not found: {session_id}")
+            session = self._sessions[session_id]
+            prompt = str(session.get("prompt") or "")
+            final_output = {"kind": "text", "content": prompt}
+            session["status"] = "completed"
+            session["updated_at"] = _utc_now()
+            session["final_output"] = final_output
+            session["latest_snapshot"] = {
+                "session_id": session_id,
+                "status": "completed",
+                "final_output": final_output,
+                "mode": "echo",
+            }
+            completed = dict(session)
+        self.store.append_event(session_id, "echo.completed", {"char_count": len(prompt)})
+        self.store.append_event(session_id, "finalize.completed", {"final_output": final_output})
+        return completed
+
+    def trigger_session(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Compatibility alias for ``resume_session``.
+
+        Used by:
+            Existing API routes that expose session triggers.
+        """
+
+        return self.resume_session(session_id, **kwargs)
+
+    def run_spec(self, spec_path: str, input_payload: dict[str, Any] | None) -> dict[str, Any]:
+        """Create and complete an echo run in one call.
+
+        Used by:
+            ``POST /runs`` and non-streaming OpenAI chat completions.
+        """
+
+        session = self.create_session(spec_path, input_payload)
+        return self.resume_session(str(session["id"]))
 
     def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
-        """List sessions for ExecutionEngine instances.
-
-        Inputs:
-            Receives limit for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
+        """List recent in-memory echo sessions.
 
         Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.list_sessions calls and related tests.
+            ``GET /sessions`` and ``GET /runs``.
         """
-        return [session.model_dump() for session in self.session_manager.list_sessions(limit=limit)]
 
-    def validate_spec(self, spec_path: str) -> CompiledRuntimeSpec:
-        """Validate spec for ExecutionEngine instances.
+        with self._lock:
+            sessions = list(self._sessions.values())[-int(limit or 50) :]
+            return [dict(session) for session in reversed(sessions)]
 
-        Inputs:
-            Receives spec_path for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """Return one session plus its events.
 
         Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.validate_spec calls and related tests.
+            Session and run inspection endpoints.
         """
-        spec = load_runtime_spec(spec_path)
-        compiled = self.compiler.compile(spec)
-        for tool_name in compiled.tools:
-            self.tool_registry.get(tool_name)
-        return compiled
 
-    # Backward-compatible run-centric accessors.
-    def get_run(self, run_id: str) -> dict[str, Any] | None:
-        """Get run for ExecutionEngine instances.
-
-        Inputs:
-            Receives run_id for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.get_run calls and related tests.
-        """
-        return self.get_session(run_id)
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            payload = dict(session)
+        payload["events"] = self.store.get_events_after(session_id)
+        return {"session": payload, "latest_snapshot": dict(payload.get("latest_snapshot") or {})}
 
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
-        """List runs for ExecutionEngine instances.
-
-        Inputs:
-            Receives limit for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
+        """Compatibility wrapper around ``list_sessions``.
 
         Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.list_runs calls and related tests.
+            ``GET /runs``.
         """
+
         return self.list_sessions(limit=limit)
 
-    def create_invocation_context(self, token: CancellationToken | None = None) -> ToolInvocationContext:
-        """Create invocation context for ExecutionEngine instances.
-
-        Inputs:
-            Receives token for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        """Compatibility wrapper around ``get_session``.
 
         Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.create_invocation_context calls and related tests.
+            ``GET /runs/{run_id}``.
         """
-        return ToolInvocationContext(
-            cancellation=token or CancellationToken(),
-            process_registry=self.active_runs,
-            worker_join_timeout_seconds=self.settings.worker_join_timeout_seconds,
-            tool_process_kill_grace_seconds=self.settings.tool_process_kill_grace_seconds,
-        )
 
-    def _run_planner(self, session: AgentSession, runtime_context: ToolInvocationContext | None = None) -> None:
-        """Handle the internal run planner helper path for this module.
-
-        Inputs:
-            Receives session, runtime_context for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._run_planner calls and related tests.
-        """
-        if runtime_context is not None:
-            runtime_context.throw_if_cancelled()
-        state = session.state
-        compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
-        self._configure_runtime_for_compiled(compiled)
-        goal = str(state.get("goal", ""))
-        planning_mode = ACTIVE_PLANNING_MODE
-        self.store.append_event(
-            session_id=session.id,
-            node_name="planner",
-            event_type="planner.started",
-            payload={
-                "retry": state.get("retries", 0),
-                "attempt": state.get("attempt", 0) + 1,
-                "planning_mode": planning_mode,
-            },
-        )
-        llm_usage_before = self._llm_usage_snapshot()
-        try:
-            plan = self.planner.build_plan(
-                goal=goal,
-                planner=compiled.planner,
-                allowed_tools=compiled.tools,
-                input_payload=dict(state.get("input", {})),
-                failure_context=state.get("failure_context"),
-            )
-            metrics = dict(state.get("metrics", {}))
-            metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + int(self.planner.last_llm_calls)
-            metrics["llm_intent_calls"] = int(metrics.get("llm_intent_calls", 0)) + int(self.planner.last_llm_intent_calls)
-            metrics["raw_planner_llm_calls"] = int(metrics.get("raw_planner_llm_calls", 0)) + int(self.planner.last_raw_planner_llm_calls)
-            self._merge_llm_token_metrics(metrics, llm_usage_before)
-            state["metrics"] = metrics
-            plan_summary = summarize_plan(plan)
-            policies_used = list(self.planner.last_policies_used)
-            high_level_plan = list(self.planner.last_high_level_plan) if self.planner.last_high_level_plan is not None else None
-            repair_trace = list(self.planner.last_plan_repairs)
-            canonicalized = bool(self.planner.last_plan_canonicalized)
-            original_execution_plan = self.planner.last_original_execution_plan if canonicalized else None
-            resolved_planning_mode = ACTIVE_PLANNING_MODE
-            planning_metadata = {
-                "planning_mode": resolved_planning_mode,
-                "capability": self.planner.last_capability_name,
-                "llm_intent_type": self.planner.last_llm_intent_type,
-                "llm_intent_confidence": self.planner.last_llm_intent_confidence,
-                "llm_intent_reason": self.planner.last_llm_intent_reason,
-                "llm_intent_calls": int(self.planner.last_llm_intent_calls),
-                "raw_planner_llm_calls": int(self.planner.last_raw_planner_llm_calls),
-            }
-            planning_metadata.update(
-                {
-                    key: value
-                    for key, value in dict(getattr(self.planner, "last_capability_metadata", {}) or {}).items()
-                    if str(key).startswith("sql_")
-                    or str(key).startswith("action_")
-                    or str(key).startswith("semantic_")
-                    or key
-                    in {
-                        "planning_mode",
-                        "raw_action_plan",
-                        "normalized_action_plan",
-                        "canonicalized_action_plan",
-                        "canonicalization_repairs",
-                        "contract_validation_errors",
-                        "domain_validation_errors",
-                    }
-                }
-            )
-            awaiting_confirmation = bool(state.get("dry_run"))
-            state.update(
-                {
-                    "current_node": "planner",
-                    "next_action": "executor",
-                    "status": "executing",
-                    "awaiting_confirmation": awaiting_confirmation,
-                    "confirmation_kind": "dry_run" if awaiting_confirmation else None,
-                    "confirmation_step": None,
-                    "confirmation_message": None,
-                    "policies_used": policies_used,
-                    "high_level_plan": high_level_plan,
-                    "step_outputs": {},
-                    "plan": plan.model_dump(),
-                    "plan_summary": plan_summary,
-                    "plan_canonicalized": canonicalized,
-                    "plan_repairs": repair_trace,
-                    "attempt_history": [],
-                    "current_step_index": 0,
-                    "attempt": int(state.get("attempt", 0)) + 1,
-                    "validation": None,
-                    "validation_checks": [],
-                    "planning_metadata": planning_metadata,
-                    "failure_context": None,
-                    "error": None,
-                }
-            )
-            self.store.append_event(
-                session_id=session.id,
-                node_name="planner",
-                event_type="planner.completed",
-                payload={
-                    **plan.model_dump(),
-                    "goal": goal,
-                    **planning_metadata,
-                    "high_level_plan": high_level_plan,
-                    "execution_plan": plan.model_dump(),
-                    "original_execution_plan": original_execution_plan,
-                    "canonicalization_changed": canonicalized,
-                    "repair_trace": repair_trace,
-                    "policies": policies_used,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            metrics = dict(state.get("metrics", {}))
-            metrics["llm_calls"] = int(metrics.get("llm_calls", 0)) + int(self.planner.last_llm_calls)
-            metrics["llm_intent_calls"] = int(metrics.get("llm_intent_calls", 0)) + int(self.planner.last_llm_intent_calls)
-            metrics["raw_planner_llm_calls"] = int(metrics.get("raw_planner_llm_calls", 0)) + int(self.planner.last_raw_planner_llm_calls)
-            self._merge_llm_token_metrics(metrics, llm_usage_before)
-            state["metrics"] = metrics
-            failed_policies = list(self.planner.last_policies_used)
-            planner_error_type = str(self.planner.last_error_type or type(exc).__name__)
-            planner_error_stage = str(self.planner.last_error_stage or "action_planner")
-            raw_output_preview = summarize_planner_raw_output(self.planner.last_raw_output)
-            normalized_error = normalize_planner_error(
-                error_type=planner_error_type,
-                detail=str(exc),
-                llm_base_url=self.settings.llm_base_url,
-            )
-            final_error = normalized_error.message if normalized_error is not None else str(exc)
-            final_output_metadata = {"goal": state.get("goal", ""), "planner_error_type": planner_error_type}
-            final_output_metadata.update(
-                {
-                    "planning_mode": ACTIVE_PLANNING_MODE,
-                    "capability": self.planner.last_capability_name,
-                    "llm_intent_type": self.planner.last_llm_intent_type,
-                    "llm_intent_confidence": self.planner.last_llm_intent_confidence,
-                    "llm_intent_reason": self.planner.last_llm_intent_reason,
-                    "llm_intent_calls": int(self.planner.last_llm_intent_calls),
-                    "raw_planner_llm_calls": int(self.planner.last_raw_planner_llm_calls),
-                }
-            )
-            if raw_output_preview is not None:
-                final_output_metadata["planner_raw_output_preview"] = raw_output_preview
-            if normalized_error is not None:
-                final_output_metadata.update(normalized_error.as_metadata())
-            if isinstance(exc, PlanContractViolation):
-                final_output_metadata.update(exc.as_metadata())
-            suggestion_content, suggestion_metadata = self._failure_output_with_suggestions(
-                goal=goal,
-                message=final_error,
-                metadata=final_output_metadata,
-                error=exc,
-                plan=_safe_execution_plan(self.planner.last_canonicalized_execution_plan),
-            )
-            state.update(
-                {
-                    "current_node": "planner",
-                    "next_action": "",
-                    "status": "failed",
-                    "done": True,
-                    "awaiting_confirmation": False,
-                    "confirmation_kind": None,
-                    "confirmation_step": None,
-                    "confirmation_message": None,
-                    "policies_used": [],
-                    "high_level_plan": None,
-                    "step_outputs": {},
-                    "plan_summary": None,
-                    "plan_canonicalized": False,
-                    "plan_repairs": [],
-                    "error": final_error,
-                    "final_output": {"content": suggestion_content, "artifacts": [], "metadata": suggestion_metadata},
-                }
-            )
-            failure_payload = {
-                "error": final_error,
-                "error_type": planner_error_type,
-                "stage": planner_error_stage,
-                "planning_mode": ACTIVE_PLANNING_MODE,
-                "capability": self.planner.last_capability_name,
-                "llm_intent_type": self.planner.last_llm_intent_type,
-                "llm_intent_confidence": self.planner.last_llm_intent_confidence,
-                "llm_intent_reason": self.planner.last_llm_intent_reason,
-                "llm_intent_calls": int(self.planner.last_llm_intent_calls),
-                "raw_planner_llm_calls": int(self.planner.last_raw_planner_llm_calls),
-                "policies": failed_policies,
-            }
-            if raw_output_preview is not None:
-                failure_payload["raw_output_preview"] = raw_output_preview
-            if self.planner.last_original_execution_plan is not None:
-                failure_payload["original_execution_plan"] = self.planner.last_original_execution_plan
-            if self.planner.last_canonicalized_execution_plan is not None:
-                failure_payload["execution_plan"] = self.planner.last_canonicalized_execution_plan
-            if self.planner.last_plan_repairs:
-                failure_payload["repair_trace"] = list(self.planner.last_plan_repairs)
-                failure_payload["canonicalization_changed"] = bool(self.planner.last_plan_canonicalized)
-            if normalized_error is not None:
-                failure_payload.update(normalized_error.as_metadata())
-            if isinstance(exc, PlanContractViolation):
-                failure_payload.update(exc.as_metadata())
-            self.store.append_event(
-                session_id=session.id,
-                node_name="planner",
-                event_type="planner.failed",
-                payload=failure_payload,
-            )
-            retries = int(state.get("retries", 0))
-            retryable = not _is_non_retryable_failure(
-                "planner_failed",
-                final_error,
-                {
-                    "error_kind": final_output_metadata.get("error_kind") or planner_error_type,
-                    "planner_error_type": planner_error_type,
-                },
-            )
-            should_retry = (
-                retryable
-                and str(self.planner.last_capability_name or "") == "action_planner"
-                and retries < min(compiled.runtime.max_retries, self.settings.max_plan_retries)
-            )
-            if should_retry:
-                previous_failure_context = dict(state.get("failure_context") or {})
-                failure_context = _cap_failure_context_size(
-                    {
-                        "reason": "planner_failed",
-                        "error": final_error,
-                        "planner_error_type": planner_error_type,
-                        "planner_error_stage": planner_error_stage,
-                        "raw_output_preview": raw_output_preview,
-                        "validation_errors": list(getattr(self.planner, "last_validation_errors", []) or [])[:8],
-                        "contract_validation_errors": list(
-                            getattr(self.planner, "last_contract_validation_errors", []) or []
-                        )[:8],
-                        "domain_validation_errors": list(getattr(self.planner, "last_domain_validation_errors", []) or [])[:8],
-                        **{
-                            key: previous_failure_context[key]
-                            for key in ("shape_error", "expected_shape", "actual_shape", "failed_sql")
-                            if key in previous_failure_context
-                        },
-                        "retryable": True,
-                    }
-                )
-                state.update(
-                    {
-                        "current_node": "planner",
-                        "next_action": "planner",
-                        "status": "retrying",
-                        "done": False,
-                        "retries": retries + 1,
-                        "failure_context": failure_context,
-                        "error": final_error,
-                        "awaiting_confirmation": False,
-                        "confirmation_kind": None,
-                        "confirmation_step": None,
-                        "confirmation_message": None,
-                        "policies_used": [],
-                        "high_level_plan": None,
-                        "step_outputs": {},
-                        "plan": {},
-                        "plan_summary": None,
-                        "plan_canonicalized": False,
-                        "plan_repairs": [],
-                        "attempt_history": [],
-                        "current_step_index": 0,
-                    }
-                )
-                self._persist(session, node_name="planner")
-                return
-        self._persist(session, node_name="planner")
-
-    def _run_executor_step(
-        self,
-        session: AgentSession,
-        approved_dangerous_step_id: int | None = None,
-        runtime_context: ToolInvocationContext | None = None,
-    ) -> None:
-        """Handle the internal run executor step helper path for this module.
-
-        Inputs:
-            Receives session, approved_dangerous_step_id, runtime_context for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._run_executor_step calls and related tests.
-        """
-        if runtime_context is not None:
-            runtime_context.throw_if_cancelled()
-        state = session.state
-        compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
-        self._configure_runtime_for_compiled(compiled)
-        plan = ExecutionPlan.model_validate(state.get("plan", {}))
-        step_index = int(state.get("current_step_index", 0))
-        if step_index >= len(plan.steps):
-            state.update({"current_node": "executor", "next_action": "validator", "status": "validating"})
-            self._persist(session, node_name="executor")
-            return
-
-        step = plan.steps[step_index]
-        try:
-            resolved_step = resolve_execution_step(step, dict(state.get("step_outputs", {})))
-        except Exception as exc:  # noqa: BLE001
-            self._handle_retry_or_failure(
-                session,
-                node_name="executor",
-                reason="tool_execution_failed",
-                detail=str(exc),
-                extra_context={
-                    "step": step.model_dump(),
-                    "history": list(state.get("attempt_history", [])),
-                },
-            )
-            return
-
-        dangerous_message = self._dangerous_step_message(resolved_step)
-        if dangerous_message is not None and approved_dangerous_step_id != step.id:
-            state.update(
-                {
-                    "current_node": "executor",
-                    "next_action": "executor",
-                    "status": "executing",
-                    "awaiting_confirmation": True,
-                    "confirmation_kind": "dangerous_step",
-                    "confirmation_step": resolved_step.model_dump(),
-                    "confirmation_message": dangerous_message,
-                    "error": None,
-                }
-            )
-            self.store.append_event(
-                session_id=session.id,
-                node_name="executor",
-                event_type="executor.step.awaiting_confirmation",
-                payload={"step": resolved_step.model_dump(), "step_index": step_index, "message": dangerous_message},
-            )
-            self._persist(session, node_name="executor")
-            return
-
-        self._clear_confirmation_state(state)
-        step_preview = self.executor.describe_step(resolved_step)
-        self.store.append_event(
-            session_id=session.id,
-            node_name="executor",
-            event_type="executor.step.started",
-            payload={"step": resolved_step.model_dump(), "step_index": step_index, **step_preview},
-        )
-        stream_shell_output = bool(state.get("stream_shell_output", False))
-
-        def emit_step_output(payload: dict[str, Any]) -> None:
-            """Emit step output for the surrounding runtime workflow.
-
-            Inputs:
-                Receives payload for this function; type hints and validators define accepted shapes.
-
-            Returns:
-                Returns None; side effects are limited to the local runtime operation described above.
-
-            Used by:
-                Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.engine.emit_step_output.
-            """
-            self.store.append_event(
-                session_id=session.id,
-                node_name="executor",
-                event_type="executor.step.output",
-                payload={
-                    "step_id": int(payload.get("step_id") or resolved_step.id),
-                    "step_index": step_index,
-                    "action": str(payload.get("action") or resolved_step.action),
-                    "channel": str(payload.get("channel") or ""),
-                    "text": str(payload.get("text") or ""),
-                    "node": str(payload.get("node") or resolved_step.args.get("node") or resolved_step.args.get("gateway_node") or ""),
-                    "command": str(payload.get("command") or resolved_step.args.get("command", "")),
-                },
-            )
-
-        log = self.executor.execute_step(
-            resolved_step,
-            event_sink=emit_step_output if stream_shell_output else None,
-            context=runtime_context,
-        )
-        if runtime_context is not None and runtime_context.cancellation is not None and runtime_context.cancellation.cancelled:
-            self._mark_session_cancelled(session, runtime_context.cancellation.reason)
-            return
-        fallback_result = maybe_apply_semantic_fallback(self.settings, goal=str(state.get("goal", "")), log=log)
-        if fallback_result.applied:
-            log = fallback_result.log
-            self.store.append_event(
-                session_id=session.id,
-                node_name="executor",
-                event_type="executor.step.semantic_fallback",
-                payload={
-                    "step_id": resolved_step.id,
-                    "step_index": step_index,
-                    **dict(fallback_result.metadata or {}),
-                },
-            )
-        log_payload = log.model_dump()
-
-        history = list(state.get("history", []))
-        attempt_history = list(state.get("attempt_history", []))
-        step_outputs = dict(state.get("step_outputs", {}))
-        history.append(log_payload)
-        attempt_history.append(log_payload)
-        state["history"] = history
-        state["attempt_history"] = attempt_history
-        if log.success and log.step.output:
-            step_outputs[log.step.output] = log.result
-        state["step_outputs"] = step_outputs
-
-        metrics = dict(state.get("metrics", {}))
-        metrics["steps_executed"] = int(metrics.get("steps_executed", 0)) + 1
-        state["metrics"] = metrics
-
-        self.store.append_event(
-            session_id=session.id,
-            node_name="executor",
-            event_type="executor.step.completed",
-            payload=log_payload,
-        )
-
-        if not log.success:
-            self._handle_retry_or_failure(
-                session,
-                node_name="executor",
-                reason="tool_execution_failed",
-                detail=log.error or "step failed",
-                extra_context={
-                    "step": step.model_dump(),
-                    "history": attempt_history,
-                },
-            )
-            return
-
-        next_index = step_index + 1
-        if next_index >= len(plan.steps):
-            attempt_models = [self._step_log_from_dict(item) for item in attempt_history]
-            final_output = summarize_final_output(
-                str(state.get("goal", "")),
-                attempt_models,
-                settings=self.settings,
-                metadata=dict(state.get("planning_metadata") or {}),
-            )
-            state.update(
-                {
-                    "current_node": "executor",
-                    "next_action": "validator",
-                    "status": "validating",
-                    "current_step_index": next_index,
-                    "final_output": final_output,
-                    "error": None,
-                }
-            )
-        else:
-            state.update(
-                {
-                    "current_node": "executor",
-                    "next_action": "executor",
-                    "status": "executing",
-                    "current_step_index": next_index,
-                    "error": None,
-                }
-            )
-        self._persist(session, node_name="executor")
-
-    def _run_validator(self, session: AgentSession) -> None:
-        """Handle the internal run validator helper path for this module.
-
-        Inputs:
-            Receives session for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._run_validator calls and related tests.
-        """
-        state = session.state
-        compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
-        self._configure_runtime_for_compiled(compiled)
-        attempt_history = [self._step_log_from_dict(item) for item in state.get("attempt_history", [])]
-        self.store.append_event(
-            session_id=session.id,
-            node_name="validator",
-            event_type="validator.started",
-            payload={"attempt_history_length": len(attempt_history), "goal": str(state.get("goal", ""))},
-        )
-        validation, checks = self.validator.validate(attempt_history, goal=str(state.get("goal", "")))
-        payload = validation.model_dump()
-        self.store.append_event(
-            session_id=session.id,
-            node_name="validator",
-            event_type="validator.completed",
-            payload={"result": payload, "checks": checks},
-        )
-
-        if validation.success:
-            final_output = self._apply_final_presentation_boundary(
-                goal=str(state.get("goal", "")),
-                history=attempt_history,
-                final_output=state.get("final_output"),
-                metadata=dict(state.get("planning_metadata") or {}),
-            )
-            state["final_output"] = final_output
-            shape_validation = validate_result_shape(
-                str(state.get("goal", "")),
-                attempt_history,
-                final_content=str(final_output.get("content") or ""),
-                allow_raw_json=self.settings.response_render_mode == "raw",
-            )
-            self.store.append_event(
-                session_id=session.id,
-                node_name="validator",
-                event_type="validator.result_shape",
-                payload={
-                    "success": shape_validation.success,
-                    "reason": shape_validation.reason,
-                    **dict(shape_validation.metadata or {}),
-                },
-            )
-            if not shape_validation.success:
-                self._handle_retry_or_failure(
-                    session,
-                    node_name="validator",
-                    reason="result_shape_failed",
-                    detail=shape_validation.reason or "Result shape did not satisfy the request.",
-                    extra_context={
-                        "shape_error": shape_validation.reason,
-                        **dict(shape_validation.metadata or {}),
-                        "plan": state.get("plan", {}),
-                        "history": state.get("attempt_history", []),
-                    },
-                )
-                return
-            artifact_result = AutoArtifactMaterializer(self.settings).maybe_materialize(
-                goal=str(state.get("goal", "")),
-                history=attempt_history,
-                final_output=final_output,
-            )
-            if artifact_result.applied:
-                final_output = artifact_result.final_output
-                self.store.append_event(
-                    session_id=session.id,
-                    node_name="validator",
-                    event_type="validator.auto_artifact",
-                    payload={"applied": True, **dict(artifact_result.metadata or {})},
-                )
-            else:
-                self.store.append_event(
-                    session_id=session.id,
-                    node_name="validator",
-                    event_type="validator.auto_artifact",
-                    payload={"applied": False, "reason": artifact_result.reason, **dict(artifact_result.metadata or {})},
-                )
-            state.update(
-                {
-                    "current_node": "validator",
-                    "next_action": "",
-                    "status": "completed",
-                    "done": True,
-                    "validation": payload,
-                    "validation_checks": checks,
-                    "error": None,
-                    "final_output": final_output,
-                }
-            )
-            self._persist(session, node_name="validator")
-            return
-
-        self._handle_retry_or_failure(
-            session,
-            node_name="validator",
-            reason="validation_failed",
-            detail=validation.reason or "validation failed",
-            extra_context={
-                "validation": payload,
-                "validation_checks": checks,
-                "plan": state.get("plan", {}),
-                "history": state.get("attempt_history", []),
-            },
-        )
-
-    def _apply_final_presentation_boundary(
-        self,
-        *,
-        goal: str,
-        history: list[Any],
-        final_output: dict[str, Any] | None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Handle the internal apply final presentation boundary helper path for this module.
-
-        Inputs:
-            Receives goal, history, final_output, metadata for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._apply_final_presentation_boundary calls and related tests.
-        """
-        output = dict(final_output or FinalOutput(metadata={"goal": goal}).model_dump())
-        if self.settings.response_render_mode == "raw":
-            return output
-        rendered = summarize_final_output(
-            goal,
-            history,
-            settings=self.settings,
-            metadata={**dict(metadata or {}), **dict(output.get("metadata") or {})},
-        )
-        if str(rendered.get("content") or "").strip():
-            merged_metadata = {
-                **dict(output.get("metadata") or {}),
-                **dict(rendered.get("metadata") or {}),
-                "goal": dict(output.get("metadata") or {}).get("goal") or goal,
-            }
-            return {
-                "content": str(rendered.get("content") or "").strip(),
-                "artifacts": list(
-                    dict.fromkeys(
-                        [
-                            *list(output.get("artifacts") or []),
-                            *list(rendered.get("artifacts") or []),
-                        ]
-                    )
-                ),
-                "metadata": merged_metadata,
-            }
-        return output
-
-    def _handle_retry_or_failure(
-        self,
-        session: AgentSession,
-        *,
-        node_name: str,
-        reason: str,
-        detail: str,
-        extra_context: dict[str, Any],
-    ) -> None:
-        """Handle the internal handle retry or failure helper path for this module.
-
-        Inputs:
-            Receives session, node_name, reason, detail, extra_context for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._handle_retry_or_failure calls and related tests.
-        """
-        state = session.state
-        compiled = CompiledRuntimeSpec.model_validate(session.compiled_spec)
-        self._configure_runtime_for_compiled(compiled)
-        retries = int(state.get("retries", 0))
-        retryable = not _is_non_retryable_failure(reason, detail, extra_context)
-        should_retry = retryable and retries < min(compiled.runtime.max_retries, self.settings.max_plan_retries)
-        step_payload = extra_context.get("step")
-        normalized_error = normalize_runtime_failure(
-            reason=reason,
-            detail=detail,
-            step=step_payload if isinstance(step_payload, dict) else None,
-            settings=self.settings,
-        )
-        final_detail = normalized_error.message if normalized_error is not None else detail
-        history_payload = extra_context.get("history")
-        validation_payload = extra_context.get("validation")
-        validation_checks = extra_context.get("validation_checks")
-        failure_context: dict[str, Any] = {
-            "reason": reason,
-            "error": final_detail,
-            "failed_step": str(step_payload.get("action") or "") if isinstance(step_payload, dict) else None,
-            "step": _summarize_step_payload(step_payload if isinstance(step_payload, dict) else None),
-            "summary": summarize_failure_history(history_payload if isinstance(history_payload, list) else []),
-        }
-        if isinstance(validation_payload, dict):
-            failure_context["validation"] = {
-                "success": validation_payload.get("success"),
-                "reason": _truncate_string(validation_payload.get("reason")),
-            }
-        if isinstance(validation_checks, list):
-            failure_context["validation_checks"] = [
-                _truncate_string(item, limit=120) or ""
-                for item in validation_checks[:5]
-                if _truncate_string(item, limit=120)
-            ]
-        for key in ("shape_error", "expected_shape", "actual_shape", "failed_sql"):
-            if key not in extra_context:
-                continue
-            if key == "failed_sql":
-                failure_context[key] = _truncate_string(extra_context[key], limit=4000)
-            else:
-                failure_context[key] = _truncate_failure_context_strings(extra_context[key])
-        if normalized_error is not None:
-            failure_context.update(normalized_error.as_metadata())
-        failure_context["retryable"] = retryable
-        if "contract_violation" in extra_context:
-            failure_context["contract_violation"] = bool(extra_context.get("contract_violation"))
-        if extra_context.get("violation_tier"):
-            failure_context["violation_tier"] = extra_context.get("violation_tier")
-        if extra_context.get("violation_code"):
-            failure_context["violation_code"] = extra_context.get("violation_code")
-        failure_context = _cap_failure_context_size(failure_context)
-
-        self.store.append_event(
-            session_id=session.id,
-            node_name=node_name,
-            event_type=f"{node_name}.failed",
-            payload=failure_context,
-        )
-
-        if should_retry:
-            state.update(
-                {
-                    "current_node": node_name,
-                    "next_action": "planner",
-                    "status": "retrying",
-                    "retries": retries + 1,
-                    "failure_context": failure_context,
-                    "error": final_detail,
-                    "awaiting_confirmation": False,
-                    "confirmation_kind": None,
-                    "confirmation_step": None,
-                    "confirmation_message": None,
-                    "policies_used": [],
-                    "high_level_plan": None,
-                    "step_outputs": {},
-                    "plan": {},
-                    "plan_summary": None,
-                    "plan_canonicalized": False,
-                    "plan_repairs": [],
-                    "attempt_history": [],
-                    "current_step_index": 0,
-                }
-            )
-        else:
-            state.update(
-                {
-                    "current_node": node_name,
-                    "next_action": "",
-                    "status": "failed",
-                    "done": True,
-                    "failure_context": failure_context,
-                    "error": final_detail,
-                    "awaiting_confirmation": False,
-                    "confirmation_kind": None,
-                    "confirmation_step": None,
-                    "confirmation_message": None,
-                    "policies_used": [],
-                    "high_level_plan": None,
-                    "step_outputs": {},
-                    "plan_summary": None,
-                    "plan_canonicalized": False,
-                    "plan_repairs": [],
-                    "final_output": {
-                        "content": "",
-                        "artifacts": list((state.get("final_output") or {}).get("artifacts", [])),
-                        "metadata": {
-                            "goal": state.get("goal", ""),
-                            "failure_reason": reason,
-                            "retryable": retryable,
-                            **(normalized_error.as_metadata() if normalized_error is not None else {}),
-                        },
-                    },
-                }
-            )
-            final_output = dict(state.get("final_output") or {})
-            plan = _safe_execution_plan(state.get("plan", {}))
-            suggestion_content, suggestion_metadata = self._failure_output_with_suggestions(
-                goal=str(state.get("goal", "")),
-                message=final_detail,
-                metadata={
-                    **dict(final_output.get("metadata") or {}),
-                    **({"reason": reason} if reason else {}),
-                },
-                error=RuntimeError(final_detail),
-                plan=plan,
-            )
-            final_output["content"] = suggestion_content
-            final_output["metadata"] = suggestion_metadata
-            state["final_output"] = final_output
-        self._persist(session, node_name=node_name)
-
-    def _finalize_session(self, session: AgentSession) -> None:
-        """Handle the internal finalize session helper path for this module.
-
-        Inputs:
-            Receives session for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._finalize_session calls and related tests.
-        """
-        state = session.state
-        metrics = RunMetrics.model_validate(state.get("metrics", {})).model_dump()
-        metrics["retries"] = int(state.get("retries", 0))
-        state["metrics"] = metrics
-        status = str(state.get("status", "failed"))
-        if status not in TERMINAL_STATUSES:
-            status = "failed"
-            state["status"] = status
-            state["done"] = True
-
-        final_output = state.get("final_output") or {"content": "", "artifacts": [], "metadata": {}}
-        if status == "failed" and not str(final_output.get("content", "")).strip():
-            final_output = {
-                "content": str(state.get("error") or "Task failed."),
-                "artifacts": list(final_output.get("artifacts", [])),
-                "metadata": dict(final_output.get("metadata", {})),
-            }
-        final_output = self._decorate_final_output(state, final_output, status=status, metrics=metrics)
-        self.store.append_event(
-            session_id=session.id,
-            node_name="finalize",
-            event_type="finalize.started",
-            payload={"status": status},
-        )
-        state.update(
-            {
-                "current_node": "finalize",
-                "next_action": "",
-                "status": status,
-                "done": True,
-                "awaiting_confirmation": False,
-                "confirmation_kind": None,
-                "confirmation_step": None,
-                "confirmation_message": None,
-                "final_output": final_output,
-            }
-        )
-        self.store.append_event(
-            session_id=session.id,
-            node_name="finalize",
-            event_type="finalize.completed",
-            payload={"status": status, "final_output": final_output, "metrics": metrics},
-        )
-        self._persist(session, node_name="finalize")
-
-    def _mark_session_cancelled(self, session: AgentSession, reason: str = "Request cancelled.") -> None:
-        """Handle the internal mark session cancelled helper path for this module.
-
-        Inputs:
-            Receives session, reason for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._mark_session_cancelled calls and related tests.
-        """
-        message = str(reason or "Request cancelled.").strip() or "Request cancelled."
-        if message == "cancelled":
-            message = "Request cancelled."
-        session.state.update(
-            {
-                "current_node": "runtime",
-                "next_action": "",
-                "status": "failed",
-                "done": True,
-                "error": message,
-                "awaiting_confirmation": False,
-                "confirmation_kind": None,
-                "confirmation_step": None,
-                "confirmation_message": None,
-                "final_output": {
-                    "content": "Request cancelled.",
-                    "artifacts": list((session.state.get("final_output") or {}).get("artifacts", [])),
-                    "metadata": {"failure_type": "cancelled", "reason": message},
-                },
-            }
-        )
-        self.store.append_event(
-            session_id=session.id,
-            node_name="runtime",
-            event_type="runtime.cancelled",
-            payload={"reason": message},
-        )
-        self._persist(session, node_name="runtime")
-
-    def _decorate_final_output(
-        self,
-        state: RuntimeState,
-        final_output: dict[str, Any],
-        *,
-        status: str,
-        metrics: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Handle the internal decorate final output helper path for this module.
-
-        Inputs:
-            Receives state, final_output, status, metrics for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._decorate_final_output calls and related tests.
-        """
-        metadata = dict(final_output.get("metadata") or {})
-        content = str(final_output.get("content") or "")
-        goal = str(state.get("goal", ""))
-        planning_metadata = {
-            key: value
-            for key, value in dict(state.get("planning_metadata") or {}).items()
-            if value is not None
-        }
-        metadata.update(planning_metadata)
-        content = self._sanitize_user_final_content(content, state=state, metadata={**metadata, **planning_metadata})
-        if not self.settings.show_prompt_suggestions:
-            content = _strip_prompt_suggestions(content)
-
-        if status == "failed" and "failure_type" not in metadata:
-            failure_context = dict(state.get("failure_context") or {})
-            failure_message = str(state.get("error") or content or "Task failed.")
-            plan = _safe_execution_plan(state.get("plan", {}))
-            suggestion_content, suggestion_metadata = self._failure_output_with_suggestions(
-                goal=goal,
-                message=failure_message,
-                metadata={**metadata, **failure_context},
-                error=RuntimeError(failure_message),
-                plan=plan,
-            )
-            suggestion_content = append_response_stats(
-                suggestion_content,
-                state=state,
-                metrics=metrics,
-                status=status,
-                enabled=self.settings.show_response_stats and self.settings.response_render_mode != "raw",
-            )
-            return {
-                "content": suggestion_content,
-                "artifacts": list(final_output.get("artifacts", [])),
-                "metadata": suggestion_metadata,
-            }
-
-        if (
-            self.settings.show_prompt_suggestions
-            and status == "completed"
-            and int(metrics.get("llm_calls", 0)) > 0
-            and "prompt_suggestions" not in metadata
-        ):
-            metadata.update(planning_metadata)
-            suggestion_result = generate_prompt_suggestions(
-                goal,
-                classify_failure(
-                    goal,
-                    metadata={**metadata, "status": status, "llm_calls": int(metrics.get("llm_calls", 0))},
-                ),
-                context=self._prompt_suggestion_context(state, metadata),
-            )
-            metadata.update(suggestion_result.metadata_payload())
-            content = append_response_stats(
-                content,
-                state=state,
-                metrics=metrics,
-                status=status,
-                enabled=self.settings.show_response_stats and self.settings.response_render_mode != "raw",
-            )
-            return {
-                "content": content,
-                "artifacts": list(final_output.get("artifacts", [])),
-                "metadata": metadata,
-            }
-
-        content = append_response_stats(
-            content,
-            state=state,
-            metrics=metrics,
-            status=status,
-            enabled=self.settings.show_response_stats and self.settings.response_render_mode != "raw",
-        )
-        return {
-            "content": content,
-            "artifacts": list(final_output.get("artifacts", [])),
-            "metadata": metadata,
-        }
-
-    def _sanitize_user_final_content(self, content: str, *, state: RuntimeState, metadata: dict[str, Any]) -> str:
-        """Handle the internal sanitize user final content helper path for this module.
-
-        Inputs:
-            Receives content, state, metadata for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._sanitize_user_final_content calls and related tests.
-        """
-        if self.settings.response_render_mode == "raw":
-            return content
-        text = str(content or "").strip()
-        if not text or text[0] not in "{[":
-            return content
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return content
-        rendered = render_agent_response(
-            parsed,
-            execution_events=list(state.get("history") or []),
-            plan=_safe_execution_plan(state.get("plan", {})),
-            metadata={**metadata, "goal": state.get("goal", "")},
-            context=ResponseRenderContext(
-                mode=self.settings.response_render_mode,
-                show_executed_commands=self.settings.show_executed_commands,
-                show_validation=self.settings.show_validation_events,
-                show_planning_steps=self.settings.show_planner_events,
-                show_tool_events=self.settings.show_tool_events,
-                show_debug_metadata=self.settings.show_debug_metadata or self.settings.include_internal_telemetry,
-                enable_llm_summary=self.settings.enable_presentation_llm_summary,
-                enable_insight_layer=self.settings.enable_insight_layer,
-                enable_llm_insights=self.settings.enable_llm_insights,
-                insight_max_facts=self.settings.insight_max_facts,
-                insight_max_input_chars=self.settings.insight_max_input_chars,
-                insight_max_output_chars=self.settings.insight_max_output_chars,
-                max_rows=max(1, int(self.settings.auto_artifact_row_threshold or 50)),
-                max_command_length=self.settings.presentation_llm_max_input_chars,
-                output_mode="text",
-                goal=str(state.get("goal", "")),
-                llm_settings=self.settings,
-                intelligent_output_mode=self.settings.intelligent_output_mode,
-                intelligent_output_max_fields=self.settings.intelligent_output_max_fields,
-            ),
-        )
-        return rendered.markdown.strip() or content
-
-    def _failure_output_with_suggestions(
-        self,
-        *,
-        goal: str,
-        message: str,
-        metadata: dict[str, Any],
-        error: Exception | None = None,
-        plan: ExecutionPlan | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        """Handle the internal failure output with suggestions helper path for this module.
-
-        Inputs:
-            Receives goal, message, metadata, error, plan for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._failure_output_with_suggestions calls and related tests.
-        """
-        suggestion_result = generate_prompt_suggestions(
-            goal,
-            classify_failure(goal, error=error, plan=plan, metadata=metadata),
-            context=self._prompt_suggestion_context(None, metadata),
-        )
-        enriched_metadata = dict(metadata)
-        enriched_metadata.update(suggestion_result.metadata_payload())
-        if not self.settings.show_prompt_suggestions:
-            enriched_metadata["suggestions_hidden"] = True
-            return _strip_prompt_suggestions(message), enriched_metadata
-        return append_prompt_suggestions(message, suggestion_result), enriched_metadata
-
-    def _prompt_suggestion_context(self, state: RuntimeState | None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Handle the internal prompt suggestion context helper path for this module.
-
-        Inputs:
-            Receives state, metadata for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._prompt_suggestion_context calls and related tests.
-        """
-        context: dict[str, Any] = {
-            "workspace_root": str(self.settings.workspace_root),
-            "outputs_dir": str(self.settings.workspace_root / "outputs"),
-        }
-        if state is not None and state.get("goal"):
-            context["goal"] = str(state.get("goal"))
-        if metadata:
-            context.update(dict(metadata))
-        return context
-
-    def _persist(self, session: AgentSession, *, node_name: str) -> None:
-        """Handle the internal persist helper path for this module.
-
-        Inputs:
-            Receives session, node_name for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._persist calls and related tests.
-        """
-        self._touch_state(session.state)
-        session.status = str(session.state.get("status", session.status))
-        session.current_trigger = str(session.state.get("trigger", session.current_trigger))
-        session.history = list(session.state.get("history", session.history))
-        self.session_manager.persist_session(session, node_name=node_name)
-
-    def _settings_for_compiled(self, compiled: CompiledRuntimeSpec) -> Settings:
-        """Handle the internal settings for compiled helper path for this module.
-
-        Inputs:
-            Receives compiled for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._settings_for_compiled calls and related tests.
-        """
-        payload = self.base_settings.model_dump()
-        endpoints = {endpoint.name: endpoint.url for endpoint in compiled.nodes.endpoints}
-        if endpoints:
-            payload["available_nodes_raw"] = ",".join(endpoints)
-            payload["gateway_endpoints"] = endpoints
-            payload["gateway_url"] = None
-            payload["default_node"] = compiled.nodes.default
-        return Settings.model_validate(payload)
-
-    def _configure_runtime_for_compiled(self, compiled: CompiledRuntimeSpec) -> None:
-        """Handle the internal configure runtime for compiled helper path for this module.
-
-        Inputs:
-            Receives compiled for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._configure_runtime_for_compiled calls and related tests.
-        """
-        effective_settings = self._settings_for_compiled(compiled)
-        self.settings = effective_settings
-        self.llm.settings = effective_settings
-        self.tool_registry = build_tool_registry(effective_settings)
-        self.planner.settings = effective_settings
-        self.planner.tools = self.tool_registry
-        self.executor.tools = self.tool_registry
-        self.validator.settings = effective_settings
-
-    @staticmethod
-    def _step_log_from_dict(payload: dict[str, Any]):
-        """Handle the internal step log from dict helper path for this module.
-
-        Inputs:
-            Receives payload for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._step_log_from_dict calls and related tests.
-        """
-        from aor_runtime.core.contracts import StepLog
-
-        return StepLog.model_validate(payload)
-
-    @staticmethod
-    def _new_session_id() -> str:
-        """Handle the internal new session id helper path for this module.
-
-        Inputs:
-            Uses module or instance state; no caller-supplied data parameters are required.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._new_session_id calls and related tests.
-        """
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        return f"{timestamp}_{uuid.uuid4().hex[:10]}"
-
-    @staticmethod
-    def _is_done(state: dict[str, Any]) -> bool:
-        """Handle the internal is done helper path for this module.
-
-        Inputs:
-            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._is_done calls and related tests.
-        """
-        return bool(state.get("done")) or str(state.get("status", "")) in TERMINAL_STATUSES
-
-    @staticmethod
-    def _decide_next_action(state: RuntimeState) -> str:
-        """Handle the internal decide next action helper path for this module.
-
-        Inputs:
-            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._decide_next_action calls and related tests.
-        """
-        next_action = str(state.get("next_action", "")).strip()
-        if next_action:
-            return next_action
-        status = str(state.get("status", "planning"))
-        if status in {"planning", "retrying"}:
-            return "planner"
-        if status == "executing":
-            return "executor"
-        if status == "validating":
-            return "validator"
-        return "planner"
-
-    @staticmethod
-    def _touch_state(state: dict[str, Any]) -> None:
-        """Handle the internal touch state helper path for this module.
-
-        Inputs:
-            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._touch_state calls and related tests.
-        """
-        now = datetime.now(timezone.utc)
-        state["updated_at"] = now.isoformat()
-        started_at = str(state.get("started_at", state["updated_at"]))
-        try:
-            started = datetime.fromisoformat(started_at)
-            elapsed_ms = round((now - started).total_seconds() * 1000, 2)
-        except Exception:  # noqa: BLE001
-            elapsed_ms = float((state.get("metrics") or {}).get("latency_ms", 0.0))
-        metrics = dict(state.get("metrics", {}))
-        metrics["latency_ms"] = elapsed_ms
-        metrics["retries"] = int(state.get("retries", 0))
-        state["metrics"] = metrics
-
-    def _llm_usage_snapshot(self) -> dict[str, int]:
-        """Handle the internal llm usage snapshot helper path for this module.
-
-        Inputs:
-            Uses module or instance state; no caller-supplied data parameters are required.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._llm_usage_snapshot calls and related tests.
-        """
-        return {
-            "prompt_tokens": int(getattr(self.llm, "total_prompt_tokens", 0) or 0),
-            "completion_tokens": int(getattr(self.llm, "total_completion_tokens", 0) or 0),
-            "total_tokens": int(getattr(self.llm, "total_tokens", 0) or 0),
-        }
-
-    def _merge_llm_token_metrics(self, metrics: dict[str, Any], before: dict[str, int]) -> None:
-        """Handle the internal merge llm token metrics helper path for this module.
-
-        Inputs:
-            Receives metrics, before for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._merge_llm_token_metrics calls and related tests.
-        """
-        after = self._llm_usage_snapshot()
-        prompt_delta = max(0, int(after.get("prompt_tokens", 0)) - int(before.get("prompt_tokens", 0)))
-        completion_delta = max(0, int(after.get("completion_tokens", 0)) - int(before.get("completion_tokens", 0)))
-        total_delta = max(0, int(after.get("total_tokens", 0)) - int(before.get("total_tokens", 0)))
-        if total_delta <= 0 and (prompt_delta or completion_delta):
-            total_delta = prompt_delta + completion_delta
-        metrics["llm_prompt_tokens"] = int(metrics.get("llm_prompt_tokens", 0) or 0) + prompt_delta
-        metrics["llm_completion_tokens"] = int(metrics.get("llm_completion_tokens", 0) or 0) + completion_delta
-        metrics["llm_total_tokens"] = int(metrics.get("llm_total_tokens", 0) or 0) + total_delta
-
-    def _get_required_session(self, session_id: str) -> AgentSession:
-        """Handle the internal get required session helper path for this module.
-
-        Inputs:
-            Receives session_id for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._get_required_session calls and related tests.
-        """
-        session = self.session_manager.get_session(session_id)
-        if session is None:
-            raise KeyError(f"Unknown session: {session_id}")
-        return session
-
-    @staticmethod
-    def _clear_confirmation_state(state: RuntimeState) -> None:
-        """Handle the internal clear confirmation state helper path for this module.
-
-        Inputs:
-            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns None; side effects are limited to the local runtime operation described above.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._clear_confirmation_state calls and related tests.
-        """
-        state["awaiting_confirmation"] = False
-        state["confirmation_kind"] = None
-        state["confirmation_step"] = None
-        state["confirmation_message"] = None
-
-    def is_dangerous(self, step: ExecutionStep) -> bool:
-        """Is dangerous for ExecutionEngine instances.
-
-        Inputs:
-            Receives step for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine.is_dangerous calls and related tests.
-        """
-        return self._dangerous_step_message(step) is not None
-
-    def _dangerous_step_message(self, step: ExecutionStep) -> str | None:
-        """Handle the internal dangerous step message helper path for this module.
-
-        Inputs:
-            Receives step for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._dangerous_step_message calls and related tests.
-        """
-        args = dict(step.args)
-
-        if step.action == "fs.write":
-            path = str(args.get("path", "")).strip()
-            if path:
-                target = resolve_path(self.settings, path)
-                if target.exists():
-                    return f"Overwrite existing path via fs.write: {target}"
-            return None
-
-        if step.action == "fs.copy":
-            dst = str(args.get("dst", "")).strip()
-            if dst:
-                target = resolve_path(self.settings, dst)
-                if target.exists():
-                    return f"Overwrite existing path via fs.copy: {target}"
-            return None
-
-        if step.action == "shell.exec":
-            command = str(args.get("command", "")).strip()
-            if command and DANGEROUS_SHELL_PATTERN.search(command.lower()):
-                try:
-                    target = resolve_execution_node(self.settings, str(args.get("node", "")))
-                except Exception:  # noqa: BLE001
-                    return None
-                return f"Run potentially destructive shell command on {target}: {command}"
-            return None
-
-        return None
-
-    @staticmethod
-    def _dry_run_preview(state: RuntimeState) -> dict[str, Any]:
-        """Handle the internal dry run preview helper path for this module.
-
-        Inputs:
-            Receives state for this ExecutionEngine method; type hints and validators define accepted shapes.
-
-        Returns:
-            Returns the computed value described by the function name and type hints.
-
-        Used by:
-            Used by planning, execution, validation, and presentation through ExecutionEngine._dry_run_preview calls and related tests.
-        """
-        return {
-            "session_id": str(state.get("session_id", "")),
-            "plan": state.get("plan", {}),
-            "summary": state.get("plan_summary"),
-        }
+        return self.get_session(run_id)

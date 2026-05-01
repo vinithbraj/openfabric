@@ -10,7 +10,8 @@ Data flow / Interfaces:
     Used by API request validation and model-list endpoints.
 
 Boundaries:
-    Keeps public model identity stable without changing planner model selection.
+    Keeps public model identity stable while the reset runtime accepts
+    OpenAI-compatible requests without planning.
 """
 
 from __future__ import annotations

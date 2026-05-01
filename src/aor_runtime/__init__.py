@@ -1,7 +1,8 @@
-"""OpenFABRIC Runtime Module: aor_runtime.__init__
+"""OpenFABRIC V10 echo reset package metadata.
 
 Purpose:
-    Expose package version metadata and runtime version helpers for OpenFABRIC. Existing module summary: OpenFABRIC runtime.
+    Expose package version metadata and runtime version helpers for the
+    reset runtime.
 
 Responsibilities:
     Resolve package version, Git revision, and dirty-worktree suffix for API/model identity surfaces.
@@ -21,7 +22,7 @@ from pathlib import Path
 
 __all__ = ["__package_version__", "__version__", "get_runtime_version"]
 
-__package_version__ = "0.4.2"
+__package_version__ = "0.10.0"
 
 
 @lru_cache(maxsize=1)

@@ -1,14 +1,17 @@
-"""OpenFABRIC Runtime Module: aor_runtime.runtime.__init__
+"""OpenFABRIC V10 echo runtime package.
 
 Purpose:
-    Implement the validator-enforced planning, execution, validation, and presentation runtime. Existing module summary: Runtime engine and state management.
+    Host the minimal echo engine used during the architecture reset.
 
 Responsibilities:
-    Coordinate LLM action plans, deterministic canonicalization, tool execution, output shaping, and session state.
+    Expose a tiny in-memory engine that echoes prompt text and records
+    compatibility events.
 
 Data flow / Interfaces:
-    Consumes user goals, runtime settings, tool results, and session history; produces execution plans, events, and final Markdown.
+    Consumes prompt dictionaries from API/CLI callers and produces echo
+    session dictionaries.
 
 Boundaries:
-    Owns the deterministic safety boundary between LLM-proposed actions, executable tools, and user-visible output.
+    Performs no planning or tool execution, keeping the reset branch free of
+    old internal behavior.
 """

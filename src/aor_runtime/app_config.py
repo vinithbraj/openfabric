@@ -4,13 +4,16 @@ Purpose:
     Load application-level configuration from YAML and environment sources.
 
 Responsibilities:
-    Resolve model, server, SQL, gateway, and runtime defaults before Settings construction.
+    Preserve existing server, model, gateway, SQL, and runtime keys so current
+    config files continue to load during the reset.
 
 Data flow / Interfaces:
-    Consumes config files/environment variables and produces typed app configuration used by CLI/API startup.
+    Consumes config files/environment variables and produces typed app
+    configuration used by CLI/API startup.
 
 Boundaries:
-    Keeps process configuration separate from per-request plans and user-provided tool arguments.
+    Keeps process configuration separate from prompt payloads; the reset runtime
+    does not convert these settings into tool calls.
 """
 
 from __future__ import annotations

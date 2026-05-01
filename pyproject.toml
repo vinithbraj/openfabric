@@ -4,21 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aor-runtime"
-version = "0.4.2"
-description = "Local-first agent orchestration runtime built on LangGraph."
+version = "0.10.0"
+description = "OpenFABRIC V10 reset runtime with an OpenAI-compatible echo interface."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116,<1.0",
-  "langchain-openai>=1.0.0,<2.0.0",
-  "langgraph>=1.1.6,<2.0.0",
   "pydantic>=2.11,<3.0",
-  "psycopg[binary]>=3.3,<4.0",
   "pyyaml>=6.0.2,<7.0",
-  "requests>=2.32,<3.0",
   "rich>=14.0,<15.0",
-  "sqlalchemy>=2.0.40,<3.0",
-  "sqlglot>=30.0,<31.0",
   "typer>=0.16,<1.0",
   "uvicorn[standard]>=0.35,<1.0",
 ]
