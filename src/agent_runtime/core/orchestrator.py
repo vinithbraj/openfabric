@@ -347,6 +347,24 @@ class AgentRuntime:
             trace.user_facing_errors.append(message)
         return f"I couldn't complete that request safely at the {stage} stage. {message}"
 
+    @staticmethod
+    def _final_request_status(result_bundle: ResultBundle, capability_gap_count: int) -> str:
+        """Return the user-facing final request status.
+
+        The execution bundle can still be a technical success when only a supported
+        subset of the user's request ran. In that case we surface the overall
+        request as partial without forcing the output pipeline into the partial
+        fallback renderer.
+        """
+
+        if result_bundle.status == "error":
+            return "error"
+        if result_bundle.status == "partial":
+            return "partial"
+        if capability_gap_count > 0:
+            return "partial"
+        return "success"
+
     def handle_request(self, raw_prompt: str, context: dict[str, Any] = {}) -> str:
         """Run the full agent pipeline and return final user-facing text."""
 
@@ -489,7 +507,13 @@ class AgentRuntime:
                 "Semantic verb assignment started",
                 "The runtime is assigning semantic verbs and object types to each task.",
             )
-            typed_tasks = assign_semantic_verbs(enriched_tasks, self.llm_client, trace=trace)
+            typed_tasks = assign_semantic_verbs(
+                enriched_tasks,
+                self.llm_client,
+                self.registry,
+                likely_domains=classification.likely_domains,
+                trace=trace,
+            )
             observability.info(
                 STAGE_VERB_ASSIGNMENT,
                 EVENT_VALIDATION_ACCEPTED,
@@ -1255,21 +1279,31 @@ class AgentRuntime:
                 dag=dag,
                 llm_client=self.llm_client,
             )
+            final_request_status = self._final_request_status(
+                result_bundle,
+                len(capability_gaps),
+            )
             log_event(
                 self.logger,
                 "agent_runtime.rendered",
                 request_id=user_request.request_id,
                 dag_id=dag.dag_id,
                 content_length=len(rendered.content),
+                final_status=final_request_status,
             )
             observability.stage_completed(
                 STAGE_COMPLETED,
-                "Request completed",
-                "The request completed and a final response was rendered.",
+                "Request partially completed" if final_request_status == "partial" else "Request completed",
+                (
+                    "The runtime rendered the supported subset of the request."
+                    if final_request_status == "partial"
+                    else "The request completed and a final response was rendered."
+                ),
                 details={
-                    "final_status": result_bundle.status,
+                    "final_status": final_request_status,
                     "content_length": len(rendered.content),
                     "display_type": rendered.display_plan.display_type,
+                    "gap_count": len(capability_gaps),
                 },
             )
             return rendered.content

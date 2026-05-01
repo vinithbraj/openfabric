@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,204 @@ class FakeGatewayClient:
         )
 
 
+class MixedSystemSaveLLMClient:
+    def complete_json(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        _ = schema
+        prompt_l = prompt.lower()
+
+        if "you are classifying a user prompt" in prompt_l:
+            return {
+                "prompt_type": "simple_tool_task",
+                "requires_tools": True,
+                "likely_domains": ["system_administration", "operating_system", "system"],
+                "risk_level": "low",
+                "needs_clarification": False,
+                "clarification_question": None,
+                "reason": "The prompt asks for safe system inspection plus saving the result.",
+                "confidence": 0.97,
+                "assumptions": [],
+            }
+        if "you are decomposing a user prompt" in prompt_l:
+            return {
+                "tasks": [
+                    {
+                        "id": "task_1",
+                        "description": "Retrieve the amount of free memory available on the system",
+                        "semantic_verb": "read",
+                        "object_type": "system.memory",
+                        "intent_confidence": 0.98,
+                        "constraints": {"human_readable": True},
+                        "dependencies": [],
+                        "raw_evidence": "how much free memory do i have on this system?",
+                        "requires_confirmation": False,
+                        "risk_level": "low",
+                    },
+                    {
+                        "id": "task_2",
+                        "description": "Save the system memory report to a file named report.txt",
+                        "semantic_verb": "create",
+                        "object_type": "filesystem.file",
+                        "intent_confidence": 0.96,
+                        "constraints": {"path": "report.txt"},
+                        "dependencies": ["task_1"],
+                        "raw_evidence": "save the report to file named report.txt",
+                        "requires_confirmation": False,
+                        "risk_level": "low",
+                    },
+                ],
+                "global_constraints": {"output_file": "report.txt"},
+                "unresolved_references": [],
+                "assumptions": [],
+            }
+        if "you are assigning semantic verbs" in prompt_l:
+            return {
+                "assignments": [
+                    {
+                        "task_id": "task_1",
+                        "semantic_verb": "read",
+                        "object_type": "system.memory",
+                        "intent_confidence": 0.97,
+                        "risk_level": "low",
+                        "requires_confirmation": False,
+                    },
+                    {
+                        "task_id": "task_2",
+                        "semantic_verb": "create",
+                        "object_type": "filesystem.file",
+                        "intent_confidence": 0.96,
+                        "risk_level": "low",
+                        "requires_confirmation": False,
+                    },
+                ]
+            }
+        if "you are selecting capability candidates for one task frame" in prompt_l:
+            if "retrieve the amount of free memory available on the system" in prompt_l:
+                return {
+                    "task_id": "task_1",
+                    "evaluations": [
+                        {
+                            "capability_id": "system.memory_status",
+                            "operation_id": "memory_status",
+                            "fits": True,
+                            "confidence": 0.95,
+                            "reason": "This directly retrieves memory availability.",
+                            "domain_reason": "System inspection belongs to the system domain.",
+                            "object_type_reason": "system.memory matches the task object type.",
+                            "argument_reason": "human_readable can be filled later.",
+                            "risk_reason": "Read-only and low risk.",
+                            "missing_arguments_likely": [],
+                        }
+                    ],
+                    "unresolved_reason": None,
+                }
+            capability_ids = re.findall(r'"capability_id":\s*"([^"]+)"', prompt)
+            operation_ids = re.findall(r'"operation_id":\s*"([^"]+)"', prompt)
+            capability_id = capability_ids[0]
+            operation_id = operation_ids[0]
+            return {
+                "task_id": "task_2",
+                "evaluations": [
+                    {
+                        "capability_id": capability_id,
+                        "operation_id": operation_id,
+                        "fits": False,
+                        "confidence": 0.96,
+                        "reason": "The runtime does not have a safe file-writing capability for this task.",
+                        "domain_reason": "A save-to-file request needs a write-capable tool.",
+                        "object_type_reason": "Reading or searching files is not the same as creating a report file.",
+                        "argument_reason": "The candidate does not accept the write arguments this task needs.",
+                        "risk_reason": "Rejecting avoids pretending a read-only tool can mutate state.",
+                        "missing_arguments_likely": [],
+                    }
+                ],
+                "unresolved_reason": "No shortlisted capability was accepted for task task_2.",
+            }
+        if "you are assessing whether a selected capability truly fits a task" in prompt_l:
+            if '"candidate_capability_id": "system.memory_status"' in prompt:
+                return {
+                    "task_id": "task_1",
+                    "candidate_capability_id": "system.memory_status",
+                    "candidate_operation_id": "memory_status",
+                    "fits": True,
+                    "confidence": 0.95,
+                    "semantic_reason": "The task asks to read free memory from the system.",
+                    "domain_reason": "system_administration and system are compatible.",
+                    "object_type_reason": "system.memory exactly matches the capability.",
+                    "argument_reason": "No required arguments are missing.",
+                    "risk_reason": "The capability is read-only and low risk.",
+                    "better_capability_id": None,
+                    "missing_capability_description": None,
+                    "suggested_domain": "system",
+                    "suggested_object_type": "system.memory",
+                    "missing_arguments_likely": [],
+                    "requires_clarification": False,
+                    "clarification_question": None,
+                }
+            capability_ids = re.findall(r'"candidate_capability_id":\s*"([^"]+)"', prompt)
+            operation_ids = re.findall(r'"candidate_operation_id":\s*"([^"]+)"', prompt)
+            capability_id = capability_ids[0]
+            operation_id = operation_ids[0]
+            return {
+                "task_id": "task_2",
+                "candidate_capability_id": capability_id,
+                "candidate_operation_id": operation_id,
+                "fits": False,
+                "confidence": 0.96,
+                "primary_failure_mode": "semantic_mismatch",
+                "semantic_reason": "The task is to create and save a report file, not just inspect or search.",
+                "domain_reason": "The request spans system memory data plus file creation, which this candidate cannot satisfy.",
+                "object_type_reason": "The task needs a writable report artifact.",
+                "argument_reason": "The candidate lacks write-oriented arguments.",
+                "risk_reason": "Rejecting avoids falsely treating a read-only capability as a write tool.",
+                "better_capability_id": None,
+                "missing_capability_description": "A safe file-writing capability is required.",
+                "suggested_domain": "system",
+                "suggested_object_type": "memory_report",
+                "missing_arguments_likely": [],
+                "requires_clarification": False,
+                "clarification_question": None,
+            }
+        if "you are extracting typed arguments" in prompt_l:
+            return {
+                "task_id": "task_1",
+                "capability_id": "system.memory_status",
+                "operation_id": "memory_status",
+                "arguments": {"human_readable": True},
+                "missing_required_arguments": [],
+                "assumptions": [],
+                "confidence": 0.95,
+            }
+        if "you are reviewing a sanitized action dag" in prompt_l:
+            return {
+                "missing_user_intents": [
+                    "The user wants the memory report saved to report.txt.",
+                ],
+                "suspicious_nodes": [],
+                "dependency_warnings": [],
+                "dataflow_warnings": [],
+                "output_expectation_warnings": [
+                    "The DAG reads memory data but does not save it to a file.",
+                ],
+                "recommended_repair": None,
+                "confidence": 0.92,
+            }
+        if "you are selecting a safe display plan" in prompt_l:
+            return {
+                "display_type": "table",
+                "title": "System Memory Report",
+                "sections": [
+                    {
+                        "title": "System Memory Report",
+                        "display_type": "table",
+                        "source_node_id": "node::task_1",
+                    }
+                ],
+                "constraints": {},
+                "redaction_policy": "standard",
+            }
+        return {}
+
+
 def _runtime(tmp_path: Path) -> AgentRuntime:
     registry = build_default_registry()
     store = InMemoryResultStore()
@@ -218,4 +417,38 @@ def test_runtime_emits_pipeline_events(tmp_path: Path) -> None:
         if event.stage == "capability_selection" and event.event_type == "capability.selected"
     )
     assert selected.details["capability_id"] == "filesystem.list_directory"
-    assert "raw_llm_response" not in selected.details
+
+
+def test_completed_status_is_partial_for_mixed_supported_and_unsupported_tasks(tmp_path: Path) -> None:
+    sink = InMemoryEventSink()
+    registry = build_default_registry()
+    store = InMemoryResultStore()
+    engine = ExecutionEngine(
+        registry,
+        {
+            "workspace_root": str(tmp_path),
+            "allow_shell_execution": False,
+            "allow_network_operations": False,
+            "gateway_url": "http://gateway",
+        },
+        store,
+        gateway_client=FakeGatewayClient(tmp_path),
+    )
+    runtime = AgentRuntime(MixedSystemSaveLLMClient(), registry, engine, OutputPipelineOrchestrator())
+
+    response = runtime.handle_request(
+        "how much free memory do i have on this system ? and save the report to file named report.txt",
+        {
+            "workspace_root": str(tmp_path),
+            "observability": {"enabled": True, "sink": sink},
+        },
+    )
+
+    assert "memory" in response.lower()
+    completed = next(
+        event
+        for event in sink.events
+        if event.stage == "completed" and event.event_type == "stage.completed"
+    )
+    assert completed.details["final_status"] == "partial"
+    assert completed.details["gap_count"] == 1

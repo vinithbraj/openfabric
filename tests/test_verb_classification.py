@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent_runtime.capabilities import build_default_registry
 from agent_runtime.core.types import TaskFrame
 from agent_runtime.input_pipeline.verb_classification import assign_semantic_verbs
 
@@ -104,39 +105,86 @@ def _client() -> FakeLLMClient:
 
 def test_assign_semantic_verbs_for_list_files() -> None:
     client = _client()
+    registry = build_default_registry()
 
-    tasks = assign_semantic_verbs([_task("task-list", "list files in this folder")], client)
+    tasks = assign_semantic_verbs([_task("task-list", "list files in this folder")], client, registry)
 
     assert tasks[0].semantic_verb in {"read", "search"}
-    assert tasks[0].object_type == "filesystem"
+    assert tasks[0].object_type == "filesystem.directory"
     assert tasks[0].risk_level == "low"
     assert "Do not generate commands, shell syntax, SQL, code, or executable plans." in client.last_prompt
     assert "read, search, create, update, delete, transform, analyze, summarize, compare, execute, render, unknown" in client.last_prompt
+    assert "Choose object_type from this runtime-owned controlled vocabulary only:" in client.last_prompt
 
 
 def test_assign_semantic_verbs_for_remove_files_forces_confirmation() -> None:
-    tasks = assign_semantic_verbs([_task("task-remove", "remove files older than a week")], _client())
+    tasks = assign_semantic_verbs(
+        [_task("task-remove", "remove files older than a week")],
+        _client(),
+        build_default_registry(),
+    )
 
     assert tasks[0].semantic_verb == "delete"
     assert tasks[0].requires_confirmation is True
 
 
 def test_assign_semantic_verbs_for_create_report() -> None:
-    tasks = assign_semantic_verbs([_task("task-report", "create report from daily metrics")], _client())
+    tasks = assign_semantic_verbs(
+        [_task("task-report", "create report from daily metrics")],
+        _client(),
+        build_default_registry(),
+    )
 
     assert tasks[0].semantic_verb in {"create", "render"}
     assert tasks[0].object_type == "report"
 
 
 def test_assign_semantic_verbs_for_run_tests_bumps_risk() -> None:
-    tasks = assign_semantic_verbs([_task("task-tests", "run tests for this project")], _client())
+    tasks = assign_semantic_verbs(
+        [_task("task-tests", "run tests for this project")],
+        _client(),
+        build_default_registry(),
+    )
 
     assert tasks[0].semantic_verb == "execute"
     assert tasks[0].risk_level in {"medium", "high"}
 
 
 def test_assign_semantic_verbs_for_summarize_logs() -> None:
-    tasks = assign_semantic_verbs([_task("task-logs", "summarize logs from today")], _client())
+    tasks = assign_semantic_verbs(
+        [_task("task-logs", "summarize logs from today")],
+        _client(),
+        build_default_registry(),
+    )
 
     assert tasks[0].semantic_verb in {"summarize", "analyze"}
+    assert tasks[0].object_type == "unknown"
     assert tasks[0].risk_level == "low"
+
+
+def test_assign_semantic_verbs_normalizes_free_form_memory_information() -> None:
+    client = FakeLLMClient(
+        {
+            "free memory": {
+                "assignments": [
+                    {
+                        "task_id": "task-memory",
+                        "semantic_verb": "read",
+                        "object_type": "memory information",
+                        "intent_confidence": 0.95,
+                        "risk_level": "low",
+                        "requires_confirmation": False,
+                    }
+                ]
+            }
+        }
+    )
+
+    tasks = assign_semantic_verbs(
+        [_task("task-memory", "retrieve free memory available on the system")],
+        client,
+        build_default_registry(),
+        likely_domains=["system_administration", "operating_system", "system"],
+    )
+
+    assert tasks[0].object_type == "system.memory"

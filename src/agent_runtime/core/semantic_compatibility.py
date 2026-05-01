@@ -295,6 +295,41 @@ def canonical_object_family(value: Optional[str]) -> Optional[str]:
     return token
 
 
+def known_object_families() -> list[str]:
+    """Return the runtime's known canonical object-family vocabulary."""
+
+    return sorted(_OBJECT_FAMILY_GROUPS.keys())
+
+
+def match_object_family_from_text(
+    text: Optional[str],
+    allowed_object_families: list[str] | None = None,
+) -> Optional[str]:
+    """Return the best matching canonical object family from free text, if any."""
+
+    normalized_text = normalize_token(text)
+    if normalized_text is None:
+        return None
+    haystack = f"_{normalized_text}_"
+    allowed = set(allowed_object_families or known_object_families())
+    best_match: tuple[int, str] | None = None
+
+    for family, aliases in _OBJECT_FAMILY_GROUPS.items():
+        if family not in allowed:
+            continue
+        for alias in aliases:
+            normalized_alias = normalize_token(alias)
+            if normalized_alias is None:
+                continue
+            if f"_{normalized_alias}_" in haystack or haystack.endswith(f"_{normalized_alias}") or haystack.startswith(
+                f"{normalized_alias}_"
+            ):
+                score = len(normalized_alias)
+                if best_match is None or score > best_match[0]:
+                    best_match = (score, family)
+    return best_match[1] if best_match is not None else None
+
+
 _VERB_ALIASES = {
     "read": "read",
     "search": "search",
@@ -512,6 +547,8 @@ __all__ = [
     "canonical_semantic_verb",
     "domains_compatible",
     "has_hard_cross_domain_conflict",
+    "known_object_families",
+    "match_object_family_from_text",
     "normalize_token",
     "object_domain",
     "object_types_compatible",
