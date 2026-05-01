@@ -116,7 +116,10 @@ def test_deterministic_sql_frame_extracts_multi_entity_counts_as_table(tmp_path:
     assert result.frame.intent == "count"
     assert result.frame.entity == "dicom_counts"
     assert result.frame.output.kind == "table"
-    assert result.frame.dimensions == ["entity"]
+    assert result.frame.output.cardinality == "multi_scalar"
+    assert result.frame.output.render_style == "metric_table"
+    assert result.frame.output.result_entities == ["patients", "studies", "series", "rtplan"]
+    assert result.frame.dimensions == []
     assert result.frame.targets["entity"].values == ["patients", "studies", "series", "rtplan"]
 
 
@@ -520,6 +523,8 @@ def test_llm_semantic_frame_prompt_contains_only_safe_metadata(tmp_path: Path) -
     assert "stderr" not in prompt.lower()
     assert "patientid" not in prompt.lower()
     assert "allowed_metrics" in prompt
+    assert "allowed_output_cardinalities" in prompt
+    assert "multi_scalar" in prompt
 
 
 def test_semantic_frame_planner_returns_none_when_mode_off(tmp_path: Path) -> None:

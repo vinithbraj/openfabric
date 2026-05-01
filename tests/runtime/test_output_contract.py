@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aor_runtime.runtime.output_contract import OutputContract, normalize_output, render_output
-from aor_runtime.runtime.output_shape import infer_goal_output_contract
+from aor_runtime.runtime.output_shape import infer_goal_output_contract, resolve_output_intent
 
 
 def test_list_to_csv_output_contract() -> None:
@@ -62,7 +62,41 @@ def test_grouped_count_goals_infer_table_contract() -> None:
 
 
 def test_multi_scalar_count_goals_infer_table_contract() -> None:
-    assert infer_goal_output_contract("count of all patients, studies, series, RTPLANS in dicom").kind == "table"
+    contract = infer_goal_output_contract("count of all patients, studies, series, RTPLANS in dicom")
+    intent = resolve_output_intent("count of all patients, studies, series, RTPLANS in dicom")
+
+    assert contract.kind == "table"
+    assert intent.cardinality == "multi_scalar"
+    assert intent.render_style == "metric_table"
+    assert intent.result_entities == ("patients", "studies", "series", "rtplan")
+
+
+def test_llm_output_intent_scalar_multi_entity_is_corrected_to_table() -> None:
+    intent = resolve_output_intent(
+        "count of all patients, studies, series, RTPLANS in dicom",
+        semantic_output={
+            "kind": "scalar",
+            "cardinality": "multi_scalar",
+            "render_style": "metric_table",
+            "result_entities": ["patients", "studies", "series", "rtplan"],
+        },
+    )
+
+    assert intent.kind == "table"
+    assert intent.cardinality == "multi_scalar"
+    assert "non_single_cardinality_forces_non_scalar" in intent.corrections
+
+
+def test_llm_output_intent_grouped_scalar_is_corrected_to_grouped_table() -> None:
+    intent = resolve_output_intent(
+        "count jobs by partition",
+        semantic_output={"kind": "scalar", "cardinality": "single", "render_style": "scalar", "group_by": ["partition"]},
+    )
+
+    assert intent.kind == "table"
+    assert intent.cardinality == "grouped"
+    assert intent.render_style == "metric_table"
+    assert "group_by_forces_grouped_cardinality" in intent.corrections
 
 
 def test_filtered_count_goal_stays_scalar_contract() -> None:

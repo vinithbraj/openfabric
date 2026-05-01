@@ -1065,6 +1065,54 @@ def test_result_shape_validator_accepts_single_numeric_count() -> None:
     assert validate_result_shape("count the number of patients", history).success is True
 
 
+def test_result_shape_validator_accepts_multi_scalar_count_metric_row() -> None:
+    history = [
+        StepLog(
+            step=ExecutionStep(
+                id=1,
+                action="sql.query",
+                args={
+                    "query": (
+                        'SELECT (SELECT COUNT(*) FROM flathr."Patient") AS patient_count, '
+                        '(SELECT COUNT(*) FROM flathr."Study") AS study_count'
+                    )
+                },
+            ),
+            result={"rows": [{"patient_count": 100, "study_count": 250}]},
+            success=True,
+        ),
+        StepLog(
+            step=ExecutionStep(id=2, action="runtime.return", args={"value": "$rows"}, output="final"),
+            result={"output": "| Metric | Value |\n| Patients | 100 |\n| Studies | 250 |", "value": "| Metric | Value |"},
+            success=True,
+        ),
+    ]
+
+    result = validate_result_shape(
+        "count of all patients, studies, series, RTPLANS in dicom",
+        history,
+        final_content="| Metric | Value |\n| Patients | 100 |\n| Studies | 250 |\n\nStats\nSteps: 2",
+    )
+
+    assert result.success is True
+
+
+def test_result_shape_validator_rejects_multi_scalar_single_column_row() -> None:
+    history = [
+        StepLog(
+            step=ExecutionStep(id=1, action="sql.query", args={"query": 'SELECT COUNT(*) AS patient_count FROM flathr."Patient"'}),
+            result={"rows": [{"patient_count": 100}]},
+            success=True,
+        )
+    ]
+
+    result = validate_result_shape("count of all patients, studies, series, RTPLANS in dicom", history)
+
+    assert result.success is False
+    assert result.metadata is not None
+    assert result.metadata["expected_shape"] == "multi-scalar metric table"
+
+
 def test_result_shape_validator_accepts_slurm_queue_count_with_verbose_final_content() -> None:
     history = [
         StepLog(
@@ -1478,128 +1526,95 @@ def test_sql_modality_relationship_repair_is_limited_to_grouping_goals(tmp_path:
     assert "COUNT(DISTINCT se.\"Modality\") AS modality_count" in plan.actions[0].inputs["query"]
 
 
-def test_action_planner_repairs_dicom_brain_breast_scalar_count_to_one_query(tmp_path: Path, monkeypatch) -> None:
-    _patch_relationship_catalog(monkeypatch)
-    llm = FakeLLM(
-        [
-            {
-                "goal": "count of patieints that have both brain and breast related studies in dicom",
-                "actions": [
-                    {
-                        "id": "brain_query",
-                        "tool": "sql.query",
-                        "inputs": {"database": "dicom", "query": 'SELECT DISTINCT PatientID FROM flathr."Study" WHERE LOWER("StudyDescription") LIKE \'%brain%\''},
-                        "output_binding": "brain_patients",
-                    },
-                    {
-                        "id": "breast_query",
-                        "tool": "sql.query",
-                        "inputs": {"database": "dicom", "query": 'SELECT DISTINCT PatientID FROM flathr."Study" WHERE LOWER("StudyDescription") LIKE \'%breast%\''},
-                        "output_binding": "breast_patients",
-                    },
-                    {"id": "return", "tool": "runtime.return", "inputs": {"value": "$brain_query.rows"}, "depends_on": ["brain_query", "breast_query"]},
-                ],
-            }
-        ]
+def test_action_plan_validator_rejects_multiple_sql_queries_for_single_scalar_count(tmp_path: Path) -> None:
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "count of patieints that have both brain and breast related studies in dicom",
+            "actions": [
+                {
+                    "id": "brain_query",
+                    "tool": "sql.query",
+                    "inputs": {"database": "dicom", "query": 'SELECT DISTINCT "PatientID" FROM flathr."Study"'},
+                    "output_binding": "brain_patients",
+                },
+                {
+                    "id": "breast_query",
+                    "tool": "sql.query",
+                    "inputs": {"database": "dicom", "query": 'SELECT DISTINCT "PatientID" FROM flathr."Study"'},
+                    "output_binding": "breast_patients",
+                },
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$brain_query.rows"}},
+            ],
+            "expected_final_shape": {"kind": "scalar"},
+        }
     )
     settings = _settings(tmp_path)
-    planner = LLMActionPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
 
-    plan = planner.build_plan(
-        goal="count of patieints that have both brain and breast related studies in dicom",
-        planner=PlannerConfig(),
-        allowed_tools=["sql.query"],
-        input_payload={},
-    )
+    result = validator.validate(plan, goal="count of patieints that have both brain and breast related studies in dicom")
 
-    assert [step.action for step in plan.steps] == ["sql.query", "text.format", "runtime.return"]
-    query = plan.steps[0].args["query"]
-    assert 'COUNT(DISTINCT p."PatientID") AS patient_count' in query
-    assert query.count("EXISTS") == 2
-    assert "brain" in query
-    assert "breast" in query
+    assert result.valid is False
+    assert "Single-scalar SQL goals must use one aggregate sql.query" in "; ".join(result.errors)
 
 
-def test_action_planner_repairs_single_modality_scalar_count_to_aggregate(tmp_path: Path, monkeypatch) -> None:
+def test_action_plan_validator_allows_single_sql_query_for_scalar_modality_count(tmp_path: Path, monkeypatch) -> None:
     _patch_relationship_catalog(monkeypatch)
-    llm = FakeLLM(
-        [
-            {
-                "goal": "count of patients that have brain in RTPLAN in dicom",
-                "actions": [
-                    {
-                        "id": "query",
-                        "tool": "sql.query",
-                        "inputs": {
-                            "database": "dicom",
-                            "query": 'SELECT se."Modality" AS modality, COUNT(DISTINCT st."PatientID") AS patient_count FROM flathr."Study" st JOIN flathr."Series" se ON st."StudyInstanceUID" = se."StudyInstanceUID" WHERE se."Modality" IN (\'RTPLAN\') GROUP BY se."Modality"',
-                        },
-                        "output_binding": "patient_counts",
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "count of patients that have brain in RTPLAN in dicom",
+            "actions": [
+                {
+                    "id": "query",
+                    "tool": "sql.query",
+                    "inputs": {
+                        "database": "dicom",
+                        "query": 'SELECT COUNT(DISTINCT p."PatientID") AS patient_count FROM flathr."Patient" p JOIN flathr."Study" st ON p."PatientID" = st."PatientID" JOIN flathr."Series" se ON st."StudyInstanceUID" = se."StudyInstanceUID" WHERE se."Modality" = \'RTPLAN\'',
                     },
-                    {"id": "return", "tool": "runtime.return", "inputs": {"value": "$query.rows"}, "depends_on": ["query"]},
-                ],
-            }
-        ]
+                    "output_binding": "patient_count",
+                },
+                {"id": "format", "tool": "text.format", "inputs": {"source": "$query.rows", "format": "txt"}, "depends_on": ["query"]},
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$format.content"}, "depends_on": ["format"]},
+            ],
+            "expected_final_shape": {"kind": "scalar"},
+        }
     )
     settings = _settings(tmp_path)
-    planner = LLMActionPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
 
-    plan = planner.build_plan(
-        goal="count of patients that have brain in RTPLAN in dicom",
-        planner=PlannerConfig(),
-        allowed_tools=["sql.query"],
-        input_payload={},
-    )
+    result = validator.validate(plan, goal="count of patients that have brain in RTPLAN in dicom")
 
-    assert [step.action for step in plan.steps] == ["sql.query", "text.format", "runtime.return"]
-    query = plan.steps[0].args["query"]
-    assert 'COUNT(DISTINCT p."PatientID") AS patient_count' in query
-    assert 'se."Modality" IN (\'RTPLAN\')' in query
-    assert "brain" in query
-    assert "GROUP BY" not in query.upper()
+    assert result.valid is True
 
 
-def test_action_planner_repairs_dicom_multi_entity_counts_to_one_query(tmp_path: Path, monkeypatch) -> None:
-    _patch_relationship_catalog(monkeypatch)
-    llm = FakeLLM(
-        [
-            {
-                "goal": "count of all patients, studies, series, RTPLANS in dicom",
-                "actions": [
-                    {
-                        "id": "patients",
-                        "tool": "sql.query",
-                        "inputs": {"database": "dicom", "query": 'SELECT COUNT(*) AS patient_count FROM flathr."Patient"'},
-                        "output_binding": "patient_count",
-                    },
-                    {
-                        "id": "studies",
-                        "tool": "sql.query",
-                        "inputs": {"database": "dicom", "query": 'SELECT COUNT(*) AS study_count FROM flathr."Study"'},
-                        "output_binding": "study_count",
-                    },
-                    {"id": "return", "tool": "runtime.return", "inputs": {"value": "$patients.rows"}, "depends_on": ["patients", "studies"]},
-                ],
-            }
-        ]
+def test_action_plan_validator_rejects_multiple_sql_queries_for_multi_scalar_count(tmp_path: Path) -> None:
+    plan = ActionPlan.model_validate(
+        {
+            "goal": "count of all patients, studies, series, RTPLANS in dicom",
+            "actions": [
+                {
+                    "id": "patients",
+                    "tool": "sql.query",
+                    "inputs": {"database": "dicom", "query": 'SELECT COUNT(*) AS patient_count FROM flathr."Patient"'},
+                    "output_binding": "patient_count",
+                },
+                {
+                    "id": "studies",
+                    "tool": "sql.query",
+                    "inputs": {"database": "dicom", "query": 'SELECT COUNT(*) AS study_count FROM flathr."Study"'},
+                    "output_binding": "study_count",
+                },
+                {"id": "return", "tool": "runtime.return", "inputs": {"value": "$patients.rows"}, "depends_on": ["patients", "studies"]},
+            ],
+            "expected_final_shape": {"kind": "table"},
+        }
     )
     settings = _settings(tmp_path)
-    planner = LLMActionPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
+    validator = ActionPlanValidator(settings=settings, tools=build_tool_registry(settings), allowed_tools=["sql.query"])
 
-    plan = planner.build_plan(
-        goal="count of all patients, studies, series, RTPLANS in dicom",
-        planner=PlannerConfig(),
-        allowed_tools=["sql.query"],
-        input_payload={},
-    )
+    result = validator.validate(plan, goal="count of all patients, studies, series, RTPLANS in dicom")
 
-    assert [step.action for step in plan.steps] == ["sql.query", "text.format", "runtime.return"]
-    query = plan.steps[0].args["query"]
-    assert '(SELECT COUNT(*) FROM flathr."Patient") AS patient_count' in query
-    assert '(SELECT COUNT(*) FROM flathr."Study") AS study_count' in query
-    assert '(SELECT COUNT(*) FROM flathr."Series") AS series_count' in query
-    assert 'se."Modality" = \'RTPLAN\'' in query
-    assert plan.steps[1].args["format"] == "markdown"
+    assert result.valid is False
+    assert "Multi-scalar SQL goals must use one aggregate sql.query" in "; ".join(result.errors)
 
 
 def test_action_planner_rewrites_generate_validate_explain_sql_to_nonexecuting_tool(tmp_path: Path, monkeypatch) -> None:

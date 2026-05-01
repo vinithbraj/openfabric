@@ -27,6 +27,7 @@ from aor_runtime.runtime.output_shape import (
     is_collection_ref,
     is_grouped_count_goal,
     is_scalar_count_goal,
+    resolve_output_intent,
     scalar_field_for_tool,
     validate_final_output_contract,
 )
@@ -73,7 +74,8 @@ def validate_result_shape(
         Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.result_shape.validate_result_shape.
     """
     goal_text = str(goal or "")
-    if is_grouped_count_goal(goal_text):
+    output_intent = resolve_output_intent(goal_text)
+    if output_intent.cardinality == "grouped" or is_grouped_count_goal(goal_text):
         grouped_validation = _validate_grouped_count_result(goal_text, history)
         if not grouped_validation.success:
             return grouped_validation
@@ -88,7 +90,22 @@ def validate_result_shape(
             return final_validation
         return ResultShapeValidation(True)
 
-    if not _is_count_goal(goal_text):
+    if output_intent.cardinality == "multi_scalar":
+        primary_validation = _validate_multi_scalar_primary_result(history)
+        if not primary_validation.success:
+            return primary_validation
+        final_validation = _validate_final_output(
+            goal_text,
+            history,
+            final_content=final_content,
+            allow_raw_json=allow_raw_json,
+            enforce_scalar_text=False,
+        )
+        if not final_validation.success:
+            return final_validation
+        return ResultShapeValidation(True)
+
+    if output_intent.kind != "scalar" or output_intent.cardinality != "single":
         final_validation = _validate_final_output(goal_text, history, final_content=final_content, allow_raw_json=allow_raw_json)
         if not final_validation.success:
             return final_validation
@@ -224,6 +241,103 @@ def _validate_sql_count_result(sql_log: StepLog) -> ResultShapeValidation:
             },
         )
     return ResultShapeValidation(True, metadata={"primary_result_validation": "sql_single_numeric_scalar"})
+
+
+def _validate_multi_scalar_primary_result(history: list[StepLog]) -> ResultShapeValidation:
+    """Validate a multi-scalar count/dashboard result from structured producer data.
+
+    Inputs:
+        Receives execution history after tool execution.
+
+    Returns:
+        Success when a producer exposes multiple numeric scalar facts in one structured result.
+
+    Used by:
+        validate_result_shape when resolved output intent is table/multi_scalar.
+    """
+    sql_log = _last_successful_sql_query(history)
+    if sql_log is not None:
+        rows = sql_log.result.get("rows")
+        if not isinstance(rows, list):
+            return ResultShapeValidation(
+                False,
+                "Multi-scalar count request did not return SQL rows.",
+                {"expected_shape": "multi-scalar metric table"},
+            )
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            return ResultShapeValidation(
+                False,
+                "Multi-scalar count request must return one aggregate row.",
+                {
+                    "expected_shape": "multi-scalar metric table",
+                    "actual_shape": {"row_count": len(rows), "columns": _row_columns(rows)},
+                    "failed_sql": str(sql_log.step.args.get("query") or ""),
+                },
+            )
+        numeric_columns = [column for column, value in rows[0].items() if _is_numeric_scalar(value)]
+        if len(numeric_columns) < 2:
+            return ResultShapeValidation(
+                False,
+                "Multi-scalar count request must return multiple numeric aggregate columns.",
+                {
+                    "expected_shape": "multi-scalar metric table",
+                    "actual_shape": {"row_count": 1, "columns": _row_columns(rows), "numeric_columns": numeric_columns},
+                    "failed_sql": str(sql_log.step.args.get("query") or ""),
+                },
+            )
+        return ResultShapeValidation(
+            True,
+            metadata={
+                "primary_result_validation": "sql_multi_numeric_scalar",
+                "expected_shape": "multi-scalar metric table",
+                "columns": numeric_columns,
+            },
+        )
+
+    final_log = _last_successful_runtime_return(history)
+    if final_log is not None:
+        value = final_log.result.get("value")
+        if isinstance(value, dict):
+            numeric_fields = [key for key, field_value in value.items() if _is_numeric_scalar(field_value)]
+            if len(numeric_fields) >= 2:
+                return ResultShapeValidation(
+                    True,
+                    metadata={
+                        "primary_result_validation": "runtime_return_multi_scalar",
+                        "expected_shape": "multi-scalar metric table",
+                        "columns": numeric_fields,
+                    },
+                )
+
+    for item in reversed(history):
+        if not item.success or not isinstance(item.result, dict):
+            continue
+        grouped = item.result.get("grouped")
+        groups = item.result.get("groups")
+        if isinstance(grouped, dict) and grouped:
+            return ResultShapeValidation(
+                True,
+                metadata={
+                    "primary_result_validation": "grouped_multi_scalar",
+                    "expected_shape": "multi-scalar metric table",
+                    "group_count": len(grouped),
+                },
+            )
+        if isinstance(groups, list) and groups:
+            return ResultShapeValidation(
+                True,
+                metadata={
+                    "primary_result_validation": "grouped_multi_scalar",
+                    "expected_shape": "multi-scalar metric table",
+                    "group_count": len(groups),
+                },
+            )
+
+    return ResultShapeValidation(
+        False,
+        "Multi-scalar request did not return structured metric values.",
+        {"expected_shape": "multi-scalar metric table"},
+    )
 
 
 def _validate_final_output(

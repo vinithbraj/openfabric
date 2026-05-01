@@ -33,7 +33,7 @@ from aor_runtime.runtime.diagnostic_orchestration import diagnostic_plan_for_goa
 from aor_runtime.runtime.output_shape import (
     grouped_count_field_for_goal,
     infer_goal_output_contract,
-    is_multi_scalar_count_goal,
+    resolve_output_intent,
     is_scalar_count_goal as _shared_is_scalar_count_goal,
     is_shell_status_goal,
     scalar_field_for_tool,
@@ -1037,12 +1037,16 @@ class ActionPlanValidator:
         """
         actions = [action.tool for action in plan.actions]
         errors: list[str] = []
+        output_intent = resolve_output_intent(goal, planner_expected_shape=plan.expected_final_shape.model_dump())
         if not actions or actions[-1] != "runtime.return":
             errors.append("Final action must be runtime.return.")
         if _looks_like_sql_goal(goal) and not any(action.tool in {"sql.query", "sql.schema", "sql.validate"} for action in plan.actions):
             errors.append("Database-shaped goals must include a SQL action, not literal or precomputed data.")
-        if _is_scalar_count_goal(goal) and sum(1 for action in plan.actions if action.tool == "sql.query") > 1:
-            errors.append("Scalar count SQL goals must use one aggregate sql.query, not multiple SQL queries combined later.")
+        sql_query_count = sum(1 for action in plan.actions if action.tool == "sql.query")
+        if output_intent.kind == "scalar" and output_intent.cardinality == "single" and sql_query_count > 1:
+            errors.append("Single-scalar SQL goals must use one aggregate sql.query, not multiple SQL queries combined later.")
+        if output_intent.cardinality == "multi_scalar" and sql_query_count > 1:
+            errors.append("Multi-scalar SQL goals must use one aggregate sql.query with multiple aggregate columns, not multiple SQL queries combined later.")
         if "sql.query" in actions and "text.format" not in actions:
             errors.append("SQL results must be formatted locally with text.format before returning or writing.")
         data_seen = False
@@ -1160,10 +1164,8 @@ class ActionPlanCanonicalizer:
         self._rewrite_bare_data_refs(actions)
         export_path = _extract_export_path(self.goal)
         export_goal = bool(export_path or EXPORT_GOAL_RE.search(self.goal))
-        self._repair_dicom_multi_scalar_count_query(actions)
         self._repair_missing_scalar_count_sql(actions)
         self._repair_scalar_count_absence_query(actions)
-        self._repair_dicom_semantic_scalar_count_query(actions)
         self._repair_count_shape_query(actions)
 
         if export_goal:
@@ -1912,7 +1914,7 @@ class ActionPlanCanonicalizer:
         Used by:
             Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._repair_scalar_count_absence_query calls and related tests.
         """
-        if self.settings is None or not _is_scalar_count_goal(self.goal):
+        if self.settings is None or _is_sql_explain_only_goal(self.goal) or not _is_scalar_count_goal(self.goal):
             return
         if sum(1 for action in actions if action.get("tool") == "sql.query") <= 1:
             return
@@ -1954,7 +1956,7 @@ class ActionPlanCanonicalizer:
         Used by:
             Used by planning, execution, validation, and presentation through ActionPlanCanonicalizer._repair_missing_scalar_count_sql calls and related tests.
         """
-        if self.settings is None or not _is_scalar_count_goal(self.goal) or not _looks_like_sql_goal(self.goal):
+        if self.settings is None or _is_sql_explain_only_goal(self.goal) or not _is_scalar_count_goal(self.goal) or not _looks_like_sql_goal(self.goal):
             return
         if any(action.get("tool") == "sql.query" for action in actions):
             return
@@ -1983,99 +1985,6 @@ class ActionPlanCanonicalizer:
             }
         ]
         self._repair("inserted_scalar_count_query", "Inserted missing SQL aggregate for scalar database count goal.")
-
-    def _repair_dicom_multi_scalar_count_query(self, actions: list[dict[str, Any]]) -> None:
-        """Replace drifted multi-entity DICOM count plans with one aggregate query.
-
-        Inputs:
-            Receives mutable planned actions.
-
-        Returns:
-            Returns None after optionally replacing SQL actions.
-
-        Used by:
-            ActionPlanCanonicalizer before scalar-specific repairs.
-        """
-        if self.settings is None or not is_multi_scalar_count_goal(self.goal) or not _looks_like_sql_goal(self.goal):
-            return
-        configured = resolve_sql_databases(self.settings)
-        database = _database_for_goal(self.goal, configured) if configured else None
-        if database is None and len(configured) == 1:
-            database = next(iter(configured))
-        if not database:
-            return
-        try:
-            catalog = get_sql_catalog(self.settings, database)
-        except Exception:
-            return
-        query = _dicom_multi_scalar_count_query(self.goal, catalog)
-        if not query:
-            return
-        first_sql = _first_action_with_tool(actions, "sql.query")
-        current_query = str((first_sql or {}).get("inputs", {}).get("query") or "")
-        if current_query.strip() == query.strip() and sum(1 for action in actions if action.get("tool") == "sql.query") == 1:
-            return
-        actions[:] = [
-            {
-                "id": "dicom_counts",
-                "tool": "sql.query",
-                "purpose": "Count requested DICOM entities in one aggregate query.",
-                "inputs": {"database": database, "query": query},
-                "depends_on": [],
-                "output_binding": "dicom_counts",
-                "expected_result_shape": {"kind": "table"},
-            }
-        ]
-        self._repair("repaired_dicom_multi_scalar_count", "Repaired DICOM multi-count request to one aggregate SQL query.")
-
-    def _repair_dicom_semantic_scalar_count_query(self, actions: list[dict[str, Any]]) -> None:
-        """Replace drifted DICOM scalar-count SQL plans with one schema-grounded aggregate.
-
-        Inputs:
-            Receives mutable planned actions.
-
-        Returns:
-            Returns None after optionally replacing the SQL action list.
-
-        Used by:
-            ActionPlanCanonicalizer before final display canonicalization.
-        """
-        if self.settings is None or not _is_scalar_count_goal(self.goal) or not _looks_like_sql_goal(self.goal):
-            return
-        if not re.search(r"\bpatients?\b|\bpatieints?\b", str(self.goal or ""), re.IGNORECASE):
-            return
-        configured = resolve_sql_databases(self.settings)
-        database = _database_for_goal(self.goal, configured) if configured else None
-        if database is None and len(configured) == 1:
-            database = next(iter(configured))
-        if not database:
-            return
-        try:
-            catalog = get_sql_catalog(self.settings, database)
-        except Exception:
-            return
-        query = _dicom_patient_semantic_count_query(self.goal, catalog)
-        if not query:
-            return
-        sql_count = sum(1 for action in actions if action.get("tool") == "sql.query")
-        first_sql = _first_action_with_tool(actions, "sql.query")
-        current_query = str((first_sql or {}).get("inputs", {}).get("query") or "")
-        needs_repair = sql_count != 1 or "GROUP BY" in current_query.upper() or "COUNT(DISTINCT p.\"PatientID\")" not in current_query
-        if not needs_repair:
-            return
-        actions[:] = [
-            {
-                "id": "count_query",
-                "tool": "sql.query",
-                "purpose": "Count patients matching schema-grounded DICOM concepts.",
-                "inputs": {"database": database, "query": query},
-                "depends_on": [],
-                "output_binding": "count_result",
-                "expected_result_shape": {"kind": "scalar"},
-            }
-        ]
-        self._repair("repaired_dicom_semantic_scalar_count", "Repaired DICOM semantic count to one qualified SQL aggregate.")
-
 
 class ActionPlanCompiler:
     """Represent action plan compiler within the OpenFABRIC runtime.
@@ -2549,7 +2458,8 @@ def _format_for_goal(goal: str, *, producer: dict[str, Any], output_path: str | 
         return "csv"
     if _normalize_shape_kind((producer.get("expected_result_shape") or {}).get("kind")) == "scalar":
         return "txt"
-    if _is_scalar_count_goal(goal):
+    output_intent = resolve_output_intent(goal)
+    if output_intent.kind == "scalar" and output_intent.cardinality == "single":
         return "txt"
     if _is_table_display_goal(goal) and str(producer.get("tool")) in {
         "shell.exec",
@@ -2582,7 +2492,8 @@ def _is_table_display_goal(goal: str) -> bool:
         Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._is_table_display_goal.
     """
     text = str(goal or "").lower()
-    if EXPORT_GOAL_RE.search(text) or _is_scalar_count_goal(text):
+    output_intent = resolve_output_intent(text)
+    if EXPORT_GOAL_RE.search(text) or (output_intent.kind == "scalar" and output_intent.cardinality == "single"):
         return False
     return bool(re.search(r"\b(?:list|show|display|return|give\s+me|all)\b", text))
 
@@ -2690,7 +2601,8 @@ def _count_shape_repair_query(goal: str, failure_context: dict[str, Any]) -> str
     Used by:
         Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._count_shape_repair_query.
     """
-    if not _is_scalar_count_goal(goal):
+    output_intent = resolve_output_intent(goal)
+    if not (output_intent.kind == "scalar" and output_intent.cardinality == "single"):
         return None
     reason = str(failure_context.get("reason") or "")
     shape_error = str(failure_context.get("shape_error") or failure_context.get("error") or "")
@@ -2904,89 +2816,6 @@ def _scalar_count_query_from_goal(goal: str, catalog: Any) -> str | None:
     return f"SELECT COUNT(*) AS count_value FROM {relation}"
 
 
-def _dicom_multi_scalar_count_query(goal: str, catalog: Any) -> str | None:
-    """Build one SQL query for several requested DICOM count metrics.
-
-    Inputs:
-        Receives a multi-scalar DICOM count goal and schema catalog.
-
-    Returns:
-        SQL with one aggregate column per requested entity, or None if unsupported.
-
-    Used by:
-        ActionPlanCanonicalizer._repair_dicom_multi_scalar_count_query.
-    """
-    entities = _dicom_multi_count_entities_from_goal(goal)
-    if len(entities) < 2:
-        return None
-    columns: list[str] = []
-    for entity in entities:
-        table_name = _table_name_for_dicom_count_entity(entity)
-        if table_name is not None:
-            table = catalog.table_by_name(None, table_name)
-            if table is None:
-                return None
-            relation = _quote_sql_relation(table.schema_name, table.table_name, dialect=catalog.dialect)
-            columns.append(f"(SELECT COUNT(*) FROM {relation}) AS {entity}_count")
-            continue
-        if entity in {"rtplan", "rtdose", "rtstruct", "ct", "mr", "pt"}:
-            series = catalog.table_by_name(None, "Series")
-            if series is None or series.column_by_name("Modality") is None:
-                return None
-            relation = _quote_sql_relation(series.schema_name, series.table_name, dialect=catalog.dialect)
-            columns.append(f"(SELECT COUNT(*) FROM {relation} se WHERE se.\"Modality\" = '{entity.upper()}') AS {entity}_count")
-    if len(columns) < 2:
-        return None
-    return "SELECT\n  " + ",\n  ".join(columns)
-
-
-def _table_name_for_dicom_count_entity(entity: str) -> str | None:
-    """Map normalized DICOM count entity labels to catalog table names.
-
-    Inputs:
-        Receives a normalized entity label.
-
-    Returns:
-        Catalog table name or None for modality-derived counts.
-
-    Used by:
-        _dicom_multi_scalar_count_query.
-    """
-    return {
-        "patient": "Patient",
-        "study": "Study",
-        "series": "Series",
-        "instance": "Instance",
-    }.get(entity)
-
-
-def _dicom_multi_count_entities_from_goal(goal: str) -> list[str]:
-    """Extract ordered DICOM entities for multi-count dashboard queries.
-
-    Inputs:
-        Receives the user goal.
-
-    Returns:
-        Ordered normalized entity labels.
-
-    Used by:
-        _dicom_multi_scalar_count_query.
-    """
-    text = str(goal or "")
-    if not is_multi_scalar_count_goal(text):
-        return []
-    patterns = [
-        ("patient", r"\b(?:patients?|patieints?)\b"),
-        ("study", r"\bstudies\b"),
-        ("series", r"\bseries\b"),
-        ("instance", r"\binstances?\b"),
-        ("rtplan", r"\brtplans?\b"),
-        ("rtdose", r"\brtdoses?\b"),
-        ("rtstruct", r"\brtstructs?\b"),
-    ]
-    return [label for label, pattern in patterns if re.search(pattern, text, re.IGNORECASE)]
-
-
 def _dicom_patient_semantic_count_query(goal: str, catalog: Any) -> str | None:
     """Build one scalar patient-count query for DICOM concepts.
 
@@ -2997,7 +2826,7 @@ def _dicom_patient_semantic_count_query(goal: str, catalog: Any) -> str | None:
         A schema-grounded aggregate SQL query, or None when unsupported.
 
     Used by:
-        Scalar count insertion and DICOM semantic repair paths.
+        Scalar count insertion fallback when semantic compilation did not already supply SQL.
     """
     text = str(goal or "")
     if not re.search(r"\bpatients?\b|\bpatieints?\b", text, re.IGNORECASE):
@@ -4484,7 +4313,8 @@ def _validate_shell_scalar_flow(plan: ActionPlan, *, goal: str) -> list[str]:
     Used by:
         Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.action_planner._validate_shell_scalar_flow.
     """
-    if not _is_scalar_count_goal(goal) or is_shell_status_goal(goal):
+    output_intent = resolve_output_intent(goal)
+    if not (output_intent.kind == "scalar" and output_intent.cardinality == "single") or is_shell_status_goal(goal):
         return []
     alias_to_tool: dict[str, str] = {}
     for action in plan.actions:

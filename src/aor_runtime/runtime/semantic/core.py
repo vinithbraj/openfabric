@@ -27,6 +27,7 @@ from aor_runtime.core.contracts import ExecutionPlan
 from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.diagnostic_orchestration import diagnostic_plan_for_goal
+from aor_runtime.runtime.output_shape import resolve_output_intent
 from aor_runtime.runtime.slurm_aggregations import format_elapsed_seconds
 from aor_runtime.runtime.temporal import (
     TemporalRange,
@@ -50,6 +51,9 @@ SemanticIntent = Literal[
     "unknown",
 ]
 SemanticOutputKind = Literal["scalar", "table", "file", "text", "json", "status", "unknown"]
+SemanticOutputCardinality = Literal["single", "multi_scalar", "grouped", "collection", "sectioned", "unknown"]
+SemanticRenderStyle = Literal["scalar", "metric_table", "record_table", "key_value", "bullets", "sectioned", "unknown"]
+SemanticOutputSource = Literal["llm", "deterministic_backup", "planner_expected", "merged", "unknown"]
 SemanticStrategy = Literal[
     "single_target_pushdown",
     "grouped_pushdown",
@@ -289,6 +293,13 @@ class SemanticOutputContract(BaseModel):
 
     kind: SemanticOutputKind = "unknown"
     format: str | None = None
+    cardinality: SemanticOutputCardinality = "unknown"
+    render_style: SemanticRenderStyle = "unknown"
+    result_entities: list[str] = Field(default_factory=list)
+    group_by: list[str] = Field(default_factory=list)
+    source: SemanticOutputSource = "unknown"
+    corrections: list[str] = Field(default_factory=list)
+    reason: str | None = None
 
 
 class SemanticFrame(BaseModel):
@@ -799,9 +810,6 @@ class SemanticFrameCanonicalizer:
         canonical.metric = _canonical_metric(canonical.metric, goal)
         canonical.targets = _merge_target_backups(canonical.targets, goal)
         canonical.targets = _canonical_targets_for_domain(canonical, goal)
-        for dimension in canonical.targets:
-            if dimension not in canonical.dimensions:
-                canonical.dimensions.append(dimension)
         canonical.time_window = _canonical_time_window(canonical.time_window, goal, self.settings)
         canonical.output = _canonical_output(canonical)
         canonical.entity = _normalize_entity(canonical.entity, goal)
@@ -1655,6 +1663,32 @@ def build_semantic_frame_prompt(*, goal: str, settings: Settings, allowed_tools:
             for domain, spec in SEMANTIC_CAPABILITIES.items()
         },
         "allowed_dimensions": ["partition", "state", "user", "node", "job_name", "modality", "extension", "path", "type", "section"],
+        "allowed_output_kinds": ["scalar", "table", "file", "text", "json", "status", "unknown"],
+        "allowed_output_cardinalities": ["single", "multi_scalar", "grouped", "collection", "sectioned", "unknown"],
+        "allowed_render_styles": ["scalar", "metric_table", "record_table", "key_value", "bullets", "sectioned", "unknown"],
+        "output_intent_examples": [
+            {
+                "prompt": "count patients in dicom",
+                "output": {"kind": "scalar", "cardinality": "single", "render_style": "scalar", "result_entities": ["patients"]},
+            },
+            {
+                "prompt": "count patients, studies, series, RTPLANS in dicom",
+                "output": {
+                    "kind": "table",
+                    "cardinality": "multi_scalar",
+                    "render_style": "metric_table",
+                    "result_entities": ["patients", "studies", "series", "rtplan"],
+                },
+            },
+            {
+                "prompt": "count jobs by partition",
+                "output": {"kind": "table", "cardinality": "grouped", "render_style": "metric_table", "group_by": ["partition"]},
+            },
+            {
+                "prompt": "list all patients",
+                "output": {"kind": "table", "cardinality": "collection", "render_style": "record_table", "result_entities": ["patients"]},
+            },
+        ],
         "allowed_state_policy_filters": ["state", "include_all_states"],
         "allowed_metrics": [
             "average_elapsed",
@@ -1680,7 +1714,15 @@ def build_semantic_frame_prompt(*, goal: str, settings: Settings, allowed_tools:
             "filters": [{"field": "string", "operator": "eq|neq|in|gt|gte|lt|lte|contains", "value": "scalar|null"}],
             "slurm_state_policy": "Use state=COMPLETED only for explicit completed jobs. Use include_all_states=true for all jobs, any state, or regardless of state.",
             "time_window": {"phrase": "string|null", "start": "string|null", "end": "string|null", "label": "string|null"},
-            "output": {"kind": "scalar|table|file|text|json|status|unknown", "format": "string|null"},
+            "output": {
+                "kind": "scalar|table|file|text|json|status|unknown",
+                "format": "string|null",
+                "cardinality": "single|multi_scalar|grouped|collection|sectioned|unknown",
+                "render_style": "scalar|metric_table|record_table|key_value|bullets|sectioned|unknown",
+                "result_entities": ["string"],
+                "group_by": ["string"],
+                "reason": "short explanation",
+            },
             "children": [],
             "confidence": "0..1",
         },
@@ -2003,10 +2045,17 @@ def _deterministic_sql_frame(text: str) -> SemanticFrame:
             intent="count",
             entity="dicom_counts",
             metric=SemanticMetric(name="count"),
-            dimensions=["entity"],
+            dimensions=[],
             targets={"entity": SemanticTargetSet(dimension="entity", values=count_entities, mode="explicit")},
             filters=filters,
-            output=SemanticOutputContract(kind="table"),
+            output=SemanticOutputContract(
+                kind="table",
+                cardinality="multi_scalar",
+                render_style="metric_table",
+                result_entities=count_entities,
+                source="deterministic_backup",
+                reason="Multiple independent DICOM counts requested.",
+            ),
             confidence=0.82,
             source="deterministic",
             rationale=text,
@@ -2026,7 +2075,14 @@ def _deterministic_sql_frame(text: str) -> SemanticFrame:
         dimensions=["modality"] if grouped and modalities else [],
         targets=targets,
         filters=filters,
-        output=SemanticOutputContract(kind="table" if grouped or intent == "aggregate_metric" else "scalar"),
+        output=SemanticOutputContract(
+            kind="table" if grouped or intent == "aggregate_metric" else "scalar",
+            cardinality="grouped" if grouped else "single",
+            render_style="metric_table" if grouped else "scalar",
+            result_entities=["patients"] if "patient" in text.lower() or "patieint" in text.lower() else [],
+            group_by=["modality"] if grouped and modalities else [],
+            source="deterministic_backup",
+        ),
         confidence=0.7,
         source="deterministic",
         rationale=text,
@@ -2661,7 +2717,7 @@ def _canonical_time_window(time_window: SemanticTimeWindow | None, goal: str, se
 
 
 def _canonical_output(frame: SemanticFrame) -> SemanticOutputContract:
-    """Infer the output contract implied by a semantic frame.
+    """Resolve the LLM-informed output contract implied by a semantic frame.
 
     Inputs:
         Receives a semantic frame.
@@ -2672,17 +2728,56 @@ def _canonical_output(frame: SemanticFrame) -> SemanticOutputContract:
     Used by:
         SemanticFrameCanonicalizer.
     """
-    if frame.output.kind not in {"unknown", None}:
-        if _has_multi_targets(frame) and frame.output.kind == "scalar":
-            return SemanticOutputContract(kind="table", format=frame.output.format)
-        return frame.output
-    if _has_multi_targets(frame) or frame.dimensions:
-        return SemanticOutputContract(kind="table")
-    if frame.intent in {"count", "aggregate_metric"}:
-        return SemanticOutputContract(kind="scalar")
-    if frame.intent == "status":
-        return SemanticOutputContract(kind="status")
-    return SemanticOutputContract(kind="unknown")
+    resolved = resolve_output_intent(
+        frame.rationale or "",
+        semantic_output=frame.output,
+        planner_expected_shape=frame.output.kind,
+        output_format=frame.output.format,
+    )
+    kind = resolved.kind
+    cardinality = resolved.cardinality
+    render_style = resolved.render_style
+    corrections = list(resolved.corrections)
+    if (_has_multi_targets(frame) or frame.dimensions) and kind == "scalar":
+        kind = "table"
+        corrections.append("semantic_dimensions_force_table")
+    if frame.dimensions and cardinality not in {"grouped", "sectioned"}:
+        cardinality = "grouped"
+        corrections.append("semantic_dimensions_force_grouped")
+    if _has_multi_targets(frame) and cardinality == "single":
+        cardinality = "multi_scalar"
+        corrections.append("semantic_targets_force_multi_scalar")
+    if frame.intent in {"count", "aggregate_metric"} and kind == "unknown":
+        kind = "scalar"
+        cardinality = "single"
+        render_style = "scalar"
+    if frame.intent == "status" and kind == "unknown":
+        kind = "status"
+        cardinality = "single"
+        render_style = "key_value"
+    if render_style == "unknown":
+        if cardinality in {"multi_scalar", "grouped"}:
+            render_style = "metric_table"
+        elif kind == "table":
+            render_style = "record_table"
+        elif kind == "scalar":
+            render_style = "scalar"
+        elif kind == "status":
+            render_style = "key_value"
+    group_by = list(resolved.group_by or tuple(frame.dimensions))
+    if frame.dimensions:
+        group_by = list(dict.fromkeys([*group_by, *frame.dimensions]))
+    return SemanticOutputContract(
+        kind=kind,
+        format=resolved.format,
+        cardinality=cardinality,
+        render_style=render_style,
+        result_entities=list(resolved.result_entities),
+        group_by=group_by,
+        source=resolved.source,
+        corrections=corrections,
+        reason=resolved.reason or frame.output.reason,
+    )
 
 
 def _has_multi_targets(frame: SemanticFrame) -> bool:
@@ -3003,8 +3098,8 @@ def _sql_query_for_frame(frame: SemanticFrame) -> str | None:
         SemanticFrameCompiler._compile_sql_query.
     """
     text = str(frame.rationale or "").lower()
-    count_entities = _target_set_values(frame.targets.get("entity"))
-    if frame.intent == "count" and frame.entity == "dicom_counts" and len(count_entities) > 1:
+    count_entities = _target_set_values(frame.targets.get("entity")) or [str(value) for value in frame.output.result_entities if str(value)]
+    if frame.intent == "count" and (frame.entity in {"dicom_counts", "dicom"} or frame.domain == "sql") and len(count_entities) > 1:
         return _dicom_multi_entity_count_query(count_entities)
     modalities = _target_set_values(frame.targets.get("modality"))
     concept_terms = _filter_values(frame, "concept_term")
