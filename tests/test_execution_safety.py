@@ -82,6 +82,8 @@ class DeleteFileCapability(BaseCapability):
         required_arguments=["path"],
         optional_arguments=[],
         output_schema={"deleted": {"type": "boolean"}},
+        execution_backend="gateway",
+        backend_operation="filesystem.delete_file",
         risk_level="high",
         read_only=False,
         mutates_state=True,
@@ -169,7 +171,7 @@ def test_safe_filesystem_read_is_allowed() -> None:
         ]
     )
 
-    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig())
+    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig(gateway_url="http://gateway"))
 
     assert isinstance(decision, SafetyDecision)
     assert decision.allowed is True
@@ -195,7 +197,7 @@ def test_unsafe_path_traversal_is_blocked() -> None:
         ]
     )
 
-    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig())
+    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig(gateway_url="http://gateway"))
 
     assert decision.allowed is False
     assert any("outside the workspace root" in reason.lower() for reason in decision.blocked_reasons)
@@ -217,7 +219,7 @@ def test_delete_requires_confirmation() -> None:
         ]
     )
 
-    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig())
+    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig(gateway_url="http://gateway"))
 
     assert decision.allowed is True
     assert decision.requires_confirmation is True
@@ -241,7 +243,7 @@ def test_shell_command_is_blocked_by_default() -> None:
         ]
     )
 
-    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig())
+    decision = evaluate_dag_safety(dag, _registry(), RuntimeConfig(gateway_url="http://gateway"))
 
     assert decision.allowed is False
     assert any("shell execution is disabled" in reason.lower() for reason in decision.blocked_reasons)

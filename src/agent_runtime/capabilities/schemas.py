@@ -23,6 +23,8 @@ class CapabilityManifest(BaseModel):
     required_arguments: list[str] = Field(default_factory=list)
     optional_arguments: list[str] = Field(default_factory=list)
     output_schema: dict[str, Any] = Field(default_factory=dict)
+    execution_backend: Literal["gateway", "local", "internal"] = "local"
+    backend_operation: str | None = None
     risk_level: Literal["low", "medium", "high", "critical"]
     read_only: bool
     mutates_state: bool

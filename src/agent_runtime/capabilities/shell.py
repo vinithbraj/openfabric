@@ -1,11 +1,11 @@
-"""Shell/system mock capability."""
+"""Gateway-backed shell/system capability manifests."""
 
-from agent_runtime.capabilities.base import BaseCapability
+from agent_runtime.capabilities.base import GatewayBackedCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
 
 
-class ShellInspectCapability(BaseCapability):
-    """Mock capability for read-only shell/system inspection."""
+class ShellInspectCapability(GatewayBackedCapability):
+    """Semantic capability for read-only shell/system inspection."""
 
     manifest = CapabilityManifest(
         capability_id="shell.inspect_system",
@@ -19,10 +19,12 @@ class ShellInspectCapability(BaseCapability):
         required_arguments=[],
         optional_arguments=["scope"],
         output_schema={"facts": {"type": "array"}},
+        execution_backend="gateway",
+        backend_operation="shell.inspect_system",
         risk_level="medium",
         read_only=True,
         mutates_state=False,
         requires_confirmation=False,
-        examples=[{"arguments": {"scope": "processes"}}],
-        safety_notes=["Read-only system inspection only."],
+        examples=[{"arguments": {"scope": "hostname"}}],
+        safety_notes=["Read-only system inspection through a gateway allowlist only."],
     )

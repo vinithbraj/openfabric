@@ -27,6 +27,8 @@ class ReadQueryCapability(BaseCapability):
         required_arguments=["query_intent"],
         optional_arguments=["limit"],
         output_schema={"query_plan": {"type": "object"}, "rows": {"type": "array"}},
+        execution_backend="local",
+        backend_operation="sql.read_query",
         risk_level="medium",
         read_only=True,
         mutates_state=False,

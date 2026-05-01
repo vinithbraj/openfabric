@@ -179,6 +179,22 @@ def _chat_chunk(response_id: str, model: str, created: int, delta: dict[str, Any
     return f"data: {json_dumps(payload)}\n\n"
 
 
+def _resolve_agent_gateway_settings(configured_settings: Settings) -> tuple[str, str | None]:
+    """Resolve gateway node and URL for the agent runtime bridge.
+
+    Used by:
+        ``create_app`` when building the gateway-backed execution config for the
+        schema-driven agent runtime.
+    """
+
+    default_node = str(configured_settings.resolved_default_node() or "localhost").strip() or "localhost"
+    try:
+        gateway_url = configured_settings.resolve_gateway_url(default_node)
+    except ValueError:
+        gateway_url = "http://127.0.0.1:8787" if default_node == "localhost" else None
+    return default_node, gateway_url
+
+
 def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | None = None) -> FastAPI:
     """Create the echo FastAPI application.
 
@@ -190,6 +206,7 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
     engine = ExecutionEngine(configured_settings)
     runtime = agent_runtime
     if runtime is None:
+        default_gateway_node, resolved_gateway_url = _resolve_agent_gateway_settings(configured_settings)
         registry = build_default_registry()
         result_store = InMemoryResultStore()
         execution_engine = AgentExecutionEngine(
@@ -198,6 +215,10 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
                 "workspace_root": str(configured_settings.workspace_root),
                 "allow_shell_execution": False,
                 "allow_network_operations": False,
+                "gateway_default_node": default_gateway_node,
+                "gateway_url": resolved_gateway_url,
+                "gateway_endpoints": dict(configured_settings.gateway_endpoints),
+                "gateway_timeout_seconds": configured_settings.gateway_timeout_seconds,
                 "max_output_preview_bytes": configured_settings.shell_max_output_chars,
                 "max_rows_returned": max(1, int(configured_settings.sql_row_limit or 100)),
                 "max_files_listed": 1000,

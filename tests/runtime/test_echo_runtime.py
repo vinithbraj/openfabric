@@ -21,6 +21,30 @@ def _client() -> TestClient:
     return TestClient(create_app(settings, agent_runtime=FakeAgentRuntime()))
 
 
+def test_create_app_defaults_agent_runtime_gateway_to_localhost() -> None:
+    settings = Settings(gateway_url=None, gateway_endpoints={}, default_node=None)
+
+    app = create_app(settings)
+
+    runtime = app.state.agent_runtime
+    assert runtime.execution_engine.safety_policy.config.gateway_default_node == "localhost"
+    assert runtime.execution_engine.safety_policy.config.gateway_url == "http://127.0.0.1:8787"
+
+
+def test_create_app_preserves_explicit_gateway_configuration() -> None:
+    settings = Settings(
+        gateway_url="http://gateway.example:9000",
+        gateway_endpoints={"worker-a": "http://gateway.worker-a:8787"},
+        default_node="worker-a",
+    )
+
+    app = create_app(settings)
+
+    runtime = app.state.agent_runtime
+    assert runtime.execution_engine.safety_policy.config.gateway_default_node == "worker-a"
+    assert runtime.execution_engine.safety_policy.config.gateway_url == "http://gateway.worker-a:8787"
+
+
 def test_extract_prompt_prefers_task_field() -> None:
     assert extract_prompt({"task": "hello", "prompt": "ignored"}) == "hello"
 

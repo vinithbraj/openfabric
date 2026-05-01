@@ -9,6 +9,7 @@ from agent_runtime.capabilities.registry import CapabilityRegistry
 from agent_runtime.core.config import RuntimeConfig
 from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult, ResultBundle
 from agent_runtime.execution.errors import ExecutionError
+from agent_runtime.execution.gateway_client import GatewayClient
 from agent_runtime.execution.result_store import InMemoryResultStore
 from agent_runtime.execution.safety import (
     SafetyDecision,
@@ -86,10 +87,12 @@ class ExecutionEngine:
         registry: CapabilityRegistry,
         safety_policy: RuntimeConfig | SafetyPolicy | dict[str, Any] | None = None,
         result_store: InMemoryResultStore | None = None,
+        gateway_client: GatewayClient | None = None,
     ) -> None:
         self.registry = registry
         self.safety_policy = _coerce_safety_policy(safety_policy)
         self.result_store = result_store or InMemoryResultStore()
+        self.gateway_client = gateway_client or GatewayClient(self.safety_policy.config)
 
     def _safety_bundle(
         self,
@@ -231,16 +234,22 @@ class ExecutionEngine:
             capability = self.registry.get(node.capability_id)
             runtime_policy.assert_allowed(capability, node.operation_id)
             try:
-                raw_result = capability.execute(
-                    node.arguments,
-                    {
-                        "node_id": node.id,
-                        "task_id": node.task_id,
-                        "execution_context": context,
-                        "result_store": self.result_store,
-                        "config": self.safety_policy.config,
-                    },
-                )
+                execution_context = {
+                    "node_id": node.id,
+                    "task_id": node.task_id,
+                    "execution_context": context,
+                    "result_store": self.result_store,
+                    "config": self.safety_policy.config,
+                }
+                if capability.manifest.execution_backend == "gateway":
+                    raw_result = self.gateway_client.invoke(
+                        node=node,
+                        capability=capability,
+                        arguments=dict(node.arguments),
+                        execution_context=context,
+                    )
+                else:
+                    raw_result = capability.execute(node.arguments, execution_context)
             except Exception as exc:
                 errored = ExecutionResult(
                     node_id=node.id,

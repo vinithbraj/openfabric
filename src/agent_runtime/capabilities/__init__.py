@@ -1,6 +1,6 @@
 """Capability contracts, mock capabilities, and registry."""
 
-from agent_runtime.capabilities.base import BaseCapability
+from agent_runtime.capabilities.base import BaseCapability, GatewayBackedCapability
 from agent_runtime.capabilities.filesystem import (
     ListDirectoryCapability,
     ReadFileCapability,
@@ -32,6 +32,7 @@ __all__ = [
     "build_default_registry",
     "CapabilityManifest",
     "CapabilityRegistry",
+    "GatewayBackedCapability",
     "ListDirectoryCapability",
     "MarkdownRenderCapability",
     "ReadFileCapability",

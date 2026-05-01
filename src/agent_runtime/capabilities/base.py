@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent_runtime.capabilities.schemas import CapabilityManifest
-from agent_runtime.core.errors import ValidationError
+from agent_runtime.core.errors import SafetyError, ValidationError
 from agent_runtime.core.types import ExecutionResult
 
 
@@ -50,4 +50,16 @@ class BaseCapability:
                 "arguments": validated,
             },
             metadata={"context": dict(context or {})},
+        )
+
+
+class GatewayBackedCapability(BaseCapability):
+    """Base class for semantic capabilities whose execution is delegated to the gateway."""
+
+    def execute(self, arguments: dict[str, Any], context: dict[str, Any]) -> ExecutionResult:
+        """Reject direct local execution for gateway-backed capabilities."""
+
+        _ = arguments, context
+        raise SafetyError(
+            f"gateway-backed capability must execute through engine routing: {self.manifest.capability_id}"
         )

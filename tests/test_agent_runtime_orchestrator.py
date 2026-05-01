@@ -5,9 +5,11 @@ from typing import Any
 
 from agent_runtime.capabilities import build_default_registry
 from agent_runtime.core.orchestrator import AgentRuntime
+from agent_runtime.core.types import ExecutionResult
 from agent_runtime.execution.engine import ExecutionEngine
 from agent_runtime.execution.result_store import InMemoryResultStore
 from agent_runtime.output_pipeline.orchestrator import OutputPipelineOrchestrator
+from gateway_agent.remote_runner import run_remote_operation
 
 
 class FakeLLMClient:
@@ -117,6 +119,24 @@ class FakeLLMClient:
         raise AssertionError(f"Unexpected prompt: {prompt}")
 
 
+class FakeGatewayClient:
+    def __init__(self, workspace_root: Path) -> None:
+        self.workspace_root = workspace_root
+
+    def invoke(self, *, node, capability, arguments, execution_context):
+        result = run_remote_operation(
+            capability.manifest.backend_operation or capability.manifest.capability_id,
+            arguments,
+            workspace_root=self.workspace_root,
+        )
+        return ExecutionResult(
+            node_id=node.id,
+            status="success",
+            data_preview=result["data_preview"],
+            metadata=result["metadata"],
+        )
+
+
 def _runtime(tmp_path: Path) -> AgentRuntime:
     registry = build_default_registry()
     store = InMemoryResultStore()
@@ -126,8 +146,10 @@ def _runtime(tmp_path: Path) -> AgentRuntime:
             "workspace_root": str(tmp_path),
             "allow_shell_execution": False,
             "allow_network_operations": False,
+            "gateway_url": "http://gateway",
         },
         store,
+        gateway_client=FakeGatewayClient(tmp_path),
     )
     return AgentRuntime(FakeLLMClient(), registry, engine, OutputPipelineOrchestrator())
 

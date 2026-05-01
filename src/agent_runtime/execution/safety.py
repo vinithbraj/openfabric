@@ -149,6 +149,12 @@ def _is_network_operation(capability: BaseCapability, node: ActionNode) -> bool:
     )
 
 
+def _is_environment_facing(manifest) -> bool:
+    """Return whether a capability touches the remote environment rather than in-memory data."""
+
+    return manifest.domain.strip().lower() in {"filesystem", "shell"}
+
+
 def _detect_sql_write(query: str) -> bool:
     """Return whether a SQL string appears to perform mutation."""
 
@@ -225,6 +231,20 @@ def evaluate_dag_safety(
         if node.operation_id != manifest.operation_id:
             blocked_reasons.append(
                 f"Operation {node.operation_id} is not declared by capability {manifest.capability_id}."
+            )
+            continue
+
+        if _is_environment_facing(manifest) and manifest.execution_backend != "gateway":
+            blocked_reasons.append(
+                f"Environment-facing capability must be gateway-backed: {manifest.capability_id}."
+            )
+            continue
+
+        if manifest.execution_backend == "gateway" and not (
+            config.gateway_url or config.gateway_endpoints
+        ):
+            blocked_reasons.append(
+                f"Gateway routing is not configured for {manifest.capability_id}."
             )
             continue
 

@@ -32,6 +32,8 @@ class MarkdownRenderCapability(BaseCapability):
         required_arguments=["input_ref", "render_type", "parameters"],
         optional_arguments=[],
         output_schema={"markdown": {"type": "string"}},
+        execution_backend="internal",
+        backend_operation="markdown.render",
         risk_level="low",
         read_only=True,
         mutates_state=False,

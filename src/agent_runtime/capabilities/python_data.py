@@ -32,6 +32,8 @@ class TransformTableCapability(BaseCapability):
         required_arguments=["input_ref", "operation", "parameters"],
         optional_arguments=[],
         output_schema={"rows": {"type": "array"}, "summary": {"type": "object"}},
+        execution_backend="local",
+        backend_operation="python_data.transform_table",
         risk_level="low",
         read_only=True,
         mutates_state=False,

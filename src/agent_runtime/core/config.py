@@ -17,6 +17,10 @@ class RuntimeConfig(BaseModel):
     workspace_root: str = "."
     allow_shell_execution: bool = False
     allow_network_operations: bool = False
+    gateway_default_node: str = "localhost"
+    gateway_url: str | None = None
+    gateway_endpoints: dict[str, str] = Field(default_factory=dict)
+    gateway_timeout_seconds: float = Field(default=30.0, gt=0.0)
     confirmation_granted: bool = False
     max_files_listed: int = Field(default=1000, gt=0)
     max_rows_returned: int = Field(default=100, gt=0)

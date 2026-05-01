@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agent_runtime.capabilities import CapabilityRegistry
-from agent_runtime.capabilities.base import BaseCapability
+from agent_runtime.capabilities.base import BaseCapability, GatewayBackedCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
 from agent_runtime.core.config import RuntimeConfig
 from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult
@@ -133,6 +133,51 @@ class LargeOutputCapability(BaseCapability):
             node_id=str(context.get("node_id") or ""),
             status="success",
             data_preview={"blob": "x" * 200},
+        )
+
+
+class GatewayListCapability(GatewayBackedCapability):
+    manifest = CapabilityManifest(
+        capability_id="filesystem.list_directory",
+        domain="filesystem",
+        operation_id="list_directory",
+        name="Gateway List Directory",
+        description="List directory via gateway.",
+        semantic_verbs=["read"],
+        object_types=["filesystem"],
+        argument_schema={"path": {"type": "string"}},
+        required_arguments=["path"],
+        optional_arguments=["limit"],
+        output_schema={"entries": {"type": "array"}},
+        execution_backend="gateway",
+        backend_operation="filesystem.list_directory",
+        risk_level="low",
+        read_only=True,
+        mutates_state=False,
+        requires_confirmation=False,
+        examples=[{"arguments": {"path": "."}}],
+        safety_notes=[],
+    )
+
+
+class FakeGatewayClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def invoke(self, *, node, capability, arguments, execution_context) -> ExecutionResult:
+        self.calls.append(
+            {
+                "node_id": node.id,
+                "capability_id": capability.manifest.capability_id,
+                "arguments": dict(arguments),
+                "execution_context": dict(execution_context),
+            }
+        )
+        return ExecutionResult(
+            node_id=node.id,
+            status="success",
+            data_preview={"entries": [{"name": "README.md", "path": "README.md"}]},
+            metadata={"transport": "gateway"},
         )
 
 
@@ -306,3 +351,34 @@ def test_large_output_is_stored_by_reference() -> None:
     assert result.data_preview is not None
     assert result.data_preview["truncated"] is True
     assert store.get(result.data_ref) == {"blob": "x" * 200}
+
+
+def test_gateway_backed_node_executes_through_gateway_client() -> None:
+    registry = CapabilityRegistry()
+    registry.register(GatewayListCapability())
+    gateway_client = FakeGatewayClient()
+    engine = ExecutionEngine(
+        registry,
+        RuntimeConfig(workspace_root=".", gateway_url="http://gateway"),
+        gateway_client=gateway_client,
+    )
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-gateway",
+                task_id="task-gateway",
+                description="list files remotely",
+                semantic_verb="read",
+                capability_id="filesystem.list_directory",
+                operation_id="list_directory",
+                arguments={"path": "."},
+                safety_labels=[],
+            )
+        ]
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True})
+
+    assert bundle.status == "success"
+    assert bundle.results[0].metadata["transport"] == "gateway"
+    assert gateway_client.calls[0]["capability_id"] == "filesystem.list_directory"

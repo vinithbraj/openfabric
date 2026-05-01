@@ -78,4 +78,6 @@ def test_export_llm_manifest_is_compact_and_safe() -> None:
     assert "argument_schema" not in first
     assert "output_schema" not in first
     assert "safety_notes" not in first
+    assert "execution_backend" not in first
+    assert "backend_operation" not in first
     assert first["read_only"] is True
