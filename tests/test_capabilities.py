@@ -167,23 +167,26 @@ def test_sql_read_query_accepts_structured_read_only_intent() -> None:
 def test_python_data_transform_table_applies_deterministic_operations(tmp_path: Path) -> None:
     store = InMemoryResultStore()
     input_ref = store.put(
+        "node-source",
         [
             {"name": "b", "value": 2},
             {"name": "a", "value": 1},
             {"name": "c", "value": 3},
-        ]
+        ],
+        "table",
+        {},
     )
     context = _context(tmp_path, store)
 
     head_result = TransformTableCapability().execute(
-        {"input_ref": input_ref, "operation": "head", "parameters": {"count": 2}},
+        {"input_ref": input_ref.ref_id, "operation": "head", "parameters": {"count": 2}},
         context,
     )
     assert head_result.data_preview["row_count"] == 2
 
     aggregate_result = TransformTableCapability().execute(
         {
-            "input_ref": input_ref,
+            "input_ref": input_ref.ref_id,
             "operation": "aggregate",
             "parameters": {"metric": "sum", "column": "value"},
         },
@@ -195,13 +198,16 @@ def test_python_data_transform_table_applies_deterministic_operations(tmp_path: 
 def test_markdown_render_outputs_markdown_from_input_ref(tmp_path: Path) -> None:
     store = InMemoryResultStore()
     input_ref = store.put(
-        {"rows": [{"name": "alice", "score": 10}, {"name": "bob", "score": 8}]}
+        "node-markdown",
+        {"rows": [{"name": "alice", "score": 10}, {"name": "bob", "score": 8}]},
+        "table",
+        {},
     )
     context = _context(tmp_path, store)
 
     table_result = MarkdownRenderCapability().execute(
         {
-            "input_ref": input_ref,
+            "input_ref": input_ref.ref_id,
             "render_type": "table",
             "parameters": {"title": "Scores"},
         },
@@ -211,7 +217,7 @@ def test_markdown_render_outputs_markdown_from_input_ref(tmp_path: Path) -> None
 
     list_result = MarkdownRenderCapability().execute(
         {
-            "input_ref": input_ref,
+            "input_ref": input_ref.ref_id,
             "render_type": "summary",
             "parameters": {"title": "Summary"},
         },

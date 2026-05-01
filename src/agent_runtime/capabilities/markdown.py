@@ -8,7 +8,7 @@ from typing import Any
 from agent_runtime.capabilities.base import BaseCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
 from agent_runtime.core.errors import ValidationError
-from agent_runtime.core.types import ExecutionResult
+from agent_runtime.core.types import DataRef, ExecutionResult
 
 RENDER_TYPES = {"table", "summary", "code_block", "list"}
 
@@ -58,7 +58,13 @@ class MarkdownRenderCapability(BaseCapability):
         if result_store is None:
             raise ValidationError("result_store is required for markdown rendering.")
 
-        input_data = result_store.get(str(validated["input_ref"]))
+        input_value = validated["input_ref"]
+        if isinstance(input_value, DataRef):
+            input_data = result_store.get(input_value.ref_id)
+        elif isinstance(input_value, str):
+            input_data = result_store.get(input_value)
+        else:
+            input_data = input_value
         render_type = str(validated["render_type"])
         parameters = dict(validated["parameters"] or {})
         if render_type not in RENDER_TYPES:

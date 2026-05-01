@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
 
 from agent_runtime.capabilities.registry import CapabilityRegistry
 from agent_runtime.core.errors import ValidationError
-from agent_runtime.core.types import ActionDAG, ActionNode, TaskFrame, UserRequest
+from agent_runtime.core.types import ActionDAG, ActionNode, InputRef, TaskFrame, UserRequest
 from agent_runtime.input_pipeline.argument_extraction import ArgumentExtractionResult
 from agent_runtime.input_pipeline.decomposition import DecompositionResult
 from agent_runtime.input_pipeline.domain_selection import CapabilitySelectionResult
@@ -35,6 +36,75 @@ def _node_id_for_task(task_id: str) -> str:
     """Map one task id to one deterministic action node id."""
 
     return f"node::{task_id}"
+
+
+_INPUT_REF_PATTERN = re.compile(r"^(?P<source>[A-Za-z0-9_:\-]+)\.(?P<output>[A-Za-z0-9_:\-]+)$")
+
+
+def _normalize_string_input_ref(
+    raw_value: str,
+    known_task_ids: set[str],
+    known_node_ids: set[str],
+) -> InputRef | str:
+    """Convert one deterministic string reference into a typed InputRef when valid."""
+
+    match = _INPUT_REF_PATTERN.match(str(raw_value or "").strip())
+    if match is None:
+        return raw_value
+
+    source = match.group("source")
+    output = match.group("output")
+    if source in known_task_ids:
+        source_node_id = _node_id_for_task(source)
+    elif source in known_node_ids:
+        source_node_id = source
+    else:
+        return raw_value
+
+    return InputRef(
+        source_node_id=source_node_id,
+        output_key=None if output == "output" else output,
+    )
+
+
+def _normalize_argument_value(
+    argument_name: str,
+    value: Any,
+    known_task_ids: set[str],
+    known_node_ids: set[str],
+) -> Any:
+    """Normalize nested input references only for explicit ref-shaped argument slots."""
+
+    if isinstance(value, InputRef):
+        return value
+    if isinstance(value, list):
+        return [
+            _normalize_argument_value(argument_name, item, known_task_ids, known_node_ids)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _normalize_argument_value(key, item, known_task_ids, known_node_ids)
+            for key, item in value.items()
+        }
+    if isinstance(value, str) and (
+        argument_name == "input_ref" or argument_name.endswith("_ref")
+    ):
+        return _normalize_string_input_ref(value, known_task_ids, known_node_ids)
+    return value
+
+
+def _normalize_arguments(
+    arguments: dict[str, Any],
+    known_task_ids: set[str],
+    known_node_ids: set[str],
+) -> dict[str, Any]:
+    """Normalize argument values that represent typed dataflow references."""
+
+    return {
+        key: _normalize_argument_value(key, value, known_task_ids, known_node_ids)
+        for key, value in dict(arguments).items()
+    }
 
 
 def _build_safety_labels(task: TaskFrame, manifest: Any) -> list[str]:
@@ -78,6 +148,8 @@ def build_action_dag(
     nodes: list[ActionNode] = []
     edges: list[tuple[str, str]] = []
     dag_requires_confirmation = False
+    known_task_ids = set(task_by_id)
+    known_node_ids = {_node_id_for_task(task_id) for task_id in known_task_ids}
 
     for task in tasks:
         selection = selections_by_task.get(task.id)
@@ -116,7 +188,12 @@ def build_action_dag(
                 f"{', '.join(extraction.missing_required_arguments)}"
             )
 
-        validated_arguments = capability.validate_arguments(extraction.arguments)
+        normalized_arguments = _normalize_arguments(
+            extraction.arguments,
+            known_task_ids,
+            known_node_ids,
+        )
+        validated_arguments = capability.validate_arguments(normalized_arguments)
         node_id = _node_id_for_task(task.id)
         dependency_node_ids = [_node_id_for_task(dependency) for dependency in task.dependencies]
         labels = _build_safety_labels(task, manifest)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -79,6 +80,61 @@ class CapabilityRef(BaseModel):
     reason: str
 
 
+class DataRef(BaseModel):
+    """Typed handle for one stored execution payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref_id: str
+    producer_node_id: str
+    data_type: str
+    preview: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InputRef(BaseModel):
+    """Typed reference from one node argument to another node's output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_node_id: str
+    output_key: str | None = None
+    expected_data_type: str | None = None
+
+
+def _coerce_input_ref_values(value: Any) -> Any:
+    """Recursively coerce explicit InputRef-shaped dictionaries."""
+
+    if isinstance(value, InputRef):
+        return value
+    if isinstance(value, list):
+        return [_coerce_input_ref_values(item) for item in value]
+    if isinstance(value, dict):
+        keys = set(value.keys())
+        if "source_node_id" in keys and keys <= {"source_node_id", "output_key", "expected_data_type"}:
+            return InputRef.model_validate(value)
+        return {key: _coerce_input_ref_values(item) for key, item in value.items()}
+    return value
+
+
+def _iter_input_refs(value: Any) -> list[InputRef]:
+    """Return every nested InputRef found within one argument value."""
+
+    if isinstance(value, InputRef):
+        return [value]
+    if isinstance(value, list):
+        refs: list[InputRef] = []
+        for item in value:
+            refs.extend(_iter_input_refs(item))
+        return refs
+    if isinstance(value, dict):
+        refs = []
+        for item in value.values():
+            refs.extend(_iter_input_refs(item))
+        return refs
+    return []
+
+
 class ActionNode(BaseModel):
     """Executable DAG node after capability selection."""
 
@@ -94,6 +150,22 @@ class ActionNode(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     safety_labels: list[str] = Field(default_factory=list)
     dry_run: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_argument_refs(cls, values: Any) -> Any:
+        """Coerce explicit InputRef payloads nested inside node arguments."""
+
+        if not isinstance(values, dict):
+            return values
+        arguments = values.get("arguments")
+        if isinstance(arguments, dict):
+            values = dict(values)
+            values["arguments"] = {
+                key: _coerce_input_ref_values(argument_value)
+                for key, argument_value in arguments.items()
+            }
+        return values
 
     @property
     def is_unresolved(self) -> bool:
@@ -146,6 +218,18 @@ class ActionDAG(BaseModel):
             adjacency[source].add(target)
 
         _assert_acyclic(adjacency)
+        ancestors = _ancestor_map(adjacency)
+        for node in self.nodes:
+            for argument_key, argument_value in node.arguments.items():
+                for input_ref in _iter_input_refs(argument_value):
+                    if input_ref.source_node_id not in unique_node_ids:
+                        raise ValueError(
+                            f"Action node {node.id} references unknown producer node {input_ref.source_node_id}."
+                        )
+                    if input_ref.source_node_id not in ancestors.get(node.id, set()):
+                        raise ValueError(
+                            f"Action node {node.id} references non-dependency producer node {input_ref.source_node_id}."
+                        )
         return self
 
 
@@ -170,6 +254,35 @@ def _assert_acyclic(adjacency: dict[str, set[str]]) -> None:
         visit(candidate_id)
 
 
+def _reverse_adjacency(adjacency: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Build reverse edges for one DAG adjacency map."""
+
+    reverse: dict[str, set[str]] = {node_id: set() for node_id in adjacency}
+    for source, children in adjacency.items():
+        for child in children:
+            reverse[child].add(source)
+    return reverse
+
+
+def _ancestor_map(adjacency: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Return transitive ancestors for every node id in one DAG."""
+
+    reverse = _reverse_adjacency(adjacency)
+    cache: dict[str, set[str]] = {}
+
+    def visit(node_id: str) -> set[str]:
+        if node_id in cache:
+            return cache[node_id]
+        ancestors: set[str] = set()
+        for parent_id in reverse.get(node_id, set()):
+            ancestors.add(parent_id)
+            ancestors.update(visit(parent_id))
+        cache[node_id] = ancestors
+        return ancestors
+
+    return {node_id: visit(node_id) for node_id in adjacency}
+
+
 class ExecutionResult(BaseModel):
     """Normalized result for one executed action node."""
 
@@ -177,7 +290,7 @@ class ExecutionResult(BaseModel):
 
     node_id: str
     status: ExecutionStatus
-    data_ref: str | None = None
+    data_ref: DataRef | None = None
     data_preview: dict[str, Any] | None = None
     error: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

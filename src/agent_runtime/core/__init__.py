@@ -4,13 +4,15 @@ from agent_runtime.core.config import RuntimeConfig
 from agent_runtime.core.errors import AgentRuntimeError
 from agent_runtime.core.ids import new_id
 from agent_runtime.core.orchestrator import AgentRuntime
-from agent_runtime.core.types import ActionDAG, ActionNode, TaskFrame, UserRequest
+from agent_runtime.core.types import ActionDAG, ActionNode, DataRef, InputRef, TaskFrame, UserRequest
 
 __all__ = [
     "ActionDAG",
     "AgentRuntimeError",
     "AgentRuntime",
     "ActionNode",
+    "DataRef",
+    "InputRef",
     "RuntimeConfig",
     "TaskFrame",
     "UserRequest",

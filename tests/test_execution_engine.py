@@ -4,7 +4,7 @@ from agent_runtime.capabilities import CapabilityRegistry
 from agent_runtime.capabilities.base import BaseCapability, GatewayBackedCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
 from agent_runtime.core.config import RuntimeConfig
-from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult
+from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult, InputRef
 from agent_runtime.execution.engine import ExecutionEngine
 from agent_runtime.execution.result_store import InMemoryResultStore
 
@@ -181,6 +181,102 @@ class FakeGatewayClient:
         )
 
 
+class ProduceRowsCapability(BaseCapability):
+    manifest = CapabilityManifest(
+        capability_id="produce.rows",
+        domain="generic",
+        operation_id="read",
+        name="Produce Rows",
+        description="Produce tabular rows for downstream tests.",
+        semantic_verbs=["read"],
+        object_types=["table"],
+        argument_schema={"rows": {"type": "array"}},
+        required_arguments=["rows"],
+        optional_arguments=[],
+        output_schema={"rows": {"type": "array"}},
+        risk_level="low",
+        read_only=True,
+        mutates_state=False,
+        requires_confirmation=False,
+        examples=[{"arguments": {"rows": [{"value": 1}]}}],
+        safety_notes=[],
+    )
+
+    def execute(self, arguments: dict[str, object], context: dict[str, object]) -> ExecutionResult:
+        validated = self.validate_arguments(arguments)
+        return ExecutionResult(
+            node_id=str(context.get("node_id") or ""),
+            status="success",
+            data_preview={"rows": list(validated["rows"])},
+            metadata={"data_type": "table"},
+        )
+
+
+class CountRowsCapability(BaseCapability):
+    manifest = CapabilityManifest(
+        capability_id="count.rows",
+        domain="generic",
+        operation_id="analyze",
+        name="Count Rows",
+        description="Count rows from resolved upstream input.",
+        semantic_verbs=["analyze"],
+        object_types=["table", "summary"],
+        argument_schema={"input_ref": {"type": "string"}},
+        required_arguments=["input_ref"],
+        optional_arguments=[],
+        output_schema={"value": {"type": "integer"}},
+        risk_level="low",
+        read_only=True,
+        mutates_state=False,
+        requires_confirmation=False,
+        examples=[{"arguments": {"input_ref": "node-a.output"}}],
+        safety_notes=[],
+    )
+
+    def execute(self, arguments: dict[str, object], context: dict[str, object]) -> ExecutionResult:
+        validated = self.validate_arguments(arguments)
+        input_data = validated["input_ref"]
+        if not isinstance(input_data, dict) or not isinstance(input_data.get("rows"), list):
+            raise RuntimeError("resolved input_ref did not produce row data")
+        return ExecutionResult(
+            node_id=str(context.get("node_id") or ""),
+            status="success",
+            data_preview={"value": len(input_data["rows"])},
+            metadata={"data_type": "scalar"},
+        )
+
+
+class FormatValueCapability(BaseCapability):
+    manifest = CapabilityManifest(
+        capability_id="format.value",
+        domain="generic",
+        operation_id="render",
+        name="Format Value",
+        description="Format one upstream scalar value.",
+        semantic_verbs=["render"],
+        object_types=["summary"],
+        argument_schema={"input_ref": {"type": "string"}},
+        required_arguments=["input_ref"],
+        optional_arguments=[],
+        output_schema={"text": {"type": "string"}},
+        risk_level="low",
+        read_only=True,
+        mutates_state=False,
+        requires_confirmation=False,
+        examples=[{"arguments": {"input_ref": "node-b.value"}}],
+        safety_notes=[],
+    )
+
+    def execute(self, arguments: dict[str, object], context: dict[str, object]) -> ExecutionResult:
+        validated = self.validate_arguments(arguments)
+        return ExecutionResult(
+            node_id=str(context.get("node_id") or ""),
+            status="success",
+            data_preview={"text": f"count={validated['input_ref']}"},
+            metadata={"data_type": "text"},
+        )
+
+
 def _registry() -> tuple[CapabilityRegistry, CountingReadCapability, FailingCapability, DeleteCapability, LargeOutputCapability]:
     registry = CapabilityRegistry()
     counting = CountingReadCapability()
@@ -350,7 +446,7 @@ def test_large_output_is_stored_by_reference() -> None:
     assert result.data_ref is not None
     assert result.data_preview is not None
     assert result.data_preview["truncated"] is True
-    assert store.get(result.data_ref) == {"blob": "x" * 200}
+    assert store.get(result.data_ref.ref_id) == {"blob": "x" * 200}
 
 
 def test_gateway_backed_node_executes_through_gateway_client() -> None:
@@ -382,3 +478,168 @@ def test_gateway_backed_node_executes_through_gateway_client() -> None:
     assert bundle.status == "success"
     assert bundle.results[0].metadata["transport"] == "gateway"
     assert gateway_client.calls[0]["capability_id"] == "filesystem.list_directory"
+
+
+def test_node_b_consumes_node_a_output_successfully() -> None:
+    registry = CapabilityRegistry()
+    registry.register(ProduceRowsCapability())
+    registry.register(CountRowsCapability())
+    engine = ExecutionEngine(registry)
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-a",
+                task_id="task-a",
+                description="produce rows",
+                semantic_verb="read",
+                capability_id="produce.rows",
+                operation_id="read",
+                arguments={"rows": [{"value": 1}, {"value": 2}]},
+                safety_labels=[],
+            ),
+            ActionNode(
+                id="node-b",
+                task_id="task-b",
+                description="count rows",
+                semantic_verb="analyze",
+                capability_id="count.rows",
+                operation_id="analyze",
+                arguments={"input_ref": InputRef(source_node_id="node-a", expected_data_type="table")},
+                depends_on=["node-a"],
+                safety_labels=[],
+            ),
+        ],
+        edges=[("node-a", "node-b")],
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True})
+
+    assert bundle.status == "success"
+    assert bundle.results[1].data_preview == {"value": 2}
+
+
+def test_node_c_consumes_node_b_output_successfully() -> None:
+    registry = CapabilityRegistry()
+    registry.register(ProduceRowsCapability())
+    registry.register(CountRowsCapability())
+    registry.register(FormatValueCapability())
+    engine = ExecutionEngine(registry)
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-a",
+                task_id="task-a",
+                description="produce rows",
+                semantic_verb="read",
+                capability_id="produce.rows",
+                operation_id="read",
+                arguments={"rows": [{"value": 1}, {"value": 2}, {"value": 3}]},
+                safety_labels=[],
+            ),
+            ActionNode(
+                id="node-b",
+                task_id="task-b",
+                description="count rows",
+                semantic_verb="analyze",
+                capability_id="count.rows",
+                operation_id="analyze",
+                arguments={"input_ref": InputRef(source_node_id="node-a", expected_data_type="table")},
+                depends_on=["node-a"],
+                safety_labels=[],
+            ),
+            ActionNode(
+                id="node-c",
+                task_id="task-c",
+                description="format count",
+                semantic_verb="render",
+                capability_id="format.value",
+                operation_id="render",
+                arguments={"input_ref": InputRef(source_node_id="node-b", output_key="value", expected_data_type="scalar")},
+                depends_on=["node-b"],
+                safety_labels=[],
+            ),
+        ],
+        edges=[("node-a", "node-b"), ("node-b", "node-c")],
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True})
+
+    assert bundle.status == "success"
+    assert bundle.results[2].data_preview == {"text": "count=3"}
+
+
+def test_input_ref_to_failed_node_causes_dependent_skip() -> None:
+    registry = CapabilityRegistry()
+    registry.register(FailingCapability())
+    registry.register(CountRowsCapability())
+    engine = ExecutionEngine(registry)
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-fail",
+                task_id="task-fail",
+                description="fail first",
+                semantic_verb="read",
+                capability_id="counting.fail",
+                operation_id="read",
+                arguments={"value": "x"},
+                safety_labels=[],
+            ),
+            ActionNode(
+                id="node-b",
+                task_id="task-b",
+                description="count rows",
+                semantic_verb="analyze",
+                capability_id="count.rows",
+                operation_id="analyze",
+                arguments={"input_ref": InputRef(source_node_id="node-fail", expected_data_type="table")},
+                depends_on=["node-fail"],
+                safety_labels=[],
+            ),
+        ],
+        edges=[("node-fail", "node-b")],
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True, "stop_on_error": False})
+
+    assert bundle.results[0].status == "error"
+    assert bundle.results[1].status == "skipped"
+
+
+def test_input_ref_data_type_mismatch_is_rejected() -> None:
+    registry = CapabilityRegistry()
+    registry.register(ProduceRowsCapability())
+    registry.register(CountRowsCapability())
+    engine = ExecutionEngine(registry)
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-a",
+                task_id="task-a",
+                description="produce rows",
+                semantic_verb="read",
+                capability_id="produce.rows",
+                operation_id="read",
+                arguments={"rows": [{"value": 1}]},
+                safety_labels=[],
+            ),
+            ActionNode(
+                id="node-b",
+                task_id="task-b",
+                description="count rows",
+                semantic_verb="analyze",
+                capability_id="count.rows",
+                operation_id="analyze",
+                arguments={"input_ref": InputRef(source_node_id="node-a", expected_data_type="scalar")},
+                depends_on=["node-a"],
+                safety_labels=[],
+            ),
+        ],
+        edges=[("node-a", "node-b")],
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True, "stop_on_error": False})
+
+    assert bundle.status == "partial"
+    assert bundle.results[1].status == "error"
+    assert "expected data_type" in (bundle.results[1].error or "")

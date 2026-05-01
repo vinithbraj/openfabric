@@ -8,7 +8,7 @@ from typing import Any
 from agent_runtime.capabilities.base import BaseCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
 from agent_runtime.core.errors import ValidationError
-from agent_runtime.core.types import ExecutionResult
+from agent_runtime.core.types import DataRef, ExecutionResult
 
 ALLOWED_OPERATIONS = {"head", "select_columns", "sort", "filter", "aggregate"}
 
@@ -58,7 +58,13 @@ class TransformTableCapability(BaseCapability):
         if result_store is None:
             raise ValidationError("result_store is required for table transformations.")
 
-        input_data = result_store.get(str(validated["input_ref"]))
+        input_value = validated["input_ref"]
+        if isinstance(input_value, DataRef):
+            input_data = result_store.get(input_value.ref_id)
+        elif isinstance(input_value, str):
+            input_data = result_store.get(input_value)
+        else:
+            input_data = input_value
         rows = _extract_rows(input_data)
         operation = str(validated["operation"])
         parameters = dict(validated["parameters"] or {})

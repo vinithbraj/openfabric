@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from agent_runtime.core.errors import ValidationError
-from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult, ResultBundle, UserRequest
+from agent_runtime.core.types import ActionDAG, ActionNode, DataRef, ExecutionResult, ResultBundle, UserRequest
 from agent_runtime.execution.result_store import InMemoryResultStore
 from agent_runtime.output_pipeline.display_selection import (
     DisplaySelectionInput,
@@ -250,3 +250,42 @@ def test_display_plan_cannot_reference_missing_data() -> None:
 
     with pytest.raises(ValidationError, match="missing node_id"):
         select_display_plan(selection_input, llm)
+
+
+def test_output_planning_sees_safe_previews_not_full_data() -> None:
+    store = InMemoryResultStore()
+    full_payload = {"blob": "x" * 5000}
+    data_ref = store.put("node-1", full_payload, "object", {})
+    bundle = ResultBundle(
+        dag_id="dag-1",
+        status="success",
+        results=[
+            ExecutionResult(
+                node_id="node-1",
+                status="success",
+                data_ref=DataRef.model_validate(data_ref.model_dump()),
+                data_preview={"preview_text": "x" * 64, "truncated": True, "bytes": 5000},
+            )
+        ],
+    )
+    llm = FakeLLMClient(
+        {
+            "display_type": "plain_text",
+            "title": "Preview",
+            "sections": [
+                {
+                    "title": "Preview",
+                    "display_type": "plain_text",
+                    "source_node_id": "node-1",
+                }
+            ],
+            "constraints": {},
+            "redaction_policy": "standard",
+        }
+    )
+
+    compose_output(_request(store=store, allow_full=False), _dag(), bundle, llm)
+
+    assert "preview_text" in llm.last_prompt
+    assert '"blob"' not in llm.last_prompt
+    assert "x" * 5000 not in llm.last_prompt

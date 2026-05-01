@@ -11,7 +11,7 @@ from agent_runtime.capabilities import (
 from agent_runtime.capabilities.base import BaseCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
 from agent_runtime.core.errors import ValidationError
-from agent_runtime.core.types import CapabilityRef, TaskFrame, UserRequest
+from agent_runtime.core.types import ActionDAG, ActionNode, CapabilityRef, InputRef, TaskFrame, UserRequest
 from agent_runtime.input_pipeline.argument_extraction import ArgumentExtractionResult
 from agent_runtime.input_pipeline.dag_builder import DAGBuilder, build_action_dag
 from agent_runtime.input_pipeline.decomposition import DecompositionResult
@@ -256,6 +256,95 @@ def test_build_action_dag_rejects_unresolved_capability() -> None:
             decomposition,
             [_selection("task-unknown", "unknown", "unknown", unresolved_reason="No safe capability matched.")],
             [_arguments("task-unknown", "unknown", "unknown", {})],
+        )
+
+
+def test_build_action_dag_normalizes_string_input_refs() -> None:
+    registry = _registry()
+    decomposition = DecompositionResult(
+        tasks=[
+            _task("task-source", "Read README.md", "read", "file"),
+            _task("task-render", "Render README as markdown", "render", "markdown", dependencies=["task-source"]),
+        ],
+        global_constraints={},
+    )
+
+    dag = build_action_dag(
+        _request(registry),
+        decomposition,
+        [
+            _selection("task-source", "filesystem.read_file", "read_file"),
+            _selection("task-render", "markdown.render", "render"),
+        ],
+        [
+            _arguments("task-source", "filesystem.read_file", "read_file", {"path": "README.md"}),
+            _arguments(
+                "task-render",
+                "markdown.render",
+                "render",
+                {"input_ref": "task-source.output", "render_type": "summary", "parameters": {}},
+            ),
+        ],
+    )
+
+    assert dag.nodes[1].arguments["input_ref"] == InputRef(source_node_id="node::task-source")
+
+
+def test_input_ref_to_nonexistent_node_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown producer node"):
+        ActionDAG(
+            nodes=[
+                ActionNode(
+                    id="node-a",
+                    task_id="task-a",
+                    description="render output",
+                    semantic_verb="render",
+                    capability_id="markdown.render",
+                    operation_id="render",
+                    arguments={"input_ref": InputRef(source_node_id="node-missing")},
+                    safety_labels=[],
+                )
+            ]
+        )
+
+
+def test_input_ref_to_non_dependency_node_is_rejected() -> None:
+    with pytest.raises(ValueError, match="non-dependency producer node"):
+        ActionDAG(
+            nodes=[
+                ActionNode(
+                    id="node-a",
+                    task_id="task-a",
+                    description="source",
+                    semantic_verb="read",
+                    capability_id="filesystem.read_file",
+                    operation_id="read_file",
+                    arguments={"path": "README.md"},
+                    safety_labels=[],
+                ),
+                ActionNode(
+                    id="node-b",
+                    task_id="task-b",
+                    description="other source",
+                    semantic_verb="read",
+                    capability_id="filesystem.read_file",
+                    operation_id="read_file",
+                    arguments={"path": "README.md"},
+                    safety_labels=[],
+                ),
+                ActionNode(
+                    id="node-c",
+                    task_id="task-c",
+                    description="render",
+                    semantic_verb="render",
+                    capability_id="markdown.render",
+                    operation_id="render",
+                    arguments={"input_ref": InputRef(source_node_id="node-a")},
+                    depends_on=["node-b"],
+                    safety_labels=[],
+                ),
+            ],
+            edges=[("node-b", "node-c")],
         )
 
 

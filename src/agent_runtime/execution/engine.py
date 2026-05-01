@@ -7,7 +7,8 @@ from typing import Any
 
 from agent_runtime.capabilities.registry import CapabilityRegistry
 from agent_runtime.core.config import RuntimeConfig
-from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult, ResultBundle
+from agent_runtime.core.errors import ValidationError
+from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult, InputRef, ResultBundle
 from agent_runtime.execution.errors import ExecutionError
 from agent_runtime.execution.gateway_client import GatewayClient
 from agent_runtime.execution.result_store import InMemoryResultStore
@@ -79,6 +80,64 @@ def _dependency_ids(node: ActionNode, dag: ActionDAG) -> set[str]:
     return dependencies
 
 
+def _all_dependency_ids(node_id: str, dag: ActionDAG) -> set[str]:
+    """Return the full transitive dependency chain for one node id."""
+
+    parents_by_node: dict[str, set[str]] = {node.id: set(node.depends_on) for node in dag.nodes}
+    for source, target in dag.edges:
+        parents_by_node.setdefault(target, set()).add(source)
+
+    ancestors: set[str] = set()
+    frontier = list(parents_by_node.get(node_id, set()))
+    while frontier:
+        current = frontier.pop()
+        if current in ancestors:
+            continue
+        ancestors.add(current)
+        frontier.extend(parent for parent in parents_by_node.get(current, set()) if parent not in ancestors)
+    return ancestors
+
+
+def _iter_input_refs(value: Any) -> list[InputRef]:
+    """Return all nested InputRef instances from one value."""
+
+    if isinstance(value, InputRef):
+        return [value]
+    if isinstance(value, list):
+        refs: list[InputRef] = []
+        for item in value:
+            refs.extend(_iter_input_refs(item))
+        return refs
+    if isinstance(value, dict):
+        refs = []
+        for item in value.values():
+            refs.extend(_iter_input_refs(item))
+        return refs
+    return []
+
+
+def _infer_data_type(result: ExecutionResult, node: ActionNode) -> str:
+    """Infer a coarse data type for one successful execution payload."""
+
+    if isinstance(result.metadata.get("data_type"), str) and result.metadata["data_type"].strip():
+        return str(result.metadata["data_type"]).strip()
+
+    preview = result.data_preview
+    if isinstance(preview, dict):
+        if any(key in preview for key in {"rows", "entries", "matches", "processes", "listeners"}):
+            return "table"
+        if any(key in preview for key in {"content_preview", "markdown", "stdout_lines", "stderr_lines"}):
+            return "text"
+        if "summary" in preview:
+            return "summary"
+        if "value" in preview:
+            return "scalar"
+        return "object"
+    if isinstance(preview, list):
+        return "list"
+    return f"{node.capability_id}.output"
+
+
 class ExecutionEngine:
     """Execute a typed DAG through registered capabilities."""
 
@@ -132,10 +191,16 @@ class ExecutionEngine:
                 preview_source,
                 self.safety_policy.config.max_output_preview_bytes,
             )
-            if safe_preview != preview_source or (
-                isinstance(safe_preview, dict) and safe_preview.get("truncated") is True
-            ):
-                data_ref = self.result_store.put(preview_source)
+            data_ref = self.result_store.put(
+                node.id,
+                preview_source,
+                _infer_data_type(raw_result, node),
+                metadata={
+                    "capability_id": node.capability_id,
+                    "operation_id": node.operation_id,
+                    **dict(raw_result.metadata),
+                },
+            )
 
         normalized_metadata = {
             "capability_id": node.capability_id,
@@ -153,6 +218,53 @@ class ExecutionEngine:
         )
         self.result_store.add(normalized)
         return normalized
+
+    def _resolve_argument_value(
+        self,
+        value: Any,
+        node: ActionNode,
+        dag: ActionDAG,
+        results_by_node: dict[str, ExecutionResult],
+    ) -> Any:
+        """Resolve nested InputRef values against completed dependency results."""
+
+        if isinstance(value, InputRef):
+            dependency_chain = _all_dependency_ids(node.id, dag)
+            if value.source_node_id not in dependency_chain:
+                raise ValidationError(
+                    f"InputRef source {value.source_node_id} is not in the dependency chain for node {node.id}."
+                )
+            producer_result = results_by_node.get(value.source_node_id)
+            if producer_result is None:
+                raise ValidationError(
+                    f"Producer output has not been executed yet for node {value.source_node_id}."
+                )
+            if producer_result.status != "success":
+                raise ValidationError(
+                    f"Producer node {value.source_node_id} did not succeed and cannot satisfy InputRef."
+                )
+            return self.result_store.resolve_input_ref(value)
+        if isinstance(value, list):
+            return [self._resolve_argument_value(item, node, dag, results_by_node) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: self._resolve_argument_value(item, node, dag, results_by_node)
+                for key, item in value.items()
+            }
+        return value
+
+    def _resolve_node_arguments(
+        self,
+        node: ActionNode,
+        dag: ActionDAG,
+        results_by_node: dict[str, ExecutionResult],
+    ) -> dict[str, Any]:
+        """Resolve all typed input references for one node's arguments."""
+
+        return {
+            key: self._resolve_argument_value(value, node, dag, results_by_node)
+            for key, value in node.arguments.items()
+        }
 
     def execute(self, dag: ActionDAG, context: dict[str, Any] | None = None) -> ResultBundle:
         """Execute a DAG in dependency order and return a normalized bundle."""
@@ -193,6 +305,7 @@ class ExecutionEngine:
 
         results: list[ExecutionResult] = []
         node_status: dict[str, str] = {}
+        results_by_node: dict[str, ExecutionResult] = {}
         hard_stop = False
 
         for node in ordered_nodes:
@@ -212,6 +325,7 @@ class ExecutionEngine:
                 )
                 results.append(skipped)
                 node_status[node.id] = skipped.status
+                results_by_node[node.id] = skipped
                 self.result_store.add(skipped)
                 continue
 
@@ -228,12 +342,14 @@ class ExecutionEngine:
                 )
                 results.append(skipped)
                 node_status[node.id] = skipped.status
+                results_by_node[node.id] = skipped
                 self.result_store.add(skipped)
                 continue
 
             capability = self.registry.get(node.capability_id)
             runtime_policy.assert_allowed(capability, node.operation_id)
             try:
+                resolved_arguments = self._resolve_node_arguments(node, executable_dag, results_by_node)
                 execution_context = {
                     "node_id": node.id,
                     "task_id": node.task_id,
@@ -245,11 +361,11 @@ class ExecutionEngine:
                     raw_result = self.gateway_client.invoke(
                         node=node,
                         capability=capability,
-                        arguments=dict(node.arguments),
+                        arguments=resolved_arguments,
                         execution_context=context,
                     )
                 else:
-                    raw_result = capability.execute(node.arguments, execution_context)
+                    raw_result = capability.execute(resolved_arguments, execution_context)
             except Exception as exc:
                 errored = ExecutionResult(
                     node_id=node.id,
@@ -262,6 +378,7 @@ class ExecutionEngine:
                 )
                 results.append(errored)
                 node_status[node.id] = errored.status
+                results_by_node[node.id] = errored
                 self.result_store.add(errored)
                 if stop_on_error:
                     hard_stop = True
@@ -270,6 +387,7 @@ class ExecutionEngine:
             normalized = self._normalize_result(node, raw_result)
             results.append(normalized)
             node_status[node.id] = normalized.status
+            results_by_node[node.id] = normalized
             if normalized.status == "error" and stop_on_error:
                 hard_stop = True
 

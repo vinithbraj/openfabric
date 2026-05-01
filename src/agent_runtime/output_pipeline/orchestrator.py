@@ -87,7 +87,7 @@ def _build_safe_previews(result_bundle: ResultBundle, redactor: Redactor) -> lis
             {
                 "node_id": result.node_id,
                 "status": result.status,
-                "data_ref": result.data_ref,
+                "data_ref": result.data_ref.ref_id if result.data_ref is not None else None,
                 "preview": redactor.redact(result.data_preview) if result.data_preview is not None else None,
                 "error": result.error,
             }
