@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -28,9 +29,29 @@ OPERATION_SPECS: dict[str, dict[str, set[str]]] = {
         "required": {"path", "pattern"},
         "optional": {"recursive", "limit"},
     },
-    "shell.inspect_system": {
+    "shell.which": {
+        "required": {"program"},
+        "optional": set(),
+    },
+    "shell.pwd": {
         "required": set(),
-        "optional": {"scope"},
+        "optional": set(),
+    },
+    "shell.list_processes": {
+        "required": set(),
+        "optional": {"pattern", "limit"},
+    },
+    "shell.check_port": {
+        "required": {"port"},
+        "optional": set(),
+    },
+    "shell.git_status": {
+        "required": set(),
+        "optional": {"path"},
+    },
+    "shell.run_tests_readonly": {
+        "required": set(),
+        "optional": {"target", "max_failures"},
     },
 }
 
@@ -185,40 +206,224 @@ def _search_files(arguments: dict[str, Any], workspace_root: Path) -> dict[str, 
     }
 
 
-SHELL_SCOPE_COMMANDS: dict[str, list[str]] = {
-    "hostname": ["hostname"],
-    "user": ["whoami"],
-    "uptime": ["uptime"],
-    "disk": ["df", "-h"],
-    "memory": ["free", "-h"],
-    "cpu": ["nproc"],
-    "ports": ["ss", "-ltn"],
-    "processes": ["ps", "-eo", "pid,comm,%cpu,%mem", "--sort=-%cpu"],
-}
+def _contains_shell_metacharacters(value: str) -> bool:
+    """Return whether one user string contains shell metacharacters we reject outright."""
+
+    text = str(value or "")
+    return any(token in text for token in (";", "&&", "||", "|", "`", "$(", ">", "<", "\n", "\r", "\x00"))
 
 
-def _inspect_system(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
-    """Run an allowlisted read-only system inspection command on the remote host."""
+def _reject_shell_text(value: str, field_name: str) -> str:
+    """Normalize one shell-facing argument and reject command-like text."""
 
-    _ = workspace_root
-    scope = str(arguments.get("scope") or "uptime").strip().lower()
-    command = SHELL_SCOPE_COMMANDS.get(scope)
-    if command is None:
-        allowed = ", ".join(sorted(SHELL_SCOPE_COMMANDS))
-        raise RemoteToolError(f"unsupported shell.inspect_system scope: {scope}. Allowed: {allowed}")
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise RemoteToolError(f"{field_name} must be a non-empty string.")
+    if _contains_shell_metacharacters(normalized):
+        raise RemoteToolError(f"{field_name} contains rejected shell command text.")
+    return normalized
+
+
+def _run_readonly_command(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """Run one internally-constructed shell command without invoking a shell."""
 
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        return subprocess.run(
+            command,
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     except OSError as exc:
-        raise RemoteToolError(f"system inspection command is unavailable for scope {scope}: {exc}") from exc
-    if completed.returncode != 0:
-        message = completed.stderr.strip() or f"system inspection failed for scope {scope}"
-        raise RemoteToolError(message)
+        joined = " ".join(command)
+        raise RemoteToolError(f"remote shell command is unavailable: {joined}: {exc}") from exc
 
-    facts = [line.rstrip() for line in completed.stdout.splitlines() if line.strip()]
+
+def _which(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Resolve one program path through `which`."""
+
+    _ = workspace_root
+    program = _reject_shell_text(arguments.get("program"), "program")
+    if "/" in program:
+        raise RemoteToolError("program must be a bare executable name, not a path.")
+
+    completed = _run_readonly_command(["which", program])
     return {
-        "data_preview": {"scope": scope, "facts": facts},
-        "metadata": {"scope": scope, "fact_count": len(facts)},
+        "data_preview": {
+            "program": program,
+            "found": completed.returncode == 0,
+            "path": completed.stdout.strip() or None,
+        },
+        "metadata": {"program": program, "exit_code": completed.returncode},
+    }
+
+
+def _pwd(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Return the remote working directory through `pwd`."""
+
+    _ = arguments
+    completed = _run_readonly_command(["pwd"], cwd=workspace_root)
+    if completed.returncode != 0:
+        raise RemoteToolError(completed.stderr.strip() or "pwd failed")
+    return {
+        "data_preview": {"cwd": completed.stdout.strip()},
+        "metadata": {"exit_code": completed.returncode},
+    }
+
+
+def _list_processes(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """List running processes through a fixed `ps` command."""
+
+    _ = workspace_root
+    pattern = arguments.get("pattern")
+    normalized_pattern = None
+    if pattern is not None:
+        normalized_pattern = _reject_shell_text(pattern, "pattern").lower()
+    limit = max(1, int(arguments.get("limit", 50)))
+
+    completed = _run_readonly_command(["ps", "-eo", "pid=,%cpu=,%mem=,comm=", "--sort=-%cpu"])
+    if completed.returncode != 0:
+        raise RemoteToolError(completed.stderr.strip() or "process listing failed")
+
+    processes: list[dict[str, Any]] = []
+    for line in completed.stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) != 4:
+            continue
+        pid_text, cpu_text, memory_text, command_name = parts
+        record = {
+            "pid": int(pid_text),
+            "command": command_name,
+            "cpu_percent": float(cpu_text),
+            "memory_percent": float(memory_text),
+        }
+        if normalized_pattern and normalized_pattern not in command_name.lower():
+            continue
+        processes.append(record)
+        if len(processes) >= limit:
+            break
+
+    return {
+        "data_preview": {
+            "pattern": normalized_pattern,
+            "processes": processes,
+            "truncated": len(processes) >= limit,
+        },
+        "metadata": {"process_count": len(processes)},
+    }
+
+
+def _check_port(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Inspect listeners on one TCP port through `lsof`."""
+
+    _ = workspace_root
+    try:
+        port = int(arguments.get("port"))
+    except (TypeError, ValueError) as exc:
+        raise RemoteToolError("port must be an integer.") from exc
+    if port <= 0 or port > 65535:
+        raise RemoteToolError("port must be between 1 and 65535.")
+
+    completed = _run_readonly_command(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"])
+    if completed.returncode not in {0, 1}:
+        raise RemoteToolError(completed.stderr.strip() or f"port inspection failed for {port}")
+
+    listeners: list[dict[str, Any]] = []
+    for line in completed.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 9:
+            continue
+        listeners.append(
+            {
+                "command": parts[0],
+                "pid": int(parts[1]),
+                "user": parts[2],
+                "name": parts[-1],
+            }
+        )
+
+    return {
+        "data_preview": {"port": port, "listeners": listeners},
+        "metadata": {"listener_count": len(listeners)},
+    }
+
+
+def _git_status(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Return concise git status through a fixed git command."""
+
+    path = str(arguments.get("path") or ".")
+    repo_path, relative_path = _normalize_workspace_path(path, workspace_root)
+    completed = _run_readonly_command(["git", "-C", str(repo_path), "status", "--short", "--branch"])
+    if completed.returncode != 0:
+        raise RemoteToolError(completed.stderr.strip() or f"git status failed for {relative_path}")
+
+    lines = [line.rstrip() for line in completed.stdout.splitlines() if line.strip()]
+    branch = None
+    if lines and lines[0].startswith("## "):
+        branch = lines[0][3:]
+
+    return {
+        "data_preview": {
+            "path": relative_path,
+            "branch": branch,
+            "is_clean": len(lines) <= 1,
+            "status_lines": lines,
+        },
+        "metadata": {"status_line_count": len(lines)},
+    }
+
+
+def _run_tests_readonly(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Run one constrained pytest command without accepting arbitrary shell flags."""
+
+    target = _reject_shell_text(arguments.get("target") or ".", "target")
+    max_failures = max(1, int(arguments.get("max_failures", 1)))
+    target_path, relative_target = _normalize_workspace_path(target, workspace_root)
+
+    if target_path.is_file() or target_path.is_dir():
+        target_argument = relative_target
+    elif "::" in target:
+        base_path = target.split("::", 1)[0]
+        if not base_path:
+            raise RemoteToolError("pytest node id target must include a file path prefix.")
+        base_target_path, base_relative = _normalize_workspace_path(base_path, workspace_root)
+        if not base_target_path.exists():
+            raise RemoteToolError(f"test target does not exist: {base_relative}")
+        suffix = target[len(base_path) :]
+        target_argument = f"{base_relative}{suffix}"
+    else:
+        raise RemoteToolError(f"test target does not exist: {target}")
+
+    python_candidates = [
+        workspace_root / ".venv" / "bin" / "python",
+        Path(sys.executable),
+    ]
+    python_command = next((candidate for candidate in python_candidates if candidate.exists()), None)
+    if python_command is None:
+        raise RemoteToolError("no Python interpreter is available for constrained test execution.")
+
+    command = [
+        os.fspath(python_command),
+        "-m",
+        "pytest",
+        "-q",
+        "--maxfail",
+        str(max_failures),
+        target_argument,
+    ]
+    completed = _run_readonly_command(command, cwd=workspace_root)
+    if completed.returncode not in {0, 1, 5}:
+        raise RemoteToolError(completed.stderr.strip() or f"pytest failed unexpectedly for {target_argument}")
+
+    return {
+        "data_preview": {
+            "target": target_argument,
+            "exit_code": completed.returncode,
+            "stdout_lines": [line.rstrip() for line in completed.stdout.splitlines() if line.strip()],
+            "stderr_lines": [line.rstrip() for line in completed.stderr.splitlines() if line.strip()],
+        },
+        "metadata": {"exit_code": completed.returncode, "target": target_argument},
     }
 
 
@@ -235,7 +440,12 @@ def run_remote_operation(
         "filesystem.list_directory": _list_directory,
         "filesystem.read_file": _read_file,
         "filesystem.search_files": _search_files,
-        "shell.inspect_system": _inspect_system,
+        "shell.which": _which,
+        "shell.pwd": _pwd,
+        "shell.list_processes": _list_processes,
+        "shell.check_port": _check_port,
+        "shell.git_status": _git_status,
+        "shell.run_tests_readonly": _run_tests_readonly,
     }
     handler = operation_map.get(operation)
     if handler is None:

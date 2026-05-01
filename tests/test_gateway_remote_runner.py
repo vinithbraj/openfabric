@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import pytest
@@ -55,10 +56,38 @@ def test_remote_runner_searches_files(tmp_path: Path) -> None:
     assert result["data_preview"]["matches"] == ["nested/two.py", "one.py"]
 
 
-def test_remote_runner_inspects_system_with_allowlisted_scope() -> None:
-    result = run_remote_operation("shell.inspect_system", {"scope": "hostname"})
+def test_remote_runner_lists_processes_and_checks_ports() -> None:
+    process_result = run_remote_operation("shell.list_processes", {"pattern": "python", "limit": 5})
 
+    assert process_result["status"] == "success"
+    assert isinstance(process_result["data_preview"]["processes"], list)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    try:
+        port = server.getsockname()[1]
+        port_result = run_remote_operation("shell.check_port", {"port": port})
+    finally:
+        server.close()
+
+    assert port_result["status"] == "success"
+    assert port_result["data_preview"]["port"] == port
+    assert port_result["metadata"]["listener_count"] >= 1
+
+
+def test_remote_runner_rejects_arbitrary_shell_text_and_unknown_args() -> None:
+    with pytest.raises(RemoteToolError):
+        run_remote_operation("shell.which", {"program": "python3; rm -rf /"})
+
+    with pytest.raises(RemoteToolError):
+        run_remote_operation("shell.which", {"program": "python3", "command": "rm -rf /"})
+
+
+def test_remote_runner_reads_pwd_and_git_status(tmp_path: Path) -> None:
+    pwd_result = run_remote_operation("shell.pwd", {}, workspace_root=tmp_path)
+    assert pwd_result["data_preview"]["cwd"] == str(tmp_path)
+
+    result = run_remote_operation("shell.git_status", {"path": "."}, workspace_root=Path.cwd())
     assert result["status"] == "success"
-    assert result["data_preview"]["scope"] == "hostname"
-    assert isinstance(result["data_preview"]["facts"], list)
-    assert result["metadata"]["fact_count"] >= 1
+    assert "status_lines" in result["data_preview"]

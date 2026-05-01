@@ -6,7 +6,7 @@ from agent_runtime.capabilities import (
     CapabilityRegistry,
     ListDirectoryCapability,
     ReadQueryCapability,
-    ShellInspectCapability,
+    ShellCheckPortCapability,
 )
 from agent_runtime.capabilities.base import BaseCapability
 from agent_runtime.capabilities.schemas import CapabilityManifest
@@ -104,7 +104,7 @@ def _registry() -> CapabilityRegistry:
     registry = CapabilityRegistry()
     registry.register(ListDirectoryCapability())
     registry.register(ReadQueryCapability())
-    registry.register(ShellInspectCapability())
+    registry.register(ShellCheckPortCapability())
     registry.register(DeleteFileCapability())
     registry.register(EchoCapability())
     registry.register(MutatingCapability())
@@ -233,11 +233,11 @@ def test_shell_command_is_blocked_by_default() -> None:
             ActionNode(
                 id="node-shell",
                 task_id="task-shell",
-                description="inspect system",
+                description="check one port",
                 semantic_verb="read",
-                capability_id="shell.inspect_system",
-                operation_id="inspect_system",
-                arguments={"scope": "processes"},
+                capability_id="shell.check_port",
+                operation_id="check_port",
+                arguments={"port": 8310},
                 safety_labels=[],
             )
         ]
@@ -247,6 +247,32 @@ def test_shell_command_is_blocked_by_default() -> None:
 
     assert decision.allowed is False
     assert any("shell execution is disabled" in reason.lower() for reason in decision.blocked_reasons)
+
+
+def test_shell_command_is_allowed_when_policy_enables_it() -> None:
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-shell-allowed",
+                task_id="task-shell-allowed",
+                description="check one port",
+                semantic_verb="read",
+                capability_id="shell.check_port",
+                operation_id="check_port",
+                arguments={"port": 8310},
+                safety_labels=[],
+            )
+        ]
+    )
+
+    decision = evaluate_dag_safety(
+        dag,
+        _registry(),
+        RuntimeConfig(gateway_url="http://gateway", allow_shell_execution=True),
+    )
+
+    assert decision.allowed is True
+    assert decision.sanitized_dag is not None
 
 
 def test_sql_read_is_allowed() -> None:

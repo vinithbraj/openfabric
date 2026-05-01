@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,14 @@ from agent_runtime.capabilities.filesystem import (
 )
 from agent_runtime.capabilities.markdown import MarkdownRenderCapability
 from agent_runtime.capabilities.python_data import TransformTableCapability
-from agent_runtime.capabilities.shell import ShellInspectCapability
+from agent_runtime.capabilities.shell import (
+    ShellCheckPortCapability,
+    ShellGitStatusCapability,
+    ShellListProcessesCapability,
+    ShellPwdCapability,
+    ShellRunTestsReadonlyCapability,
+    ShellWhichCapability,
+)
 from agent_runtime.capabilities.sql import ReadQueryCapability
 from agent_runtime.core.errors import SafetyError, ValidationError
 from agent_runtime.execution.result_store import InMemoryResultStore
@@ -84,15 +92,53 @@ def test_filesystem_search_files_runs_through_gateway_runner(tmp_path: Path) -> 
     assert result["data_preview"]["matches"] == ["nested/three.py", "one.py"]
 
 
-def test_shell_capability_runs_through_gateway_runner() -> None:
+def test_shell_capabilities_run_through_gateway_runner(tmp_path: Path) -> None:
     with pytest.raises(SafetyError):
-        ShellInspectCapability().execute({"scope": "hostname"}, {"node_id": "node-shell"})
+        ShellPwdCapability().execute({}, {"node_id": "node-shell"})
+    with pytest.raises(SafetyError):
+        ShellWhichCapability().execute({"program": "git"}, {"node_id": "node-shell"})
+    with pytest.raises(SafetyError):
+        ShellListProcessesCapability().execute({"pattern": "python"}, {"node_id": "node-shell"})
+    with pytest.raises(SafetyError):
+        ShellCheckPortCapability().execute({"port": 8310}, {"node_id": "node-shell"})
+    with pytest.raises(SafetyError):
+        ShellGitStatusCapability().execute({"path": "."}, {"node_id": "node-shell"})
+    with pytest.raises(SafetyError):
+        ShellRunTestsReadonlyCapability().execute({"target": "tests"}, {"node_id": "node-shell"})
 
-    result = run_remote_operation("shell.inspect_system", {"scope": "hostname"})
+    pwd_result = run_remote_operation("shell.pwd", {}, workspace_root=tmp_path)
+    assert pwd_result["data_preview"]["cwd"] == str(tmp_path)
 
-    assert result["status"] == "success"
-    assert result["data_preview"]["scope"] == "hostname"
-    assert isinstance(result["data_preview"]["facts"], list)
+    which_result = run_remote_operation("shell.which", {"program": "git"})
+    assert which_result["status"] == "success"
+    assert which_result["data_preview"]["found"] is True
+
+    process_result = run_remote_operation("shell.list_processes", {"pattern": "python", "limit": 5})
+    assert isinstance(process_result["data_preview"]["processes"], list)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    try:
+        port = server.getsockname()[1]
+        port_result = run_remote_operation("shell.check_port", {"port": port})
+    finally:
+        server.close()
+    assert port_result["metadata"]["listener_count"] >= 1
+
+    git_result = run_remote_operation("shell.git_status", {"path": "."}, workspace_root=Path.cwd())
+    assert git_result["status"] == "success"
+    assert "status_lines" in git_result["data_preview"]
+
+    with pytest.raises(RemoteToolError):
+        run_remote_operation("shell.which", {"program": "git; rm -rf /"})
+
+    with pytest.raises(RemoteToolError):
+        run_remote_operation(
+            "shell.run_tests_readonly",
+            {"target": "tests && rm -rf /"},
+            workspace_root=Path.cwd(),
+        )
 
 
 def test_sql_read_query_accepts_structured_read_only_intent() -> None:

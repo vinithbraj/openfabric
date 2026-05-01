@@ -10,7 +10,14 @@ from agent_runtime.capabilities.markdown import MarkdownRenderCapability
 from agent_runtime.capabilities.python_data import TransformTableCapability
 from agent_runtime.capabilities.registry import CapabilityRegistry
 from agent_runtime.capabilities.schemas import CapabilityManifest
-from agent_runtime.capabilities.shell import ShellInspectCapability
+from agent_runtime.capabilities.shell import (
+    ShellCheckPortCapability,
+    ShellGitStatusCapability,
+    ShellListProcessesCapability,
+    ShellPwdCapability,
+    ShellRunTestsReadonlyCapability,
+    ShellWhichCapability,
+)
 from agent_runtime.capabilities.sql import ReadQueryCapability
 
 
@@ -24,7 +31,12 @@ def build_default_registry() -> CapabilityRegistry:
     registry.register(ReadQueryCapability())
     registry.register(TransformTableCapability())
     registry.register(MarkdownRenderCapability())
-    registry.register(ShellInspectCapability())
+    registry.register(ShellWhichCapability())
+    registry.register(ShellPwdCapability())
+    registry.register(ShellListProcessesCapability())
+    registry.register(ShellCheckPortCapability())
+    registry.register(ShellGitStatusCapability())
+    registry.register(ShellRunTestsReadonlyCapability())
     return registry
 
 __all__ = [
@@ -38,6 +50,11 @@ __all__ = [
     "ReadFileCapability",
     "ReadQueryCapability",
     "SearchFilesCapability",
-    "ShellInspectCapability",
+    "ShellCheckPortCapability",
+    "ShellGitStatusCapability",
+    "ShellListProcessesCapability",
+    "ShellPwdCapability",
+    "ShellRunTestsReadonlyCapability",
+    "ShellWhichCapability",
     "TransformTableCapability",
 ]
