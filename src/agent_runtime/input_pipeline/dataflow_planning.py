@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic.json_schema import model_json_schema
 
 from agent_runtime.capabilities.registry import CapabilityRegistry
 from agent_runtime.capabilities.schemas import CapabilityManifest
@@ -23,6 +23,21 @@ from agent_runtime.llm.structured_call import structured_call
 
 _REF_PATTERN = re.compile(r"^(?P<source>[A-Za-z0-9_:\-]+)\.(?P<output>[A-Za-z0-9_:\-]+)$")
 _ROW_LIKE_KEYS = {"entries", "rows", "matches", "processes", "listeners"}
+_DATAFLOW_INTENT_PATTERNS = (
+    " count ",
+    " total ",
+    " sum ",
+    " average ",
+    " avg ",
+    " min ",
+    " max ",
+    " head ",
+    " first ",
+    " top ",
+    " compute ",
+    " calculate ",
+    " aggregate ",
+)
 
 
 class DataflowRefProposal(BaseModel):
@@ -128,16 +143,35 @@ def _task_output_hints(task_id: str, manifest: CapabilityManifest) -> dict[str, 
     }
 
 
+def _dataflow_argument_names(manifest: CapabilityManifest) -> list[str]:
+    """Return manifest arguments that are eligible to receive upstream dataflow refs."""
+
+    declared_arguments = list(manifest.required_arguments) + list(manifest.optional_arguments)
+    return [
+        argument_name
+        for argument_name in declared_arguments
+        if argument_name == "input_ref" or argument_name.endswith("_ref")
+    ]
+
+
 def _consumer_hints(task_id: str, manifest: CapabilityManifest) -> dict[str, Any]:
     """Build compact input-hint metadata for a potential consumer task."""
 
+    eligible_arguments = _dataflow_argument_names(manifest)
     return {
         "task_id": task_id,
         "capability_id": manifest.capability_id,
         "operation_id": manifest.operation_id,
-        "required_arguments": list(manifest.required_arguments),
-        "optional_arguments": list(manifest.optional_arguments),
-        "argument_schema": manifest.argument_schema,
+        "wireable_required_arguments": [
+            argument_name for argument_name in manifest.required_arguments if argument_name in eligible_arguments
+        ],
+        "wireable_optional_arguments": [
+            argument_name for argument_name in manifest.optional_arguments if argument_name in eligible_arguments
+        ],
+        "wireable_argument_schema": {
+            argument_name: manifest.argument_schema.get(argument_name, {})
+            for argument_name in eligible_arguments
+        },
     }
 
 
@@ -155,12 +189,42 @@ def _runtime_data_capability_hints(registry: CapabilityRegistry) -> list[dict[st
                 "capability_id": manifest.capability_id,
                 "operation_id": manifest.operation_id,
                 "description": manifest.description,
-                "required_arguments": list(manifest.required_arguments),
-                "optional_arguments": list(manifest.optional_arguments),
+                "wireable_required_arguments": [
+                    argument_name
+                    for argument_name in manifest.required_arguments
+                    if argument_name in _dataflow_argument_names(manifest)
+                ],
+                "wireable_optional_arguments": [
+                    argument_name
+                    for argument_name in manifest.optional_arguments
+                    if argument_name in _dataflow_argument_names(manifest)
+                ],
                 "output_schema": manifest.output_schema,
             }
         )
     return hints
+
+
+def _prompt_suggests_dataflow(original_prompt: str) -> bool:
+    """Return whether the raw prompt suggests aggregation or producer-consumer chaining."""
+
+    normalized = f" {str(original_prompt or '').strip().lower()} "
+    return any(pattern in normalized for pattern in _DATAFLOW_INTENT_PATTERNS)
+
+
+def _should_attempt_dataflow_planning(
+    *,
+    original_prompt: str,
+    tasks: list[TaskFrame],
+    capability_selections: list[CapabilitySelectionResult],
+) -> bool:
+    """Return whether dataflow planning is worth attempting for the current request."""
+
+    if len(tasks) > 1:
+        return True
+    if len(tasks) == 0 or len(capability_selections) == 0:
+        return False
+    return _prompt_suggests_dataflow(original_prompt)
 
 
 def _build_dataflow_prompt(
@@ -181,29 +245,36 @@ def _build_dataflow_prompt(
             continue
         manifest = registry.get(selection.selected.capability_id).manifest
         producers.append(_task_output_hints(task.id, manifest))
-        consumers.append(_consumer_hints(task.id, manifest))
+        consumer_hint = _consumer_hints(task.id, manifest)
+        if consumer_hint["wireable_required_arguments"] or consumer_hint["wireable_optional_arguments"]:
+            consumers.append(consumer_hint)
 
-    schema = model_json_schema(DataflowPlanProposal)
+    payload_json = json.dumps(
+        {
+            "original_prompt": original_prompt,
+            "tasks": [task.model_dump(mode="json") for task in tasks],
+            "selected_producer_capability_hints": producers,
+            "selected_consumer_capability_hints": consumers,
+            "available_internal_data_capabilities": _runtime_data_capability_hints(registry),
+        },
+        sort_keys=True,
+        default=str,
+        ensure_ascii=True,
+    )
     return "\n".join(
         [
             "You are proposing typed dataflow for an intelligent agent runtime.",
             "Return JSON only.",
             "Do not return markdown fences.",
-            "You may propose producer-consumer references, derived data tasks, and dependency edges.",
+            "You may propose producer-consumer references, derived data tasks, and dependency edges only when there is a real producer-consumer relationship.",
             "Use only the provided tasks, selected capabilities, compact manifests, producer output schemas, and internal data capabilities.",
             "Do not produce shell commands, Python code, SQL, arbitrary expressions, or executable syntax.",
-            "Original prompt:",
-            original_prompt,
-            "Existing tasks:",
-            str([task.model_dump(mode="json") for task in tasks]),
-            "Selected producer capability hints:",
-            str(producers),
-            "Selected consumer capability hints:",
-            str(consumers),
-            "Available internal data capabilities:",
-            str(_runtime_data_capability_hints(registry)),
-            "JSON schema:",
-            str(schema),
+            "Never create a self-reference: producer_task_id and consumer_task_id must be different.",
+            "Only wire arguments that are explicitly marked as wireable ref-style arguments.",
+            "Never wire formatting or configuration arguments such as human_readable, booleans, flags, limits, or display settings.",
+            "If there is only one task and no real producer-consumer relationship exists, return refs=[], derived_tasks=[], dependency_edges=[].",
+            "Payload:",
+            payload_json,
         ]
     )
 
@@ -629,6 +700,31 @@ def plan_dataflow(
     trace: PlanningTrace | None = None,
 ) -> ValidatedDataflowPlan:
     """Propose and validate a dataflow plan, returning an empty plan on failure."""
+
+    if not _should_attempt_dataflow_planning(
+        original_prompt=original_prompt,
+        tasks=tasks,
+        capability_selections=capability_selections,
+    ):
+        validated = _empty_validated_plan()
+        if isinstance(trace, PlanningTrace):
+            model_name, temperature = llm_client_metadata(llm_client)
+            append_trace_entry(
+                trace,
+                PlanningTraceEntry(
+                    stage="dataflow_planning",
+                    request_id=str(trace.request_id),
+                    model_name=model_name,
+                    llm_temperature=temperature,
+                    prompt_template_id="dataflow_planning",
+                    parsed_proposal=validated.model_dump(mode="json"),
+                    selected_candidate=validated.model_dump(mode="json"),
+                    rejection_reasons=[
+                        "dataflow planning skipped because the request did not show multi-step or aggregation intent"
+                    ],
+                ),
+            )
+        return validated
 
     proposal = propose_dataflow_with_llm(
         original_prompt=original_prompt,

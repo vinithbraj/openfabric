@@ -18,7 +18,9 @@ from agent_runtime.input_pipeline.dataflow_planning import (
     DataflowRefProposal,
     DerivedTaskProposal,
     ValidatedDataflowPlan,
+    _build_dataflow_prompt,
     validate_dataflow_plan,
+    plan_dataflow,
 )
 from agent_runtime.input_pipeline.decomposition import DecompositionResult
 from agent_runtime.input_pipeline.domain_selection import CapabilitySelectionResult
@@ -277,6 +279,18 @@ class FakeGatewayClient:
         )
 
 
+class _ShouldNotBeCalledLLM:
+    def __init__(self) -> None:
+        self.called = False
+        self.model = "fake-model"
+        self.temperature = 0.0
+
+    def complete_json(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        _ = prompt, schema
+        self.called = True
+        raise AssertionError("dataflow LLM should not have been called")
+
+
 def _runtime(tmp_path: Path, prompt: str) -> AgentRuntime:
     registry = build_default_registry()
     store = InMemoryResultStore()
@@ -316,6 +330,34 @@ def _base_selection() -> CapabilitySelectionResult:
     )
     return CapabilitySelectionResult(
         task_id="task_list",
+        candidates=[selected],
+        selected=selected,
+        unresolved_reason=None,
+    )
+
+
+def _memory_task() -> TaskFrame:
+    return TaskFrame(
+        id="task_1",
+        description="Query the system for the current amount of free memory available.",
+        semantic_verb="read",
+        object_type="memory",
+        intent_confidence=0.98,
+        constraints={"human_readable": True},
+        dependencies=[],
+        risk_level="low",
+    )
+
+
+def _memory_selection() -> CapabilitySelectionResult:
+    selected = CapabilityRef(
+        capability_id="system.memory_status",
+        operation_id="memory_status",
+        confidence=0.98,
+        reason="Memory availability request.",
+    )
+    return CapabilitySelectionResult(
+        task_id="task_1",
         candidates=[selected],
         selected=selected,
         unresolved_reason=None,
@@ -570,3 +612,35 @@ def test_invalid_consumer_argument_is_rejected() -> None:
     )
 
     assert validated.rejected_refs
+
+
+def test_dataflow_prompt_forbids_self_reference_and_excludes_human_readable() -> None:
+    registry = build_default_registry()
+
+    prompt = _build_dataflow_prompt(
+        original_prompt="how much free memory do i have on this system?",
+        tasks=[_memory_task()],
+        capability_selections=[_memory_selection()],
+        registry=registry,
+    )
+
+    assert "Never create a self-reference" in prompt
+    assert "return refs=[], derived_tasks=[], dependency_edges=[]" in prompt
+    assert '"selected_consumer_capability_hints": []' in prompt
+    assert "JSON schema:" not in prompt
+
+
+def test_single_step_memory_request_skips_dataflow_planning() -> None:
+    registry = build_default_registry()
+    llm = _ShouldNotBeCalledLLM()
+
+    validated = plan_dataflow(
+        original_prompt="how much free memory do i have on this system?",
+        tasks=[_memory_task()],
+        capability_selections=[_memory_selection()],
+        registry=registry,
+        llm_client=llm,
+    )
+
+    assert llm.called is False
+    assert validated == ValidatedDataflowPlan()

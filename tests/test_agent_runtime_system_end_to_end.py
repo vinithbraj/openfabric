@@ -421,7 +421,21 @@ def _runtime(tmp_path: Path) -> AgentRuntime:
 
 
 def test_memory_prompt_runs_system_memory_status_end_to_end(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
+    llm = SystemLLMClient()
+    registry = build_default_registry()
+    store = InMemoryResultStore()
+    engine = ExecutionEngine(
+        registry,
+        {
+            "workspace_root": str(tmp_path),
+            "allow_shell_execution": False,
+            "allow_network_operations": False,
+            "gateway_url": "http://gateway",
+        },
+        store,
+        gateway_client=FakeGatewayClient(tmp_path),
+    )
+    runtime = AgentRuntime(llm, registry, engine, OutputPipelineOrchestrator())
     response = runtime.handle_request("how much free memory do i have on this system?", {"workspace_root": str(tmp_path)})
     assert "memory" in response.lower()
     assert runtime.last_plan_summary is not None
@@ -429,6 +443,7 @@ def test_memory_prompt_runs_system_memory_status_end_to_end(tmp_path: Path) -> N
     trace = runtime.last_planning_trace
     assert trace is not None
     assert trace.capability_fit_decisions_by_task["task_1"]["status"] == "fit"
+    assert not any("you are proposing typed dataflow" in prompt.lower() for prompt in llm.prompts)
 
 
 def test_disk_prompt_runs_system_disk_usage_end_to_end(tmp_path: Path) -> None:
