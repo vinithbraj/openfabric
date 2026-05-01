@@ -119,3 +119,25 @@ def test_classify_fix_code_prompt() -> None:
     assert classification.prompt_type == "complex_workflow"
     assert classification.likely_domains == ["filesystem", "shell", "python_data"]
     assert classification.risk_level == "high"
+
+
+def test_classify_pwd_prompt_is_normalized_to_shell_tool_task() -> None:
+    client = FakeLLMClient(
+        {
+            "what is the current working directory?": {
+                "prompt_type": "simple_question",
+                "requires_tools": False,
+                "likely_domains": [],
+                "risk_level": "low",
+                "needs_clarification": False,
+                "clarification_question": None,
+                "reason": "This looks like a direct question.",
+            }
+        }
+    )
+
+    classification = classify_prompt(UserRequest(raw_prompt="what is the current working directory?"), client)
+
+    assert classification.prompt_type == "simple_tool_task"
+    assert classification.requires_tools is True
+    assert "shell" in classification.likely_domains

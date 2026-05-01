@@ -106,6 +106,8 @@ class DisplaySelector:
                 preview.get("preview", {}).get("entries")
                 or preview.get("preview", {}).get("rows")
                 or preview.get("preview", {}).get("matches")
+                or preview.get("preview", {}).get("processes")
+                or preview.get("preview", {}).get("listeners")
                 for preview in selection_input.safe_previews
             )
             else "markdown"

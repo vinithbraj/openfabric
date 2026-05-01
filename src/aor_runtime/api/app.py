@@ -195,6 +195,13 @@ def _resolve_agent_gateway_settings(configured_settings: Settings) -> tuple[str,
     return default_node, gateway_url
 
 
+def _allow_shell_execution_from_settings(configured_settings: Settings) -> bool:
+    """Resolve whether read-only shell capabilities should be enabled in the agent runtime."""
+
+    shell_mode = str(configured_settings.shell_mode or "read_only").strip().lower() or "read_only"
+    return shell_mode != "disabled"
+
+
 def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | None = None) -> FastAPI:
     """Create the echo FastAPI application.
 
@@ -213,7 +220,7 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
             registry,
             {
                 "workspace_root": str(configured_settings.workspace_root),
-                "allow_shell_execution": False,
+                "allow_shell_execution": _allow_shell_execution_from_settings(configured_settings),
                 "allow_network_operations": False,
                 "gateway_default_node": default_gateway_node,
                 "gateway_url": resolved_gateway_url,

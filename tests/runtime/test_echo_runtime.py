@@ -45,6 +45,24 @@ def test_create_app_preserves_explicit_gateway_configuration() -> None:
     assert runtime.execution_engine.safety_policy.config.gateway_url == "http://gateway.worker-a:8787"
 
 
+def test_create_app_enables_shell_when_shell_mode_is_not_disabled() -> None:
+    settings = Settings(shell_mode="read_only")
+
+    app = create_app(settings)
+
+    runtime = app.state.agent_runtime
+    assert runtime.execution_engine.safety_policy.config.allow_shell_execution is True
+
+
+def test_create_app_disables_shell_when_shell_mode_is_disabled() -> None:
+    settings = Settings(shell_mode="disabled")
+
+    app = create_app(settings)
+
+    runtime = app.state.agent_runtime
+    assert runtime.execution_engine.safety_policy.config.allow_shell_execution is False
+
+
 def test_extract_prompt_prefers_task_field() -> None:
     assert extract_prompt({"task": "hello", "prompt": "ignored"}) == "hello"
 

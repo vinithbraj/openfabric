@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -118,11 +119,60 @@ def _build_classification_prompt(user_request: UserRequest) -> str:
     )
 
 
+_SHELL_TOOL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bcurrent working directory\b"),
+    re.compile(r"\bpwd\b"),
+    re.compile(r"\bgit status\b"),
+    re.compile(r"\bwhich\b"),
+    re.compile(r"\bprocess(?:es)?\b"),
+    re.compile(r"\bport\b"),
+    re.compile(r"\brun\b.*\breadonly tests\b"),
+    re.compile(r"\brun\b.*\btests\b"),
+)
+
+
+def _looks_like_shell_tool_prompt(raw_prompt: str) -> bool:
+    """Return whether a prompt strongly implies a shell/system inspection tool."""
+
+    lowered = str(raw_prompt or "").strip().lower()
+    if not lowered:
+        return False
+    return any(pattern.search(lowered) for pattern in _SHELL_TOOL_PATTERNS)
+
+
+def _normalize_classification(
+    user_request: UserRequest,
+    classification: PromptClassification,
+) -> PromptClassification:
+    """Apply conservative deterministic normalization after LLM classification."""
+
+    if classification.needs_clarification:
+        return classification
+
+    if _looks_like_shell_tool_prompt(user_request.raw_prompt) and (
+        classification.prompt_type == "simple_question" or not classification.requires_tools
+    ):
+        likely_domains = list(classification.likely_domains)
+        if "shell" not in {domain.strip().lower() for domain in likely_domains}:
+            likely_domains.append("shell")
+        return classification.model_copy(
+            update={
+                "prompt_type": "simple_tool_task",
+                "requires_tools": True,
+                "likely_domains": likely_domains,
+                "reason": f"{classification.reason} Deterministically normalized to a shell tool task.",
+            }
+        )
+
+    return classification
+
+
 def classify_prompt(user_request: UserRequest, llm_client) -> PromptClassification:
     """Classify a user prompt through a strict structured LLM call."""
 
     prompt = _build_classification_prompt(user_request)
-    return structured_call(llm_client, prompt, PromptClassification)
+    classification = structured_call(llm_client, prompt, PromptClassification)
+    return _normalize_classification(user_request, classification)
 
 
 def _build_decomposition_prompt(

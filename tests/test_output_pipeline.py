@@ -131,6 +131,48 @@ def test_read_file_renders_as_code_block() -> None:
     assert "print('hello')" in output
 
 
+def test_process_rows_render_as_markdown_table() -> None:
+    bundle = ResultBundle(
+        dag_id="dag-1",
+        status="success",
+        results=[
+            ExecutionResult(
+                node_id="node-1",
+                status="success",
+                data_preview={
+                    "pattern": "python",
+                    "processes": [
+                        {"pid": 1, "command": "python3", "cpu_percent": 10.2, "memory_percent": 1.5},
+                        {"pid": 2, "command": "uvicorn", "cpu_percent": 5.0, "memory_percent": 0.8},
+                    ],
+                    "truncated": False,
+                },
+            )
+        ],
+    )
+    llm = FakeLLMClient(
+        {
+            "display_type": "table",
+            "title": "Running Python Processes",
+            "sections": [
+                {
+                    "title": "Running Python Processes",
+                    "display_type": "table",
+                    "source_node_id": "node-1",
+                }
+            ],
+            "constraints": {},
+            "redaction_policy": "standard",
+        }
+    )
+
+    output = compose_output(_request(), _dag("node-1", "shell.list_processes", "list_processes"), bundle, llm)
+
+    assert "## Running Python Processes" in output
+    assert "| pid | command | cpu_percent | memory_percent |" in output
+    assert "python3" in output
+
+
 def test_errors_render_cleanly() -> None:
     bundle = ResultBundle(
         dag_id="dag-1",

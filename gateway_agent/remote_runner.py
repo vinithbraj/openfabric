@@ -325,11 +325,11 @@ def _check_port(arguments: dict[str, Any], workspace_root: Path) -> dict[str, An
     if port <= 0 or port > 65535:
         raise RemoteToolError("port must be between 1 and 65535.")
 
+    listeners: list[dict[str, Any]] = []
     completed = _run_readonly_command(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"])
     if completed.returncode not in {0, 1}:
         raise RemoteToolError(completed.stderr.strip() or f"port inspection failed for {port}")
 
-    listeners: list[dict[str, Any]] = []
     for line in completed.stdout.splitlines()[1:]:
         parts = line.split()
         if len(parts) < 9:
@@ -342,6 +342,36 @@ def _check_port(arguments: dict[str, Any], workspace_root: Path) -> dict[str, An
                 "name": parts[-1],
             }
         )
+
+    if not listeners:
+        ss_completed = _run_readonly_command(["ss", "-ltnp"])
+        if ss_completed.returncode == 0:
+            port_suffix = f":{port}"
+            for line in ss_completed.stdout.splitlines()[1:]:
+                if port_suffix not in line:
+                    continue
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                local_address = parts[3]
+                process_info = parts[5] if len(parts) > 5 else ""
+                pid = None
+                command = None
+                if "pid=" in process_info:
+                    try:
+                        pid = int(process_info.split("pid=", 1)[1].split(",", 1)[0].rstrip(")"))
+                    except ValueError:
+                        pid = None
+                if 'users:(("' in process_info:
+                    command = process_info.split('users:(("', 1)[1].split('"', 1)[0]
+                listeners.append(
+                    {
+                        "command": command or "unknown",
+                        "pid": pid,
+                        "user": None,
+                        "name": local_address,
+                    }
+                )
 
     return {
         "data_preview": {"port": port, "listeners": listeners},

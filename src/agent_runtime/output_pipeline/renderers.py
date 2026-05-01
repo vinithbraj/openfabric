@@ -18,6 +18,10 @@ def _rows_from_payload(payload: Any) -> list[dict[str, Any]]:
             return [dict(item) for item in payload["entries"] if isinstance(item, dict)]
         if isinstance(payload.get("rows"), list):
             return [dict(item) for item in payload["rows"] if isinstance(item, dict)]
+        if isinstance(payload.get("processes"), list):
+            return [dict(item) for item in payload["processes"] if isinstance(item, dict)]
+        if isinstance(payload.get("listeners"), list):
+            return [dict(item) for item in payload["listeners"] if isinstance(item, dict)]
         if isinstance(payload.get("matches"), list):
             return [{"path": item} for item in payload["matches"]]
     return []
@@ -48,12 +52,30 @@ def _plain_text_from_payload(payload: Any) -> str:
             return str(payload["content_preview"])
         if "markdown" in payload:
             return str(payload["markdown"])
+        if "status_lines" in payload:
+            return "\n".join(str(item) for item in payload["status_lines"])
+        if "stdout_lines" in payload or "stderr_lines" in payload:
+            stdout_lines = [str(item) for item in payload.get("stdout_lines", [])]
+            stderr_lines = [str(item) for item in payload.get("stderr_lines", [])]
+            blocks: list[str] = []
+            if stdout_lines:
+                blocks.append("\n".join(stdout_lines))
+            if stderr_lines:
+                if blocks:
+                    blocks.append("")
+                blocks.append("stderr:")
+                blocks.extend(stderr_lines)
+            return "\n".join(blocks).strip()
         if "matches" in payload:
             return "\n".join(str(item) for item in payload["matches"])
         if "entries" in payload:
             return "\n".join(str(item.get("path") or item.get("name")) for item in payload["entries"])
         if "rows" in payload:
             return json.dumps(payload["rows"], indent=2, default=str)
+        if "processes" in payload:
+            return _markdown_table(_rows_from_payload(payload))
+        if "listeners" in payload:
+            return _markdown_table(_rows_from_payload(payload))
         return "\n".join(f"{key}: {value}" for key, value in payload.items())
     if isinstance(payload, list):
         return "\n".join(str(item) for item in payload)
