@@ -19,7 +19,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from aor_runtime.core.utils import extract_json_object
+from aor_runtime.runtime.llm_recursion import LLMStageRecursionBudget
 from aor_runtime.runtime.markdown import cell as md_cell
 from aor_runtime.runtime.markdown import section as md_section
 from aor_runtime.runtime.markdown import table as md_table
@@ -28,7 +31,8 @@ from aor_runtime.runtime.slurm_result_normalizer import SlurmResultKind, normali
 
 
 IntelligentOutputMode = Literal["off", "compare", "replace"]
-RenderStyle = Literal["table", "key_value", "bullets"]
+RenderStyle = Literal["table", "key_value", "bullets", "sectioned"]
+PresentationComposition = Literal["single", "sectioned"]
 
 
 @dataclass(frozen=True)
@@ -131,7 +135,7 @@ class DisplayFieldCatalog:
             "max_fields": max_fields,
             "available_fields": [field.prompt_dict() for field in self.fields],
             "default_fields": list(self.default_fields),
-            "allowed_render_styles": ["table", "key_value", "bullets"],
+            "allowed_render_styles": ["table", "key_value", "bullets", "sectioned"],
             "data_visibility_rule": "Only field metadata is provided. Actual values are local-only and unavailable to the LLM.",
         }
 
@@ -152,8 +156,37 @@ class IntelligentOutputSelection:
     selected_fields: list[str]
     title: str = "Intelligent Output"
     render_style: RenderStyle = "table"
+    children: list["IntelligentOutputSelection"] = field(default_factory=list)
+    composition: PresentationComposition = "single"
     rationale: str = ""
     confidence: float | None = None
+
+
+class PresentationIntentProposal(BaseModel):
+    """Represent the strict LLM proposal for intelligent output presentation.
+
+    Inputs:
+        Created from the LLM field-selection JSON response.
+
+    Returns:
+        A typed presentation intent with no executable or data-bearing fields.
+
+    Used by:
+        _coerce_selection before rendering local values.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = "Intelligent Output"
+    render_style: RenderStyle = "table"
+    selected_fields: list[str] = Field(default_factory=list)
+    children: list["PresentationIntentProposal"] = Field(default_factory=list)
+    composition: PresentationComposition = "single"
+    rationale: str = ""
+    confidence: float | None = None
+
+
+PresentationIntentProposal.model_rebuild()
 
 
 @dataclass
@@ -172,6 +205,7 @@ class IntelligentOutputResult:
     markdown: str
     selected_fields: list[str]
     prompt_payload: dict[str, Any]
+    presentation_intent_tree: dict[str, Any] | None = None
     llm_used: bool = True
 
 
@@ -203,13 +237,29 @@ def render_intelligent_output(
         return None
     max_field_count = max(1, int(max_fields or 8))
     prompt_payload = catalog.prompt_payload(goal=context.goal, max_fields=max_field_count)
+    budget = LLMStageRecursionBudget(
+        settings,
+        stage="presentation_intent",
+        max_depth=int(getattr(settings, "presentation_intent_max_depth", 10) or 10),
+    )
+    prompt_payload["llm_stage"] = budget.state(
+        depth=0,
+        parent_id=None,
+        composition="single",
+        allowed_schema=_presentation_allowed_schema(),
+    ).prompt_metadata()
     selection = _select_fields_with_llm(prompt_payload, catalog, settings, max_fields=max_field_count)
     if selection is None:
         return None
     markdown = _render_selection(catalog, selection, max_rows=context.max_rows)
     if not markdown:
         return None
-    return IntelligentOutputResult(markdown=markdown, selected_fields=selection.selected_fields, prompt_payload=prompt_payload)
+    return IntelligentOutputResult(
+        markdown=markdown,
+        selected_fields=_flatten_selected_fields(selection),
+        prompt_payload=prompt_payload,
+        presentation_intent_tree=_selection_tree(selection),
+    )
 
 
 def build_display_field_catalog(
@@ -269,8 +319,9 @@ def _select_fields_with_llm(
         system_prompt = (
             "You select which display fields best answer the user's request. "
             "You receive field metadata only, never data values. "
-            "Return one JSON object with keys: title, render_style, selected_fields, rationale, confidence. "
+            "Return one JSON object with keys: title, render_style, selected_fields, children, composition, rationale, confidence. "
             "selected_fields must contain only ids from available_fields and should be concise. "
+            "Children may recursively refine section intent using the same field ids. "
             "Do not invent fields. Do not request raw data."
         )
         if hasattr(client, "complete_json"):
@@ -280,16 +331,22 @@ def _select_fields_with_llm(
             raw = extract_json_object(text)
         if not isinstance(raw, dict):
             return None
-        return _coerce_selection(raw, catalog, max_fields=max_fields)
+        try:
+            proposal = PresentationIntentProposal.model_validate(raw)
+        except ValidationError:
+            return None
+        if not _validate_presentation_proposal_tree(proposal, settings):
+            return None
+        return _coerce_selection(proposal, catalog, max_fields=max_fields)
     except Exception:
         return None
 
 
-def _coerce_selection(raw: dict[str, Any], catalog: DisplayFieldCatalog, *, max_fields: int) -> IntelligentOutputSelection | None:
+def _coerce_selection(raw: PresentationIntentProposal, catalog: DisplayFieldCatalog, *, max_fields: int) -> IntelligentOutputSelection | None:
     """Handle the internal coerce selection helper path for this module.
 
     Inputs:
-        Receives raw, catalog, max_fields for this function; type hints and validators define accepted shapes.
+        Receives a strict proposal, catalog, and max_fields.
 
     Returns:
         Returns the computed value described by the function name and type hints.
@@ -299,28 +356,30 @@ def _coerce_selection(raw: dict[str, Any], catalog: DisplayFieldCatalog, *, max_
     """
     allowed = catalog.field_map()
     selected: list[str] = []
-    for item in raw.get("selected_fields") or []:
+    for item in raw.selected_fields or []:
         field_id = str(item or "").strip()
         if field_id in allowed and field_id not in selected:
             selected.append(field_id)
         if len(selected) >= max_fields:
             break
-    if not selected:
+    children = [
+        child
+        for child in (_coerce_selection(child, catalog, max_fields=max_fields) for child in raw.children or [])
+        if child is not None
+    ]
+    if not selected and not children:
         return None
-    render_style = str(raw.get("render_style") or catalog.render_style or "table").strip().lower()
-    if render_style not in {"table", "key_value", "bullets"}:
+    render_style = str(raw.render_style or catalog.render_style or "table").strip().lower()
+    if render_style not in {"table", "key_value", "bullets", "sectioned"}:
         render_style = catalog.render_style
-    confidence = raw.get("confidence")
-    try:
-        confidence_value = float(confidence) if confidence is not None else None
-    except Exception:
-        confidence_value = None
     return IntelligentOutputSelection(
         selected_fields=selected,
-        title=str(raw.get("title") or catalog.title or "Intelligent Output").strip() or "Intelligent Output",
+        title=str(raw.title or catalog.title or "Intelligent Output").strip() or "Intelligent Output",
         render_style=render_style,  # type: ignore[arg-type]
-        rationale=str(raw.get("rationale") or "").strip(),
-        confidence=confidence_value,
+        children=children,
+        composition=raw.composition,
+        rationale=str(raw.rationale or "").strip(),
+        confidence=raw.confidence,
     )
 
 
@@ -337,7 +396,7 @@ def _render_selection(catalog: DisplayFieldCatalog, selection: IntelligentOutput
         Used by planning, execution, validation, and presentation code paths that import or call aor_runtime.runtime.intelligent_output._render_selection.
     """
     fields = [catalog.field_map()[field_id] for field_id in selection.selected_fields if field_id in catalog.field_map()]
-    if not fields:
+    if not fields and not selection.children:
         return ""
     rows = list(catalog.records or [])
     limit = max(1, int(max_rows or 20))
@@ -346,21 +405,145 @@ def _render_selection(catalog: DisplayFieldCatalog, selection: IntelligentOutput
     if selection.title and selection.title != "Intelligent Output":
         lines.append(f"**{md_cell(selection.title)}**")
         lines.append("")
-    if selection.render_style == "key_value" and len(rows) == 1:
+    if fields and selection.render_style == "key_value" and len(rows) == 1:
         lines.extend(md_table(["Field", "Value"], [[_code_cell(field.label), _code_cell(rows[0].get(field.id))] for field in fields]))
-    elif selection.render_style == "bullets" and len(rows) == 1:
+    elif fields and selection.render_style == "bullets" and len(rows) == 1:
         for field in fields:
             lines.append(f"- **{md_cell(field.label)}:** `{_inline_code(rows[0].get(field.id))}`")
-    else:
+    elif fields:
         rendered_rows = rows[:limit]
         lines.extend(md_table([field.label for field in fields], [[_code_cell(row.get(field.id)) for field in fields] for row in rendered_rows]))
         if len(rows) > limit:
             lines.append("")
             lines.append(f"Showing first {limit} of {len(rows)} rows.")
+    for child in selection.children:
+        child_markdown = _render_child_selection(catalog, child, max_rows=limit)
+        if child_markdown:
+            lines.append("")
+            lines.append(child_markdown)
     if selection.rationale:
         lines.append("")
         lines.append(f"Selection: `{_inline_code(selection.rationale)}`")
     return "\n".join(lines).strip()
+
+
+def _render_child_selection(catalog: DisplayFieldCatalog, selection: IntelligentOutputSelection, *, max_rows: int) -> str:
+    """Render a child presentation intent as a Markdown subsection.
+
+    Inputs:
+        Receives the local field catalog, child selection, and max row count.
+
+    Returns:
+        Markdown for one child selection using local values only.
+
+    Used by:
+        _render_selection when recursive presentation intent is present.
+    """
+    fields = [catalog.field_map()[field_id] for field_id in selection.selected_fields if field_id in catalog.field_map()]
+    if not fields and not selection.children:
+        return ""
+    rows = list(catalog.records or [])[: max(1, int(max_rows or 20))]
+    lines = [f"### {md_cell(selection.title)}"]
+    if fields and selection.render_style == "key_value" and len(rows) == 1:
+        lines.extend(md_table(["Field", "Value"], [[_code_cell(field.label), _code_cell(rows[0].get(field.id))] for field in fields]))
+    elif fields:
+        lines.extend(md_table([field.label for field in fields], [[_code_cell(row.get(field.id)) for field in fields] for row in rows]))
+    for child in selection.children:
+        child_markdown = _render_child_selection(catalog, child, max_rows=max_rows)
+        if child_markdown:
+            lines.append("")
+            lines.append(child_markdown)
+    if selection.rationale:
+        lines.append("")
+        lines.append(f"Selection: `{_inline_code(selection.rationale)}`")
+    return "\n".join(lines).strip()
+
+
+def _presentation_allowed_schema() -> dict[str, Any]:
+    """Return the allowed recursive presentation intent schema.
+
+    Inputs:
+        Uses module constants only.
+
+    Returns:
+        JSON-compatible schema metadata safe for LLM prompts.
+
+    Used by:
+        render_intelligent_output when constructing presentation prompts.
+    """
+    return {
+        "required": ["selected_fields or children"],
+        "render_style": ["table", "key_value", "bullets", "sectioned"],
+        "composition": ["single", "sectioned"],
+        "children": "recursive PresentationIntentProposal list",
+        "privacy": "field metadata only; values are unavailable",
+    }
+
+
+def _validate_presentation_proposal_tree(proposal: PresentationIntentProposal, settings: Any, *, depth: int = 0) -> bool:
+    """Validate recursive presentation intent depth and field-only structure.
+
+    Inputs:
+        Receives a proposal tree, settings, and current depth.
+
+    Returns:
+        True when the tree fits configured recursion limits.
+
+    Used by:
+        _select_fields_with_llm before local value rendering.
+    """
+    global_limit = int(getattr(settings, "llm_stage_max_depth", 10) or 10)
+    presentation_limit = int(getattr(settings, "presentation_intent_max_depth", 10) or 10)
+    max_depth = min(global_limit, presentation_limit)
+    if depth > max_depth:
+        return False
+    return all(_validate_presentation_proposal_tree(child, settings, depth=depth + 1) for child in proposal.children)
+
+
+def _flatten_selected_fields(selection: IntelligentOutputSelection) -> list[str]:
+    """Flatten selected field ids from a recursive selection tree.
+
+    Inputs:
+        Receives a presentation selection tree.
+
+    Returns:
+        De-duplicated field ids in traversal order.
+
+    Used by:
+        IntelligentOutputResult construction.
+    """
+    fields: list[str] = []
+    for field_id in selection.selected_fields:
+        if field_id not in fields:
+            fields.append(field_id)
+    for child in selection.children:
+        for field_id in _flatten_selected_fields(child):
+            if field_id not in fields:
+                fields.append(field_id)
+    return fields
+
+
+def _selection_tree(selection: IntelligentOutputSelection) -> dict[str, Any]:
+    """Serialize a recursive presentation selection tree for metadata.
+
+    Inputs:
+        Receives a local presentation selection.
+
+    Returns:
+        A safe metadata dictionary with field ids but no values.
+
+    Used by:
+        IntelligentOutputResult construction.
+    """
+    return {
+        "title": selection.title,
+        "render_style": selection.render_style,
+        "selected_fields": list(selection.selected_fields),
+        "composition": selection.composition,
+        "rationale": selection.rationale,
+        "confidence": selection.confidence,
+        "children": [_selection_tree(child) for child in selection.children],
+    }
 
 
 def _slurm_catalog(result: Any, source_action: str, context: PresentationContext, source_tools: list[str]) -> DisplayFieldCatalog | None:

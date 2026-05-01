@@ -7,6 +7,7 @@ from typing import Any
 from aor_runtime.config import Settings
 from aor_runtime.core.contracts import ExecutionPlan, ExecutionStep, PlannerConfig
 from aor_runtime.runtime.dataflow import resolve_execution_step
+from aor_runtime.runtime.llm_recursion import LLMStageRecursionBudget
 from aor_runtime.runtime.semantic_frame import (
     LLMSemanticFrameExtractor,
     SemanticCoverageValidator,
@@ -49,6 +50,45 @@ def test_semantic_frame_public_facade_keeps_core_imports_available() -> None:
     assert SemanticFilter(field="State", value="COMPLETED").field == "state"
     assert SemanticFrameCompiler is not None
     assert deterministic_semantic_frame is not None
+
+
+def test_semantic_filter_accepts_list_values_only_for_in_operator() -> None:
+    filter_ = SemanticFilter(field="partition", operator="in", value=["slicer", "totalseg"])
+
+    assert filter_.field == "partition"
+    assert filter_.value == ["slicer", "totalseg"]
+
+    try:
+        SemanticFilter(field="partition", operator="eq", value=["slicer", "totalseg"])
+    except ValueError as exc:
+        assert "operator='in'" in str(exc)
+    else:
+        raise AssertionError("Expected list-valued eq filter to fail")
+
+
+def test_semantic_frame_normalizes_null_list_fields() -> None:
+    frame = SemanticFrame.model_validate(
+        {
+            "domain": "filesystem",
+            "intent": "count",
+            "dimensions": None,
+            "filters": None,
+            "children": None,
+            "output": {
+                "kind": "table",
+                "cardinality": "grouped",
+                "render_style": "metric_table",
+                "group_by": None,
+                "result_entities": None,
+            },
+        }
+    )
+
+    assert frame.dimensions == []
+    assert frame.filters == []
+    assert frame.children == []
+    assert frame.output.group_by == []
+    assert frame.output.result_entities == []
 
 
 def test_slurm_policy_module_exposes_all_state_semantics(tmp_path: Path) -> None:
@@ -160,6 +200,40 @@ def test_semantic_sql_compiler_builds_multi_entity_count_query(tmp_path: Path) -
     assert [step.action for step in compiled.plan.steps] == ["sql.query", "text.format", "runtime.return"]
 
 
+def test_semantic_sql_compiler_builds_single_patient_count_query(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    frame = SemanticFrame(
+        domain="sql",
+        intent="count",
+        entity="patients",
+        metric={"name": "count"},
+        filters=[{"field": "database", "value": "dicom"}],
+        output=SemanticOutputContract(kind="scalar", cardinality="single", render_style="scalar", result_entities=["patients"]),
+    )
+
+    compiled = SemanticFrameCompiler(settings=settings, allowed_tools=["sql.query"]).compile(frame)
+
+    assert compiled is not None
+    assert compiled.plan.steps[0].args["query"] == 'SELECT COUNT(*) AS patient_count FROM flathr."Patient"'
+
+
+def test_semantic_sql_compiler_builds_single_modality_count_query(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    frame = SemanticFrame(
+        domain="sql",
+        intent="count",
+        entity="rtplan",
+        metric={"name": "count"},
+        filters=[{"field": "database", "value": "dicom"}],
+        output=SemanticOutputContract(kind="scalar", cardinality="single", render_style="scalar", result_entities=["rtplan"]),
+    )
+
+    compiled = SemanticFrameCompiler(settings=settings, allowed_tools=["sql.query"]).compile(frame)
+
+    assert compiled is not None
+    assert compiled.plan.steps[0].args["query"] == "SELECT COUNT(*) AS rtplan_count FROM flathr.\"Series\" se WHERE se.\"Modality\" = 'RTPLAN'"
+
+
 def test_semantic_sql_compiler_builds_single_modality_scalar_query(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     frame = deterministic_semantic_frame("count of patients that have brain in RTPLAN in dicom", settings).frame
@@ -173,6 +247,55 @@ def test_semantic_sql_compiler_builds_single_modality_scalar_query(tmp_path: Pat
     assert 'se."Modality" IN (\'RTPLAN\')' in query
     assert "brain" in query
     assert "GROUP BY" not in query.upper()
+
+
+def test_semantic_sql_compiler_builds_patient_age_count_query(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    frame = SemanticFrame(
+        domain="sql",
+        intent="count",
+        entity="patients",
+        metric={"name": "count"},
+        filters=[
+            {"field": "database", "value": "dicom"},
+            {"field": "age", "operator": "gt", "value": 45},
+        ],
+        output=SemanticOutputContract(kind="scalar", cardinality="single", render_style="scalar", result_entities=["patients"]),
+    )
+
+    compiled = SemanticFrameCompiler(settings=settings, allowed_tools=["sql.query"]).compile(frame)
+
+    assert compiled is not None
+    query = compiled.plan.steps[0].args["query"]
+    assert 'COUNT(DISTINCT p."PatientID") AS patient_count' in query
+    assert 'FROM flathr."Patient" p' in query
+    assert 'p."PatientBirthDate" < CURRENT_DATE - INTERVAL \'45 years\'' in query
+    assert "GROUP BY" not in query.upper()
+
+
+def test_semantic_sql_compiler_combines_age_with_modality_patient_count(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    frame = SemanticFrame(
+        domain="sql",
+        intent="count",
+        entity="patients",
+        metric={"name": "count"},
+        targets={"modality": ["RTPLAN"]},
+        filters=[
+            {"field": "database", "value": "dicom"},
+            {"field": "age", "operator": "gte", "value": "45"},
+        ],
+        output=SemanticOutputContract(kind="scalar", cardinality="single", render_style="scalar", result_entities=["patients"]),
+    )
+
+    compiled = SemanticFrameCompiler(settings=settings, allowed_tools=["sql.query"]).compile(frame)
+
+    assert compiled is not None
+    query = compiled.plan.steps[0].args["query"]
+    assert 'JOIN flathr."Study" st ON st."PatientID" = p."PatientID"' in query
+    assert 'JOIN flathr."Series" se ON se."StudyInstanceUID" = st."StudyInstanceUID"' in query
+    assert 'p."PatientBirthDate" <= CURRENT_DATE - INTERVAL \'45 years\'' in query
+    assert 'se."Modality" IN (\'RTPLAN\')' in query
 
 
 def test_slurm_domain_compiler_module_preserves_all_jobs_policy(tmp_path: Path) -> None:
@@ -327,9 +450,29 @@ def test_slurm_completed_negation_aggregate_uses_all_state_policy(tmp_path: Path
     assert "default_state_applied" not in first.args
 
 
-def test_task_planner_semantic_frame_skips_wrong_tool_and_llm_for_supported_slurm_prompt(tmp_path: Path) -> None:
+def test_task_planner_semantic_frame_uses_llm_first_for_supported_slurm_prompt(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    planner = TaskPlanner(llm=FakeLLM(), tools=build_tool_registry(settings), settings=settings)
+    llm = FakeLLM(
+        [
+            {
+                "domain": "slurm",
+                "intent": "aggregate_metric",
+                "entity": "jobs",
+                "metric": {"name": "average_elapsed", "unit": "seconds"},
+                "targets": {"partition": ["slicer", "totalseg"]},
+                "filters": [{"field": "include_all_states", "value": True}],
+                "time_window": {"phrase": "last 7 days"},
+                "output": {
+                    "kind": "table",
+                    "cardinality": "grouped",
+                    "render_style": "metric_table",
+                    "group_by": ["partition"],
+                    "result_entities": ["jobs"],
+                },
+            }
+        ]
+    )
+    planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
 
     plan = planner.build_plan(
         goal="Give me an average of the job times in slicer , totalseg partitions only consider jobs for the last 7 days",
@@ -343,7 +486,8 @@ def test_task_planner_semantic_frame_skips_wrong_tool_and_llm_for_supported_slur
     assert "__semantic_projection" not in plan.steps[0].args
     assert plan.steps[0].metadata["semantic_projection"]["values"] == ["slicer", "totalseg"]
     assert planner.last_capability_name == "semantic_frame"
-    assert planner.last_llm_calls == 0
+    assert planner.last_llm_calls == 1
+    assert planner.last_capability_metadata["semantic_frame_source"] == "llm"
     assert planner.last_capability_metadata["semantic_strategy"] == "grouped_pushdown"
 
 
@@ -506,7 +650,7 @@ def test_llm_semantic_frame_prompt_contains_only_safe_metadata(tmp_path: Path) -
                 "metric": {"name": "average_elapsed"},
                 "targets": {"partition": ["slicer", "totalseg"]},
                 "time_window": {"phrase": "last 7 days"},
-                "output": {"kind": "table"},
+                "output": {"kind": "table", "cardinality": "grouped", "render_style": "metric_table"},
             }
         ]
     )
@@ -518,13 +662,157 @@ def test_llm_semantic_frame_prompt_contains_only_safe_metadata(tmp_path: Path) -
 
     assert result.matched
     prompt = llm.user_prompts[0]
-    assert "raw rows" not in prompt.lower()
-    assert "stdout" not in prompt.lower()
-    assert "stderr" not in prompt.lower()
+    assert "privacy_contract" in prompt
+    assert "JobID" not in prompt
+    assert "Elapsed" not in prompt
     assert "patientid" not in prompt.lower()
     assert "allowed_metrics" in prompt
     assert "allowed_output_cardinalities" in prompt
     assert "multi_scalar" in prompt
+    assert "slurm_state_policy" not in prompt
+    assert "state_policy" in prompt
+
+
+def test_llm_semantic_frame_extractor_rejects_missing_output_intent(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    llm = FakeLLM(
+        [
+            {
+                "domain": "filesystem",
+                "intent": "count",
+                "entity": "files",
+                "targets": {"extension": ["csv", "json"]},
+                "output": {"kind": "table"},
+            }
+        ]
+    )
+
+    result = LLMSemanticFrameExtractor(llm=llm, settings=settings).extract(
+        goal="count CSV and JSON files separately",
+        allowed_tools=["fs.aggregate"],
+    )
+
+    assert not result.matched
+    assert result.reason == "semantic_frame_missing_output_cardinality"
+
+
+def test_llm_semantic_frame_extractor_repairs_invalid_state_policy_field(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    llm = FakeLLM(
+        [
+            {
+                "domain": "slurm",
+                "intent": "aggregate_metric",
+                "entity": "jobs",
+                "metric": {"name": "average_elapsed"},
+                "targets": {"partition": ["totalseg", "slicer"]},
+                "slurm_state_policy": "include_all_states=true",
+                "time_window": {"phrase": "last 7 days"},
+                "output": {"kind": "table", "cardinality": "grouped", "render_style": "metric_table"},
+            },
+            {
+                "domain": "slurm",
+                "intent": "aggregate_metric",
+                "entity": "jobs",
+                "metric": {"name": "average_elapsed"},
+                "targets": {"partition": ["totalseg", "slicer"]},
+                "state_policy": {"include_all_states": True},
+                "time_window": {"phrase": "last 7 days"},
+                "output": {"kind": "table", "cardinality": "grouped", "render_style": "metric_table"},
+            },
+        ]
+    )
+
+    result = LLMSemanticFrameExtractor(llm=llm, settings=settings).extract(
+        goal="average runtime for all jobs in totalseg and slicer partitions for last 7 days",
+        allowed_tools=["slurm.accounting_aggregate"],
+    )
+
+    assert result.matched
+    assert result.frame is not None
+    assert result.frame.state_policy is not None
+    assert result.frame.state_policy.include_all_states is True
+    assert len(llm.user_prompts) == 2
+    repair_prompt = llm.user_prompts[1]
+    assert "repair_semantic_frame_json" in repair_prompt
+    assert "pydantic.dev" not in repair_prompt
+    assert "JobID" not in repair_prompt
+
+
+def test_llm_semantic_frame_extractor_recursively_expands_compound_frames(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, semantic_frame_max_depth=10)
+    llm = FakeLLM(
+        [
+            {
+                "frame_id": "root",
+                "composition": "sequence",
+                "domain": "diagnostic",
+                "intent": "diagnostic",
+                "entity": "workspace_diagnostic",
+                "output": {"kind": "text", "cardinality": "sectioned", "render_style": "sectioned"},
+            },
+            {
+                "frame_id": "root_expanded",
+                "composition": "sequence",
+                "domain": "diagnostic",
+                "intent": "diagnostic",
+                "entity": "workspace_diagnostic",
+                "output": {"kind": "text", "cardinality": "sectioned", "render_style": "sectioned"},
+                "children": [
+                    {
+                        "domain": "filesystem",
+                        "intent": "count",
+                        "entity": "files",
+                        "targets": {"extension": ["csv"]},
+                        "output": {"kind": "scalar", "cardinality": "single", "render_style": "scalar"},
+                        "rationale": "Count CSV files.",
+                    },
+                    {
+                        "frame_id": "nested",
+                        "composition": "sequence",
+                        "domain": "diagnostic",
+                        "intent": "diagnostic",
+                        "entity": "system_diagnostic",
+                        "output": {"kind": "text", "cardinality": "sectioned", "render_style": "sectioned"},
+                        "rationale": "Inspect system health.",
+                    },
+                ],
+            },
+            {
+                "domain": "shell",
+                "intent": "status",
+                "entity": "disk",
+                "output": {"kind": "status", "cardinality": "single", "render_style": "key_value"},
+                "rationale": "Inspect disk status.",
+            },
+        ]
+    )
+
+    result = LLMSemanticFrameExtractor(llm=llm, settings=settings).extract(
+        goal="count CSV files, then inspect disk status",
+        allowed_tools=["fs.aggregate", "shell.exec"],
+    )
+
+    assert result.matched
+    assert result.frame is not None
+    assert [child.domain for child in result.frame.children] == ["filesystem", "shell"]
+    assert result.llm_calls == 3
+    assert result.metadata["llm_stage_calls"]["semantic_frame"] == 3
+    assert result.metadata["llm_recursion_depth"] == 2
+    assert all('"llm_stage"' in prompt for prompt in llm.user_prompts)
+
+
+def test_llm_stage_recursion_budget_accepts_depth_10_and_rejects_11(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    budget = LLMStageRecursionBudget(settings, stage="semantic_frame")
+
+    assert budget.state(depth=10).remaining_depth == 0
+    try:
+        budget.state(depth=11)
+    except ValueError as exc:
+        assert "exceeds maximum 10" in str(exc)
+    else:
+        raise AssertionError("Expected recursion depth 11 to fail")
 
 
 def test_semantic_frame_planner_returns_none_when_mode_off(tmp_path: Path) -> None:
@@ -673,7 +961,7 @@ def test_llm_semantic_frame_extraction_handles_non_slurm_candidate(tmp_path: Pat
                 "intent": "count",
                 "entity": "files",
                 "targets": {"extension": ["csv", "parquet"]},
-                "output": {"kind": "table"},
+                "output": {"kind": "table", "cardinality": "multi_scalar", "render_style": "metric_table"},
             }
         ]
     )

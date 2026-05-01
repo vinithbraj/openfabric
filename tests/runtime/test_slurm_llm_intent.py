@@ -45,6 +45,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         "available_nodes_raw": "edge-1,edge-2",
         "default_node": "edge-1",
         "enable_llm_intent_extraction": True,
+        "semantic_frame_mode": "off",
     }
     payload.update(overrides)
     return Settings(**payload)

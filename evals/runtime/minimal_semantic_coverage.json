@@ -1,0 +1,106 @@
+{
+  "name": "minimal_semantic_coverage",
+  "description": "Read-only live checks for minimal semantic aliases that broad eval packs can miss.",
+  "cases": [
+    {
+      "id": 1,
+      "domain": "sql_dicom_minimal",
+      "prompt": "count of patients in dicom",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "sql.count_entity",
+      "expected_tools": ["sql.query"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 2,
+      "domain": "sql_dicom_minimal",
+      "prompt": "count of studies in dicom",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "sql.count_entity",
+      "expected_tools": ["sql.query"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 3,
+      "domain": "sql_dicom_minimal",
+      "prompt": "count of series in dicom",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "sql.count_entity",
+      "expected_tools": ["sql.query"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 4,
+      "domain": "sql_dicom_minimal",
+      "prompt": "count of patients over age 45 in dicom",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "sql.count_filtered_entity",
+      "expected_tools": ["sql.query"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 5,
+      "domain": "sql_dicom_minimal",
+      "prompt": "count of RTPLAN in dicom",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "sql.count_entity",
+      "expected_tools": ["sql.query"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 6,
+      "domain": "slurm_minimal",
+      "prompt": "list all the nodes in slurm",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "slurm.list_nodes",
+      "expected_tools": ["slurm.nodes"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 7,
+      "domain": "slurm_minimal",
+      "prompt": "unique nodes in slurm",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "slurm.list_nodes",
+      "expected_tools": ["slurm.nodes"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 8,
+      "domain": "slurm_minimal",
+      "prompt": "list partitions in slurm",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "slurm.list_partitions",
+      "expected_tools": ["slurm.partitions"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 9,
+      "domain": "slurm_minimal",
+      "prompt": "count nodes in slurm",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "slurm.count_nodes",
+      "expected_tools": ["slurm.nodes"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    },
+    {
+      "id": 10,
+      "domain": "slurm_minimal",
+      "prompt": "count jobs in slurm",
+      "expected_outcome": "pass",
+      "expected_semantic_action": "slurm.queue_count_jobs",
+      "expected_tools": ["slurm.queue"],
+      "timeout_seconds": 120,
+      "sensitive_output": true
+    }
+  ]
+}

@@ -121,8 +121,10 @@ class Settings(BaseModel):
     intelligent_output_mode: str = Field(default_factory=lambda: os.getenv("AOR_INTELLIGENT_OUTPUT_MODE", "off").strip().lower())
     intelligent_output_max_fields: int = Field(default_factory=lambda: int(os.getenv("AOR_INTELLIGENT_OUTPUT_MAX_FIELDS", "8")))
     semantic_frame_mode: str = Field(default_factory=lambda: os.getenv("AOR_SEMANTIC_FRAME_MODE", "enforce").strip().lower())
-    semantic_frame_max_depth: int = Field(default_factory=lambda: int(os.getenv("AOR_SEMANTIC_FRAME_MAX_DEPTH", "3")))
+    semantic_frame_max_depth: int = Field(default_factory=lambda: int(os.getenv("AOR_SEMANTIC_FRAME_MAX_DEPTH", "10")))
     semantic_frame_max_children: int = Field(default_factory=lambda: int(os.getenv("AOR_SEMANTIC_FRAME_MAX_CHILDREN", "8")))
+    llm_stage_max_depth: int = Field(default_factory=lambda: int(os.getenv("AOR_LLM_STAGE_MAX_DEPTH", "10")))
+    presentation_intent_max_depth: int = Field(default_factory=lambda: int(os.getenv("AOR_PRESENTATION_INTENT_MAX_DEPTH", "10")))
     enable_insight_layer: bool = Field(default_factory=lambda: _env_bool("AOR_ENABLE_INSIGHT_LAYER", True))
     enable_llm_insights: bool = Field(default_factory=lambda: _env_bool("AOR_ENABLE_LLM_INSIGHTS"))
     insight_max_facts: int = Field(default_factory=lambda: int(os.getenv("AOR_INSIGHT_MAX_FACTS", "50")))
@@ -341,6 +343,10 @@ class Settings(BaseModel):
             raise ValueError("semantic_frame_max_depth must be greater than zero.")
         if self.semantic_frame_max_children <= 0:
             raise ValueError("semantic_frame_max_children must be greater than zero.")
+        if self.llm_stage_max_depth <= 0:
+            raise ValueError("llm_stage_max_depth must be greater than zero.")
+        if self.presentation_intent_max_depth <= 0:
+            raise ValueError("presentation_intent_max_depth must be greater than zero.")
         if self.insight_max_facts <= 0:
             raise ValueError("insight_max_facts must be greater than zero.")
         if self.insight_max_input_chars <= 0:
@@ -488,6 +494,10 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         ),
         semantic_frame_max_children=int(
             os.getenv("AOR_SEMANTIC_FRAME_MAX_CHILDREN", str(app_config.runtime.semantic_frame_max_children))
+        ),
+        llm_stage_max_depth=int(os.getenv("AOR_LLM_STAGE_MAX_DEPTH", str(app_config.runtime.llm_stage_max_depth))),
+        presentation_intent_max_depth=int(
+            os.getenv("AOR_PRESENTATION_INTENT_MAX_DEPTH", str(app_config.runtime.presentation_intent_max_depth))
         ),
         enable_insight_layer=_env_bool("AOR_ENABLE_INSIGHT_LAYER", app_config.runtime.enable_insight_layer),
         enable_llm_insights=_env_bool("AOR_ENABLE_LLM_INSIGHTS", app_config.runtime.enable_llm_insights),

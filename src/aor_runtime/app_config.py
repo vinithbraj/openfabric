@@ -162,8 +162,10 @@ class RuntimeAppConfig(BaseModel):
     intelligent_output_mode: str = "off"
     intelligent_output_max_fields: int = 8
     semantic_frame_mode: str = "enforce"
-    semantic_frame_max_depth: int = 3
+    semantic_frame_max_depth: int = 10
     semantic_frame_max_children: int = 8
+    llm_stage_max_depth: int = 10
+    presentation_intent_max_depth: int = 10
     enable_insight_layer: bool = True
     enable_llm_insights: bool = False
     insight_max_facts: int = 50
@@ -222,6 +224,10 @@ class RuntimeAppConfig(BaseModel):
             raise ValueError("runtime.semantic_frame_max_depth must be greater than zero.")
         if self.semantic_frame_max_children <= 0:
             raise ValueError("runtime.semantic_frame_max_children must be greater than zero.")
+        if self.llm_stage_max_depth <= 0:
+            raise ValueError("runtime.llm_stage_max_depth must be greater than zero.")
+        if self.presentation_intent_max_depth <= 0:
+            raise ValueError("runtime.presentation_intent_max_depth must be greater than zero.")
         if self.insight_max_facts <= 0:
             raise ValueError("runtime.insight_max_facts must be greater than zero.")
         if self.insight_max_input_chars <= 0:

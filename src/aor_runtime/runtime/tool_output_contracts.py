@@ -143,6 +143,12 @@ TOOL_OUTPUT_CONTRACTS: dict[str, ToolOutputContract] = {
         collection_paths=("partitions",),
         scalar_paths=("count",),
     ),
+    "slurm.slurmdbd_health": ToolOutputContract(
+        default_path="text_lines",
+        collection_paths=("clusters", "text_lines"),
+        scalar_paths=("available",),
+        text_paths=("message", "status"),
+    ),
     "slurm.queue": ToolOutputContract(
         default_path="jobs",
         collection_paths=("grouped", "jobs"),

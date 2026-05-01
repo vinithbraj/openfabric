@@ -27,7 +27,8 @@ class FakeLLM:
 
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
-    return Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", **overrides)
+    payload = {"semantic_frame_mode": "off", **overrides}
+    return Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", **payload)
 
 
 def _read_file_action_plan(path: str = "notes.txt") -> dict:

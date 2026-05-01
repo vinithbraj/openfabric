@@ -45,7 +45,7 @@ class FakeLLM:
 
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
-    payload = {"response_render_mode": "raw", **overrides}
+    payload = {"response_render_mode": "raw", "semantic_frame_mode": "off", **overrides}
     return Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", **payload)
 
 

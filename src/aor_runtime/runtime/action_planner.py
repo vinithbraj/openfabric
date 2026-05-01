@@ -30,6 +30,7 @@ from aor_runtime.core.utils import dumps_json, extract_json_object
 from aor_runtime.llm.client import LLMClient
 from aor_runtime.runtime.dataflow import collect_step_references, normalize_execution_plan_dataflow
 from aor_runtime.runtime.diagnostic_orchestration import diagnostic_plan_for_goal
+from aor_runtime.runtime.llm_recursion import LLMStageRecursionBudget
 from aor_runtime.runtime.output_shape import (
     grouped_count_field_for_goal,
     infer_goal_output_contract,
@@ -198,7 +199,7 @@ class RawPlannedAction(BaseModel):
     Used by:
         Used by callers of aor_runtime.runtime.action_planner.RawPlannedAction and related tests.
     """
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     id: Any = None
     tool: Any = None
@@ -224,7 +225,7 @@ class RawActionPlan(BaseModel):
     Used by:
         Used by callers of aor_runtime.runtime.action_planner.RawActionPlan and related tests.
     """
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     goal: Any = ""
     actions: list[RawPlannedAction] = Field(default_factory=list)
@@ -369,6 +370,29 @@ class ActionPlan(BaseModel):
         if not self.actions:
             raise ValueError("ActionPlan requires at least one action.")
         return self
+
+
+ActionPlanProposal = ActionPlan
+
+
+class RepairPlanProposal(BaseModel):
+    """Represent a typed LLM repair decision for failed planning attempts.
+
+    Inputs:
+        Created from compact failure facts only, never raw rows or payloads.
+
+    Returns:
+        A strict repair instruction envelope that can choose replan or fail.
+
+    Used by:
+        Repair-aware planner prompts and future typed repair orchestration.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["replan", "fail"] = "replan"
+    reason: str = ""
+    constraints: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass
@@ -772,10 +796,22 @@ class LLMActionPlanner:
             Used by planning, execution, validation, and presentation through LLMActionPlanner._build_context calls and related tests.
         """
         manifest = build_tool_manifest(self.tools, allowed_tools)
+        stage_name = "repair_plan" if failure_context else "action_plan"
+        budget = LLMStageRecursionBudget(self.settings, stage=stage_name)
+        stage_state = budget.state(
+            depth=0,
+            parent_id=None,
+            composition="single",
+            allowed_schema={
+                "proposal": "RepairPlanProposal" if failure_context else "ActionPlanProposal",
+                "tools": allowed_tools,
+            },
+        )
         context: dict[str, Any] = {
             "goal": goal,
             "input": input_payload,
             "runtime_date": temporal_runtime.runtime_date_context(self.settings, now=now),
+            "llm_stage": stage_state.prompt_metadata(),
             "available_tools": manifest,
             "runtime_rules": {
                 "sql": "SELECT-only. Use exact schema identifiers. Use an outer COUNT(*) for count prompts over grouped/HAVING sets. Do not add LIMIT/FETCH row caps when the user asks for all/list/show rows unless they explicitly requested top/first/sample/a limit.",

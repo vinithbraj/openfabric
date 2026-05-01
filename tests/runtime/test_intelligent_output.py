@@ -132,10 +132,63 @@ def test_intelligent_output_compare_uses_field_catalog_without_values(tmp_path: 
     assert "| `Minimum runtime` | `0s` | `364` | `Last 7 days` |" in rendered.markdown
     assert prompts
     assert "available_fields" in prompts[0]
-    assert "selected_fields" not in prompts[0]
+    assert "llm_stage" in prompts[0]
     assert "10m 53s" not in prompts[0]
     assert "1h 11m 3s" not in prompts[0]
     assert "value_human" not in prompts[0]
+
+
+def test_recursive_intelligent_output_selection_renders_sections(tmp_path: Path, monkeypatch) -> None:
+    prompts: list[str] = []
+
+    class FakeLLM:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def complete_json(self, **kwargs):
+            prompts.append(kwargs["user_prompt"])
+            return {
+                "title": "Runtime Dashboard",
+                "render_style": "sectioned",
+                "selected_fields": [],
+                "composition": "sectioned",
+                "children": [
+                    {
+                        "title": "Runtime Values",
+                        "render_style": "table",
+                        "selected_fields": ["metric", "value"],
+                        "rationale": "Show the requested runtime metrics.",
+                    },
+                    {
+                        "title": "Scope",
+                        "render_style": "table",
+                        "selected_fields": ["jobs", "time_window_label"],
+                        "rationale": "Show the included jobs and time range.",
+                    },
+                ],
+            }
+
+    monkeypatch.setattr("aor_runtime.llm.client.LLMClient", FakeLLM)
+    payload = _multi_metric_payload()
+
+    rendered = render_agent_response(
+        payload,
+        execution_events=_history(payload),
+        context=ResponseRenderContext(
+            source_action="text.format",
+            goal="calculate min max and average times for totalseg over the past 7 days",
+            intelligent_output_mode="compare",
+            llm_settings=_settings(tmp_path, intelligent_output_mode="compare"),
+        ),
+    )
+
+    assert "### Runtime Values" in rendered.markdown
+    assert "### Scope" in rendered.markdown
+    assert "| Metric | Value |" in rendered.markdown
+    assert "| Jobs | Time Window |" in rendered.markdown
+    assert prompts
+    assert "llm_stage" in prompts[0]
+    assert "10m 53s" not in prompts[0]
 
 
 def test_invalid_intelligent_output_selection_falls_back_to_deterministic_output(tmp_path: Path, monkeypatch) -> None:

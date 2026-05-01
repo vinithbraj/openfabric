@@ -321,7 +321,7 @@ def test_task_planner_uses_action_planner_for_sql_count(tmp_path: Path, monkeypa
             }
         ]
     )
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, semantic_frame_mode="off")
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
 
     plan = planner.build_plan(
@@ -363,7 +363,7 @@ def test_action_planner_normalizes_count_shape_and_completes_sql_plan(tmp_path: 
             }
         ]
     )
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, semantic_frame_mode="off")
     planner = TaskPlanner(llm=llm, tools=build_tool_registry(settings), settings=settings)
 
     plan = planner.build_plan(

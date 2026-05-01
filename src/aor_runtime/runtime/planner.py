@@ -396,7 +396,10 @@ class TaskPlanner:
             "semantic_strategy": result.metadata.get("semantic_strategy"),
             "semantic_targets": result.metadata.get("semantic_targets"),
             "semantic_frame": result.metadata.get("semantic_frame"),
+            "semantic_frame_tree": result.metadata.get("semantic_frame_tree"),
             "semantic_coverage": result.metadata.get("semantic_coverage"),
+            "llm_stage_calls": result.metadata.get("llm_stage_calls"),
+            "llm_recursion_depth": result.metadata.get("llm_recursion_depth"),
         }
 
     def _finalize_plan(

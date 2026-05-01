@@ -23,6 +23,11 @@ ARCHITECTURE_RE = re.compile(
     r"unknown action|Planner produced|validation error for|Field required|literal_error|Pydantic|extra_forbidden",
     re.IGNORECASE,
 )
+SEMANTIC_FRAME_CONTRACT_RE = re.compile(
+    r"semantic_frame_contract_invalid|semantic_frame_repair_failed|semantic_compiler_unsupported|"
+    r"Semantic frame could not be compiled|Semantic action .* requires",
+    re.IGNORECASE,
+)
 SQL_SCHEMA_RE = re.compile(
     r"unknown column|undefinedcolumn|column .* does not exist|table .* does not exist|"
     r"SQL references unknown|relation .* does not exist",
@@ -31,7 +36,10 @@ SQL_SCHEMA_RE = re.compile(
 SQL_TIMEOUT_RE = re.compile(r"SQL query timed out|statement timeout|canceling statement due to statement timeout", re.IGNORECASE)
 SLURM_TEMPORAL_RE = re.compile(r"time_window_label|slurm start must be|slurm end must be", re.IGNORECASE)
 RAW_JSON_RE = re.compile(r"^\s*[\[{]")
-TOOL_DOMAIN_RE = re.compile(r"wrong tool|domain mismatch|SLURM.*process|process.*SLURM", re.IGNORECASE | re.DOTALL)
+TOOL_DOMAIN_RE = re.compile(
+    r"wrong tool|domain mismatch|SLURM\s+(?:request|prompt).*process|process\s+(?:request|prompt).*SLURM",
+    re.IGNORECASE,
+)
 DATA_UNAVAILABLE_RE = re.compile(
     r"No matching|0 rows|no rows|not available|unavailable|not found|does not appear|not present",
     re.IGNORECASE,
@@ -50,6 +58,8 @@ class EvalCase:
     prompt: str
     expected_outcome: str = "pass"
     expected_issue_class: str | None = None
+    expected_semantic_action: str | None = None
+    expected_tools: tuple[str, ...] = ()
     timeout_seconds: int = 90
     sensitive_output: bool = True
 
@@ -114,6 +124,8 @@ def _load_cases(path: Path) -> list[EvalCase]:
                 prompt=str(item["prompt"]),
                 expected_outcome=str(item.get("expected_outcome") or "pass"),
                 expected_issue_class=item.get("expected_issue_class"),
+                expected_semantic_action=item.get("expected_semantic_action"),
+                expected_tools=tuple(str(tool) for tool in item.get("expected_tools", []) if str(tool).strip()),
                 timeout_seconds=int(item.get("timeout_seconds") or 90),
                 sensitive_output=bool(item.get("sensitive_output", True)),
             )
@@ -155,13 +167,17 @@ def _run_case(base_url: str, model: str, case: EvalCase, *, timeout: int) -> dic
         transport_error = str(exc)
 
     elapsed = round(time.monotonic() - started, 2)
-    status, issues = _classify(content, http_status=http_status, transport_error=transport_error)
+    status, issues = _classify(content, http_status=http_status, transport_error=transport_error, case=case)
+    tools = _extract_stats_value(content, "Tools")
     return {
         "id": case.id,
         "domain": case.domain,
         "prompt": case.prompt,
         "expected_outcome": case.expected_outcome,
         "expected_issue_class": case.expected_issue_class,
+        "expected_semantic_action": case.expected_semantic_action,
+        "expected_tools": list(case.expected_tools),
+        "selected_semantic_action": _extract_semantic_action(content),
         "status": status,
         "issues": issues,
         "elapsed_seconds": elapsed,
@@ -169,14 +185,14 @@ def _run_case(base_url: str, model: str, case: EvalCase, *, timeout: int) -> dic
         "output_sha256_12": hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()[:12],
         "output_chars": len(content),
         "artifacted": bool(re.search(r"Rows written:\s*\d+", content) and "Output file:" in content),
-        "tools": _extract_stats_value(content, "Tools"),
+        "tools": tools,
         "llm_passes": _extract_int_stats_value(content, "LLM Passes"),
         "steps": _extract_int_stats_value(content, "Steps"),
         "failure_excerpt": _safe_failure_excerpt(content, transport_error=transport_error) if status == "fail" else "",
     }
 
 
-def _classify(content: str, *, http_status: int, transport_error: str) -> tuple[str, list[str]]:
+def _classify(content: str, *, http_status: int, transport_error: str, case: EvalCase | None = None) -> tuple[str, list[str]]:
     if transport_error:
         issue = "transport_timeout" if "timed out" in transport_error.lower() else "transport_error"
         return "fail", [issue]
@@ -191,6 +207,8 @@ def _classify(content: str, *, http_status: int, transport_error: str) -> tuple[
     hard_failure = bool(FAILURE_PREFIX_RE.search(text))
     if REFERENCE_RE.search(text):
         issues.append("dataflow_reference")
+    if SEMANTIC_FRAME_CONTRACT_RE.search(text):
+        issues.append("semantic_frame_contract")
     if ARCHITECTURE_RE.search(text):
         issues.append("architecture_boundary")
     if SQL_SCHEMA_RE.search(text):
@@ -214,15 +232,22 @@ def _classify(content: str, *, http_status: int, transport_error: str) -> tuple[
         issues.append("capability_unavailable")
     if len(text) > 30000 and "Output file:" not in text:
         issues.append("formatting_presentation")
+    if case is not None and case.expected_tools:
+        observed_tools = set(_split_tools(_extract_stats_value(text, "Tools")))
+        expected_tools = set(case.expected_tools)
+        if observed_tools and not observed_tools.intersection(expected_tools):
+            issues.append("semantic_misroute")
 
     failure_issues = {
         "architecture_boundary",
+        "semantic_frame_contract",
         "dataflow_reference",
         "sql_schema_relationship",
         "sql_cost_timeout",
         "slurm_temporal_schema",
         "formatting_presentation",
         "tool_domain",
+        "semantic_misroute",
     }
     if hard_failure or any(issue in failure_issues for issue in issues):
         return "fail", sorted(set(issues))
@@ -255,6 +280,39 @@ def _extract_int_stats_value(content: str, field: str) -> int | None:
         return None
     match = re.search(r"\d+", value)
     return int(match.group(0)) if match else None
+
+
+def _split_tools(value: str | None) -> list[str]:
+    """Split a rendered tools stats value into tool names.
+
+    Inputs:
+        Receives a tools string from rendered Markdown stats.
+
+    Returns:
+        List of tool identifiers.
+
+    Used by:
+        _classify to detect semantic misroutes in safe eval reports.
+    """
+    if not value:
+        return []
+    return [part.strip(" `") for part in re.split(r",|\s+", value) if part.strip(" `")]
+
+
+def _extract_semantic_action(content: str) -> str | None:
+    """Extract semantic action telemetry when present in rendered output.
+
+    Inputs:
+        Receives final chat content.
+
+    Returns:
+        Semantic action id or None when user-mode output hides it.
+
+    Used by:
+        _run_case safe report metadata.
+    """
+    match = re.search(r"`?semantic_action`?\s*\|\s*`?([^`\n|]+)`?", content, re.IGNORECASE)
+    return match.group(1).strip() if match else None
 
 
 def _build_report(records: list[dict[str, Any]], *, model: str, base_url: str, elapsed_seconds: float) -> dict[str, Any]:

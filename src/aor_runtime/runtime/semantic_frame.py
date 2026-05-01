@@ -15,6 +15,14 @@ Boundaries:
 
 from __future__ import annotations
 
+from aor_runtime.runtime.semantic.action_matrix import (
+    SEMANTIC_ACTION_MATRIX,
+    SemanticActionOutput,
+    SemanticActionRow,
+    active_semantic_actions,
+    disabled_semantic_actions,
+    select_semantic_action,
+)
 from aor_runtime.runtime.semantic.core import (
     LLMSemanticFrameExtractor,
     SEMANTIC_CAPABILITIES,
@@ -30,6 +38,7 @@ from aor_runtime.runtime.semantic.core import (
     SemanticFrameCompiler,
     SemanticFrameExtractionResult,
     SemanticFramePlanner,
+    SemanticFrameProposal,
     SemanticMetric,
     SemanticOutputContract,
     SemanticOutputKind,
@@ -49,7 +58,10 @@ from aor_runtime.runtime.semantic.core import (
 
 __all__ = [
     "LLMSemanticFrameExtractor",
+    "SEMANTIC_ACTION_MATRIX",
     "SEMANTIC_CAPABILITIES",
+    "SemanticActionOutput",
+    "SemanticActionRow",
     "SemanticCapabilitySpec",
     "SemanticCompilationResult",
     "SemanticCompound",
@@ -62,6 +74,7 @@ __all__ = [
     "SemanticFrameCompiler",
     "SemanticFrameExtractionResult",
     "SemanticFramePlanner",
+    "SemanticFrameProposal",
     "SemanticMetric",
     "SemanticOutputContract",
     "SemanticOutputKind",
@@ -71,10 +84,13 @@ __all__ = [
     "SemanticTargetSet",
     "SemanticTimeWindow",
     "SlurmAccountingStatePolicy",
+    "active_semantic_actions",
     "build_semantic_frame_prompt",
     "deterministic_semantic_frame",
+    "disabled_semantic_actions",
     "normalize_metric_name",
     "project_semantic_result",
+    "select_semantic_action",
     "semantic_frame_mode",
     "validate_semantic_coverage",
 ]

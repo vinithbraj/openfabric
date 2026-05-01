@@ -1676,6 +1676,7 @@ class SlurmPartitionsTool(BaseTool):
             Used by callers of aor_runtime.tools.slurm.ToolResult and related tests.
         """
         partitions: list[dict[str, str]]
+        count: int
 
     def __init__(self, settings: Settings | None = None) -> None:
         """Handle the internal initialize the object helper path for this module.
@@ -2599,7 +2600,7 @@ def _partitions_result_from_stdout(stdout: str, *, partition: str | None) -> dic
     partitions = parse_sinfo_partitions_output(stdout)
     if partition:
         partitions = [item for item in partitions if _normalize_partition_name(item["partition"]) == partition]
-    return {"partitions": partitions}
+    return {"partitions": partitions, "count": len(partitions)}
 
 
 def _accounting_result_from_stdout(

@@ -184,6 +184,7 @@ def infer_goal_output_contract(
     *,
     output_format: str | None = None,
     semantic_output: Any | None = None,
+    allow_goal_backup: bool = True,
 ) -> GoalOutputContract:
     """Infer goal output contract for the surrounding runtime workflow.
 
@@ -201,6 +202,7 @@ def infer_goal_output_contract(
         semantic_output=semantic_output,
         planner_expected_shape=expected_kind,
         output_format=output_format,
+        allow_goal_backup=allow_goal_backup,
     ).as_contract()
 
 
@@ -210,6 +212,7 @@ def resolve_output_intent(
     semantic_output: Any | None = None,
     planner_expected_shape: Any | None = None,
     output_format: str | None = None,
+    allow_goal_backup: bool = True,
 ) -> ResolvedOutputIntent:
     """Resolve LLM-informed output intent into an enforceable runtime contract.
 
@@ -251,7 +254,7 @@ def resolve_output_intent(
             reason="export_goal",
         )
 
-    if _looks_like_sql_explain_only_goal(goal_text):
+    if allow_goal_backup and _looks_like_sql_explain_only_goal(goal_text):
         if kind not in {"unknown", "text"}:
             corrections.append("explain_only_forces_text")
         return ResolvedOutputIntent(
@@ -266,7 +269,7 @@ def resolve_output_intent(
             reason="sql_explain_only",
         )
 
-    fallback = _deterministic_output_backup(goal_text)
+    fallback = _deterministic_output_backup(goal_text) if allow_goal_backup else ResolvedOutputIntent()
     if fallback.group_by and not group_by:
         group_by = fallback.group_by
     if fallback.result_entities and not result_entities:

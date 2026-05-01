@@ -25,7 +25,12 @@ class FakeLLM:
 
 
 def _settings(tmp_path: Path) -> Settings:
-    return Settings(workspace_root=tmp_path, run_store_path=tmp_path / "runtime.db", default_node="localhost")
+    return Settings(
+        workspace_root=tmp_path,
+        run_store_path=tmp_path / "runtime.db",
+        default_node="localhost",
+        semantic_frame_mode="off",
+    )
 
 
 def _shell_plan(command: str) -> dict:
@@ -95,15 +100,15 @@ def _plan(tmp_path: Path, prompt: str, response: dict):
     return plan, planner, llm
 
 
-def test_filesystem_listing_uses_semantic_frame_when_supported(tmp_path: Path) -> None:
+def test_filesystem_listing_uses_action_planner_when_semantic_frame_disabled(tmp_path: Path) -> None:
     plan, planner, llm = _plan(tmp_path, "list all files in this folder", _fs_glob_plan())
 
     assert [step.action for step in plan.steps] == ["fs.glob", "text.format", "runtime.return"]
     assert plan.steps[0].args["path"] == "."
     assert planner.last_planning_mode == ACTIVE_PLANNING_MODE
-    assert planner.last_capability_name == "semantic_frame"
-    assert planner.last_llm_calls == 0
-    assert llm.call_count == 0
+    assert planner.last_capability_name == "action_planner"
+    assert planner.last_llm_calls == 1
+    assert llm.call_count == 1
 
 
 def test_disk_usage_still_gets_storage_command_canonicalization(tmp_path: Path) -> None:

@@ -15,6 +15,25 @@ Boundaries:
 
 from __future__ import annotations
 
+from aor_runtime.runtime.semantic.action_matrix import (
+    SEMANTIC_ACTION_MATRIX,
+    SemanticActionOutput,
+    SemanticActionRow,
+    active_semantic_actions,
+    disabled_semantic_actions,
+    select_semantic_action,
+    semantic_action_prompt_metadata,
+)
 from aor_runtime.runtime.semantic.core import SEMANTIC_CAPABILITIES, SemanticStrategySelector
 
-__all__ = ["SEMANTIC_CAPABILITIES", "SemanticStrategySelector"]
+__all__ = [
+    "SEMANTIC_ACTION_MATRIX",
+    "SEMANTIC_CAPABILITIES",
+    "SemanticActionOutput",
+    "SemanticActionRow",
+    "SemanticStrategySelector",
+    "active_semantic_actions",
+    "disabled_semantic_actions",
+    "select_semantic_action",
+    "semantic_action_prompt_metadata",
+]
