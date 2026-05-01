@@ -473,6 +473,123 @@ The LLM does **not** control:
 Those are all runtime-owned or gateway-owned.
 
 
+## Maximizing LLM Use Without Trusting the LLM
+
+This runtime now intentionally uses the LLM more often, but gives it no additional authority.
+
+That distinction is the whole point of the refactor.
+
+### The LLM's role
+
+The LLM is used as:
+
+- a semantic proposer;
+- a decomposition proposer;
+- a decomposition critic;
+- a verb classifier;
+- a capability ranker;
+- an argument proposer;
+- a DAG reviewer;
+- a failure repair assistant;
+- a display-plan proposer.
+
+In other words, the LLM is now asked to do more of the "thinking about what the user probably means" work.
+
+### The runtime's role
+
+The runtime remains the authority for:
+
+- schema validation;
+- normalization;
+- capability existence checks;
+- argument validation;
+- DAG construction;
+- dependency validation;
+- `InputRef` validation;
+- safety policy;
+- execution readiness;
+- gateway routing;
+- actual execution;
+- final rendering.
+
+The important boundary is:
+
+> The LLM may propose, critique, rank, explain, and repair.  
+> The runtime alone may validate, authorize, and execute.
+
+### Proposal, critique, validation, repair
+
+The current design now wraps several stages with a tighter pattern:
+
+```text
+LLM proposal
+  -> deterministic validation
+  -> optional LLM critique or review
+  -> deterministic acceptance or rejection
+  -> trusted runtime object
+```
+
+For selected stages, the runtime can also generate multiple LLM candidates and choose among them deterministically.
+
+This lets us increase LLM usage without letting raw LLM output become executable truth.
+
+### Why reproducibility does not come from deterministic LLM behavior
+
+The system does **not** assume the LLM is deterministic.
+
+Instead, reproducibility comes from recording:
+
+- what the LLM proposed;
+- what the runtime accepted or rejected;
+- what deterministic normalizations were applied;
+- what safety decision was made;
+- what final trusted DAG was produced.
+
+That information is stored in a `PlanningTrace`.
+
+So reproducibility here means:
+
+> We can replay the validated plan.  
+> We do not need the model to say the exact same thing again.
+
+### Replay model
+
+Replay works from the trusted end of the pipeline:
+
+1. load a `PlanningTrace`;
+2. recover the validated `ActionDAG`;
+3. verify `final_dag_hash`;
+4. verify the DAG was marked `execution_ready`;
+5. re-execute the trusted DAG without calling the LLM again.
+
+This is a stronger reproducibility story than "set temperature to zero and hope."
+
+### Adding a capability safely
+
+The safe way to add a new capability is:
+
+1. add a new manifest to the registry;
+2. define its typed argument schema and output shape;
+3. decide whether it is `gateway`, `local`, or `internal`;
+4. implement deterministic validation in the capability itself;
+5. make execution backend behavior explicit;
+6. add safety coverage;
+7. add tests proving LLM proposals cannot bypass the capability contract.
+
+The LLM should only ever learn:
+
+- what the capability means;
+- what arguments it can take;
+- what kind of result it produces.
+
+It should never become the authority for:
+
+- command strings;
+- backend transport;
+- mutation semantics;
+- permission grants.
+
+
 ## Action DAG and Validation
 
 The action DAG is the contract between semantic planning and execution.

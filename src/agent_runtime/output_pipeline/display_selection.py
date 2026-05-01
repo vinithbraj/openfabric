@@ -9,6 +9,7 @@ from pydantic.json_schema import model_json_schema
 
 from agent_runtime.core.errors import ValidationError
 from agent_runtime.core.types import DisplayPlan
+from agent_runtime.llm.proposals import DisplayPlanProposal
 from agent_runtime.llm.structured_call import structured_call
 
 
@@ -27,7 +28,7 @@ class DisplaySelectionInput(BaseModel):
 def _build_selection_prompt(selection_input: DisplaySelectionInput) -> str:
     """Build the strict JSON-only prompt for display-plan selection."""
 
-    schema = model_json_schema(DisplayPlan)
+    schema = model_json_schema(DisplayPlanProposal)
     return "\n".join(
         [
             "You are selecting a safe display plan for an intelligent agent runtime.",
@@ -90,7 +91,8 @@ def select_display_plan(selection_input: DisplaySelectionInput, llm_client) -> D
     """Select a display plan from safe previews through a structured LLM call."""
 
     prompt = _build_selection_prompt(selection_input)
-    plan = structured_call(llm_client, prompt, DisplayPlan)
+    proposal = structured_call(llm_client, prompt, DisplayPlanProposal)
+    plan = DisplayPlan.model_validate(proposal.model_dump(mode="json"))
     return _validate_display_plan_references(plan, selection_input)
 
 

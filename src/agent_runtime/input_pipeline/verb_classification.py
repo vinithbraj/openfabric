@@ -8,6 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import model_json_schema
 
 from agent_runtime.core.types import RiskLevel, SemanticVerb, TaskFrame
+from agent_runtime.llm.proposals import VerbAssignmentProposal
+from agent_runtime.llm.reproducibility import (
+    PlanningTrace,
+    PlanningTraceEntry,
+    append_trace_entry,
+    llm_client_metadata,
+)
 from agent_runtime.llm.structured_call import structured_call
 
 VERB_VOCABULARY: tuple[str, ...] = (
@@ -124,17 +131,33 @@ def _post_process_assignment(task: TaskFrame) -> TaskFrame:
     return task
 
 
-def assign_semantic_verbs(tasks: list[TaskFrame], llm_client) -> list[TaskFrame]:
+def assign_semantic_verbs(tasks: list[TaskFrame], llm_client, trace: PlanningTrace | None = None) -> list[TaskFrame]:
     """Assign semantic verbs and semantic metadata to task frames through an LLM."""
 
     if not tasks:
         return []
 
     prompt = _build_assignment_prompt(tasks)
-    assignment_result = structured_call(llm_client, prompt, TaskVerbAssignmentResult)
+    proposal = structured_call(llm_client, prompt, VerbAssignmentProposal)
+    assignment_result = TaskVerbAssignmentResult.model_validate(
+        {
+            "assignments": [
+                {
+                    "task_id": assignment.task_id,
+                    "semantic_verb": assignment.semantic_verb,
+                    "object_type": assignment.object_type,
+                    "intent_confidence": assignment.intent_confidence,
+                    "risk_level": assignment.risk_level,
+                    "requires_confirmation": assignment.requires_confirmation,
+                }
+                for assignment in proposal.assignments
+            ]
+        }
+    )
     assignments = {assignment.task_id: assignment for assignment in assignment_result.assignments}
 
     updated_tasks: list[TaskFrame] = []
+    deterministic_normalizations: list[str] = []
     for task in tasks:
         assignment = assignments.get(task.id)
         if assignment is None:
@@ -148,5 +171,24 @@ def assign_semantic_verbs(tasks: list[TaskFrame], llm_client) -> list[TaskFrame]
                 "requires_confirmation": assignment.requires_confirmation,
             }
         )
-        updated_tasks.append(_post_process_assignment(updated_task))
+        processed_task = _post_process_assignment(updated_task)
+        if processed_task != updated_task:
+            deterministic_normalizations.append(task.id)
+        updated_tasks.append(processed_task)
+    if isinstance(trace, PlanningTrace):
+        model_name, temperature = llm_client_metadata(llm_client)
+        append_trace_entry(
+            trace,
+            PlanningTraceEntry(
+                stage="semantic_verb_assignment",
+                request_id=str(trace.request_id),
+                model_name=model_name,
+                llm_temperature=temperature,
+                prompt_template_id="semantic_verb_assignment",
+                raw_llm_response=proposal.model_dump(mode="json"),
+                parsed_proposal=proposal.model_dump(mode="json"),
+                selected_candidate=assignment_result.model_dump(mode="json"),
+                deterministic_normalizations=deterministic_normalizations,
+            ),
+        )
     return updated_tasks

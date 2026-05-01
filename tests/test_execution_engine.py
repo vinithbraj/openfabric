@@ -7,6 +7,17 @@ from agent_runtime.core.config import RuntimeConfig
 from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult, InputRef
 from agent_runtime.execution.engine import ExecutionEngine
 from agent_runtime.execution.result_store import InMemoryResultStore
+from agent_runtime.llm.reproducibility import hash_action_dag
+
+
+def _ready_dag(dag: ActionDAG, allowed: bool = True) -> ActionDAG:
+    prepared = dag.model_copy(
+        update={
+            "execution_ready": allowed,
+            "safety_decision": {"allowed": allowed},
+        }
+    )
+    return prepared.model_copy(update={"final_dag_hash": hash_action_dag(prepared)})
 
 
 class CountingReadCapability(BaseCapability):
@@ -320,7 +331,7 @@ def test_successful_linear_dag_executes_in_dependency_order() -> None:
         edges=[("node-a", "node-b")],
     )
 
-    bundle = engine.execute(dag, {"confirmation": True})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True})
 
     assert bundle.status == "success"
     assert [result.node_id for result in bundle.results] == ["node-a", "node-b"]
@@ -357,7 +368,7 @@ def test_failed_dependency_causes_downstream_skip() -> None:
         edges=[("node-fail", "node-after")],
     )
 
-    bundle = engine.execute(dag, {"confirmation": True, "stop_on_error": False})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True, "stop_on_error": False})
 
     assert bundle.status == "error"
     assert failing.calls == 1
@@ -384,7 +395,7 @@ def test_blocked_dag_does_not_execute() -> None:
         ]
     )
 
-    bundle = engine.execute(dag, {"confirmation": True})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True})
 
     assert bundle.status == "error"
     assert counting.calls == 0
@@ -409,7 +420,7 @@ def test_confirmation_required_dag_does_not_execute_without_confirmation() -> No
         ]
     )
 
-    bundle = engine.execute(dag, {})
+    bundle = engine.execute(_ready_dag(dag), {})
 
     assert bundle.status == "error"
     assert bundle.metadata["confirmation_required"] is True
@@ -439,7 +450,7 @@ def test_large_output_is_stored_by_reference() -> None:
         ]
     )
 
-    bundle = engine.execute(dag, {"confirmation": True})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True})
 
     assert bundle.status == "success"
     result = bundle.results[0]
@@ -473,7 +484,7 @@ def test_gateway_backed_node_executes_through_gateway_client() -> None:
         ]
     )
 
-    bundle = engine.execute(dag, {"confirmation": True})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True})
 
     assert bundle.status == "success"
     assert bundle.results[0].metadata["transport"] == "gateway"
@@ -512,7 +523,7 @@ def test_node_b_consumes_node_a_output_successfully() -> None:
         edges=[("node-a", "node-b")],
     )
 
-    bundle = engine.execute(dag, {"confirmation": True})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True})
 
     assert bundle.status == "success"
     assert bundle.results[1].data_preview == {"value": 2}
@@ -562,7 +573,7 @@ def test_node_c_consumes_node_b_output_successfully() -> None:
         edges=[("node-a", "node-b"), ("node-b", "node-c")],
     )
 
-    bundle = engine.execute(dag, {"confirmation": True})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True})
 
     assert bundle.status == "success"
     assert bundle.results[2].data_preview == {"text": "count=3"}
@@ -600,7 +611,7 @@ def test_input_ref_to_failed_node_causes_dependent_skip() -> None:
         edges=[("node-fail", "node-b")],
     )
 
-    bundle = engine.execute(dag, {"confirmation": True, "stop_on_error": False})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True, "stop_on_error": False})
 
     assert bundle.results[0].status == "error"
     assert bundle.results[1].status == "skipped"
@@ -638,7 +649,7 @@ def test_input_ref_data_type_mismatch_is_rejected() -> None:
         edges=[("node-a", "node-b")],
     )
 
-    bundle = engine.execute(dag, {"confirmation": True, "stop_on_error": False})
+    bundle = engine.execute(_ready_dag(dag), {"confirmation": True, "stop_on_error": False})
 
     assert bundle.status == "partial"
     assert bundle.results[1].status == "error"

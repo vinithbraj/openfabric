@@ -12,6 +12,7 @@ from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult, Inp
 from agent_runtime.execution.errors import ExecutionError
 from agent_runtime.execution.gateway_client import GatewayClient
 from agent_runtime.execution.result_store import InMemoryResultStore
+from agent_runtime.llm.reproducibility import hash_action_dag
 from agent_runtime.execution.safety import (
     SafetyDecision,
     SafetyPolicy,
@@ -266,9 +267,31 @@ class ExecutionEngine:
             for key, value in node.arguments.items()
         }
 
+    def _enforce_execution_ready_dag(self, dag: ActionDAG) -> None:
+        """Reject untrusted or unprepared DAGs before execution."""
+
+        if not isinstance(dag, ActionDAG):
+            raise ValidationError("ExecutionEngine accepts only trusted ActionDAG instances.")
+        if not dag.execution_ready:
+            raise ValidationError("ExecutionEngine refuses DAGs that are not execution_ready.")
+        if not dag.final_dag_hash:
+            raise ValidationError("ExecutionEngine refuses DAGs without final_dag_hash.")
+        if hash_action_dag(dag) != dag.final_dag_hash:
+            raise ValidationError("ExecutionEngine refuses DAGs whose final_dag_hash does not match the payload.")
+        if not dag.safety_decision:
+            raise ValidationError("ExecutionEngine refuses DAGs without a recorded safety decision.")
+        if not bool(dag.safety_decision.get("allowed", False)):
+            raise ValidationError("ExecutionEngine refuses DAGs whose recorded safety decision is not allowed.")
+        unresolved = [node.id for node in dag.nodes if node.is_unresolved]
+        if unresolved:
+            raise ValidationError(
+                f"ExecutionEngine refuses DAGs with unresolved nodes: {', '.join(unresolved)}"
+            )
+
     def execute(self, dag: ActionDAG, context: dict[str, Any] | None = None) -> ResultBundle:
         """Execute a DAG in dependency order and return a normalized bundle."""
 
+        self._enforce_execution_ready_dag(dag)
         context = dict(context or {})
         confirmation_granted = bool(context.get("confirmation", False))
         effective_config = self.safety_policy.config.model_copy(
@@ -298,7 +321,18 @@ class ExecutionEngine:
                 metadata={"confirmation_required": True},
             )
 
-        executable_dag = decision.sanitized_dag or dag
+        if decision.sanitized_dag is not None:
+            executable_dag = dag.model_copy(
+                update={
+                    "nodes": decision.sanitized_dag.nodes,
+                    "edges": decision.sanitized_dag.edges,
+                    "global_constraints": decision.sanitized_dag.global_constraints,
+                    "requires_confirmation": decision.requires_confirmation,
+                    "safety_decision": decision.model_dump(mode="json"),
+                }
+            )
+        else:
+            executable_dag = dag
         ordered_nodes = _topological_sort(executable_dag)
         stop_on_error = bool(context.get("stop_on_error", self.safety_policy.config.stop_on_error))
         runtime_policy = SafetyPolicy(effective_config)
@@ -374,6 +408,7 @@ class ExecutionEngine:
                     metadata={
                         "capability_id": node.capability_id,
                         "operation_id": node.operation_id,
+                        "error_class": type(exc).__name__,
                     },
                 )
                 results.append(errored)

@@ -14,7 +14,14 @@ from agent_runtime.capabilities.schemas import CapabilityManifest
 from agent_runtime.core.errors import CapabilityNotFoundError
 from agent_runtime.core.types import TaskFrame
 from agent_runtime.input_pipeline.domain_selection import CapabilitySelectionResult
-from agent_runtime.llm.structured_call import structured_call
+from agent_runtime.input_pipeline.plan_selection import CandidateEvaluation, select_best_candidate
+from agent_runtime.llm.proposals import ArgumentExtractionProposal, collect_n_best_structured_attempts
+from agent_runtime.llm.reproducibility import (
+    PlanningTrace,
+    PlanningTraceEntry,
+    append_trace_entry,
+    llm_client_metadata,
+)
 
 
 class ArgumentExtractionResult(BaseModel):
@@ -248,6 +255,8 @@ def extract_arguments(
     selections: list[CapabilitySelectionResult],
     registry: CapabilityRegistry,
     llm_client,
+    n_best: int = 3,
+    trace: PlanningTrace | None = None,
 ) -> list[ArgumentExtractionResult]:
     """Extract and normalize capability arguments for selected task frames."""
 
@@ -292,7 +301,77 @@ def extract_arguments(
 
         manifest = capability.manifest
         prompt = _build_argument_prompt(task_by_id[task.id], manifest)
-        response = structured_call(llm_client, prompt, _ArgumentExtractionResponse)
-        results.append(_apply_deterministic_normalization(task, manifest, response, workspace_root))
+        attempts = collect_n_best_structured_attempts(
+            llm_client=llm_client,
+            system_prompt=prompt,
+            user_payload={
+                "task_id": task.id,
+                "description": task.description,
+                "constraints": task.constraints,
+                "capability_id": manifest.capability_id,
+                "operation_id": manifest.operation_id,
+            },
+            output_model=ArgumentExtractionProposal,
+            n=n_best,
+        )
+        evaluations: list[CandidateEvaluation[ArgumentExtractionResult]] = []
+        for attempt in attempts:
+            evaluation = CandidateEvaluation[ArgumentExtractionResult](
+                raw_response=attempt.raw_llm_response,
+                validation_errors=list(attempt.validation_errors),
+            )
+            if attempt.parsed_proposal is None or attempt.validation_errors:
+                evaluations.append(evaluation)
+                continue
+            proposal = attempt.parsed_proposal
+            response = _ArgumentExtractionResponse.model_validate(proposal.model_dump(mode="json"))
+            normalized = _apply_deterministic_normalization(task, manifest, response, workspace_root)
+            evaluation.proposal = normalized
+            evaluation.confidence = normalized.confidence
+            evaluation.missing_required_count = len(normalized.missing_required_arguments)
+            evaluation.assumption_count = len(normalized.assumptions)
+            evaluations.append(evaluation)
+        selected = select_best_candidate(evaluations)
+        if selected is None or selected.proposal is None:
+            results.append(
+                ArgumentExtractionResult(
+                    task_id=task.id,
+                    capability_id=manifest.capability_id,
+                    operation_id=manifest.operation_id,
+                    arguments={},
+                    missing_required_arguments=list(manifest.required_arguments),
+                    assumptions=["No valid argument extraction proposal was accepted."],
+                    confidence=0.0,
+                )
+            )
+            continue
+
+        if isinstance(trace, PlanningTrace):
+            model_name, temperature = llm_client_metadata(llm_client)
+            append_trace_entry(
+                trace,
+                PlanningTraceEntry(
+                    stage="argument_extraction",
+                    request_id=str(trace.request_id),
+                    model_name=model_name,
+                    llm_temperature=temperature,
+                    prompt_template_id="argument_extraction",
+                    raw_llm_response=[attempt.raw_llm_response for attempt in attempts],
+                    parsed_proposal=[
+                        attempt.parsed_proposal.model_dump(mode="json")
+                        if attempt.parsed_proposal is not None
+                        else None
+                        for attempt in attempts
+                    ],
+                    validation_errors=[
+                        error for evaluation in evaluations for error in evaluation.validation_errors
+                    ],
+                    selected_candidate=selected.proposal.model_dump(mode="json"),
+                    rejection_reasons=[
+                        reason for evaluation in evaluations for reason in evaluation.rejection_reasons
+                    ],
+                ),
+            )
+        results.append(selected.proposal)
 
     return results

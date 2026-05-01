@@ -18,10 +18,12 @@ class FakeLLMClient:
 
     def __init__(self, payloads: dict[str, dict[str, Any]]) -> None:
         self.payloads = payloads
+        self.prompts: list[str] = []
         self.last_prompt = ""
         self.last_schema: dict[str, Any] | None = None
 
     def complete_json(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        self.prompts.append(prompt)
         self.last_prompt = prompt
         self.last_schema = schema
         for raw_prompt, payload in self.payloads.items():
@@ -163,10 +165,11 @@ def test_decompose_simple_prompt() -> None:
     assert len(result.tasks) == 1
     assert result.tasks[0].description == "List all files in the current folder."
     assert result.global_constraints == {"path": "."}
-    assert "Do not select tools." in client.last_prompt
-    assert "Do not generate commands." in client.last_prompt
-    assert "Do not generate SQL." in client.last_prompt
-    assert "Do not generate shell syntax." in client.last_prompt
+    decomposition_prompt = next(prompt for prompt in client.prompts if "You are decomposing a user prompt" in prompt)
+    assert "Do not select tools." in decomposition_prompt
+    assert "Do not generate commands." in decomposition_prompt
+    assert "Do not generate SQL." in decomposition_prompt
+    assert "Do not generate shell syntax." in decomposition_prompt
 
 
 def test_decompose_compound_prompt_preserves_order_and_dependencies() -> None:

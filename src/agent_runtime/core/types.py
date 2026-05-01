@@ -185,6 +185,9 @@ class ActionDAG(BaseModel):
     edges: list[tuple[str, str]] = Field(default_factory=list)
     global_constraints: dict[str, Any] = Field(default_factory=dict)
     requires_confirmation: bool = False
+    final_dag_hash: str | None = None
+    execution_ready: bool = False
+    safety_decision: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_graph(self) -> "ActionDAG":

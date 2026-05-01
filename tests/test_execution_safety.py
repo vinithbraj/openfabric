@@ -15,6 +15,17 @@ from agent_runtime.core.errors import SafetyError
 from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult
 from agent_runtime.execution.engine import ExecutionEngine
 from agent_runtime.execution.safety import SafetyDecision, evaluate_dag_safety
+from agent_runtime.llm.reproducibility import hash_action_dag
+
+
+def _ready_dag(dag: ActionDAG, allowed: bool = True) -> ActionDAG:
+    prepared = dag.model_copy(
+        update={
+            "execution_ready": allowed,
+            "safety_decision": {"allowed": allowed},
+        }
+    )
+    return prepared.model_copy(update={"final_dag_hash": hash_action_dag(prepared)})
 
 
 class EchoCapability(BaseCapability):
@@ -127,7 +138,7 @@ def test_execution_engine_invokes_registered_capability() -> None:
         ]
     )
 
-    bundle = _engine().execute(dag, {"confirmation": True})
+    bundle = _engine().execute(_ready_dag(dag), {"confirmation": True})
 
     assert bundle.status == "success"
     assert bundle.results[0].node_id == "node-1"
@@ -149,7 +160,7 @@ def test_execution_safety_blocks_mutating_action_by_default() -> None:
         ]
     )
 
-    bundle = _engine().execute(dag)
+    bundle = _engine().execute(_ready_dag(dag))
 
     assert bundle.status == "error"
     assert bundle.metadata["confirmation_required"] is True

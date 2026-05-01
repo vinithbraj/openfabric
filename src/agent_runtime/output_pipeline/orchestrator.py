@@ -6,6 +6,12 @@ from typing import Any
 
 from agent_runtime.core.errors import ValidationError
 from agent_runtime.core.types import ActionDAG, RenderedOutput, ResultBundle, UserRequest
+from agent_runtime.llm.reproducibility import (
+    PlanningTrace,
+    PlanningTraceEntry,
+    append_trace_entry,
+    llm_client_metadata,
+)
 from agent_runtime.output_pipeline.display_selection import (
     DisplaySelectionInput,
     DisplaySelector,
@@ -220,6 +226,21 @@ def compose_output(
         ],
     )
     display_plan = select_display_plan(selection_input, llm_client)
+    trace = user_request.safety_context.get("planning_trace")
+    if isinstance(trace, PlanningTrace):
+        model_name, temperature = llm_client_metadata(llm_client)
+        append_trace_entry(
+            trace,
+            PlanningTraceEntry(
+                stage="display_plan_selection",
+                request_id=user_request.request_id,
+                model_name=model_name,
+                llm_temperature=temperature,
+                prompt_template_id="display_plan_selection",
+                parsed_proposal=display_plan.model_dump(mode="json"),
+                selected_candidate=display_plan.model_dump(mode="json"),
+            ),
+        )
     lookup = _source_lookup(result_bundle, safe_previews, user_request)
     rendered = render_display_plan(display_plan, lookup, _resolve_section_payload)
     return rendered.content

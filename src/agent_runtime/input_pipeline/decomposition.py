@@ -9,6 +9,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import model_json_schema
 
 from agent_runtime.core.types import TaskFrame, UserRequest
+from agent_runtime.input_pipeline.plan_selection import CandidateEvaluation, select_best_candidate
+from agent_runtime.llm.critique import critique_decomposition, critique_requires_repair
+from agent_runtime.llm.proposals import (
+    PromptClassificationProposal,
+    TaskDecompositionProposal,
+    collect_n_best_structured_attempts,
+)
+from agent_runtime.llm.reproducibility import (
+    PlanningTrace,
+    PlanningTraceEntry,
+    append_trace_entry,
+    llm_client_metadata,
+)
 from agent_runtime.llm.structured_call import structured_call
 
 
@@ -119,6 +132,25 @@ def _build_classification_prompt(user_request: UserRequest) -> str:
     )
 
 
+def _validate_classification_proposal(
+    proposal: PromptClassificationProposal,
+) -> tuple[PromptClassification, list[str]]:
+    """Convert one untrusted classification proposal into the trusted model."""
+
+    normalized = PromptClassification.model_validate(
+        {
+            "prompt_type": proposal.prompt_type,
+            "requires_tools": proposal.requires_tools,
+            "likely_domains": list(proposal.likely_domains),
+            "risk_level": proposal.risk_level,
+            "needs_clarification": proposal.needs_clarification,
+            "clarification_question": proposal.clarification_question,
+            "reason": proposal.reason,
+        }
+    )
+    return normalized, [f"proposal_confidence={proposal.confidence}"] if proposal.confidence is not None else []
+
+
 _SHELL_TOOL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bcurrent working directory\b"),
     re.compile(r"\bpwd\b"),
@@ -171,13 +203,36 @@ def classify_prompt(user_request: UserRequest, llm_client) -> PromptClassificati
     """Classify a user prompt through a strict structured LLM call."""
 
     prompt = _build_classification_prompt(user_request)
-    classification = structured_call(llm_client, prompt, PromptClassification)
-    return _normalize_classification(user_request, classification)
+    raw_response = llm_client.complete_json(prompt, PromptClassificationProposal.model_json_schema())
+    proposal = PromptClassificationProposal.model_validate(raw_response)
+    classification, normalizations = _validate_classification_proposal(proposal)
+    normalized = _normalize_classification(user_request, classification)
+    if normalized != classification:
+        normalizations.append("normalized_shell_tool_prompt")
+    trace = user_request.safety_context.get("planning_trace")
+    if isinstance(trace, PlanningTrace):
+        model_name, temperature = llm_client_metadata(llm_client)
+        append_trace_entry(
+            trace,
+            PlanningTraceEntry(
+                stage="prompt_classification",
+                request_id=user_request.request_id,
+                model_name=model_name,
+                llm_temperature=temperature,
+                prompt_template_id="prompt_classification",
+                raw_llm_response=raw_response,
+                parsed_proposal=proposal.model_dump(mode="json"),
+                selected_candidate=normalized.model_dump(mode="json"),
+                deterministic_normalizations=normalizations,
+            ),
+        )
+    return normalized
 
 
 def _build_decomposition_prompt(
     user_request: UserRequest,
     classification: PromptClassification,
+    critique_feedback: dict[str, Any] | None = None,
 ) -> str:
     """Build the strict JSON-only prompt sent to the LLM decomposer."""
 
@@ -199,6 +254,14 @@ def _build_decomposition_prompt(
             _decomposition_schema_description(),
             "Prompt classification context:",
             str(classification.model_dump()),
+            *(
+                [
+                    "Critique feedback from a previous proposal attempt:",
+                    str(critique_feedback),
+                ]
+                if critique_feedback
+                else []
+            ),
             "JSON schema:",
             str(schema),
             "User prompt:",
@@ -207,12 +270,166 @@ def _build_decomposition_prompt(
     )
 
 
+def _normalize_decomposition_proposal(
+    proposal: TaskDecompositionProposal,
+) -> DecompositionResult:
+    """Convert one untrusted decomposition proposal into the trusted model."""
+
+    tasks = [TaskFrame.model_validate(task.model_dump(mode="json")) for task in proposal.tasks]
+    return DecompositionResult(
+        tasks=tasks,
+        global_constraints=dict(proposal.global_constraints),
+        unresolved_references=list(proposal.unresolved_references),
+        assumptions=list(proposal.assumptions),
+    )
+
+
+_RISK_SCORES: dict[str, int] = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+    "critical": 3,
+}
+
+
+def _evaluate_decomposition_attempts(
+    attempts,
+) -> list[CandidateEvaluation[DecompositionResult]]:
+    """Evaluate N-best decomposition attempts deterministically."""
+
+    evaluations: list[CandidateEvaluation[DecompositionResult]] = []
+    for attempt in attempts:
+        evaluation = CandidateEvaluation[DecompositionResult](
+            raw_response=attempt.raw_llm_response,
+            validation_errors=list(attempt.validation_errors),
+        )
+        if attempt.parsed_proposal is None or attempt.validation_errors:
+            evaluations.append(evaluation)
+            continue
+        proposal = attempt.parsed_proposal
+        try:
+            normalized = _normalize_decomposition_proposal(proposal)
+            evaluation.proposal = normalized
+            evaluation.confidence = float(proposal.confidence or 0.0)
+            evaluation.assumption_count = len(proposal.assumptions)
+            evaluation.unresolved_count = len(proposal.unresolved_references)
+            evaluation.risk_score = sum(
+                _RISK_SCORES.get(task.risk_level.strip().lower(), 0) for task in proposal.tasks
+            )
+        except Exception as exc:
+            evaluation.validation_errors.append(str(exc))
+        evaluations.append(evaluation)
+    return evaluations
+
+
 def decompose_prompt(
     user_request: UserRequest,
     classification: PromptClassification,
     llm_client,
+    available_domains: list[str] | None = None,
+    n_best: int = 3,
 ) -> DecompositionResult:
     """Decompose a prompt into ordered atomic tasks through a structured LLM call."""
 
     prompt = _build_decomposition_prompt(user_request, classification)
-    return structured_call(llm_client, prompt, DecompositionResult)
+    attempts = collect_n_best_structured_attempts(
+        llm_client=llm_client,
+        system_prompt=prompt,
+        user_payload={
+            "prompt": user_request.raw_prompt,
+            "classification": classification.model_dump(mode="json"),
+        },
+        output_model=TaskDecompositionProposal,
+        n=n_best,
+    )
+    evaluations = _evaluate_decomposition_attempts(attempts)
+    selected = select_best_candidate(evaluations)
+    if selected is None or selected.proposal is None or not selected.is_valid:
+        errors = [
+            error
+            for evaluation in evaluations
+            for error in (evaluation.validation_errors + evaluation.rejection_reasons)
+        ]
+        raise ValueError(
+            "No valid decomposition proposal was accepted."
+            + (f" Errors: {' | '.join(errors)}" if errors else "")
+        )
+
+    available_domains = available_domains or []
+    selected_proposal = TaskDecompositionProposal.model_validate(
+        attempts[evaluations.index(selected)].parsed_proposal.model_dump(mode="json")
+        if attempts[evaluations.index(selected)].parsed_proposal is not None
+        else {}
+    )
+    critique = critique_decomposition(user_request, selected_proposal, available_domains, llm_client)
+    repaired = False
+    if critique_requires_repair(critique):
+        repair_prompt = _build_decomposition_prompt(
+            user_request,
+            classification,
+            critique_feedback=critique.model_dump(mode="json"),
+        )
+        repair_attempts = collect_n_best_structured_attempts(
+            llm_client=llm_client,
+            system_prompt=repair_prompt,
+            user_payload={
+                "prompt": user_request.raw_prompt,
+                "classification": classification.model_dump(mode="json"),
+                "critique": critique.model_dump(mode="json"),
+            },
+            output_model=TaskDecompositionProposal,
+            n=1,
+        )
+        repair_evaluations = _evaluate_decomposition_attempts(repair_attempts)
+        repaired_candidate = select_best_candidate(repair_evaluations)
+        if repaired_candidate is not None and repaired_candidate.is_valid and repaired_candidate.proposal is not None:
+            selected = repaired_candidate
+            repaired = True
+
+    trace = user_request.safety_context.get("planning_trace")
+    if isinstance(trace, PlanningTrace):
+        model_name, temperature = llm_client_metadata(llm_client)
+        append_trace_entry(
+            trace,
+            PlanningTraceEntry(
+                stage="task_decomposition",
+                request_id=user_request.request_id,
+                model_name=model_name,
+                llm_temperature=temperature,
+                prompt_template_id="task_decomposition",
+                raw_llm_response=[attempt.raw_llm_response for attempt in attempts],
+                parsed_proposal=[
+                    attempt.parsed_proposal.model_dump(mode="json")
+                    if attempt.parsed_proposal is not None
+                    else None
+                    for attempt in attempts
+                ],
+                validation_errors=[
+                    error for attempt in attempts for error in attempt.validation_errors
+                ],
+                selected_candidate=selected.proposal.model_dump(mode="json"),
+                rejection_reasons=[
+                    reason
+                    for evaluation in evaluations
+                    if evaluation is not selected
+                    for reason in (evaluation.rejection_reasons + evaluation.validation_errors)
+                ],
+                deterministic_normalizations=(
+                    ["repaired_after_critique"] if repaired else []
+                ),
+            ),
+        )
+        append_trace_entry(
+            trace,
+            PlanningTraceEntry(
+                stage="task_decomposition_critique",
+                request_id=user_request.request_id,
+                model_name=model_name,
+                llm_temperature=temperature,
+                prompt_template_id="task_decomposition_critique",
+                raw_llm_response=critique.model_dump(mode="json"),
+                parsed_proposal=critique.model_dump(mode="json"),
+                selected_candidate=selected.proposal.model_dump(mode="json"),
+            ),
+        )
+    return selected.proposal
