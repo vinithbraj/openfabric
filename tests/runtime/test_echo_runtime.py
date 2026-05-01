@@ -12,7 +12,10 @@ class FakeAgentRuntime:
     """Small fake runtime injected into the OpenAI-compatible API tests."""
 
     def handle_request(self, raw_prompt: str, context: dict | None = None) -> str:
-        _ = context
+        payload = dict(context or {})
+        callback = payload.get("event_callback")
+        if callable(callback):
+            callback("[Prompt Classification] Started\n\nPlanning is underway.\n\n")
         return f"handled: {raw_prompt}"
 
 
@@ -116,6 +119,7 @@ def test_openai_chat_completion_stream_echoes_prompt_and_done() -> None:
         body = response.read().decode()
 
     assert response.status_code == 200
+    assert "[Prompt Classification] Started" in body
     assert "handled: hello stream" in body
     assert "data: [DONE]" in body
 

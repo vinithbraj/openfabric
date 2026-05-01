@@ -102,14 +102,18 @@ class DisplaySelector:
     def select(self, selection_input: DisplaySelectionInput) -> DisplayPlan:
         """Return a deterministic fallback display plan when no LLM is used."""
 
+        def _preview_payload(preview: dict[str, Any]) -> dict[str, Any]:
+            payload = preview.get("preview")
+            return payload if isinstance(payload, dict) else {}
+
         default_type = (
             "table"
             if any(
-                preview.get("preview", {}).get("entries")
-                or preview.get("preview", {}).get("rows")
-                or preview.get("preview", {}).get("matches")
-                or preview.get("preview", {}).get("processes")
-                or preview.get("preview", {}).get("listeners")
+                _preview_payload(preview).get("entries")
+                or _preview_payload(preview).get("rows")
+                or _preview_payload(preview).get("matches")
+                or _preview_payload(preview).get("processes")
+                or _preview_payload(preview).get("listeners")
                 for preview in selection_input.safe_previews
             )
             else "markdown"

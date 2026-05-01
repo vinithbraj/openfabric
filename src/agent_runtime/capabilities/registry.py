@@ -29,7 +29,8 @@ class CapabilityRegistry:
     def list_manifests(self) -> list[CapabilityManifest]:
         """Return all registered manifests."""
 
-        return [capability.manifest for capability in self._capabilities.values()]
+        manifests = [capability.manifest for capability in self._capabilities.values()]
+        return sorted(manifests, key=lambda manifest: (manifest.domain.lower(), manifest.capability_id))
 
     def find_by_domain(self, domain: str) -> list[CapabilityManifest]:
         """Return manifests in the requested domain."""

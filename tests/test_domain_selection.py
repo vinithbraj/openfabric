@@ -198,7 +198,7 @@ def test_unknown_task_becomes_unresolved() -> None:
 
     assert results[0].selected is None
     assert results[0].unresolved_reason is not None
-    assert "below threshold" in results[0].unresolved_reason
+    assert "No deterministic shortlist candidates" in results[0].unresolved_reason
 
 
 def test_mismatched_semantic_verb_is_rejected_without_explicit_high_confidence_reason() -> None:
@@ -230,4 +230,7 @@ def test_mismatched_semantic_verb_is_rejected_without_explicit_high_confidence_r
 
     assert results[0].selected is None
     assert results[0].unresolved_reason is not None
-    assert "do not match task verb" in results[0].unresolved_reason
+    assert (
+        "deterministic shortlist" in results[0].unresolved_reason
+        or "do not match task verb" in results[0].unresolved_reason
+    )

@@ -162,6 +162,49 @@ _SHELL_TOOL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\brun\b.*\btests\b"),
 )
 
+_SYSTEM_TOOL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bfree memory\b"),
+    re.compile(r"\bmemory usage\b"),
+    re.compile(r"\bram\b"),
+    re.compile(r"\bswap\b"),
+    re.compile(r"\bdisk usage\b"),
+    re.compile(r"\bfree disk\b"),
+    re.compile(r"\bdisk space\b"),
+    re.compile(r"\bcpu load\b"),
+    re.compile(r"\bload average\b"),
+    re.compile(r"\buptime\b"),
+    re.compile(r"\benvironment summary\b"),
+)
+
+_RUNTIME_INTROSPECTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "runtime.describe_capabilities": (
+        re.compile(r"\bwhat are my capabilities\b"),
+        re.compile(r"\bwhat tools do you have\b"),
+        re.compile(r"\bwhat can this runtime do\b"),
+        re.compile(r"\bshow available capabilities\b"),
+        re.compile(r"\blist registered capabilities\b"),
+        re.compile(r"\bwhat operations are available\b"),
+        re.compile(r"\bwhat tools are enabled\b"),
+    ),
+    "runtime.describe_pipeline": (
+        re.compile(r"\bhow does this runtime work\b"),
+        re.compile(r"\bshow pipeline\b"),
+        re.compile(r"\bexplain your architecture\b"),
+        re.compile(r"\bwhat stages do you run\b"),
+    ),
+    "runtime.show_last_plan": (
+        re.compile(r"\bshow last plan\b"),
+        re.compile(r"\bwhat plan did you make\b"),
+        re.compile(r"\bshow the dag\b"),
+        re.compile(r"\bwhy did you choose that tool\b"),
+    ),
+    "runtime.explain_last_failure": (
+        re.compile(r"\bwhy did that fail\b"),
+        re.compile(r"\bexplain the last error\b"),
+        re.compile(r"\bwhat went wrong\b"),
+    ),
+}
+
 
 def _looks_like_shell_tool_prompt(raw_prompt: str) -> bool:
     """Return whether a prompt strongly implies a shell/system inspection tool."""
@@ -170,6 +213,27 @@ def _looks_like_shell_tool_prompt(raw_prompt: str) -> bool:
     if not lowered:
         return False
     return any(pattern.search(lowered) for pattern in _SHELL_TOOL_PATTERNS)
+
+
+def _runtime_introspection_capability_id(raw_prompt: str) -> str | None:
+    """Return the runtime introspection capability implied by one prompt, if any."""
+
+    lowered = str(raw_prompt or "").strip().lower()
+    if not lowered:
+        return None
+    for capability_id, patterns in _RUNTIME_INTROSPECTION_PATTERNS.items():
+        if any(pattern.search(lowered) for pattern in patterns):
+            return capability_id
+    return None
+
+
+def _looks_like_system_tool_prompt(raw_prompt: str) -> bool:
+    """Return whether a prompt strongly implies a safe system-inspection capability."""
+
+    lowered = str(raw_prompt or "").strip().lower()
+    if not lowered:
+        return False
+    return any(pattern.search(lowered) for pattern in _SYSTEM_TOOL_PATTERNS)
 
 
 def _normalize_classification(
@@ -193,6 +257,38 @@ def _normalize_classification(
                 "requires_tools": True,
                 "likely_domains": likely_domains,
                 "reason": f"{classification.reason} Deterministically normalized to a shell tool task.",
+            }
+        )
+
+    if _looks_like_system_tool_prompt(user_request.raw_prompt) and (
+        classification.prompt_type == "simple_question" or not classification.requires_tools
+    ):
+        likely_domains = list(classification.likely_domains)
+        if "system" not in {domain.strip().lower() for domain in likely_domains}:
+            likely_domains.append("system")
+        return classification.model_copy(
+            update={
+                "prompt_type": "simple_tool_task",
+                "requires_tools": True,
+                "likely_domains": likely_domains,
+                "reason": f"{classification.reason} Deterministically normalized to a system inspection tool task.",
+            }
+        )
+
+    runtime_capability = _runtime_introspection_capability_id(user_request.raw_prompt)
+    if runtime_capability is not None:
+        likely_domains = list(classification.likely_domains)
+        if "runtime" not in {domain.strip().lower() for domain in likely_domains}:
+            likely_domains.append("runtime")
+        return classification.model_copy(
+            update={
+                "prompt_type": "simple_tool_task",
+                "requires_tools": True,
+                "likely_domains": likely_domains,
+                "reason": (
+                    f"{classification.reason} Deterministically normalized to runtime introspection via "
+                    f"{runtime_capability}."
+                ),
             }
         )
 

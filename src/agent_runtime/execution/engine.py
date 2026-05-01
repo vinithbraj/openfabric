@@ -12,11 +12,19 @@ from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult, Inp
 from agent_runtime.execution.errors import ExecutionError
 from agent_runtime.execution.gateway_client import GatewayClient
 from agent_runtime.execution.result_store import InMemoryResultStore
-from agent_runtime.llm.reproducibility import hash_action_dag
 from agent_runtime.execution.safety import (
     SafetyDecision,
     SafetyPolicy,
     evaluate_dag_safety,
+)
+from agent_runtime.llm.reproducibility import hash_action_dag
+from agent_runtime.observability import (
+    EVENT_EXECUTION_NODE_COMPLETED,
+    EVENT_EXECUTION_NODE_FAILED,
+    EVENT_EXECUTION_NODE_STARTED,
+    ObservabilityContext,
+    STAGE_EXECUTION,
+    observability_from_context,
 )
 
 
@@ -137,6 +145,28 @@ def _infer_data_type(result: ExecutionResult, node: ActionNode) -> str:
     if isinstance(preview, list):
         return "list"
     return f"{node.capability_id}.output"
+
+
+def _result_preview_details(result: ExecutionResult, node: ActionNode) -> dict[str, Any]:
+    """Return a concise preview summary for one normalized result."""
+
+    preview = result.data_preview
+    details: dict[str, Any] = {
+        "node_id": node.id,
+        "capability_id": node.capability_id,
+        "operation_id": node.operation_id,
+        "data_type": result.data_ref.data_type if result.data_ref is not None else None,
+    }
+    if isinstance(preview, dict):
+        details["keys"] = sorted(preview.keys())
+        for key in ("rows", "entries", "matches", "processes", "listeners"):
+            value = preview.get(key)
+            if isinstance(value, list):
+                details["row_count"] = len(value)
+                break
+        if "truncated" in preview:
+            details["truncated"] = bool(preview.get("truncated"))
+    return details
 
 
 class ExecutionEngine:
@@ -293,6 +323,7 @@ class ExecutionEngine:
 
         self._enforce_execution_ready_dag(dag)
         context = dict(context or {})
+        observability = observability_from_context(context)
         confirmation_granted = bool(context.get("confirmation", False))
         effective_config = self.safety_policy.config.model_copy(
             update={
@@ -343,6 +374,20 @@ class ExecutionEngine:
         hard_stop = False
 
         for node in ordered_nodes:
+            if isinstance(observability, ObservabilityContext):
+                observability.info(
+                    STAGE_EXECUTION,
+                    EVENT_EXECUTION_NODE_STARTED,
+                    "Execution node started",
+                    "The runtime started executing one node.",
+                    details={
+                        "node_id": node.id,
+                        "task_id": node.task_id,
+                        "capability_id": node.capability_id,
+                        "operation_id": node.operation_id,
+                        "depends_on": list(node.depends_on),
+                    },
+                )
             dependency_statuses = {
                 dependency_id: node_status.get(dependency_id)
                 for dependency_id in _dependency_ids(node, executable_dag)
@@ -361,6 +406,17 @@ class ExecutionEngine:
                 node_status[node.id] = skipped.status
                 results_by_node[node.id] = skipped
                 self.result_store.add(skipped)
+                if isinstance(observability, ObservabilityContext):
+                    observability.warning(
+                        STAGE_EXECUTION,
+                        EVENT_EXECUTION_NODE_FAILED,
+                        "Execution node skipped",
+                        "The node was skipped because stop_on_error halted downstream execution.",
+                        details={
+                            "node_id": node.id,
+                            "reason": skipped.error,
+                        },
+                    )
                 continue
 
             if any(status in {"error", "skipped"} for status in dependency_statuses.values()):
@@ -378,6 +434,17 @@ class ExecutionEngine:
                 node_status[node.id] = skipped.status
                 results_by_node[node.id] = skipped
                 self.result_store.add(skipped)
+                if isinstance(observability, ObservabilityContext):
+                    observability.warning(
+                        STAGE_EXECUTION,
+                        EVENT_EXECUTION_NODE_FAILED,
+                        "Execution node skipped",
+                        "The node was skipped because an upstream dependency did not succeed.",
+                        details={
+                            "node_id": node.id,
+                            "dependency_statuses": dependency_statuses,
+                        },
+                    )
                 continue
 
             capability = self.registry.get(node.capability_id)
@@ -390,6 +457,8 @@ class ExecutionEngine:
                     "execution_context": context,
                     "result_store": self.result_store,
                     "config": self.safety_policy.config,
+                    "registry": self.registry,
+                    "runtime_state": context.get("runtime_state"),
                 }
                 if capability.manifest.execution_backend == "gateway":
                     raw_result = self.gateway_client.invoke(
@@ -415,6 +484,20 @@ class ExecutionEngine:
                 node_status[node.id] = errored.status
                 results_by_node[node.id] = errored
                 self.result_store.add(errored)
+                if isinstance(observability, ObservabilityContext):
+                    observability.error(
+                        STAGE_EXECUTION,
+                        EVENT_EXECUTION_NODE_FAILED,
+                        "Execution node failed",
+                        "The node failed during execution.",
+                        details={
+                            "node_id": node.id,
+                            "capability_id": node.capability_id,
+                            "operation_id": node.operation_id,
+                            "error": errored.error,
+                            "error_class": errored.metadata.get("error_class"),
+                        },
+                    )
                 if stop_on_error:
                     hard_stop = True
                 continue
@@ -423,6 +506,26 @@ class ExecutionEngine:
             results.append(normalized)
             node_status[node.id] = normalized.status
             results_by_node[node.id] = normalized
+            if isinstance(observability, ObservabilityContext):
+                if normalized.status == "success":
+                    observability.info(
+                        STAGE_EXECUTION,
+                        EVENT_EXECUTION_NODE_COMPLETED,
+                        "Execution node completed",
+                        "The node completed successfully.",
+                        details=_result_preview_details(normalized, node),
+                    )
+                else:
+                    observability.error(
+                        STAGE_EXECUTION,
+                        EVENT_EXECUTION_NODE_FAILED,
+                        "Execution node failed",
+                        "The node returned an error status.",
+                        details={
+                            **_result_preview_details(normalized, node),
+                            "error": normalized.error,
+                        },
+                    )
             if normalized.status == "error" and stop_on_error:
                 hard_stop = True
 

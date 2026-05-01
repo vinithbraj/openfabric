@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_runtime.core.errors import ValidationError
 from agent_runtime.core.types import ActionDAG, RenderedOutput, ResultBundle, UserRequest
 from agent_runtime.llm.reproducibility import (
     PlanningTrace,
@@ -12,13 +11,28 @@ from agent_runtime.llm.reproducibility import (
     append_trace_entry,
     llm_client_metadata,
 )
+from agent_runtime.observability import (
+    EVENT_OUTPUT_SHAPE_SELECTED,
+    EVENT_RENDERING_COMPLETED,
+    ObservabilityContext,
+    STAGE_OUTPUT_PLANNING,
+    STAGE_RENDERING,
+)
 from agent_runtime.output_pipeline.display_selection import (
     DisplaySelectionInput,
     DisplaySelector,
     select_display_plan,
 )
 from agent_runtime.output_pipeline.redaction import Redactor
-from agent_runtime.output_pipeline.renderers import render_display_plan
+from agent_runtime.output_pipeline.renderers import render_result_shape, render_display_plan
+from agent_runtime.output_pipeline.result_shapes import (
+    AggregateResult,
+    DirectoryListingResult,
+    ErrorResult,
+    MultiSectionResult,
+    ResultShape,
+    normalize_execution_result,
+)
 from agent_runtime.output_pipeline.summarizer import Summarizer
 
 
@@ -33,6 +47,20 @@ def _result_store_from_request(user_request: UserRequest):
         store = context.get("result_store")
         if store is not None:
             return store
+    return None
+
+
+def _observability_from_request(user_request: UserRequest) -> ObservabilityContext | None:
+    """Resolve a request-scoped observability context when present."""
+
+    for context in (
+        user_request.safety_context,
+        user_request.session_context,
+        user_request.user_context,
+    ):
+        observability = context.get("observability")
+        if isinstance(observability, ObservabilityContext):
+            return observability
     return None
 
 
@@ -95,6 +123,7 @@ def _build_safe_previews(result_bundle: ResultBundle, redactor: Redactor) -> lis
                 "status": result.status,
                 "data_ref": result.data_ref.ref_id if result.data_ref is not None else None,
                 "preview": redactor.redact(result.data_preview) if result.data_preview is not None else None,
+                "shape_type": normalize_execution_result(result).shape_type,
                 "error": result.error,
             }
         )
@@ -124,6 +153,14 @@ def _source_lookup(
             "node_id": preview.get("node_id"),
             "data_ref": data_ref,
             "payload": payload,
+            "shape": normalize_execution_result(
+                next(
+                    result
+                    for result in result_bundle.results
+                    if result.node_id == preview.get("node_id")
+                ),
+                result_store if allow_full else None,
+            ),
             "status": preview.get("status"),
             "error": preview.get("error"),
         }
@@ -135,24 +172,30 @@ def _source_lookup(
     return lookup
 
 
-def _resolve_section_payload(section: dict[str, Any], lookup: dict[str, dict[str, Any]]) -> Any:
-    """Resolve one section payload from safe or full-data lookup entries."""
+def _safe_error_text(message: str | None) -> str:
+    """Strip traceback-like content from user-visible error text."""
 
-    source_node_id = section.get("source_node_id")
-    if source_node_id is not None:
-        key = f"node:{source_node_id}"
-        if key not in lookup:
-            raise ValidationError(f"Display plan references missing node source: {source_node_id}")
-        return lookup[key]["payload"]
+    text = str(message or "").strip()
+    if not text:
+        return "Execution failed."
+    if "Traceback (most recent call last)" in text:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in reversed(lines):
+            if ":" in line and not line.startswith("Traceback"):
+                return line
+        return "Execution failed."
+    return text.splitlines()[0].strip()
 
-    source_data_ref = section.get("source_data_ref")
-    if source_data_ref is not None:
-        key = f"data:{source_data_ref}"
-        if key not in lookup:
-            raise ValidationError(f"Display plan references missing data source: {source_data_ref}")
-        return lookup[key]["payload"]
 
-    raise ValidationError("Display plan section must reference source_node_id or source_data_ref.")
+def _safe_summary_text(message: str | None) -> str:
+    """Remove traceback text from summaries while preserving normal prose."""
+
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    if "Traceback (most recent call last)" in text:
+        return _safe_error_text(text)
+    return text
 
 
 def _render_error_bundle(result_bundle: ResultBundle) -> str:
@@ -164,9 +207,10 @@ def _render_error_bundle(result_bundle: ResultBundle) -> str:
         lines.append("")
         lines.append("Blocked reasons:")
         lines.extend(f"- {reason}" for reason in blocked_reasons)
-    if result_bundle.safe_summary:
+    safe_summary = _safe_summary_text(result_bundle.safe_summary)
+    if safe_summary:
         lines.append("")
-        lines.append(result_bundle.safe_summary)
+        lines.append(safe_summary)
     return "\n".join(lines)
 
 
@@ -174,8 +218,9 @@ def _render_partial_bundle(result_bundle: ResultBundle) -> str:
     """Render a partial bundle deterministically."""
 
     lines = ["Partial results"]
-    if result_bundle.safe_summary:
-        lines.extend(["", result_bundle.safe_summary])
+    safe_summary = _safe_summary_text(result_bundle.safe_summary)
+    if safe_summary:
+        lines.extend(["", safe_summary])
 
     successes = [result for result in result_bundle.results if result.status == "success"]
     skipped = [result for result in result_bundle.results if result.status == "skipped"]
@@ -192,8 +237,110 @@ def _render_partial_bundle(result_bundle: ResultBundle) -> str:
     if errors:
         lines.extend(["", "Errors:"])
         for result in errors:
-            lines.append(f"- {result.node_id}: {result.error or 'Execution failed.'}")
+            lines.append(f"- {result.node_id}: {_safe_error_text(result.error)}")
     return "\n".join(lines)
+
+
+def _default_shape_title(shape: ResultShape) -> str | None:
+    """Return a deterministic title for one normalized shape."""
+
+    if getattr(shape, "title", None):
+        return getattr(shape, "title")
+    if isinstance(shape, AggregateResult):
+        return shape.label or "Aggregate Result"
+    if isinstance(shape, DirectoryListingResult):
+        return "Directory Listing"
+    return None
+
+
+def _shape_with_default_title(shape: ResultShape) -> ResultShape:
+    """Ensure fallback-rendered sections have stable, human-readable titles."""
+
+    if getattr(shape, "title", None):
+        return shape
+    default_title = _default_shape_title(shape)
+    if not default_title:
+        return shape
+    return shape.model_copy(update={"title": default_title})
+
+
+def _fallback_section_order(prompt: str, shapes: list[ResultShape]) -> list[ResultShape]:
+    """Order normalized shapes deterministically for fallback rendering."""
+
+    lowered = str(prompt or "").lower()
+    asked_to_list_files = "list" in lowered and "file" in lowered
+    ordered = list(shapes)
+    if asked_to_list_files:
+        ordered.sort(
+            key=lambda shape: (
+                0
+                if isinstance(shape, DirectoryListingResult)
+                else 1
+                if isinstance(shape, AggregateResult)
+                else 2
+            )
+        )
+    return ordered
+
+
+def _fallback_render_success(
+    user_request: UserRequest,
+    result_bundle: ResultBundle,
+) -> str:
+    """Render successful bundles deterministically from normalized result shapes."""
+
+    result_store = _result_store_from_request(user_request)
+    shapes = [
+        normalize_execution_result(result, result_store)
+        for result in result_bundle.results
+        if result.status == "success"
+    ]
+    if not shapes:
+        return "No results available."
+
+    ordered_shapes = [
+        _shape_with_default_title(shape)
+        for shape in _fallback_section_order(user_request.raw_prompt, shapes)
+    ]
+    if len(ordered_shapes) == 1:
+        shape = ordered_shapes[0]
+        return render_result_shape(shape, title=_default_shape_title(shape))
+
+    multi = MultiSectionResult(
+        node_id="multi-section",
+        title=None,
+        sections=ordered_shapes,
+    )
+    return render_result_shape(multi)
+
+
+def _fallback_rendered_output(
+    user_request: UserRequest,
+    result_bundle: ResultBundle,
+) -> RenderedOutput:
+    """Build a deterministic rendered output when display planning fails."""
+
+    content = _fallback_render_success(user_request, result_bundle)
+    return RenderedOutput(
+        content=content,
+        display_plan=DisplaySelector().select(
+            DisplaySelectionInput(
+                original_prompt=user_request.raw_prompt,
+                dag_summary={},
+                result_summary=_summarize_results(result_bundle),
+                safe_previews=[],
+                available_display_types=[
+                    "plain_text",
+                    "markdown",
+                    "table",
+                    "json",
+                    "code_block",
+                    "multi_section",
+                ],
+            )
+        ),
+        metadata={"fallback": True},
+    )
 
 
 def compose_output(
@@ -204,13 +351,63 @@ def compose_output(
 ) -> str:
     """Compose final user-facing output from a DAG and result bundle."""
 
+    observability = _observability_from_request(user_request)
     if result_bundle.status == "error":
-        return _render_error_bundle(result_bundle)
+        if observability is not None:
+            observability.stage_started(
+                STAGE_RENDERING,
+                "Rendering started",
+                "The runtime is rendering an error result deterministically.",
+            )
+        content = _render_error_bundle(result_bundle)
+        if observability is not None:
+            observability.info(
+                STAGE_RENDERING,
+                EVENT_RENDERING_COMPLETED,
+                "Rendering completed",
+                "The runtime rendered an error result deterministically.",
+                details={"content_length": len(content)},
+            )
+            observability.stage_completed(
+                STAGE_RENDERING,
+                "Rendering completed",
+                "Rendering finished with an error bundle view.",
+                details={"content_length": len(content)},
+            )
+        return content
     if result_bundle.status == "partial":
-        return _render_partial_bundle(result_bundle)
+        if observability is not None:
+            observability.stage_started(
+                STAGE_RENDERING,
+                "Rendering started",
+                "The runtime is rendering partial results deterministically.",
+            )
+        content = _render_partial_bundle(result_bundle)
+        if observability is not None:
+            observability.info(
+                STAGE_RENDERING,
+                EVENT_RENDERING_COMPLETED,
+                "Rendering completed",
+                "The runtime rendered partial results deterministically.",
+                details={"content_length": len(content)},
+            )
+            observability.stage_completed(
+                STAGE_RENDERING,
+                "Rendering completed",
+                "Rendering finished with a partial-results view.",
+                details={"content_length": len(content)},
+            )
+        return content
 
     redactor = Redactor()
     safe_previews = _build_safe_previews(result_bundle, redactor)
+    if observability is not None:
+        observability.stage_started(
+            STAGE_OUTPUT_PLANNING,
+            "Output planning started",
+            "The runtime is selecting result shapes and a display plan.",
+            details={"safe_preview_count": len(safe_previews)},
+        )
     selection_input = DisplaySelectionInput(
         original_prompt=user_request.raw_prompt,
         dag_summary=_summarize_dag(dag),
@@ -225,25 +422,102 @@ def compose_output(
             "multi_section",
         ],
     )
-    display_plan = select_display_plan(selection_input, llm_client)
+    display_plan = None
     trace = user_request.safety_context.get("planning_trace")
-    if isinstance(trace, PlanningTrace):
-        model_name, temperature = llm_client_metadata(llm_client)
-        append_trace_entry(
-            trace,
-            PlanningTraceEntry(
-                stage="display_plan_selection",
-                request_id=user_request.request_id,
-                model_name=model_name,
-                llm_temperature=temperature,
-                prompt_template_id="display_plan_selection",
-                parsed_proposal=display_plan.model_dump(mode="json"),
-                selected_candidate=display_plan.model_dump(mode="json"),
-            ),
-        )
-    lookup = _source_lookup(result_bundle, safe_previews, user_request)
-    rendered = render_display_plan(display_plan, lookup, _resolve_section_payload)
-    return rendered.content
+    try:
+        if observability is not None:
+            result_store = _result_store_from_request(user_request)
+            shape_types = [
+                normalize_execution_result(result, result_store).shape_type
+                for result in result_bundle.results
+            ]
+            observability.info(
+                STAGE_OUTPUT_PLANNING,
+                EVENT_OUTPUT_SHAPE_SELECTED,
+                "Result shapes selected",
+                "Execution results were normalized into semantic result shapes.",
+                details={"shape_types": shape_types},
+            )
+        display_plan = select_display_plan(selection_input, llm_client)
+        if isinstance(trace, PlanningTrace):
+            model_name, temperature = llm_client_metadata(llm_client)
+            append_trace_entry(
+                trace,
+                PlanningTraceEntry(
+                    stage="display_plan_selection",
+                    request_id=user_request.request_id,
+                    model_name=model_name,
+                    llm_temperature=temperature,
+                    prompt_template_id="display_plan_selection",
+                    parsed_proposal=display_plan.model_dump(mode="json"),
+                    selected_candidate=display_plan.model_dump(mode="json"),
+                    ),
+                )
+        if observability is not None:
+            observability.stage_completed(
+                STAGE_OUTPUT_PLANNING,
+                "Output planning completed",
+                "A display plan was selected for rendering.",
+                details={
+                    "display_type": display_plan.display_type,
+                    "section_count": len(display_plan.sections),
+                },
+            )
+            observability.stage_started(
+                STAGE_RENDERING,
+                "Rendering started",
+                "The runtime is rendering the validated display plan.",
+                details={"display_type": display_plan.display_type},
+            )
+        lookup = _source_lookup(result_bundle, safe_previews, user_request)
+        rendered = render_display_plan(display_plan, lookup)
+        if observability is not None:
+            observability.info(
+                STAGE_RENDERING,
+                EVENT_RENDERING_COMPLETED,
+                "Rendering completed",
+                "The final response was rendered successfully.",
+                details={
+                    "display_type": display_plan.display_type,
+                    "content_length": len(rendered.content),
+                },
+            )
+            observability.stage_completed(
+                STAGE_RENDERING,
+                "Rendering completed",
+                "Rendering finished successfully.",
+                details={"content_length": len(rendered.content)},
+            )
+        return rendered.content
+    except Exception:
+        if observability is not None:
+            observability.warning(
+                STAGE_OUTPUT_PLANNING,
+                "validation.rejected",
+                "Display plan rejected",
+                "The runtime fell back to deterministic result-shape rendering.",
+            )
+        content = _fallback_render_success(user_request, result_bundle)
+        if observability is not None:
+            observability.stage_started(
+                STAGE_RENDERING,
+                "Rendering started",
+                "The runtime is using deterministic result-shape rendering.",
+            )
+            observability.info(
+                STAGE_RENDERING,
+                EVENT_RENDERING_COMPLETED,
+                "Rendering completed",
+                "The runtime rendered the response using the deterministic fallback.",
+                details={"content_length": len(content), "fallback": True},
+            )
+            observability.stage_completed(
+                STAGE_RENDERING,
+                "Rendering completed",
+                "Deterministic fallback rendering finished successfully.",
+                details={"content_length": len(content)},
+            )
+        return content
 
 
 class OutputPipelineOrchestrator:
@@ -308,8 +582,15 @@ class OutputPipelineOrchestrator:
                 "node_id": preview["node_id"],
                 "data_ref": preview.get("data_ref"),
                 "payload": preview.get("preview"),
+                "shape": normalize_execution_result(result),
             }
-            for preview in safe_previews
+            for result, preview in zip(bundle.results, safe_previews)
         }
-        rendered = render_display_plan(display_plan, lookup, _resolve_section_payload)
+        try:
+            rendered = render_display_plan(display_plan, lookup)
+        except Exception:
+            rendered = _fallback_rendered_output(
+                user_request or UserRequest(raw_prompt=""),
+                bundle,
+            )
         return self.summarizer.summarize(rendered)

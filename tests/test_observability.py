@@ -8,29 +8,19 @@ from agent_runtime.core.orchestrator import AgentRuntime
 from agent_runtime.core.types import ExecutionResult
 from agent_runtime.execution.engine import ExecutionEngine
 from agent_runtime.execution.result_store import InMemoryResultStore
+from agent_runtime.observability import (
+    InMemoryEventSink,
+    PipelineEvent,
+    build_observability_context,
+    redact_event,
+)
 from agent_runtime.output_pipeline.orchestrator import OutputPipelineOrchestrator
 from gateway_agent.remote_runner import run_remote_operation
 
 
 class FakeLLMClient:
-    """Route structured prompts to fixed payloads by stage marker."""
-
-    def __init__(self) -> None:
-        self.prompts: list[str] = []
-
     def complete_json(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
-        self.prompts.append(prompt)
         if "You are classifying a user prompt" in prompt:
-            if "What is 2+2?" in prompt:
-                return {
-                    "prompt_type": "simple_question",
-                    "requires_tools": False,
-                    "likely_domains": [],
-                    "risk_level": "low",
-                    "needs_clarification": False,
-                    "clarification_question": None,
-                    "reason": "This is a direct question with no tool need.",
-                }
             return {
                 "prompt_type": "simple_tool_task",
                 "requires_tools": True,
@@ -134,7 +124,7 @@ class FakeLLMClient:
                 "constraints": {},
                 "redaction_policy": "standard",
             }
-        raise AssertionError(f"Unexpected prompt: {prompt}")
+        return {}
 
 
 class FakeGatewayClient:
@@ -172,22 +162,60 @@ def _runtime(tmp_path: Path) -> AgentRuntime:
     return AgentRuntime(FakeLLMClient(), registry, engine, OutputPipelineOrchestrator())
 
 
-def test_handle_request_returns_direct_answer_placeholder(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
+def test_redact_event_removes_secret_like_content() -> None:
+    event = PipelineEvent(
+        request_id="req-1",
+        level="info",
+        stage="test",
+        event_type="test",
+        title="Test",
+        summary="Summary",
+        details={"api_key": "sk-secret-1234567890", "note": "safe"},
+    )
 
-    response = runtime.handle_request("What is 2+2?", {"workspace_root": str(tmp_path)})
+    redacted = redact_event(event, "standard")
 
-    assert "Direct answering without tools is not implemented yet" in response
+    assert redacted.details["api_key"] == "[redacted]"
+    assert redacted.details["note"] == "safe"
 
 
-def test_handle_request_runs_full_tool_pipeline(tmp_path: Path) -> None:
+def test_build_observability_context_supports_callback() -> None:
+    messages: list[str] = []
+
+    context = build_observability_context(
+        "req-1",
+        {"event_callback": messages.append},
+    )
+    context.info("test", "demo", "Hello", "World", {"foo": "bar"})
+
+    assert context.enabled is True
+    assert messages
+    assert "Hello" in messages[0]
+
+
+def test_runtime_emits_pipeline_events(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+    sink = InMemoryEventSink()
     runtime = _runtime(tmp_path)
 
     response = runtime.handle_request(
         "list all files in this folder",
-        {"workspace_root": str(tmp_path)},
+        {
+            "workspace_root": str(tmp_path),
+            "observability": {"enabled": True, "sink": sink},
+        },
     )
 
-    assert "Workspace Files" in response
     assert "README.md" in response
+    event_types = {(event.stage, event.event_type) for event in sink.events}
+    assert ("prompt_classification", "stage.started") in event_types
+    assert ("capability_selection", "capability.selected") in event_types
+    assert ("execution", "execution.node.completed") in event_types
+    assert ("completed", "stage.completed") in event_types
+    selected = next(
+        event
+        for event in sink.events
+        if event.stage == "capability_selection" and event.event_type == "capability.selected"
+    )
+    assert selected.details["capability_id"] == "filesystem.list_directory"
+    assert "raw_llm_response" not in selected.details

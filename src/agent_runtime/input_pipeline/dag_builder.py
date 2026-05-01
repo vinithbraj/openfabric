@@ -11,6 +11,8 @@ from agent_runtime.capabilities.registry import CapabilityRegistry
 from agent_runtime.core.errors import ValidationError
 from agent_runtime.core.types import ActionDAG, ActionNode, InputRef, TaskFrame, UserRequest
 from agent_runtime.input_pipeline.argument_extraction import ArgumentExtractionResult
+from agent_runtime.input_pipeline.capability_fit import CapabilityFitDecision
+from agent_runtime.input_pipeline.dataflow_planning import ValidatedDataflowPlan
 from agent_runtime.input_pipeline.decomposition import DecompositionResult
 from agent_runtime.input_pipeline.domain_selection import CapabilitySelectionResult
 
@@ -128,11 +130,20 @@ def build_action_dag(
     decomposition_result: DecompositionResult,
     capability_selection_results: list[CapabilitySelectionResult],
     argument_extraction_results: list[ArgumentExtractionResult],
+    dataflow_plan: ValidatedDataflowPlan | None = None,
+    capability_fit_decisions: list[CapabilityFitDecision] | None = None,
 ) -> ActionDAG:
     """Build a validated action DAG from decomposition, selection, and arguments."""
 
     registry = _resolve_registry(user_request)
-    tasks = decomposition_result.tasks
+    fit_by_task = {decision.task_id: decision for decision in (capability_fit_decisions or [])}
+    base_tasks = [
+        task
+        for task in decomposition_result.tasks
+        if fit_by_task.get(task.id) is None or fit_by_task[task.id].is_fit
+    ]
+    derived_tasks = [derived.task for derived in dataflow_plan.derived_tasks] if dataflow_plan else []
+    tasks = [*base_tasks, *derived_tasks]
     task_by_id = {task.id: task for task in tasks}
     if len(task_by_id) != len(tasks):
         raise ValidationError("Decomposition contains duplicate task ids.")
@@ -145,6 +156,10 @@ def build_action_dag(
     if len(arguments_by_task) != len(argument_extraction_results):
         raise ValidationError("Argument extraction contains duplicate task ids.")
 
+    derived_by_task = {
+        derived.task.id: derived for derived in (dataflow_plan.derived_tasks if dataflow_plan else [])
+    }
+
     nodes: list[ActionNode] = []
     edges: list[tuple[str, str]] = []
     dag_requires_confirmation = False
@@ -152,50 +167,74 @@ def build_action_dag(
     known_node_ids = {_node_id_for_task(task_id) for task_id in known_task_ids}
 
     for task in tasks:
-        selection = selections_by_task.get(task.id)
-        if selection is None:
-            raise ValidationError(f"Task {task.id} has no capability selection result.")
-        if selection.selected is None:
-            reason = selection.unresolved_reason or "Capability selection is unresolved."
-            raise ValidationError(f"Task {task.id} is unresolved: {reason}")
+        derived = derived_by_task.get(task.id)
+        if derived is not None:
+            capability = registry.get(derived.capability_id)
+            manifest = capability.manifest
+            if derived.operation_id != manifest.operation_id:
+                raise ValidationError(
+                    f"Derived task {task.id} operation {derived.operation_id} does not match manifest operation {manifest.operation_id}."
+                )
+            source_arguments = dict(derived.arguments)
+        else:
+            selection = selections_by_task.get(task.id)
+            if selection is None:
+                raise ValidationError(f"Task {task.id} has no capability selection result.")
+            if selection.selected is None:
+                reason = selection.unresolved_reason or "Capability selection is unresolved."
+                raise ValidationError(f"Task {task.id} is unresolved: {reason}")
 
-        capability = registry.get(selection.selected.capability_id)
-        manifest = capability.manifest
+            capability = registry.get(selection.selected.capability_id)
+            manifest = capability.manifest
 
-        if selection.selected.operation_id != manifest.operation_id:
-            raise ValidationError(
-                f"Task {task.id} selected operation {selection.selected.operation_id} "
-                f"does not match manifest operation {manifest.operation_id}."
-            )
+            if selection.selected.operation_id != manifest.operation_id:
+                raise ValidationError(
+                    f"Task {task.id} selected operation {selection.selected.operation_id} "
+                    f"does not match manifest operation {manifest.operation_id}."
+                )
 
-        extraction = arguments_by_task.get(task.id)
-        if extraction is None:
-            raise ValidationError(f"Task {task.id} has no argument extraction result.")
+            extraction = arguments_by_task.get(task.id)
+            if extraction is None:
+                raise ValidationError(f"Task {task.id} has no argument extraction result.")
 
-        if extraction.capability_id != manifest.capability_id:
-            raise ValidationError(
-                f"Task {task.id} argument extraction capability {extraction.capability_id} "
-                f"does not match selected capability {manifest.capability_id}."
-            )
-        if extraction.operation_id != manifest.operation_id:
-            raise ValidationError(
-                f"Task {task.id} argument extraction operation {extraction.operation_id} "
-                f"does not match selected operation {manifest.operation_id}."
-            )
-        if extraction.missing_required_arguments:
-            raise ValidationError(
-                f"Task {task.id} is missing required arguments: "
-                f"{', '.join(extraction.missing_required_arguments)}"
-            )
+            if extraction.capability_id != manifest.capability_id:
+                raise ValidationError(
+                    f"Task {task.id} argument extraction capability {extraction.capability_id} "
+                    f"does not match selected capability {manifest.capability_id}."
+                )
+            if extraction.operation_id != manifest.operation_id:
+                raise ValidationError(
+                    f"Task {task.id} argument extraction operation {extraction.operation_id} "
+                    f"does not match selected operation {manifest.operation_id}."
+                )
+            if extraction.missing_required_arguments:
+                raise ValidationError(
+                    f"Task {task.id} is missing required arguments: "
+                    f"{', '.join(extraction.missing_required_arguments)}"
+                )
+            source_arguments = dict(extraction.arguments)
 
-        normalized_arguments = _normalize_arguments(
-            extraction.arguments,
-            known_task_ids,
-            known_node_ids,
-        )
+        for ref in dataflow_plan.refs if dataflow_plan else []:
+            if ref.consumer_task_id == task.id:
+                source_arguments[ref.consumer_argument_name] = ref.input_ref
+
+        normalized_arguments = _normalize_arguments(source_arguments, known_task_ids, known_node_ids)
         validated_arguments = capability.validate_arguments(normalized_arguments)
         node_id = _node_id_for_task(task.id)
-        dependency_node_ids = [_node_id_for_task(dependency) for dependency in task.dependencies]
+        dependency_task_ids = list(task.dependencies)
+        if dataflow_plan:
+            dependency_task_ids.extend(
+                source
+                for source, target in dataflow_plan.dependency_edges
+                if target == task.id
+            )
+            dependency_task_ids.extend(
+                ref.producer_task_id
+                for ref in dataflow_plan.refs
+                if ref.consumer_task_id == task.id
+            )
+        dependency_task_ids = list(dict.fromkeys(dependency_task_ids))
+        dependency_node_ids = [_node_id_for_task(dependency) for dependency in dependency_task_ids]
         labels = _build_safety_labels(task, manifest)
         if task.requires_confirmation or manifest.requires_confirmation:
             dag_requires_confirmation = True

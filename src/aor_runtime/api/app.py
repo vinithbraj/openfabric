@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -400,18 +402,17 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
         if not task:
             raise HTTPException(status_code=400, detail="No actionable user task found.")
 
-        content = runtime.handle_request(
-            task,
-            context={
-                "workspace_root": str(configured_settings.workspace_root),
-                "confirmation": False,
-                "allow_full_output_access": False,
-            },
-        )
-
         created = int(time.time())
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
         if not request.stream:
+            content = runtime.handle_request(
+                task,
+                context={
+                    "workspace_root": str(configured_settings.workspace_root),
+                    "confirmation": False,
+                    "allow_full_output_access": False,
+                },
+            )
             return {
                 "id": response_id,
                 "object": "chat.completion",
@@ -428,6 +429,46 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
 
         def event_stream():
             yield _chat_chunk(response_id, request.model, created, {"role": "assistant"})
+            event_queue: queue.Queue[str] = queue.Queue()
+            worker_done = threading.Event()
+            outcome: dict[str, str] = {}
+
+            def _event_callback(text: str) -> None:
+                if text:
+                    event_queue.put(text)
+
+            def _worker() -> None:
+                try:
+                    outcome["content"] = runtime.handle_request(
+                        task,
+                        context={
+                            "workspace_root": str(configured_settings.workspace_root),
+                            "confirmation": False,
+                            "allow_full_output_access": False,
+                            "event_callback": _event_callback,
+                            "observability": {
+                                "enabled": True,
+                                "debug": False,
+                            },
+                        },
+                    )
+                except Exception:
+                    outcome["content"] = "I hit an internal error while handling that request."
+                finally:
+                    worker_done.set()
+
+            worker = threading.Thread(target=_worker, daemon=True)
+            worker.start()
+
+            while not worker_done.is_set() or not event_queue.empty():
+                try:
+                    payload = event_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                yield _chat_chunk(response_id, request.model, created, {"content": payload})
+
+            worker.join(timeout=0.1)
+            content = outcome.get("content", "")
             if content:
                 yield _chat_chunk(response_id, request.model, created, {"content": content})
             yield _chat_chunk(response_id, request.model, created, {}, finish_reason="stop")

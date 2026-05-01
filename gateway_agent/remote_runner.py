@@ -4,6 +4,8 @@ import argparse
 import base64
 import json
 import os
+import platform
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -52,6 +54,26 @@ OPERATION_SPECS: dict[str, dict[str, set[str]]] = {
     "shell.run_tests_readonly": {
         "required": set(),
         "optional": {"target", "max_failures"},
+    },
+    "system.memory_status": {
+        "required": set(),
+        "optional": {"human_readable"},
+    },
+    "system.disk_usage": {
+        "required": set(),
+        "optional": {"path", "human_readable"},
+    },
+    "system.cpu_load": {
+        "required": set(),
+        "optional": set(),
+    },
+    "system.uptime": {
+        "required": set(),
+        "optional": set(),
+    },
+    "system.environment_summary": {
+        "required": set(),
+        "optional": set(),
     },
 }
 
@@ -457,6 +479,241 @@ def _run_tests_readonly(arguments: dict[str, Any], workspace_root: Path) -> dict
     }
 
 
+def _format_bytes(value: int) -> str:
+    """Return a stable human-readable byte string."""
+
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    amount = float(max(0, int(value)))
+    unit_index = 0
+    while amount >= 1024.0 and unit_index < len(units) - 1:
+        amount /= 1024.0
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(amount)} {units[unit_index]}"
+    return f"{amount:.1f} {units[unit_index]}"
+
+
+def _parse_meminfo() -> dict[str, int]:
+    """Parse /proc/meminfo into byte counts when available."""
+
+    meminfo_path = Path("/proc/meminfo")
+    if not meminfo_path.exists():
+        raise RemoteToolError("/proc/meminfo is not available on this host.")
+
+    values: dict[str, int] = {}
+    for line in meminfo_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        parts = raw_value.strip().split()
+        if not parts:
+            continue
+        try:
+            numeric = int(parts[0])
+        except ValueError:
+            continue
+        multiplier = 1024 if len(parts) > 1 and parts[1].lower() == "kb" else 1
+        values[key.strip()] = numeric * multiplier
+    return values
+
+
+def _memory_status(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Read memory and swap status without arbitrary shell execution."""
+
+    _ = workspace_root
+    human_readable = bool(arguments.get("human_readable", False))
+    meminfo = _parse_meminfo()
+
+    memory_total = int(meminfo.get("MemTotal", 0))
+    memory_available = int(meminfo.get("MemAvailable", meminfo.get("MemFree", 0)))
+    memory_used = max(0, memory_total - memory_available)
+    swap_total = int(meminfo.get("SwapTotal", 0))
+    swap_free = int(meminfo.get("SwapFree", 0))
+    swap_used = max(0, swap_total - swap_free)
+
+    memory = {
+        "total_bytes": memory_total,
+        "available_bytes": memory_available,
+        "used_bytes": memory_used,
+        "used_percent": round((memory_used / memory_total) * 100.0, 2) if memory_total else 0.0,
+    }
+    swap = {
+        "total_bytes": swap_total,
+        "free_bytes": swap_free,
+        "used_bytes": swap_used,
+        "used_percent": round((swap_used / swap_total) * 100.0, 2) if swap_total else 0.0,
+    }
+    rows = [
+        {
+            "resource": "memory",
+            "total_bytes": memory["total_bytes"],
+            "used_bytes": memory["used_bytes"],
+            "available_bytes": memory["available_bytes"],
+            "used_percent": memory["used_percent"],
+        },
+        {
+            "resource": "swap",
+            "total_bytes": swap["total_bytes"],
+            "used_bytes": swap["used_bytes"],
+            "free_bytes": swap["free_bytes"],
+            "used_percent": swap["used_percent"],
+        },
+    ]
+    if human_readable:
+        memory["total_human"] = _format_bytes(memory_total)
+        memory["available_human"] = _format_bytes(memory_available)
+        memory["used_human"] = _format_bytes(memory_used)
+        swap["total_human"] = _format_bytes(swap_total)
+        swap["free_human"] = _format_bytes(swap_free)
+        swap["used_human"] = _format_bytes(swap_used)
+        for row in rows:
+            for key in ("total_bytes", "used_bytes", "available_bytes", "free_bytes"):
+                if key in row:
+                    row[key.replace("_bytes", "_human")] = _format_bytes(int(row[key]))
+
+    return {
+        "data_preview": {
+            "memory": memory,
+            "swap": swap,
+            "rows": rows,
+        },
+        "metadata": {"human_readable": human_readable},
+    }
+
+
+def _disk_usage(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Read disk usage for a workspace-bounded path without arbitrary shell execution."""
+
+    path = str(arguments.get("path") or ".")
+    human_readable = bool(arguments.get("human_readable", False))
+    target_path, relative_path = _normalize_workspace_path(path, workspace_root)
+    usage = shutil.disk_usage(target_path)
+    rows = [
+        {"metric": "total", "value": int(usage.total)},
+        {"metric": "used", "value": int(usage.used)},
+        {"metric": "free", "value": int(usage.free)},
+    ]
+    if human_readable:
+        for row in rows:
+            row["human"] = _format_bytes(int(row["value"]))
+
+    return {
+        "data_preview": {
+            "path": relative_path,
+            "total": int(usage.total),
+            "used": int(usage.used),
+            "free": int(usage.free),
+            "used_percent": round((usage.used / usage.total) * 100.0, 2) if usage.total else 0.0,
+            "rows": rows,
+        },
+        "metadata": {"human_readable": human_readable},
+    }
+
+
+def _cpu_load(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Read CPU load using OS APIs without arbitrary shell execution."""
+
+    _ = arguments, workspace_root
+    try:
+        load_1m, load_5m, load_15m = os.getloadavg()
+    except (AttributeError, OSError):
+        load_1m = load_5m = load_15m = None
+    cpu_count = os.cpu_count()
+    rows = [
+        {"metric": "load_1m", "value": load_1m},
+        {"metric": "load_5m", "value": load_5m},
+        {"metric": "load_15m", "value": load_15m},
+        {"metric": "cpu_count", "value": cpu_count},
+    ]
+    return {
+        "data_preview": {
+            "load_1m": load_1m,
+            "load_5m": load_5m,
+            "load_15m": load_15m,
+            "cpu_count": cpu_count,
+            "rows": rows,
+        },
+        "metadata": {},
+    }
+
+
+def _format_uptime(seconds: float) -> str:
+    """Return a compact human-readable uptime string."""
+
+    total_seconds = max(0, int(seconds))
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds_only = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or parts:
+        parts.append(f"{hours}h")
+    if minutes or parts:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds_only}s")
+    return " ".join(parts)
+
+
+def _uptime(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Read uptime from /proc/uptime without arbitrary shell execution."""
+
+    _ = arguments, workspace_root
+    uptime_path = Path("/proc/uptime")
+    if not uptime_path.exists():
+        raise RemoteToolError("/proc/uptime is not available on this host.")
+    first_token = uptime_path.read_text(encoding="utf-8", errors="replace").split()[0]
+    try:
+        seconds = float(first_token)
+    except (IndexError, ValueError) as exc:
+        raise RemoteToolError("could not parse /proc/uptime.") from exc
+
+    return {
+        "data_preview": {
+            "seconds": seconds,
+            "human": _format_uptime(seconds),
+        },
+        "metadata": {},
+    }
+
+
+def _environment_summary(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Return a safe summary of the remote environment."""
+
+    _ = arguments
+    memory_summary = None
+    try:
+        memory_summary = _memory_status({"human_readable": True}, workspace_root)["data_preview"]["memory"]
+    except RemoteToolError:
+        memory_summary = None
+
+    rows = [
+        {"metric": "os", "value": platform.platform()},
+        {"metric": "python_version", "value": platform.python_version()},
+        {"metric": "working_directory", "value": str(workspace_root)},
+        {"metric": "cpu_count", "value": os.cpu_count()},
+    ]
+    if memory_summary is not None:
+        rows.append(
+            {
+                "metric": "memory_available",
+                "value": memory_summary.get("available_human") or memory_summary.get("available_bytes"),
+            }
+        )
+
+    return {
+        "data_preview": {
+            "os": platform.platform(),
+            "python_version": platform.python_version(),
+            "working_directory": str(workspace_root),
+            "cpu_count": os.cpu_count(),
+            "memory": memory_summary,
+            "rows": rows,
+        },
+        "metadata": {},
+    }
+
+
 def run_remote_operation(
     operation: str,
     arguments: dict[str, Any],
@@ -476,6 +733,11 @@ def run_remote_operation(
         "shell.check_port": _check_port,
         "shell.git_status": _git_status,
         "shell.run_tests_readonly": _run_tests_readonly,
+        "system.memory_status": _memory_status,
+        "system.disk_usage": _disk_usage,
+        "system.cpu_load": _cpu_load,
+        "system.uptime": _uptime,
+        "system.environment_summary": _environment_summary,
     }
     handler = operation_map.get(operation)
     if handler is None:

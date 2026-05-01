@@ -19,6 +19,37 @@ class LLMClient(Protocol):
         """Return a JSON-compatible object matching the requested schema."""
 
 
+def _truncate_preview(value: Any, max_length: int = 1000) -> str | None:
+    """Return a safe truncated preview for diagnostics."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + "...[truncated]"
+
+
+class LLMClientError(RuntimeError):
+    """Typed structured-call transport/formatting failure from the LLM client."""
+
+    def __init__(
+        self,
+        *,
+        error_kind: str,
+        error_message: str,
+        raw_response_preview: str | None = None,
+        raw_payload_preview: str | None = None,
+    ) -> None:
+        super().__init__(error_message)
+        self.error_kind = error_kind
+        self.error_message = error_message
+        self.raw_response_preview = raw_response_preview
+        self.raw_payload_preview = raw_payload_preview
+
+
 class StaticLLMClient:
     """Test placeholder that always returns a configured payload."""
 
@@ -153,15 +184,48 @@ class OpenAICompatLLMClient:
                 last_error = exc
                 if include_response_format and exc.code in {400, 404, 415, 422, 500}:
                     continue
-                raise RuntimeError(f"LLM request failed with HTTP {exc.code}.") from exc
+                raise LLMClientError(
+                    error_kind="transport_error",
+                    error_message=f"LLM request failed with HTTP {exc.code}.",
+                ) from exc
             except URLError as exc:
-                raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+                raise LLMClientError(
+                    error_kind="transport_error",
+                    error_message=f"LLM request failed: {exc.reason}",
+                ) from exc
         if response_payload is None:
-            raise RuntimeError("LLM request failed.") from last_error
+            raise LLMClientError(
+                error_kind="transport_error",
+                error_message="LLM request failed.",
+            ) from last_error
 
         choices = response_payload.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise RuntimeError("LLM response did not include choices.")
+            raise LLMClientError(
+                error_kind="empty_response",
+                error_message="LLM response did not include choices.",
+                raw_payload_preview=_truncate_preview(
+                    json.dumps(response_payload, sort_keys=True, default=str, ensure_ascii=True)
+                ),
+            )
         message = choices[0].get("message", {})
         content = _coerce_message_content(message.get("content"))
-        return _extract_json_object(content)
+        if not content:
+            raise LLMClientError(
+                error_kind="empty_response",
+                error_message="LLM response message content was empty.",
+                raw_payload_preview=_truncate_preview(
+                    json.dumps(response_payload, sort_keys=True, default=str, ensure_ascii=True)
+                ),
+            )
+        try:
+            return _extract_json_object(content)
+        except ValueError as exc:
+            raise LLMClientError(
+                error_kind="invalid_json",
+                error_message=str(exc),
+                raw_response_preview=_truncate_preview(content),
+                raw_payload_preview=_truncate_preview(
+                    json.dumps(response_payload, sort_keys=True, default=str, ensure_ascii=True)
+                ),
+            ) from exc

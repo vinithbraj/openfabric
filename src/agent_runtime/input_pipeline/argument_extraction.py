@@ -12,7 +12,9 @@ from pydantic.json_schema import model_json_schema
 from agent_runtime.capabilities.registry import CapabilityRegistry
 from agent_runtime.capabilities.schemas import CapabilityManifest
 from agent_runtime.core.errors import CapabilityNotFoundError
-from agent_runtime.core.types import TaskFrame
+from agent_runtime.core.types import InputRef, TaskFrame
+from agent_runtime.input_pipeline.dataflow_planning import ValidatedDataflowPlan
+from agent_runtime.input_pipeline.capability_fit import CapabilityFitDecision
 from agent_runtime.input_pipeline.domain_selection import CapabilitySelectionResult
 from agent_runtime.input_pipeline.plan_selection import CandidateEvaluation, select_best_candidate
 from agent_runtime.llm.proposals import ArgumentExtractionProposal, collect_n_best_structured_attempts
@@ -62,7 +64,11 @@ class ArgumentExtractor:
         return []
 
 
-def _build_argument_prompt(task: TaskFrame, manifest: CapabilityManifest) -> str:
+def _build_argument_prompt(
+    task: TaskFrame,
+    manifest: CapabilityManifest,
+    fixed_arguments: dict[str, Any] | None = None,
+) -> str:
     """Build the strict JSON-only prompt for one argument extraction task."""
 
     schema = model_json_schema(_ArgumentExtractionResponse)
@@ -83,6 +89,14 @@ def _build_argument_prompt(task: TaskFrame, manifest: CapabilityManifest) -> str
             ),
             "Do not invent file paths, table names, database names, or external resources.",
             "If required information is missing, leave the argument absent and list it in missing_required_arguments.",
+            *(
+                [
+                    "These arguments are already fixed by validated dataflow planning and must be preserved exactly:",
+                    str(fixed_arguments),
+                ]
+                if fixed_arguments
+                else ["No arguments are prefilled by validated dataflow planning."]
+            ),
             "Task frame:",
             str(
                 {
@@ -189,6 +203,7 @@ def _apply_deterministic_normalization(
     manifest: CapabilityManifest,
     response: _ArgumentExtractionResponse,
     workspace_root: Path,
+    fixed_arguments: dict[str, Any] | None = None,
 ) -> ArgumentExtractionResult:
     """Normalize extracted arguments and compute deterministic missing fields."""
 
@@ -229,6 +244,11 @@ def _apply_deterministic_normalization(
         if required_argument not in arguments:
             missing_required.add(required_argument)
 
+    if fixed_arguments:
+        arguments.update(fixed_arguments)
+        for required_argument in fixed_arguments:
+            missing_required.discard(required_argument)
+
     return ArgumentExtractionResult(
         task_id=task.id,
         capability_id=manifest.capability_id,
@@ -250,6 +270,21 @@ def _extract_current_directory_path(description: str) -> str | None:
     return None
 
 
+def _fixed_arguments_for_task(
+    task_id: str,
+    dataflow_plan: ValidatedDataflowPlan | None,
+) -> dict[str, InputRef]:
+    """Return validated dataflow-prefilled InputRef arguments for one task."""
+
+    if dataflow_plan is None:
+        return {}
+    fixed: dict[str, InputRef] = {}
+    for ref in dataflow_plan.refs:
+        if ref.consumer_task_id == task_id:
+            fixed[ref.consumer_argument_name] = ref.input_ref
+    return fixed
+
+
 def extract_arguments(
     tasks: list[TaskFrame],
     selections: list[CapabilitySelectionResult],
@@ -257,15 +292,36 @@ def extract_arguments(
     llm_client,
     n_best: int = 3,
     trace: PlanningTrace | None = None,
+    dataflow_plan: ValidatedDataflowPlan | None = None,
+    capability_fit_decisions: list[CapabilityFitDecision] | None = None,
 ) -> list[ArgumentExtractionResult]:
     """Extract and normalize capability arguments for selected task frames."""
 
     task_by_id = {task.id: task for task in tasks}
     selection_by_task = {selection.task_id: selection for selection in selections}
+    fit_by_task = {decision.task_id: decision for decision in (capability_fit_decisions or [])}
     workspace_root = Path.cwd().resolve()
     results: list[ArgumentExtractionResult] = []
 
     for task in tasks:
+        fit_decision = fit_by_task.get(task.id)
+        if fit_decision is not None and not fit_decision.is_fit:
+            if isinstance(trace, PlanningTrace):
+                append_trace_entry(
+                    trace,
+                    PlanningTraceEntry(
+                        stage="argument_extraction_skipped",
+                        request_id=str(trace.request_id),
+                        prompt_template_id="argument_extraction",
+                        selected_candidate={
+                            "task_id": task.id,
+                            "reason": fit_decision.status,
+                            "capability_fit_decision": fit_decision.model_dump(mode="json"),
+                        },
+                        rejection_reasons=list(fit_decision.deterministic_rejections),
+                    ),
+                )
+            continue
         selection = selection_by_task.get(task.id)
         if selection is None or selection.selected is None:
             results.append(
@@ -300,7 +356,8 @@ def extract_arguments(
             continue
 
         manifest = capability.manifest
-        prompt = _build_argument_prompt(task_by_id[task.id], manifest)
+        fixed_arguments = _fixed_arguments_for_task(task.id, dataflow_plan)
+        prompt = _build_argument_prompt(task_by_id[task.id], manifest, fixed_arguments)
         attempts = collect_n_best_structured_attempts(
             llm_client=llm_client,
             system_prompt=prompt,
@@ -325,7 +382,13 @@ def extract_arguments(
                 continue
             proposal = attempt.parsed_proposal
             response = _ArgumentExtractionResponse.model_validate(proposal.model_dump(mode="json"))
-            normalized = _apply_deterministic_normalization(task, manifest, response, workspace_root)
+            normalized = _apply_deterministic_normalization(
+                task,
+                manifest,
+                response,
+                workspace_root,
+                fixed_arguments,
+            )
             evaluation.proposal = normalized
             evaluation.confidence = normalized.confidence
             evaluation.missing_required_count = len(normalized.missing_required_arguments)
