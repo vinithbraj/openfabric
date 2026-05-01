@@ -13,6 +13,7 @@ from agent_runtime.observability import (
     InMemoryEventSink,
     PipelineEvent,
     build_observability_context,
+    format_event_for_openwebui,
     redact_event,
 )
 from agent_runtime.output_pipeline.orchestrator import OutputPipelineOrchestrator
@@ -390,6 +391,88 @@ def test_build_observability_context_supports_callback() -> None:
     assert context.enabled is True
     assert messages
     assert "Hello" in messages[0]
+
+
+def test_openwebui_formatter_uses_markdown_sections_and_inline_code() -> None:
+    event = PipelineEvent(
+        request_id="req-1",
+        level="info",
+        stage="capability_fit",
+        event_type="validation.accepted",
+        title="Capability fit accepted",
+        summary="The selected capability passed semantic and deterministic fit checks.",
+        details={
+            "task_id": "task_1",
+            "capability_id": "system.memory_status",
+            "operation_id": "memory_status",
+            "status": "fit",
+            "llm_fits": True,
+            "llm_confidence": 0.95,
+            "reasons": [
+                "The capability matches the system memory task.",
+                "Deterministic compatibility confirmed the selection.",
+            ],
+            "normalized_task_object_type": "system.memory",
+        },
+    )
+
+    rendered = format_event_for_openwebui(event)
+
+    assert rendered.startswith("### Capability Fit\n---\n")
+    assert "> **Capability fit accepted**" in rendered
+    assert "> - Task: `task_1`" in rendered
+    assert "> - Capability: `system.memory_status`" in rendered
+    assert "> - Operation: `memory_status`" in rendered
+    assert "> - LLM Fits: `true`" in rendered
+    assert "> **Reasons**" in rendered
+    assert "> - The capability matches the system memory task." in rendered
+
+
+def test_openwebui_formatter_renders_tasks_candidates_and_arguments_cleanly() -> None:
+    event = PipelineEvent(
+        request_id="req-1",
+        level="info",
+        stage="decomposition",
+        event_type="llm.proposal.received",
+        title="Task decomposition received",
+        summary="The runtime received a structured task decomposition.",
+        details={
+            "task_count": 2,
+            "tasks": [
+                {
+                    "task_id": "task_1",
+                    "description": "Retrieve free memory available on the system",
+                    "depends_on": [],
+                },
+                {
+                    "task_id": "task_2",
+                    "description": "Save the report to report.txt",
+                    "depends_on": ["task_1"],
+                },
+            ],
+            "candidates": [
+                {
+                    "capability_id": "system.memory_status",
+                    "operation_id": "memory_status",
+                    "confidence": 0.96,
+                    "reason": "Direct match for a memory inspection task.",
+                }
+            ],
+            "arguments": {"human_readable": True},
+        },
+    )
+
+    rendered = format_event_for_openwebui(event)
+
+    assert "> **Tasks**" in rendered
+    assert "> - `task_1`" in rendered
+    assert ">   - Details: `Retrieve free memory available on the system`" in rendered
+    assert ">   - Depends On: `task_1`" in rendered
+    assert "> **Candidates**" in rendered
+    assert "`system.memory_status` via `memory_status`" in rendered
+    assert "> **Arguments**" in rendered
+    assert "> ```json" in rendered
+    assert '"human_readable": true' in rendered
 
 
 def test_runtime_emits_pipeline_events(tmp_path: Path) -> None:
