@@ -1,0 +1,308 @@
+from __future__ import annotations
+
+from agent_runtime.capabilities import CapabilityRegistry
+from agent_runtime.capabilities.base import BaseCapability
+from agent_runtime.capabilities.schemas import CapabilityManifest
+from agent_runtime.core.config import RuntimeConfig
+from agent_runtime.core.types import ActionDAG, ActionNode, ExecutionResult
+from agent_runtime.execution.engine import ExecutionEngine
+from agent_runtime.execution.result_store import InMemoryResultStore
+
+
+class CountingReadCapability(BaseCapability):
+    manifest = CapabilityManifest(
+        capability_id="counting.read",
+        domain="generic",
+        operation_id="read",
+        name="Counting Read",
+        description="Return a tracked value.",
+        semantic_verbs=["read"],
+        object_types=["generic"],
+        argument_schema={"value": {"type": "string"}},
+        required_arguments=["value"],
+        optional_arguments=["path"],
+        output_schema={"value": {"type": "string"}},
+        risk_level="low",
+        read_only=True,
+        mutates_state=False,
+        requires_confirmation=False,
+        examples=[{"arguments": {"value": "hello"}}],
+        safety_notes=[],
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, arguments: dict[str, object], context: dict[str, object]) -> ExecutionResult:
+        self.calls += 1
+        validated = self.validate_arguments(arguments)
+        return ExecutionResult(
+            node_id=str(context.get("node_id") or ""),
+            status="success",
+            data_preview={"value": validated["value"]},
+            metadata={"calls": self.calls},
+        )
+
+
+class FailingCapability(BaseCapability):
+    manifest = CapabilityManifest(
+        capability_id="counting.fail",
+        domain="generic",
+        operation_id="read",
+        name="Failing Read",
+        description="Always fail.",
+        semantic_verbs=["read"],
+        object_types=["generic"],
+        argument_schema={"value": {"type": "string"}},
+        required_arguments=["value"],
+        optional_arguments=[],
+        output_schema={"value": {"type": "string"}},
+        risk_level="low",
+        read_only=True,
+        mutates_state=False,
+        requires_confirmation=False,
+        examples=[{"arguments": {"value": "hello"}}],
+        safety_notes=[],
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, arguments: dict[str, object], context: dict[str, object]) -> ExecutionResult:
+        self.calls += 1
+        raise RuntimeError("simulated failure")
+
+
+class DeleteCapability(BaseCapability):
+    manifest = CapabilityManifest(
+        capability_id="generic.delete",
+        domain="generic",
+        operation_id="delete",
+        name="Delete Value",
+        description="Delete a generic value.",
+        semantic_verbs=["delete"],
+        object_types=["generic"],
+        argument_schema={"value": {"type": "string"}},
+        required_arguments=["value"],
+        optional_arguments=[],
+        output_schema={"deleted": {"type": "boolean"}},
+        risk_level="high",
+        read_only=False,
+        mutates_state=True,
+        requires_confirmation=True,
+        examples=[{"arguments": {"value": "old"}}],
+        safety_notes=["Mutates state."],
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, arguments: dict[str, object], context: dict[str, object]) -> ExecutionResult:
+        self.calls += 1
+        validated = self.validate_arguments(arguments)
+        return ExecutionResult(
+            node_id=str(context.get("node_id") or ""),
+            status="success",
+            data_preview={"deleted": validated["value"]},
+        )
+
+
+class LargeOutputCapability(BaseCapability):
+    manifest = CapabilityManifest(
+        capability_id="generic.large",
+        domain="generic",
+        operation_id="read",
+        name="Large Output",
+        description="Return a large payload.",
+        semantic_verbs=["read"],
+        object_types=["generic"],
+        argument_schema={},
+        required_arguments=[],
+        optional_arguments=[],
+        output_schema={"blob": {"type": "string"}},
+        risk_level="low",
+        read_only=True,
+        mutates_state=False,
+        requires_confirmation=False,
+        examples=[{"arguments": {}}],
+        safety_notes=[],
+    )
+
+    def execute(self, arguments: dict[str, object], context: dict[str, object]) -> ExecutionResult:
+        return ExecutionResult(
+            node_id=str(context.get("node_id") or ""),
+            status="success",
+            data_preview={"blob": "x" * 200},
+        )
+
+
+def _registry() -> tuple[CapabilityRegistry, CountingReadCapability, FailingCapability, DeleteCapability, LargeOutputCapability]:
+    registry = CapabilityRegistry()
+    counting = CountingReadCapability()
+    failing = FailingCapability()
+    deleting = DeleteCapability()
+    large = LargeOutputCapability()
+    registry.register(counting)
+    registry.register(failing)
+    registry.register(deleting)
+    registry.register(large)
+    return registry, counting, failing, deleting, large
+
+
+def test_successful_linear_dag_executes_in_dependency_order() -> None:
+    registry, counting, _, _, _ = _registry()
+    engine = ExecutionEngine(registry)
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-a",
+                task_id="task-a",
+                description="first read",
+                semantic_verb="read",
+                capability_id="counting.read",
+                operation_id="read",
+                arguments={"value": "a"},
+                safety_labels=[],
+            ),
+            ActionNode(
+                id="node-b",
+                task_id="task-b",
+                description="second read",
+                semantic_verb="read",
+                capability_id="counting.read",
+                operation_id="read",
+                arguments={"value": "b"},
+                depends_on=["node-a"],
+                safety_labels=[],
+            ),
+        ],
+        edges=[("node-a", "node-b")],
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True})
+
+    assert bundle.status == "success"
+    assert [result.node_id for result in bundle.results] == ["node-a", "node-b"]
+    assert counting.calls == 2
+
+
+def test_failed_dependency_causes_downstream_skip() -> None:
+    registry, counting, failing, _, _ = _registry()
+    engine = ExecutionEngine(registry)
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-fail",
+                task_id="task-fail",
+                description="fail first",
+                semantic_verb="read",
+                capability_id="counting.fail",
+                operation_id="read",
+                arguments={"value": "x"},
+                safety_labels=[],
+            ),
+            ActionNode(
+                id="node-after",
+                task_id="task-after",
+                description="read after failure",
+                semantic_verb="read",
+                capability_id="counting.read",
+                operation_id="read",
+                arguments={"value": "after"},
+                depends_on=["node-fail"],
+                safety_labels=[],
+            ),
+        ],
+        edges=[("node-fail", "node-after")],
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True, "stop_on_error": False})
+
+    assert bundle.status == "error"
+    assert failing.calls == 1
+    assert counting.calls == 0
+    assert bundle.results[0].status == "error"
+    assert bundle.results[1].status == "skipped"
+
+
+def test_blocked_dag_does_not_execute() -> None:
+    registry, counting, _, _, _ = _registry()
+    engine = ExecutionEngine(registry, RuntimeConfig(workspace_root="."))
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-blocked",
+                task_id="task-blocked",
+                description="blocked traversal",
+                semantic_verb="read",
+                capability_id="counting.read",
+                operation_id="read",
+                arguments={"value": "x", "path": "../secret.txt"},
+                safety_labels=[],
+            )
+        ]
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True})
+
+    assert bundle.status == "error"
+    assert counting.calls == 0
+    assert bundle.metadata["blocked_reasons"]
+
+
+def test_confirmation_required_dag_does_not_execute_without_confirmation() -> None:
+    registry, _, _, deleting, _ = _registry()
+    engine = ExecutionEngine(registry)
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-delete",
+                task_id="task-delete",
+                description="delete value",
+                semantic_verb="delete",
+                capability_id="generic.delete",
+                operation_id="delete",
+                arguments={"value": "old"},
+                safety_labels=[],
+            )
+        ]
+    )
+
+    bundle = engine.execute(dag, {})
+
+    assert bundle.status == "error"
+    assert bundle.metadata["confirmation_required"] is True
+    assert deleting.calls == 0
+
+
+def test_large_output_is_stored_by_reference() -> None:
+    registry, _, _, _, large = _registry()
+    store = InMemoryResultStore()
+    engine = ExecutionEngine(
+        registry,
+        RuntimeConfig(max_output_preview_bytes=64),
+        store,
+    )
+    dag = ActionDAG(
+        nodes=[
+            ActionNode(
+                id="node-large",
+                task_id="task-large",
+                description="read large output",
+                semantic_verb="read",
+                capability_id="generic.large",
+                operation_id="read",
+                arguments={},
+                safety_labels=[],
+            )
+        ]
+    )
+
+    bundle = engine.execute(dag, {"confirmation": True})
+
+    assert bundle.status == "success"
+    result = bundle.results[0]
+    assert result.data_ref is not None
+    assert result.data_preview is not None
+    assert result.data_preview["truncated"] is True
+    assert store.get(result.data_ref) == {"blob": "x" * 200}

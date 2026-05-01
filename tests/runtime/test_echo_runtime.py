@@ -2,14 +2,23 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from agent_runtime.core.orchestrator import AgentRuntime
 from aor_runtime.api.app import create_app
 from aor_runtime.config import Settings
 from aor_runtime.runtime.engine import ExecutionEngine, extract_prompt
 
 
+class FakeAgentRuntime:
+    """Small fake runtime injected into the OpenAI-compatible API tests."""
+
+    def handle_request(self, raw_prompt: str, context: dict | None = None) -> str:
+        _ = context
+        return f"handled: {raw_prompt}"
+
+
 def _client() -> TestClient:
     settings = Settings(openai_compat_model_name="OpenFABRIC Echo")
-    return TestClient(create_app(settings))
+    return TestClient(create_app(settings, agent_runtime=FakeAgentRuntime()))
 
 
 def test_extract_prompt_prefers_task_field() -> None:
@@ -47,7 +56,7 @@ def test_openai_chat_completion_echoes_latest_user_prompt() -> None:
     )
 
     assert response.status_code == 200
-    assert response.json()["choices"][0]["message"]["content"] == "list all nodes"
+    assert response.json()["choices"][0]["message"]["content"] == "handled: list all nodes"
 
 
 def test_openai_chat_completion_stream_echoes_prompt_and_done() -> None:
@@ -65,7 +74,7 @@ def test_openai_chat_completion_stream_echoes_prompt_and_done() -> None:
         body = response.read().decode()
 
     assert response.status_code == 200
-    assert "hello stream" in body
+    assert "handled: hello stream" in body
     assert "data: [DONE]" in body
 
 

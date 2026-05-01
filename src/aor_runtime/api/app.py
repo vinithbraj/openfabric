@@ -31,6 +31,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from agent_runtime.capabilities import build_default_registry
+from agent_runtime.core.orchestrator import AgentRuntime
+from agent_runtime.execution.engine import ExecutionEngine as AgentExecutionEngine
+from agent_runtime.execution.result_store import InMemoryResultStore
+from agent_runtime.llm import OpenAICompatLLMClient
+from agent_runtime.output_pipeline.orchestrator import OutputPipelineOrchestrator
 from aor_runtime import __version__
 from aor_runtime.app_config import APP_CONFIG_PATH_ENV
 from aor_runtime.config import Settings, get_settings
@@ -173,7 +179,7 @@ def _chat_chunk(response_id: str, model: str, created: int, delta: dict[str, Any
     return f"data: {json_dumps(payload)}\n\n"
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | None = None) -> FastAPI:
     """Create the echo FastAPI application.
 
     Used by:
@@ -182,6 +188,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     configured_settings = settings or get_settings(config_path=os.getenv(APP_CONFIG_PATH_ENV) or None)
     engine = ExecutionEngine(configured_settings)
+    runtime = agent_runtime
+    if runtime is None:
+        registry = build_default_registry()
+        result_store = InMemoryResultStore()
+        execution_engine = AgentExecutionEngine(
+            registry,
+            {
+                "workspace_root": str(configured_settings.workspace_root),
+                "allow_shell_execution": False,
+                "allow_network_operations": False,
+                "max_output_preview_bytes": configured_settings.shell_max_output_chars,
+                "max_rows_returned": max(1, int(configured_settings.sql_row_limit or 100)),
+                "max_files_listed": 1000,
+                "stop_on_error": True,
+            },
+            result_store,
+        )
+        llm_client = OpenAICompatLLMClient(
+            base_url=configured_settings.llm_base_url,
+            api_key=configured_settings.llm_api_key,
+            model=configured_settings.default_model,
+            timeout_seconds=configured_settings.llm_timeout_seconds,
+            temperature=configured_settings.default_temperature,
+        )
+        runtime = AgentRuntime(
+            llm_client=llm_client,
+            registry=registry,
+            execution_engine=execution_engine,
+            output_orchestrator=OutputPipelineOrchestrator(),
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -192,6 +228,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="OpenFABRIC Echo Runtime", version=__version__, lifespan=lifespan)
     app.state.engine = engine
     app.state.settings = configured_settings
+    app.state.agent_runtime = runtime
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -327,13 +364,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/chat/completions")
     def openai_chat_completions(request: ChatCompletionsRequest):
-        """Echo the latest user prompt in OpenAI-compatible chat format."""
+        """Handle chat completions through the new typed agent runtime."""
 
         if not configured_settings.openai_compat_enabled:
             raise HTTPException(status_code=404, detail="OpenAI compatibility is disabled.")
         task = _messages_to_task(request.messages)
         if not task:
             raise HTTPException(status_code=400, detail="No actionable user task found.")
+
+        content = runtime.handle_request(
+            task,
+            context={
+                "workspace_root": str(configured_settings.workspace_root),
+                "confirmation": False,
+                "allow_full_output_access": False,
+            },
+        )
 
         created = int(time.time())
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -346,7 +392,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": task},
+                        "message": {"role": "assistant", "content": content},
                         "finish_reason": "stop",
                     }
                 ],
@@ -354,8 +400,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         def event_stream():
             yield _chat_chunk(response_id, request.model, created, {"role": "assistant"})
-            if task:
-                yield _chat_chunk(response_id, request.model, created, {"content": task})
+            if content:
+                yield _chat_chunk(response_id, request.model, created, {"content": content})
             yield _chat_chunk(response_id, request.model, created, {}, finish_reason="stop")
             yield "data: [DONE]\n\n"
 
