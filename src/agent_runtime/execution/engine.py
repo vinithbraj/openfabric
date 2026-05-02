@@ -190,13 +190,14 @@ class ExecutionEngine:
         decision: SafetyDecision,
         safe_summary: str,
         metadata: dict[str, Any],
+        status: str = "error",
     ) -> ResultBundle:
         """Return a normalized error bundle for blocked or gated execution."""
 
         return ResultBundle(
             dag_id=dag.dag_id,
             results=[],
-            status="error",
+            status=status,
             safe_summary=safe_summary,
             metadata={
                 "blocked_reasons": list(decision.blocked_reasons),
@@ -342,6 +343,7 @@ class ExecutionEngine:
                 decision,
                 safe_summary="Execution blocked by safety policy.",
                 metadata={"confirmation_required": False},
+                status="error",
             )
 
         if decision.requires_confirmation and not confirmation_granted:
@@ -350,6 +352,7 @@ class ExecutionEngine:
                 decision,
                 safe_summary="Execution requires confirmation before proceeding.",
                 metadata={"confirmation_required": True},
+                status="confirmation_required",
             )
 
         if decision.sanitized_dag is not None:

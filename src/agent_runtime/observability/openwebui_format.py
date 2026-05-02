@@ -208,10 +208,20 @@ def _render_tasks(values: list[dict[str, Any]]) -> list[str]:
     lines = ["**Tasks**"]
     for task in values:
         task_id = _format_code(task.get("task_id") or task.get("id") or "task")
-        description = str(task.get("description") or "No description provided.")
+        description = str(task.get("description") or "").strip()
+        semantic_verb = task.get("semantic_verb")
+        object_type = task.get("object_type")
+        risk_level = task.get("risk_level")
         depends_on = task.get("depends_on") or task.get("dependencies") or []
         lines.append(f"- {task_id}")
-        lines.append(f"  - Details: {_format_code(description)}")
+        if description:
+            lines.append(f"  - Details: {_format_code(description)}")
+        if semantic_verb:
+            lines.append(f"  - Semantic Verb: {_format_code(semantic_verb)}")
+        if object_type:
+            lines.append(f"  - Object Type: {_format_code(object_type)}")
+        if risk_level:
+            lines.append(f"  - Risk Level: {_format_code(risk_level)}")
         if depends_on:
             lines.append(
                 f"  - Depends On: {', '.join(_format_code(dep) for dep in depends_on)}"

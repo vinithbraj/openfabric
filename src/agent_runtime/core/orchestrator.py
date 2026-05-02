@@ -434,6 +434,8 @@ class AgentRuntime:
 
         if bool(result_bundle.metadata.get("confirmation_required", False)):
             return "confirmation_required"
+        if result_bundle.status == "confirmation_required":
+            return "confirmation_required"
         if result_bundle.status == "error":
             return "error"
         if result_bundle.status == "partial":
@@ -600,6 +602,7 @@ class AgentRuntime:
                     "tasks": [
                         {
                             "task_id": task.id,
+                            "description": task.description,
                             "semantic_verb": task.semantic_verb,
                             "object_type": task.object_type,
                             "risk_level": task.risk_level,
@@ -1245,7 +1248,7 @@ class AgentRuntime:
                 result_bundle = ResultBundle(
                     dag_id=dag.dag_id,
                     results=[],
-                    status="error",
+                    status="confirmation_required",
                     safe_summary="Execution requires confirmation before proceeding.",
                     metadata={
                         "blocked_reasons": [],

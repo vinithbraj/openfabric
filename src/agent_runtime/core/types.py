@@ -25,7 +25,7 @@ SemanticVerb = Literal[
 ]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 ExecutionStatus = Literal["success", "error", "skipped"]
-BundleStatus = Literal["success", "partial", "error"]
+BundleStatus = Literal["success", "partial", "error", "confirmation_required"]
 DisplayType = Literal[
     "plain_text",
     "markdown",

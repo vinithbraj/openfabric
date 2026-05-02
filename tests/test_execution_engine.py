@@ -422,7 +422,7 @@ def test_confirmation_required_dag_does_not_execute_without_confirmation() -> No
 
     bundle = engine.execute(_ready_dag(dag), {})
 
-    assert bundle.status == "error"
+    assert bundle.status == "confirmation_required"
     assert bundle.metadata["confirmation_required"] is True
     assert deleting.calls == 0
 

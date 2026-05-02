@@ -384,7 +384,9 @@ def compose_output(
     """Compose final user-facing output from a DAG and result bundle."""
 
     observability = _observability_from_request(user_request)
-    if bool(result_bundle.metadata.get("confirmation_required", False)):
+    if result_bundle.status == "confirmation_required" or bool(
+        result_bundle.metadata.get("confirmation_required", False)
+    ):
         if observability is not None:
             observability.stage_started(
                 STAGE_RENDERING,
@@ -616,7 +618,9 @@ class OutputPipelineOrchestrator:
             )
             return self.summarizer.summarize(rendered)
 
-        if bool(bundle.metadata.get("confirmation_required", False)):
+        if bundle.status == "confirmation_required" or bool(
+            bundle.metadata.get("confirmation_required", False)
+        ):
             display_plan = self.display_selector.select(
                 DisplaySelectionInput(
                     original_prompt="",

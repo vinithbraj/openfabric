@@ -164,7 +164,7 @@ def test_execution_safety_blocks_mutating_action_by_default() -> None:
 
     bundle = _engine().execute(_ready_dag(dag))
 
-    assert bundle.status == "error"
+    assert bundle.status == "confirmation_required"
     assert bundle.metadata["confirmation_required"] is True
 
 

@@ -475,6 +475,46 @@ def test_openwebui_formatter_renders_tasks_candidates_and_arguments_cleanly() ->
     assert '"human_readable": true' in rendered
 
 
+def test_openwebui_formatter_renders_verb_assignment_tasks_without_placeholder_details() -> None:
+    event = PipelineEvent(
+        request_id="req-1",
+        level="info",
+        stage="verb_assignment",
+        event_type="validation.accepted",
+        title="Verb assignments accepted",
+        summary="Semantic task annotations passed deterministic validation.",
+        details={
+            "tasks": [
+                {
+                    "task_id": "task_1",
+                    "description": "Retrieve free memory available on the system",
+                    "semantic_verb": "read",
+                    "object_type": "system.memory",
+                    "risk_level": "low",
+                },
+                {
+                    "task_id": "task_2",
+                    "semantic_verb": "create",
+                    "object_type": "filesystem.file",
+                    "risk_level": "low",
+                },
+            ]
+        },
+    )
+
+    rendered = format_event_for_openwebui(event)
+
+    assert "> - `task_1`" in rendered
+    assert ">   - Details: `Retrieve free memory available on the system`" in rendered
+    assert ">   - Semantic Verb: `read`" in rendered
+    assert ">   - Object Type: `system.memory`" in rendered
+    assert ">   - Risk Level: `low`" in rendered
+    assert "No description provided." not in rendered
+    assert "> - `task_2`" in rendered
+    assert ">   - Semantic Verb: `create`" in rendered
+    assert ">   - Object Type: `filesystem.file`" in rendered
+
+
 def test_runtime_emits_pipeline_events(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("hello", encoding="utf-8")
     sink = InMemoryEventSink()

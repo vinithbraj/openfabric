@@ -11,7 +11,7 @@ from agent_runtime.output_pipeline.display_selection import (
     DisplaySelectionInput,
     select_display_plan,
 )
-from agent_runtime.output_pipeline.orchestrator import compose_output
+from agent_runtime.output_pipeline.orchestrator import OutputPipelineOrchestrator, compose_output
 from agent_runtime.output_pipeline.renderers import render_result_shape
 from agent_runtime.output_pipeline.result_shapes import (
     AggregateResult,
@@ -251,6 +251,21 @@ def test_partial_failures_render_clearly() -> None:
     assert "Completed:" in output
     assert "Errors:" in output
     assert "Skipped:" in output
+
+
+def test_confirmation_required_bundle_renders_from_status_without_metadata() -> None:
+    bundle = ResultBundle(
+        dag_id="dag-1",
+        status="confirmation_required",
+        results=[],
+        safe_summary="Execution requires confirmation before proceeding.",
+        metadata={},
+    )
+
+    rendered = OutputPipelineOrchestrator().render(bundle)
+
+    assert "## Confirmation Required" in rendered.content
+    assert "approval" in rendered.content.lower()
 
 
 def test_display_plan_cannot_reference_missing_data() -> None:
