@@ -291,7 +291,7 @@ If you add a new capability, the shortest correct path is:
 1. define the manifest and capability class in `src/agent_runtime/capabilities/`
 2. register it in `build_default_registry()`
 3. if it is environment-facing, add the backend operation in
-   `gateway_agent/remote_runner.py`
+   `src/gateway_agent/remote_runner.py`
 4. update any needed selection hints or semantic compatibility helpers
 5. ensure argument extraction and result-shape normalization understand it
 6. add safety coverage

@@ -1,21 +1,12 @@
-"""FastAPI and OpenAI-compatible echo API for the V10 reset.
+"""FastAPI and OpenAI-compatible API for the typed agent runtime.
 
 Purpose:
-    Preserve the external HTTP/OpenWebUI interface while the internal runtime is
-    rebuilt from scratch.
+    Expose the modern chat surface and preserve older compatibility routes such
+    as ``/runs`` and ``/sessions``.
 
 Responsibilities:
-    Expose health, model listing, run/session compatibility endpoints, and
-    OpenAI-compatible chat completions that echo the latest user prompt.
-
-Data flow / Interfaces:
-    Receives HTTP JSON payloads, extracts the user prompt, delegates to the
-    echo ``ExecutionEngine``, and returns JSON or SSE responses.
-
-Boundaries:
-    This API performs no tool execution and forwards no prompts to an LLM. The
-    returned assistant content is exactly the prompt text selected from the
-    request.
+    Parse HTTP payloads, bootstrap the typed agent runtime, preserve
+    compatibility envelopes, and manage the generic confirmation handshake.
 """
 
 from __future__ import annotations
@@ -35,22 +26,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent_runtime.capabilities import build_default_registry
 from agent_runtime.core.orchestrator import AgentRuntime
-from agent_runtime.execution.engine import ExecutionEngine as AgentExecutionEngine
-from agent_runtime.execution.result_store import InMemoryResultStore
-from agent_runtime.llm import OpenAICompatLLMClient
-from agent_runtime.output_pipeline.orchestrator import OutputPipelineOrchestrator
-from aor_runtime import __version__
-from aor_runtime.app_config import APP_CONFIG_PATH_ENV
-from aor_runtime.config import Settings, get_settings
-from aor_runtime.runtime.engine import ExecutionEngine
+from agent_runtime.api import __version__
+from agent_runtime.api.app_config import APP_CONFIG_PATH_ENV
+from agent_runtime.api.config import Settings, get_settings
+from agent_runtime.api.constants import DEFAULT_COMPAT_SPEC_PATH
+from agent_runtime.api.runtime.engine import ExecutionEngine, build_agent_runtime
 
 
 class RunRequest(BaseModel):
     """Compatibility request for run and session endpoints."""
 
-    spec_path: str = "examples/general_purpose_assistant.yaml"
+    spec_path: str = DEFAULT_COMPAT_SPEC_PATH
     input: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -160,7 +147,7 @@ def _message_content_to_text(content: Any) -> str:
     """Convert OpenAI message content shapes into plain text.
 
     Used by:
-        ``_messages_to_task`` when extracting the prompt to echo.
+        ``_messages_to_task`` when extracting the actionable prompt text.
     """
 
     if isinstance(content, str):
@@ -286,74 +273,19 @@ def _chat_chunk(response_id: str, model: str, created: int, delta: dict[str, Any
     return f"data: {json_dumps(payload)}\n\n"
 
 
-def _resolve_agent_gateway_settings(configured_settings: Settings) -> tuple[str, str | None]:
-    """Resolve gateway node and URL for the agent runtime bridge.
-
-    Used by:
-        ``create_app`` when building the gateway-backed execution config for the
-        schema-driven agent runtime.
-    """
-
-    default_node = str(configured_settings.resolved_default_node() or "localhost").strip() or "localhost"
-    try:
-        gateway_url = configured_settings.resolve_gateway_url(default_node)
-    except ValueError:
-        gateway_url = "http://127.0.0.1:8787" if default_node == "localhost" else None
-    return default_node, gateway_url
-
-
-def _allow_shell_execution_from_settings(configured_settings: Settings) -> bool:
-    """Resolve whether read-only shell capabilities should be enabled in the agent runtime."""
-
-    shell_mode = str(configured_settings.shell_mode or "read_only").strip().lower() or "read_only"
-    return shell_mode != "disabled"
-
-
 def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | None = None) -> FastAPI:
-    """Create the echo FastAPI application.
+    """Create the FastAPI application.
 
     Used by:
         ``aor serve`` and tests.
     """
 
     configured_settings = settings or get_settings(config_path=os.getenv(APP_CONFIG_PATH_ENV) or None)
-    engine = ExecutionEngine(configured_settings)
     runtime = agent_runtime
     pending_confirmations = PendingConfirmationStore()
     if runtime is None:
-        default_gateway_node, resolved_gateway_url = _resolve_agent_gateway_settings(configured_settings)
-        registry = build_default_registry()
-        result_store = InMemoryResultStore()
-        execution_engine = AgentExecutionEngine(
-            registry,
-            {
-                "workspace_root": str(configured_settings.workspace_root),
-                "allow_shell_execution": _allow_shell_execution_from_settings(configured_settings),
-                "allow_network_operations": False,
-                "gateway_default_node": default_gateway_node,
-                "gateway_url": resolved_gateway_url,
-                "gateway_endpoints": dict(configured_settings.gateway_endpoints),
-                "gateway_timeout_seconds": configured_settings.gateway_timeout_seconds,
-                "max_output_preview_bytes": configured_settings.shell_max_output_chars,
-                "max_rows_returned": max(1, int(configured_settings.sql_row_limit or 100)),
-                "max_files_listed": 1000,
-                "stop_on_error": True,
-            },
-            result_store,
-        )
-        llm_client = OpenAICompatLLMClient(
-            base_url=configured_settings.llm_base_url,
-            api_key=configured_settings.llm_api_key,
-            model=configured_settings.default_model,
-            timeout_seconds=configured_settings.llm_timeout_seconds,
-            temperature=configured_settings.default_temperature,
-        )
-        runtime = AgentRuntime(
-            llm_client=llm_client,
-            registry=registry,
-            execution_engine=execution_engine,
-            output_orchestrator=OutputPipelineOrchestrator(),
-        )
+        runtime = build_agent_runtime(configured_settings)
+    engine = ExecutionEngine(configured_settings, agent_runtime=runtime)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -361,7 +293,7 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
 
         yield
 
-    app = FastAPI(title="OpenFABRIC Echo Runtime", version=__version__, lifespan=lifespan)
+    app = FastAPI(title="OpenFABRIC Agent Runtime", version=__version__, lifespan=lifespan)
     app.state.engine = engine
     app.state.settings = configured_settings
     app.state.agent_runtime = runtime
@@ -370,7 +302,7 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
     def healthz() -> dict[str, str]:
         """Report API health."""
 
-        return {"status": "ok", "mode": "echo"}
+        return {"status": "ok", "mode": "agent_runtime"}
 
     @app.post("/compile")
     def compile_spec(request: ValidateRequest) -> dict[str, Any]:
@@ -380,7 +312,7 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
 
     @app.post("/sessions")
     def create_session(request: RunRequest, run_immediately: bool = True) -> dict[str, Any]:
-        """Create a session and optionally complete it immediately."""
+        """Create a compatibility session and optionally complete it immediately."""
 
         session = engine.create_session(request.spec_path, request.input, trigger="manual")
         if not run_immediately:
@@ -389,13 +321,13 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
 
     @app.get("/sessions")
     def list_sessions(limit: int = 50) -> list[dict[str, Any]]:
-        """List echo sessions."""
+        """List compatibility sessions."""
 
         return engine.list_sessions(limit=limit)
 
     @app.get("/sessions/{session_id}")
     def get_session(session_id: str) -> dict[str, Any]:
-        """Inspect one echo session."""
+        """Inspect one compatibility session."""
 
         payload = engine.get_session(session_id)
         if payload is None:
@@ -429,31 +361,39 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
 
     @app.post("/sessions/{session_id}/trigger")
     def trigger_session(session_id: str, request: SessionTriggerRequest) -> dict[str, Any]:
-        """Complete a pending echo session."""
+        """Trigger a pending compatibility session."""
 
         try:
-            return engine.trigger_session(session_id, trigger=request.trigger)
+            return engine.trigger_session(
+                session_id,
+                trigger=request.trigger,
+                approve_dangerous=request.approve_dangerous,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/sessions/{session_id}/resume")
     def resume_session(session_id: str, request: SessionTriggerRequest) -> dict[str, Any]:
-        """Resume a pending echo session."""
+        """Resume a pending compatibility session."""
 
         try:
-            return engine.resume_session(session_id, trigger=request.trigger)
+            return engine.resume_session(
+                session_id,
+                trigger=request.trigger,
+                approve_dangerous=request.approve_dangerous,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/runs")
     def create_run(request: RunRequest) -> dict[str, Any]:
-        """Run one prompt through the echo engine."""
+        """Run one prompt through the typed agent runtime in a compatibility envelope."""
 
         return engine.run_spec(request.spec_path, request.input)
 
     @app.post("/runs/stream")
     def create_run_stream(request: RunRequest) -> StreamingResponse:
-        """Stream compatibility run events for an echo run."""
+        """Stream compatibility run events for one typed-runtime run."""
 
         session = engine.create_session(request.spec_path, request.input)
         final_state = engine.resume_session(str(session["id"]))
@@ -466,13 +406,13 @@ def create_app(settings: Settings | None = None, agent_runtime: AgentRuntime | N
 
     @app.get("/runs")
     def list_runs(limit: int = 50) -> list[dict[str, Any]]:
-        """List echo runs."""
+        """List compatibility runs."""
 
         return engine.list_runs(limit=limit)
 
     @app.get("/runs/{run_id}")
     def get_run(run_id: str) -> dict[str, Any]:
-        """Inspect one echo run."""
+        """Inspect one compatibility run."""
 
         payload = engine.get_run(run_id)
         if payload is None:

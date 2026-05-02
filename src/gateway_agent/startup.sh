@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 export GATEWAY_NODE_NAME="${GATEWAY_NODE_NAME:-localhost}"
 export GATEWAY_BIND_HOST="${GATEWAY_BIND_HOST:-127.0.0.1}"
@@ -28,6 +28,6 @@ export GATEWAY_TRACE_COMMANDS="${TRACE_COMMANDS}"
 
 cd "${REPO_ROOT}"
 
-exec python -m uvicorn gateway_agent.app:app \
+exec python -m uvicorn --app-dir src gateway_agent.app:app \
   --host "${GATEWAY_BIND_HOST}" \
   --port "${GATEWAY_BIND_PORT}"

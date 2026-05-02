@@ -1,20 +1,20 @@
-"""OpenFABRIC Runtime Module: aor_runtime.config
+"""OpenFABRIC runtime settings and environment-driven defaults.
 
 Purpose:
-    Define runtime Settings and environment-driven configuration defaults for
-    the reset API shell.
+    Define typed settings for the API, CLI, gateway bridge, and compatibility
+    surfaces that now route into the typed agent runtime.
 
 Responsibilities:
     Preserve existing configuration keys so deployments and config files remain
-    compatible while the active runtime only echoes prompts.
+    compatible while the active runtime continues to evolve.
 
 Data flow / Interfaces:
-    Consumes app config/environment variables and provides typed settings to the
-    CLI and API layers.
+    Consumes app config and environment variables and provides typed settings to
+    the CLI, API, and compatibility bridge.
 
 Boundaries:
-    Configuration values are validated for compatibility, but no tool execution
-    is performed by the reset runtime.
+    Configuration values are validated here, but planning, execution, and tool
+    behavior live in the runtime and gateway layers.
 """
 
 from __future__ import annotations
@@ -25,8 +25,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
-from aor_runtime.app_config import load_app_config
-from aor_runtime.model_identity import DEFAULT_OPENAI_COMPAT_MODEL_NAME, normalize_openai_compat_model_name
+from agent_runtime.api.app_config import load_app_config
+from agent_runtime.api.constants import DEFAULT_COMPAT_SPEC_PATH, is_compat_spec_placeholder
+from agent_runtime.api.model_identity import DEFAULT_OPENAI_COMPAT_MODEL_NAME, normalize_openai_compat_model_name
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -39,7 +40,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.config._env_bool.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.config._env_bool.
     """
     raw = os.getenv(name)
     if raw is None:
@@ -57,7 +58,7 @@ class Settings(BaseModel):
         Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
 
     Used by:
-        Used by callers of aor_runtime.config.Settings and related tests.
+        Used by callers of agent_runtime.api.config.Settings and related tests.
     """
     workspace_root: Path = Field(default_factory=lambda: Path.cwd())
     prompts_root: Path = Field(default_factory=lambda: Path.cwd() / "prompts")
@@ -143,7 +144,7 @@ class Settings(BaseModel):
     max_plan_retries: int = 2
     openai_compat_enabled: bool = True
     openai_compat_model_name: str = DEFAULT_OPENAI_COMPAT_MODEL_NAME
-    openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"
+    openai_compat_spec_path: str = DEFAULT_COMPAT_SPEC_PATH
 
     @property
     def available_nodes(self) -> list[str]:
@@ -239,7 +240,7 @@ class Settings(BaseModel):
             raise ValueError(f"Gateway URL is not configured for node: {resolved_node}.")
         return gateway_url
 
-    def resolve_openai_compat_spec_path(self) -> Path:
+    def resolve_openai_compat_spec_path(self) -> Path | None:
         """Resolve openai compat spec path for Settings instances.
 
         Inputs:
@@ -252,6 +253,8 @@ class Settings(BaseModel):
             Used by OpenFABRIC runtime support through Settings.resolve_openai_compat_spec_path calls and related tests.
         """
         raw_path = str(self.openai_compat_spec_path or "").strip()
+        if is_compat_spec_placeholder(raw_path):
+            return None
         candidate = Path(raw_path).expanduser()
         if candidate.is_absolute():
             return candidate
@@ -364,7 +367,8 @@ class Settings(BaseModel):
         if self.auto_artifact_format not in {"csv"}:
             raise ValueError("auto_artifact_format must be csv.")
         self.openai_compat_model_name = normalize_openai_compat_model_name(self.openai_compat_model_name)
-        self.openai_compat_spec_path = str(self.openai_compat_spec_path or "").strip() or "examples/general_purpose_assistant.yaml"
+        normalized_spec_path = str(self.openai_compat_spec_path or "").strip()
+        self.openai_compat_spec_path = normalized_spec_path or DEFAULT_COMPAT_SPEC_PATH
         normalized_endpoints: dict[str, str] = {}
         for raw_node, raw_url in dict(self.gateway_endpoints or {}).items():
             node = str(raw_node or "").strip()
@@ -392,7 +396,7 @@ def _cached_settings(config_path: str, cwd: str) -> Settings:
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.config._cached_settings.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.config._cached_settings.
     """
     app_config, resolved_config_path = load_app_config(config_path=config_path or None, cwd=cwd or None)
     workspace_root = Path(cwd).resolve()
@@ -542,7 +546,7 @@ def get_settings(config_path: str | Path | None = None, cwd: str | Path | None =
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.config.get_settings.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.config.get_settings.
     """
     resolved_cwd = str(Path(cwd).resolve()) if cwd is not None else str(Path.cwd().resolve())
     resolved_config = str(Path(config_path).expanduser().resolve()) if config_path is not None else ""

@@ -1,19 +1,20 @@
-"""OpenFABRIC Runtime Module: aor_runtime.app_config
+"""OpenFABRIC application-level config loading.
 
 Purpose:
-    Load application-level configuration from YAML and environment sources.
+    Load YAML and environment configuration for the current runtime, server, and
+    compatibility surfaces.
 
 Responsibilities:
-    Preserve existing server, model, gateway, SQL, and runtime keys so current
-    config files continue to load during the reset.
+    Preserve server, model, gateway, SQL, and runtime keys so existing config
+    files keep working as the typed runtime evolves.
 
 Data flow / Interfaces:
-    Consumes config files/environment variables and produces typed app
-    configuration used by CLI/API startup.
+    Consumes config files and environment variables and produces typed
+    application configuration used during CLI and API startup.
 
 Boundaries:
-    Keeps process configuration separate from prompt payloads; the reset runtime
-    does not convert these settings into tool calls.
+    Keeps process configuration separate from prompt payloads and runtime
+    execution behavior.
 """
 
 from __future__ import annotations
@@ -24,7 +25,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from aor_runtime.model_identity import DEFAULT_OPENAI_COMPAT_MODEL_NAME, normalize_openai_compat_model_name
+from agent_runtime.api.constants import DEFAULT_COMPAT_SPEC_PATH
+from agent_runtime.api.model_identity import DEFAULT_OPENAI_COMPAT_MODEL_NAME, normalize_openai_compat_model_name
 
 
 APP_CONFIG_FILENAME = "config.yaml"
@@ -41,7 +43,7 @@ class ServerConfig(BaseModel):
         Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
 
     Used by:
-        Used by callers of aor_runtime.app_config.ServerConfig and related tests.
+        Used by callers of agent_runtime.api.app_config.ServerConfig and related tests.
     """
     host: str = "127.0.0.1"
     port: int = 8011
@@ -75,7 +77,7 @@ class LLMConfig(BaseModel):
         Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
 
     Used by:
-        Used by callers of aor_runtime.app_config.LLMConfig and related tests.
+        Used by callers of agent_runtime.api.app_config.LLMConfig and related tests.
     """
     base_url: str = "http://127.0.0.1:8000/v1"
     api_key: str = "local"
@@ -120,7 +122,7 @@ class RuntimeAppConfig(BaseModel):
         Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
 
     Used by:
-        Used by callers of aor_runtime.app_config.RuntimeAppConfig and related tests.
+        Used by callers of agent_runtime.api.app_config.RuntimeAppConfig and related tests.
     """
     allow_destructive_shell: bool = False
     shell_mode: str = "read_only"
@@ -176,7 +178,7 @@ class RuntimeAppConfig(BaseModel):
     insight_max_output_chars: int = 1500
     openai_compat_enabled: bool = True
     openai_compat_model_name: str = DEFAULT_OPENAI_COMPAT_MODEL_NAME
-    openai_compat_spec_path: str = "examples/general_purpose_assistant.yaml"
+    openai_compat_spec_path: str = DEFAULT_COMPAT_SPEC_PATH
 
     @model_validator(mode="after")
     def validate_runtime(self) -> "RuntimeAppConfig":
@@ -255,7 +257,8 @@ class RuntimeAppConfig(BaseModel):
         if self.openwebui_trace_mode and self.openwebui_trace_mode not in {"off", "summary", "diagnostic"}:
             raise ValueError("runtime.openwebui_trace_mode must be one of: off, summary, diagnostic.")
         self.openai_compat_model_name = normalize_openai_compat_model_name(self.openai_compat_model_name)
-        self.openai_compat_spec_path = str(self.openai_compat_spec_path or "").strip() or "examples/general_purpose_assistant.yaml"
+        normalized_spec_path = str(self.openai_compat_spec_path or "").strip()
+        self.openai_compat_spec_path = normalized_spec_path or DEFAULT_COMPAT_SPEC_PATH
         return self
 
 
@@ -269,7 +272,7 @@ class SQLConfig(BaseModel):
         Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
 
     Used by:
-        Used by callers of aor_runtime.app_config.SQLConfig and related tests.
+        Used by callers of agent_runtime.api.app_config.SQLConfig and related tests.
     """
     database_url: str | None = None
     databases: dict[str, str] = Field(default_factory=dict)
@@ -326,7 +329,7 @@ class AppConfig(BaseModel):
         Instances are created and consumed by OpenFABRIC runtime support code paths according to type hints and validators.
 
     Used by:
-        Used by callers of aor_runtime.app_config.AppConfig and related tests.
+        Used by callers of agent_runtime.api.app_config.AppConfig and related tests.
     """
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -344,7 +347,7 @@ def _config_error_message(path: Path | None = None) -> str:
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.app_config._config_error_message.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.app_config._config_error_message.
     """
     if path is not None:
         return f"App config not found at {path}. Create {APP_CONFIG_FILENAME} or pass --config."
@@ -361,7 +364,7 @@ def resolve_app_config_path(config_path: str | Path | None = None, cwd: str | Pa
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.app_config.resolve_app_config_path.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.app_config.resolve_app_config_path.
     """
     base_dir = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
     requested = config_path if config_path is not None else os.getenv(APP_CONFIG_PATH_ENV)
@@ -387,7 +390,7 @@ def load_app_config(config_path: str | Path | None = None, cwd: str | Path | Non
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.app_config.load_app_config.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.app_config.load_app_config.
     """
     resolved = resolve_app_config_path(config_path=config_path, cwd=cwd)
     try:

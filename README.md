@@ -9,13 +9,12 @@ It is built around one simple rule:
 > The runtime enforces structure and safety.  
 > The gateway touches the real environment.
 
-This repository contains two related surfaces:
+This repository contains one core runtime with multiple entrypoints:
 
 - the **typed agent runtime** used by Open WebUI and the
   OpenAI-compatible `POST /v1/chat/completions` path;
-- older **compatibility surfaces** such as `/runs`, `/sessions`, and the legacy
-  CLI engine, which are still present but are not the main path described by the
-  new runtime docs.
+- compatibility surfaces such as `/runs`, `/sessions`, and the `aor` CLI, which
+  are still present and now route into that same typed runtime.
 
 If you want to understand how the current planning, capability selection,
 confirmation, execution, and rendering flow works, start here:
@@ -65,11 +64,17 @@ flowchart TD
 ## Quick Start
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
-aor serve
+./install.sh
+./startup.sh
+```
+
+You can still use `aor serve`, but `./startup.sh` is the simplest local
+launcher and exposes the full runtime env surface in one place.
+
+If you want one command that installs and starts the agent:
+
+```bash
+./install.sh --launch
 ```
 
 OpenAI-compatible endpoints:
@@ -107,12 +112,11 @@ Environment-facing capabilities use the gateway agent for bounded filesystem,
 shell, and system operations.
 
 ```bash
-cd gateway_agent
 python -m pip install -e .
-gateway-agent
+./src/gateway_agent/startup.sh
 ```
 
-See `gateway_agent/README.md` for gateway usage details.
+See [src/gateway_agent/README.md](/home/vraj/Desktop/workspace/openfabric/src/gateway_agent/README.md) for gateway usage details.
 
 
 ## Documentation Map

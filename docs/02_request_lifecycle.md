@@ -42,7 +42,7 @@ The runtime pattern is:
 
 ## 0. Prompt Intake
 
-**Where:** `src/aor_runtime/api/app.py`
+**Where:** `src/agent_runtime/api/app.py`
 
 **Purpose**
 

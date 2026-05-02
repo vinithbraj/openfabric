@@ -16,14 +16,15 @@ At the highest level, the system follows one rule:
 
 ## What This Docs Suite Covers
 
-This suite mostly explains the **typed agent runtime path** used by:
+This suite explains the **typed agent runtime path** used by:
 
 - Open WebUI
 - `POST /v1/chat/completions`
+- compatibility endpoints such as `/runs` and `/sessions`
+- the `aor` CLI
 
-The repository still contains older compatibility surfaces such as `/runs`,
-`/sessions`, and a legacy echo-style CLI engine. Those are real and still
-present, but they are not the main path this suite is trying to teach.
+All of those surfaces now route into the same typed agent runtime. The docs
+still focus on the chat path first because that is the main user-facing flow.
 
 
 ## Big Picture
@@ -62,7 +63,7 @@ In plain language:
 
 The main pieces live here:
 
-- API entrypoint: `src/aor_runtime/api/app.py`
+- API entrypoint: `src/agent_runtime/api/app.py`
 - Runtime orchestrator: `src/agent_runtime/core/orchestrator.py`
 - Core typed models: `src/agent_runtime/core/types.py`
 - Semantic input stages: `src/agent_runtime/input_pipeline/`
@@ -70,7 +71,7 @@ The main pieces live here:
 - Execution engine and safety: `src/agent_runtime/execution/`
 - Output planning and rendering: `src/agent_runtime/output_pipeline/`
 - Observability and Open WebUI formatting: `src/agent_runtime/observability/`
-- Gateway app and remote runner: `gateway_agent/`
+- Gateway app and remote runner: `src/gateway_agent/`
 
 
 ## Documentation Guide
@@ -117,7 +118,8 @@ If you are implementing or debugging:
 - There is **no active `prompts/` directory** driving the runtime today.
   Prompt builders live in code, inside the stage modules that use them.
 - The OpenAI-compatible chat path uses the typed runtime.
-- Some compatibility endpoints and the legacy CLI still use a simpler engine.
+- Compatibility endpoints and the `aor` CLI now route into that same typed
+  runtime through a lightweight compatibility bridge.
 - Output rendering can use LLM-selected display plans or a deterministic
   fallback.
 - Confirmation is a first-class pause state, not just an execution error.

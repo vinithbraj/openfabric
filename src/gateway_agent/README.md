@@ -1,6 +1,6 @@
 # Gateway Agent
 
-`gateway_agent/` is a standalone node-local execution service for OpenFabric shell commands.
+`src/gateway_agent/` is a standalone node-local execution service for OpenFabric shell commands.
 
 This v2 agent:
 - runs on one host
@@ -21,10 +21,11 @@ Command failures return `200` with a non-zero `exit_code`. Request validation pr
 ## Install
 
 ```bash
+cd /path/to/openfabric
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install -r gateway_agent/requirements.txt
+pip install -r src/gateway_agent/requirements.txt
 ```
 
 ## Configuration
@@ -43,26 +44,26 @@ export GATEWAY_NODE_NAME=localhost
 export GATEWAY_BIND_HOST=127.0.0.1
 export GATEWAY_BIND_PORT=8787
 
-uvicorn gateway_agent.app:app --host "${GATEWAY_BIND_HOST}" --port "${GATEWAY_BIND_PORT}"
+python -m uvicorn --app-dir src gateway_agent.app:app --host "${GATEWAY_BIND_HOST}" --port "${GATEWAY_BIND_PORT}"
 ```
 
 Or use the helper script:
 
 ```bash
-./gateway_agent/startup.sh
+./src/gateway_agent/startup.sh
 ```
 
 To make the gateway print each requested command on the server side:
 
 ```bash
-./gateway_agent/startup.sh --trace-commands
+./src/gateway_agent/startup.sh --trace-commands
 ```
 
 or:
 
 ```bash
 export GATEWAY_TRACE_COMMANDS=1
-./gateway_agent/startup.sh
+./src/gateway_agent/startup.sh
 ```
 
 ## OpenFabric Wiring
@@ -80,7 +81,7 @@ nodes:
 Then run a shell task through OpenFabric:
 
 ```bash
-aor chat examples/general_purpose_assistant.yaml
+aor chat
 ```
 
 If you want to use a different runtime spec, add a similar `nodes:` section there or fall back to the `AOR_GATEWAY_URL`, `AOR_AVAILABLE_NODES`, and `AOR_DEFAULT_NODE` environment variables.

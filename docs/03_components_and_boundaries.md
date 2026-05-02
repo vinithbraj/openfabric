@@ -30,19 +30,19 @@ flowchart LR
 
 | Component | Main Location | What It Owns | What It Does Not Own |
 | --- | --- | --- | --- |
-| API layer | `src/aor_runtime/api/app.py` | HTTP endpoints, OpenAI-compatible chat, confirmation handshake | semantic planning, capability execution internals |
+| API layer | `src/agent_runtime/api/app.py` | HTTP endpoints, OpenAI-compatible chat, confirmation handshake | semantic planning, capability execution internals |
 | Agent runtime | `src/agent_runtime/core/orchestrator.py` | request pipeline orchestration | raw environment access |
 | Input pipeline | `src/agent_runtime/input_pipeline/` | task understanding and planning artifacts | actual execution |
 | Capability registry | `src/agent_runtime/capabilities/` | trusted capability definitions | user-facing orchestration |
 | Execution engine | `src/agent_runtime/execution/` | trusted DAG execution and result storage | high-level semantic interpretation |
 | Output pipeline | `src/agent_runtime/output_pipeline/` | result-shape normalization, display planning, rendering | execution and capability routing |
 | Observability | `src/agent_runtime/observability/` | event emission, safe formatting, Open WebUI trace layout | trusted planning decisions |
-| Gateway agent | `gateway_agent/` | bounded environment-facing operations | prompt interpretation |
+| Gateway agent | `src/gateway_agent/` | bounded environment-facing operations | prompt interpretation |
 
 
 ## API Layer
 
-**Main file:** `src/aor_runtime/api/app.py`
+**Main file:** `src/agent_runtime/api/app.py`
 
 ### Responsibilities
 
@@ -51,7 +51,8 @@ flowchart LR
 - expose `POST /v1/chat/completions`
 - parse chat messages into one actionable user prompt
 - maintain the generic confirmation pause/resume flow
-- preserve older compatibility endpoints
+- preserve older compatibility endpoints while routing them into the same typed
+  runtime
 
 ### Boundary
 
@@ -61,8 +62,8 @@ the agent runtime.
 ### Important current truth
 
 - `POST /v1/chat/completions` uses the typed agent runtime
-- older `/runs` and `/sessions` endpoints still use a simpler compatibility
-  engine
+- `/runs`, `/sessions`, and the `aor` CLI also route into that same typed
+  runtime through a compatibility bridge
 
 
 ## Agent Runtime Orchestrator
@@ -179,7 +180,7 @@ capabilities.
 
 ## Gateway And Remote Runner
 
-**Main files:** `gateway_agent/app.py`, `gateway_agent/remote_runner.py`
+**Main files:** `src/gateway_agent/app.py`, `src/gateway_agent/remote_runner.py`
 
 ### Responsibilities
 
@@ -215,7 +216,7 @@ decisions.
 
 ## Confirmation Layer
 
-**Main files:** `src/aor_runtime/api/app.py`,
+**Main files:** `src/agent_runtime/api/app.py`,
 `src/agent_runtime/core/orchestrator.py`
 
 ### Responsibilities

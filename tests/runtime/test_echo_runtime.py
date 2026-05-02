@@ -5,9 +5,10 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from agent_runtime.core.orchestrator import AgentRuntime
-from aor_runtime.api.app import create_app
-from aor_runtime.config import Settings
-from aor_runtime.runtime.engine import ExecutionEngine, extract_prompt
+from agent_runtime.api.app import create_app
+from agent_runtime.api.config import Settings
+from agent_runtime.api.constants import DEFAULT_COMPAT_SPEC_PATH
+from agent_runtime.api.runtime.engine import ExecutionEngine, extract_prompt
 
 
 class FakeAgentRuntime:
@@ -96,19 +97,19 @@ def test_extract_prompt_prefers_task_field() -> None:
 
 
 def test_engine_echoes_prompt() -> None:
-    engine = ExecutionEngine(Settings())
+    engine = ExecutionEngine(Settings(), agent_runtime=FakeAgentRuntime())
 
-    result = engine.run_spec("examples/general_purpose_assistant.yaml", {"task": "count patients"})
+    result = engine.run_spec(DEFAULT_COMPAT_SPEC_PATH, {"task": "count patients"})
 
     assert result["status"] == "completed"
-    assert result["final_output"]["content"] == "count patients"
+    assert result["final_output"]["content"] == "handled: count patients"
 
 
 def test_healthz_reports_echo_mode() -> None:
     response = _client().get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "mode": "echo"}
+    assert response.json() == {"status": "ok", "mode": "agent_runtime"}
 
 
 def test_openai_chat_completion_echoes_latest_user_prompt() -> None:
@@ -214,8 +215,43 @@ def test_run_endpoint_echoes_prompt() -> None:
 
     response = client.post(
         "/runs",
-        json={"spec_path": "examples/general_purpose_assistant.yaml", "input": {"task": "echo me"}},
+        json={"spec_path": DEFAULT_COMPAT_SPEC_PATH, "input": {"task": "echo me"}},
     )
 
     assert response.status_code == 200
-    assert response.json()["final_output"]["content"] == "echo me"
+    assert response.json()["final_output"]["content"] == "handled: echo me"
+
+
+def test_run_endpoint_uses_neutral_default_spec_path() -> None:
+    client = _client()
+
+    response = client.post(
+        "/runs",
+        json={"input": {"task": "echo default"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["spec_path"] == DEFAULT_COMPAT_SPEC_PATH
+    assert response.json()["final_output"]["content"] == "handled: echo default"
+
+
+def test_session_resume_routes_through_agent_runtime() -> None:
+    client = _client()
+
+    created = client.post(
+        "/sessions?run_immediately=false",
+        json={"input": {"task": "resume me"}},
+    )
+
+    assert created.status_code == 200
+    session_id = created.json()["id"]
+    assert created.json()["status"] == "pending"
+
+    resumed = client.post(
+        f"/sessions/{session_id}/resume",
+        json={"trigger": "manual"},
+    )
+
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "completed"
+    assert resumed.json()["final_output"]["content"] == "handled: resume me"

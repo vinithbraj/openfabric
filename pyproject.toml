@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aor-runtime"
 version = "0.10.0"
-description = "OpenFABRIC V10 reset runtime with an OpenAI-compatible echo interface."
+description = "OpenFABRIC agent runtime with typed planning, execution, and OpenAI-compatible APIs."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,7 +24,7 @@ dev = [
 ]
 
 [project.scripts]
-aor = "aor_runtime.cli:app"
+aor = "agent_runtime.api.cli:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

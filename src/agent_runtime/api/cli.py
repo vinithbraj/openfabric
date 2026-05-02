@@ -1,19 +1,8 @@
-"""Typer CLI for the V10 echo reset runtime.
+"""Typer CLI for the OpenFABRIC agent runtime.
 
 Purpose:
-    Keep the ``aor`` command usable while the internal agent runtime is rebuilt.
-
-Responsibilities:
-    Load configuration, start the FastAPI server, and provide local run/chat
-    commands that echo prompt text.
-
-Data flow / Interfaces:
-    CLI arguments are converted into prompt payloads for ``ExecutionEngine`` or
-    server settings for ``uvicorn``.
-
-Boundaries:
-    The CLI does not invoke tools, LLMs, SQL, SLURM, shell commands, or gateway
-    calls. It only echoes prompt text through the reset runtime.
+    Keep the ``aor`` command as a lightweight entrypoint into the current
+    runtime and server surfaces.
 """
 
 from __future__ import annotations
@@ -26,13 +15,14 @@ import typer
 import uvicorn
 from rich.console import Console
 
-from aor_runtime.api.app import create_app
-from aor_runtime.app_config import APP_CONFIG_PATH_ENV
-from aor_runtime.config import Settings, get_settings
-from aor_runtime.runtime.engine import ExecutionEngine, extract_prompt
+from agent_runtime.api.app import create_app
+from agent_runtime.api.app_config import APP_CONFIG_PATH_ENV
+from agent_runtime.api.config import Settings, get_settings
+from agent_runtime.api.constants import DEFAULT_COMPAT_SPEC_PATH
+from agent_runtime.api.runtime.engine import ExecutionEngine, extract_prompt
 
 
-app = typer.Typer(help="OpenFABRIC V10 echo reset runtime.")
+app = typer.Typer(help="OpenFABRIC agent runtime.")
 console = Console()
 
 
@@ -67,7 +57,7 @@ def serve(
     host: Annotated[str | None, typer.Option("--host", help="Override configured host.")] = None,
     port: Annotated[int | None, typer.Option("--port", help="Override configured port.")] = None,
 ) -> None:
-    """Start the OpenWebUI/OpenAI-compatible echo API."""
+    """Start the OpenWebUI/OpenAI-compatible API."""
 
     settings = _settings(config)
     if config:
@@ -83,12 +73,15 @@ def serve(
 
 @app.command()
 def run(
-    spec_path: Annotated[str, typer.Argument(help="Compatibility spec path; retained but not executed.")],
+    spec_path: Annotated[
+        str,
+        typer.Argument(help="Optional compatibility spec path; retained for older surfaces but ignored by the current runtime."),
+    ] = DEFAULT_COMPAT_SPEC_PATH,
     input_json: Annotated[str | None, typer.Option("--input", help="JSON input containing task/prompt.")] = None,
-    prompt: Annotated[str | None, typer.Option("--prompt", help="Prompt text to echo.")] = None,
+    prompt: Annotated[str | None, typer.Option("--prompt", help="Prompt text to run.")] = None,
     config: Annotated[Path | None, typer.Option("--config", help="Path to config.yaml.")] = None,
 ) -> None:
-    """Echo a prompt once and print the result."""
+    """Run one prompt once and print the final rendered result."""
 
     engine = ExecutionEngine(_settings(config))
     payload = _payload_from_input(input_json, prompt)
@@ -99,13 +92,16 @@ def run(
 
 @app.command()
 def chat(
-    spec_path: Annotated[str, typer.Argument(help="Compatibility spec path; retained but not executed.")],
+    spec_path: Annotated[
+        str,
+        typer.Argument(help="Optional compatibility spec path; retained for older surfaces but ignored by the current runtime."),
+    ] = DEFAULT_COMPAT_SPEC_PATH,
     config: Annotated[Path | None, typer.Option("--config", help="Path to config.yaml.")] = None,
 ) -> None:
-    """Start a tiny interactive echo loop."""
+    """Start a tiny interactive chat loop through the compatibility runtime."""
 
     engine = ExecutionEngine(_settings(config))
-    console.print("[bold]OpenFABRIC echo runtime[/bold]. Type 'exit' or 'quit' to stop.")
+    console.print("[bold]OpenFABRIC agent runtime[/bold]. Type 'exit' or 'quit' to stop.")
     while True:
         try:
             prompt = typer.prompt("you")

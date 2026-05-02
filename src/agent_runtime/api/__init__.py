@@ -1,8 +1,8 @@
-"""OpenFABRIC V10 echo reset package metadata.
+"""OpenFABRIC package metadata for the current runtime surfaces.
 
 Purpose:
-    Expose package version metadata and runtime version helpers for the
-    reset runtime.
+    Expose package version metadata and runtime version helpers for the API,
+    CLI, and compatibility layers.
 
 Responsibilities:
     Resolve package version, Git revision, and dirty-worktree suffix for API/model identity surfaces.
@@ -11,7 +11,8 @@ Data flow / Interfaces:
     Exports __version__, __package_version__, and get_runtime_version for CLI, API, and OpenWebUI model naming.
 
 Boundaries:
-    Performs read-only Git inspection only and must not mutate repository state.
+    Performs read-only Git inspection only and must not mutate repository
+    state.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ def get_runtime_version() -> str:
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.__init__.get_runtime_version.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.__init__.get_runtime_version.
     """
     repo_root = Path(__file__).resolve().parents[2]
     if not (repo_root / ".git").exists():
@@ -60,7 +61,7 @@ def _git_worktree_is_dirty(repo_root: Path) -> bool:
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.__init__._git_worktree_is_dirty.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.__init__._git_worktree_is_dirty.
     """
     status = _run_git_command(repo_root, ["status", "--short"])
     return bool(status)
@@ -76,7 +77,7 @@ def _run_git_command(repo_root: Path, args: list[str]) -> str:
         Returns the computed value described by the function name and type hints.
 
     Used by:
-        Used by OpenFABRIC runtime support code paths that import or call aor_runtime.__init__._run_git_command.
+        Used by OpenFABRIC runtime support code paths that import or call agent_runtime.api.__init__._run_git_command.
     """
     try:
         result = subprocess.run(
