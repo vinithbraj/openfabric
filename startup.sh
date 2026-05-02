@@ -4,6 +4,52 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
 
+CONFIG_OVERRIDE=""
+HOST_OVERRIDE=""
+PORT_OVERRIDE=""
+RELOAD_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --config" >&2
+        echo "Usage: $0 [--config PATH] [--host HOST] [--port PORT] [--reload]" >&2
+        exit 1
+      fi
+      CONFIG_OVERRIDE="$2"
+      shift 2
+      ;;
+    --host)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --host" >&2
+        echo "Usage: $0 [--config PATH] [--host HOST] [--port PORT] [--reload]" >&2
+        exit 1
+      fi
+      HOST_OVERRIDE="$2"
+      shift 2
+      ;;
+    --port)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --port" >&2
+        echo "Usage: $0 [--config PATH] [--host HOST] [--port PORT] [--reload]" >&2
+        exit 1
+      fi
+      PORT_OVERRIDE="$2"
+      shift 2
+      ;;
+    --reload)
+      RELOAD_OVERRIDE="1"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      echo "Usage: $0 [--config PATH] [--host HOST] [--port PORT] [--reload]" >&2
+      exit 1
+      ;;
+  esac
+done
+
 cd "${REPO_ROOT}"
 
 if [[ ! -d ".venv" ]]; then
@@ -15,12 +61,26 @@ fi
 source .venv/bin/activate
 
 # Launcher-level settings.
-export AOR_HOST="${AOR_HOST:-127.0.0.1}"
-export AOR_PORT="${AOR_PORT:-8011}"
-export AOR_RELOAD="${AOR_RELOAD:-0}"
+# Default to 0.0.0.0 so local Dockerized clients such as Open WebUI can reach
+# the server without extra overrides. Set AOR_HOST=127.0.0.1 if you want the
+# API bound to loopback only.
+export AOR_HOST="${HOST_OVERRIDE:-${AOR_HOST:-0.0.0.0}}"
+export AOR_PORT="${PORT_OVERRIDE:-${AOR_PORT:-8011}}"
+export AOR_RELOAD="${RELOAD_OVERRIDE:-${AOR_RELOAD:-0}}"
 
-# Config loading. Point this at a config file if you do not want the defaults.
-export AOR_APP_CONFIG_PATH="${AOR_APP_CONFIG_PATH:-}"
+# Config loading. Prefer config_ucla.yaml when present, then config.yaml, unless
+# the caller already supplied AOR_APP_CONFIG_PATH or --config explicitly.
+if [[ -n "${CONFIG_OVERRIDE}" ]]; then
+  export AOR_APP_CONFIG_PATH="${CONFIG_OVERRIDE}"
+elif [[ -n "${AOR_APP_CONFIG_PATH:-}" ]]; then
+  export AOR_APP_CONFIG_PATH="${AOR_APP_CONFIG_PATH}"
+elif [[ -f "${REPO_ROOT}/config_ucla.yaml" ]]; then
+  export AOR_APP_CONFIG_PATH="${REPO_ROOT}/config_ucla.yaml"
+elif [[ -f "${REPO_ROOT}/config.yaml" ]]; then
+  export AOR_APP_CONFIG_PATH="${REPO_ROOT}/config.yaml"
+else
+  export AOR_APP_CONFIG_PATH=""
+fi
 
 # Gateway and node routing.
 export AOR_AVAILABLE_NODES="${AOR_AVAILABLE_NODES:-localhost}"

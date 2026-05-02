@@ -71,6 +71,18 @@ flowchart TD
 You can still use `aor serve`, but `./startup.sh` is the simplest local
 launcher and exposes the full runtime env surface in one place.
 
+By default, `startup.sh` binds the API to `0.0.0.0:8011` so local Dockerized
+Open WebUI setups can reach it. Set `AOR_HOST=127.0.0.1` if you want the API
+to listen on loopback only.
+
+`startup.sh` now prefers `config_ucla.yaml` when it exists, then falls back to
+`config.yaml`. You can override that explicitly:
+
+```bash
+./startup.sh --config config.yaml
+./startup.sh --config config_ucla.yaml --port 8311
+```
+
 If you want one command that installs and starts the agent:
 
 ```bash
