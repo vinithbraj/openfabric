@@ -1,35 +1,66 @@
-# OpenFABRIC V10 Reset Runtime
+# OpenFABRIC Agent Runtime
 
-This branch intentionally removes the previous internal planner, semantic-frame,
-tool, SQL, SLURM, filesystem, shell, eval, and rendering machinery.
+OpenFABRIC is a schema-driven agent runtime for tool use, safe execution, and
+deterministic rendering.
 
-The preserved system is a clean interface shell:
+It is built around one simple rule:
 
-- Gateway agent remains in `gateway_agent/`.
-- Config loading remains in `config.yaml`, `config_ucla.yaml`, and
-  `src/aor_runtime/config.py`.
-- The FastAPI/OpenAI-compatible/OpenWebUI surface remains available.
-- Every prompt is currently passed through and echoed as the assistant response.
+> The LLM decides meaning.  
+> The runtime enforces structure and safety.  
+> The gateway touches the real environment.
 
-This is a reset point for designing the next runtime without old internal
-behavior accidentally participating.
+This repository contains two related surfaces:
 
-## Behavior
+- the **typed agent runtime** used by Open WebUI and the
+  OpenAI-compatible `POST /v1/chat/completions` path;
+- older **compatibility surfaces** such as `/runs`, `/sessions`, and the legacy
+  CLI engine, which are still present but are not the main path described by the
+  new runtime docs.
 
-Given:
+If you want to understand how the current planning, capability selection,
+confirmation, execution, and rendering flow works, start here:
 
-```text
-count of patients in dicom
+- [docs/architecture.md](docs/architecture.md)
+
+
+## What The Current Runtime Does
+
+The typed agent runtime can:
+
+- classify prompts into tool and workflow intent;
+- decompose prompts into typed tasks;
+- assign semantic verbs and known object types;
+- shortlist and validate capabilities;
+- build and execute a typed action DAG;
+- route environment-facing work through the gateway;
+- pause for confirmation before confirmation-gated actions;
+- render a final answer from safe result previews and deterministic shapes.
+
+Examples of current built-in capability families include:
+
+- runtime introspection
+- structured data transforms
+- filesystem read/search/write
+- shell inspection
+- system inspection
+- structured SQL query planning
+
+
+## High-Level Flow
+
+```mermaid
+flowchart TD
+    A[User Prompt] --> B[/v1/chat/completions]
+    B --> C[Agent Runtime]
+    C --> D[Input Semantic Pipeline]
+    D --> E[Typed Action DAG]
+    E --> F[Execution Engine]
+    F --> G[Gateway or Internal Capability]
+    G --> H[Result Bundle]
+    H --> I[Output Planning and Rendering]
+    I --> J[Final Assistant Response]
 ```
 
-The runtime returns:
-
-```text
-count of patients in dicom
-```
-
-There are no LLM calls, tool invocations, SQL queries, shell commands, SLURM
-queries, action DAGs, or output-reconstruction steps in this reset runtime.
 
 ## Quick Start
 
@@ -47,7 +78,7 @@ OpenAI-compatible endpoints:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 
-Compatibility endpoints retained for clients:
+Compatibility endpoints still present:
 
 - `POST /runs`
 - `POST /runs/stream`
@@ -56,19 +87,24 @@ Compatibility endpoints retained for clients:
 - `GET /sessions/{id}`
 - `GET /sessions/{id}/events`
 
-## CLI
 
-```bash
-aor run examples/general_purpose_assistant.yaml --prompt "hello"
-aor chat examples/general_purpose_assistant.yaml
-aor serve --host 0.0.0.0 --port 8310
-```
+## Open WebUI
 
-The `spec_path` argument is retained for compatibility but is not executed.
+The main modern runtime path is the OpenAI-compatible chat endpoint:
+
+- connect Open WebUI to this server
+- send prompts through `POST /v1/chat/completions`
+- the runtime will emit structured observability trace sections during planning,
+  safety, execution, and rendering
+
+Confirmation-gated actions, such as `filesystem.write_file`, pause with a
+confirmation message instead of pretending execution failed.
+
 
 ## Gateway Agent
 
-The gateway agent is preserved unchanged as the future node-local interface:
+Environment-facing capabilities use the gateway agent for bounded filesystem,
+shell, and system operations.
 
 ```bash
 cd gateway_agent
@@ -76,10 +112,21 @@ python -m pip install -e .
 gateway-agent
 ```
 
-See `gateway_agent/README.md` for its own usage.
+See `gateway_agent/README.md` for gateway usage details.
 
-## Reset Notes
 
-The old architecture documentation and eval packs were removed because they
-described systems that are no longer active on this branch. The new design can
-now be rebuilt against this much smaller surface.
+## Documentation Map
+
+- [docs/architecture.md](docs/architecture.md) — landing page and system map
+- [docs/01_overview_for_humans.md](docs/01_overview_for_humans.md) — simple,
+  plain-language explanation
+- [docs/02_request_lifecycle.md](docs/02_request_lifecycle.md) — full request
+  flow, stage by stage
+- [docs/03_components_and_boundaries.md](docs/03_components_and_boundaries.md)
+  — subsystem responsibilities and boundaries
+- [docs/04_llm_stages_and_contracts.md](docs/04_llm_stages_and_contracts.md) —
+  exact LLM-involved stages and structured contracts
+- [docs/05_capabilities_safety_and_gateway.md](docs/05_capabilities_safety_and_gateway.md)
+  — capabilities, safety, gateway routing, and file writing
+- [docs/06_worked_example_memory_report.md](docs/06_worked_example_memory_report.md)
+  — one end-to-end walkthrough of a real prompt
