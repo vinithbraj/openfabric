@@ -511,6 +511,12 @@ def test_output_contract_resolution_satisfies_full_path_follow_up() -> None:
 
     client = FitLLMClient(
         {
+            "You are reviewing whether a downstream task is already satisfied by upstream declared outputs.": {
+                "task_id": "task_3",
+                "producer_task_id": "task_2",
+                "satisfied_from_output": True,
+                "confidence": 0.92,
+            },
             "Calculate how much free memory this system has.": {
                 "task_id": "task_1",
                 "candidate_capability_id": "system.memory_status",
@@ -594,3 +600,222 @@ def test_output_contract_resolution_satisfies_full_path_follow_up() -> None:
     assert resolution.producer_task_id == "task_2"
     assert "absolute_path" in resolution.matched_output_fields
     assert "returns.absolute_path" in resolution.matched_output_affordances
+    assert resolution.resolution_source == "deterministic"
+
+
+def test_output_contract_resolution_llm_reviewer_handles_fuzzy_saved_location_follow_up() -> None:
+    registry = build_default_registry()
+    task_memory = _task(
+        "task_1",
+        "Calculate how much free memory this system has.",
+        "analyze",
+        "system.memory",
+    )
+    task_write = _task(
+        "task_2",
+        "Save the free memory information to a file named memory_report.txt.",
+        "create",
+        "filesystem.file",
+    )
+    task_write.dependencies = ["task_1"]
+    task_location = _task(
+        "task_3",
+        "Tell me where the saved report lives.",
+        "read",
+        "report",
+    )
+    task_location.dependencies = ["task_2"]
+
+    selection_memory = _selection("task_1", "system.memory_status", "memory_status")
+    selection_write = _selection("task_2", "filesystem.write_file", "write_file")
+    selection_location = _selection("task_3", "filesystem.search_files", "search_files")
+
+    client = FitLLMClient(
+        {
+            "You are reviewing whether a downstream task is already satisfied by upstream declared outputs.": {
+                "task_id": "task_3",
+                "producer_task_id": "task_2",
+                "satisfied_from_output": True,
+                "confidence": 0.92,
+            },
+            "Calculate how much free memory this system has.": {
+                "task_id": "task_1",
+                "candidate_capability_id": "system.memory_status",
+                "candidate_operation_id": "memory_status",
+                "fits": True,
+                "confidence": 0.97,
+                "primary_failure_mode": None,
+                "semantic_reason": "The task asks for free memory.",
+                "domain_reason": "System metrics belong to the system domain.",
+                "object_type_reason": "system.memory matches directly.",
+                "argument_reason": "No required arguments are missing.",
+                "risk_reason": "Read-only and low risk.",
+                "suggested_domain": "system",
+                "suggested_object_type": "system.memory",
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            "Save the free memory information to a file named memory_report.txt.": {
+                "task_id": "task_2",
+                "candidate_capability_id": "filesystem.write_file",
+                "candidate_operation_id": "write_file",
+                "fits": True,
+                "confidence": 0.97,
+                "primary_failure_mode": None,
+                "semantic_reason": "The task asks to save a report to disk.",
+                "domain_reason": "Writing to a file belongs to the filesystem domain.",
+                "object_type_reason": "filesystem.file matches directly.",
+                "argument_reason": "The path and format can be extracted.",
+                "risk_reason": "Confirmation-gated but otherwise safe.",
+                "suggested_domain": "filesystem",
+                "suggested_object_type": "filesystem.file",
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            "Tell me where the saved report lives.": {
+                "task_id": "task_3",
+                "candidate_capability_id": "filesystem.search_files",
+                "candidate_operation_id": "search_files",
+                "fits": False,
+                "confidence": 0.94,
+                "primary_failure_mode": "semantic_mismatch",
+                "semantic_reason": "Searching files is not the same as surfacing where the saved output ended up.",
+                "domain_reason": "Filesystem is related, but the action is different.",
+                "object_type_reason": "The task asks for saved-location metadata, not a file search result set.",
+                "argument_reason": "Pattern and path inputs would still require extra execution.",
+                "risk_reason": "Low risk but not the right tool.",
+                "suggested_domain": "filesystem",
+                "suggested_object_type": "filesystem.path",
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+        }
+    )
+
+    decisions, gaps = assess_capability_fit(
+        [task_memory, task_write, task_location],
+        [selection_memory, selection_write, selection_location],
+        registry,
+        _classification_context(
+            "calculate free memory, save it, and tell me where the saved report lives",
+            ["system", "filesystem"],
+        ),
+        client,
+    )
+
+    resolutions = resolve_tasks_from_output_contracts(
+        [task_memory, task_write, task_location],
+        decisions,
+        [selection_memory, selection_write, selection_location],
+        registry,
+        _classification_context(
+            "calculate free memory, save it, and tell me where the saved report lives",
+            ["system", "filesystem"],
+        ),
+        llm_client=client,
+    )
+
+    assert any(gap.task_id == "task_3" for gap in gaps)
+    assert len(resolutions) == 1
+    resolution = resolutions[0]
+    assert resolution.task_id == "task_3"
+    assert resolution.producer_task_id == "task_2"
+    assert resolution.resolution_source == "llm_overlap_review"
+    assert resolution.llm_confidence == 0.92
+    assert "absolute_path" in resolution.matched_output_fields
+    assert "returns.absolute_path" in resolution.matched_output_affordances
+    assert any(
+        "already satisfied by upstream declared outputs" in prompt.lower()
+        for prompt in client.prompts
+    )
+
+
+def test_output_contract_resolution_llm_true_is_rejected_without_declared_overlap_contract() -> None:
+    registry = build_default_registry()
+    task_memory = _task(
+        "task_1",
+        "Calculate how much free memory this system has.",
+        "analyze",
+        "system.memory",
+    )
+    task_follow_up = _task(
+        "task_2",
+        "Tell me where the saved report lives.",
+        "read",
+        "report",
+    )
+    task_follow_up.dependencies = ["task_1"]
+
+    selection_memory = _selection("task_1", "system.memory_status", "memory_status")
+    selection_follow_up = _selection("task_2", "filesystem.search_files", "search_files")
+
+    client = FitLLMClient(
+        {
+            "You are reviewing whether a downstream task is already satisfied by upstream declared outputs.": {
+                "task_id": "task_2",
+                "producer_task_id": "task_1",
+                "satisfied_from_output": True,
+                "confidence": 0.91,
+            },
+            "Calculate how much free memory this system has.": {
+                "task_id": "task_1",
+                "candidate_capability_id": "system.memory_status",
+                "candidate_operation_id": "memory_status",
+                "fits": True,
+                "confidence": 0.97,
+                "primary_failure_mode": None,
+                "semantic_reason": "The task asks for free memory.",
+                "domain_reason": "System metrics belong to the system domain.",
+                "object_type_reason": "system.memory matches directly.",
+                "argument_reason": "No required arguments are missing.",
+                "risk_reason": "Read-only and low risk.",
+                "suggested_domain": "system",
+                "suggested_object_type": "system.memory",
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            "Tell me where the saved report lives.": {
+                "task_id": "task_2",
+                "candidate_capability_id": "filesystem.search_files",
+                "candidate_operation_id": "search_files",
+                "fits": False,
+                "confidence": 0.94,
+                "primary_failure_mode": "semantic_mismatch",
+                "semantic_reason": "Searching files is not the same as reporting a saved location.",
+                "domain_reason": "Filesystem is related, but the action is different.",
+                "object_type_reason": "The task asks for saved-location metadata.",
+                "argument_reason": "A pattern and path would still require extra execution.",
+                "risk_reason": "Low risk but not the right tool.",
+                "suggested_domain": "filesystem",
+                "suggested_object_type": "filesystem.path",
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+        }
+    )
+
+    decisions, gaps = assess_capability_fit(
+        [task_memory, task_follow_up],
+        [selection_memory, selection_follow_up],
+        registry,
+        _classification_context(
+            "calculate free memory and tell me where the saved report lives",
+            ["system", "filesystem"],
+        ),
+        client,
+    )
+
+    resolutions = resolve_tasks_from_output_contracts(
+        [task_memory, task_follow_up],
+        decisions,
+        [selection_memory, selection_follow_up],
+        registry,
+        _classification_context(
+            "calculate free memory and tell me where the saved report lives",
+            ["system", "filesystem"],
+        ),
+        llm_client=client,
+    )
+
+    assert any(gap.task_id == "task_2" for gap in gaps)
+    assert resolutions == []

@@ -726,6 +726,8 @@ class AgentRuntime:
                 selections,
                 self.registry,
                 classification_context,
+                llm_client=self.llm_client,
+                trace=trace,
             )
             resolved_output_task_ids = {item.task_id for item in output_contract_resolutions}
             if output_contract_resolutions:
@@ -854,6 +856,8 @@ class AgentRuntime:
                         "matched_output_object_types": resolution.matched_output_object_types,
                         "matched_output_fields": resolution.matched_output_fields,
                         "matched_output_affordances": resolution.matched_output_affordances,
+                        "resolution_source": resolution.resolution_source,
+                        "llm_confidence": resolution.llm_confidence,
                         "reason": resolution.reason,
                     },
                 )

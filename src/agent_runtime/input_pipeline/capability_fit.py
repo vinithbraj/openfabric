@@ -107,7 +107,20 @@ class OutputContractResolution(BaseModel):
     matched_output_object_types: list[str] = Field(default_factory=list)
     matched_output_fields: list[str] = Field(default_factory=list)
     matched_output_affordances: list[str] = Field(default_factory=list)
+    resolution_source: Literal["deterministic", "llm_overlap_review"] = "deterministic"
+    llm_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     reason: str
+
+
+class OutputOverlapReviewProposal(BaseModel):
+    """Strict boolean LLM proposal for overlap between a task and upstream outputs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    producer_task_id: str
+    satisfied_from_output: bool
+    confidence: float = Field(ge=0.0, le=1.0)
 
 def infer_task_domain(task: TaskFrame, classification_context: dict[str, Any] | None = None) -> str | None:
     """Infer the canonical task domain from constraints, object type, and likely domains."""
@@ -529,6 +542,92 @@ def _gap_from_task(
     )
 
 
+def _output_overlap_prompt(
+    task: TaskFrame,
+    producer_task: TaskFrame,
+    manifest: CapabilityManifest,
+    classification_context: dict[str, Any] | None = None,
+) -> str:
+    """Build the JSON-only prompt for reviewing overlap with upstream outputs."""
+
+    payload = {
+        "original_prompt_preview": str((classification_context or {}).get("original_prompt") or "")[:400],
+        "downstream_task": {
+            "task_id": task.id,
+            "description": task.description,
+            "semantic_verb": task.semantic_verb,
+            "object_type": task.object_type,
+        },
+        "dependency_relation": {
+            "depends_on_task_id": producer_task.id,
+            "dependency_description": producer_task.description,
+        },
+        "upstream_task": {
+            "task_id": producer_task.id,
+            "description": producer_task.description,
+            "semantic_verb": producer_task.semantic_verb,
+            "object_type": producer_task.object_type,
+        },
+        "upstream_capability_manifest": {
+            "capability_id": manifest.capability_id,
+            "operation_id": manifest.operation_id,
+            "domain": manifest.domain,
+            "description": manifest.description,
+            "semantic_verbs": manifest.semantic_verbs,
+            "object_types": manifest.object_types,
+            "output_object_types": manifest.output_object_types,
+            "output_fields": manifest.output_fields,
+            "output_affordances": manifest.output_affordances,
+            "read_only": manifest.read_only,
+            "mutates_state": manifest.mutates_state,
+            "requires_confirmation": manifest.requires_confirmation,
+        },
+    }
+    payload_json = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
+    return "\n".join(
+        [
+            "You are reviewing whether a downstream task is already satisfied by upstream declared outputs.",
+            "Return JSON only.",
+            "Do not return markdown fences.",
+            "Do not produce commands, shell syntax, SQL, Python, or executable plans.",
+            "Decide whether the downstream task can be satisfied entirely from the upstream capability's declared outputs without any additional execution.",
+            "Answer only with satisfied_from_output: true or false, confidence, task_id, and producer_task_id.",
+            "Do not invent undeclared outputs, hidden side effects, or implicit filesystem lookups.",
+            "If the downstream task would require any new action, new computation, new I/O, or any state mutation, answer false.",
+            "Payload:",
+            payload_json,
+        ]
+    )
+
+
+def review_output_overlap_with_llm(
+    task: TaskFrame,
+    producer_task: TaskFrame,
+    manifest: CapabilityManifest,
+    classification_context: dict[str, Any] | None,
+    llm_client,
+) -> tuple[OutputOverlapReviewProposal, StructuredCallDiagnostics | None]:
+    """Ask the LLM for a strict boolean overlap judgment on upstream outputs."""
+
+    prompt = _output_overlap_prompt(task, producer_task, manifest, classification_context)
+    diagnostics: StructuredCallDiagnostics | None = None
+    try:
+        proposal = structured_call(llm_client, prompt, OutputOverlapReviewProposal)
+    except StructuredCallError as exc:
+        diagnostics = exc.diagnostics
+        proposal = OutputOverlapReviewProposal(
+            task_id=task.id,
+            producer_task_id=producer_task.id,
+            satisfied_from_output=False,
+            confidence=0.0,
+        )
+    if proposal.task_id != task.id:
+        proposal = proposal.model_copy(update={"task_id": task.id})
+    if proposal.producer_task_id != producer_task.id:
+        proposal = proposal.model_copy(update={"producer_task_id": producer_task.id})
+    return proposal, diagnostics
+
+
 def _normalized_output_object_types(manifest: CapabilityManifest) -> list[str]:
     """Return canonical output object families for one manifest."""
 
@@ -582,6 +681,33 @@ def _task_requests_path(task: TaskFrame) -> bool:
         or "saved_location" in description
         or "saved_to" in description
     )
+
+
+def _path_contract_evidence(
+    manifest: CapabilityManifest,
+) -> tuple[list[str], list[str], list[str]]:
+    """Return path-like output evidence declared by one manifest."""
+
+    output_object_types = _normalized_output_object_types(manifest)
+    output_fields = _normalized_output_fields(manifest)
+    output_affordances = _normalized_output_affordances(manifest)
+
+    matched_output_object_types = [
+        item for item in output_object_types if item == "filesystem.path"
+    ]
+    matched_output_fields = [
+        item for item in output_fields if item in {"path", "absolute_path"}
+    ]
+    matched_output_affordances = [
+        (
+            "returns.absolute_path"
+            if item == "returns_absolute_path"
+            else "returns.relative_path"
+        )
+        for item in output_affordances
+        if item in {"returns_absolute_path", "returns_relative_path"}
+    ]
+    return matched_output_object_types, matched_output_fields, matched_output_affordances
 
 
 def _resolve_task_from_upstream_output(
@@ -664,6 +790,97 @@ def _resolve_task_from_upstream_output(
         matched_output_object_types=matched_output_object_types,
         matched_output_fields=matched_output_fields,
         matched_output_affordances=matched_output_affordances,
+        resolution_source="deterministic",
+        reason=reason,
+    )
+
+
+def _resolve_task_from_upstream_output_with_llm(
+    task: TaskFrame,
+    producer_task: TaskFrame,
+    manifest: CapabilityManifest,
+    classification_context: dict[str, Any] | None,
+    llm_client,
+    trace: PlanningTrace | None = None,
+) -> OutputContractResolution | None:
+    """Ask the LLM about semantic overlap, then validate that overlap deterministically."""
+
+    if llm_client is None:
+        return None
+    if canonical_semantic_verb(task.semantic_verb) in _MUTATING_VERBS | {"execute"}:
+        return None
+
+    path_object_types, path_fields, path_affordances = _path_contract_evidence(manifest)
+    if not path_object_types and not path_fields and not path_affordances:
+        return None
+
+    review, diagnostics = review_output_overlap_with_llm(
+        task,
+        producer_task,
+        manifest,
+        classification_context,
+        llm_client,
+    )
+    if isinstance(trace, PlanningTrace):
+        model_name, temperature = llm_client_metadata(llm_client)
+        append_trace_entry(
+            trace,
+            PlanningTraceEntry(
+                stage="output_contract_overlap_review",
+                request_id=str(trace.request_id),
+                model_name=model_name,
+                llm_temperature=temperature,
+                prompt_template_id="output_contract_overlap_review",
+                raw_llm_response=(
+                    diagnostics.model_dump(mode="json")
+                    if diagnostics is not None
+                    else review.model_dump(mode="json")
+                ),
+                parsed_proposal=review.model_dump(mode="json"),
+                llm_diagnostics=(
+                    diagnostics.model_dump(mode="json")
+                    if diagnostics is not None
+                    else None
+                ),
+            )
+        )
+
+    if diagnostics is not None or not review.satisfied_from_output:
+        return None
+
+    reason_bits: list[str] = []
+    if path_object_types:
+        reason_bits.append(
+            "the producer declares output object types "
+            + ", ".join(f"`{item}`" for item in path_object_types)
+        )
+    if path_fields:
+        reason_bits.append(
+            "the producer returns output fields "
+            + ", ".join(f"`{item}`" for item in path_fields)
+        )
+    if path_affordances:
+        reason_bits.append(
+            "the producer advertises output affordances "
+            + ", ".join(f"`{item}`" for item in path_affordances)
+        )
+
+    reason = (
+        f"Task `{task.id}` can be satisfied from upstream task `{producer_task.id}` because the overlap reviewer judged the downstream task to be fully satisfied by declared upstream outputs, "
+        "and deterministic validation confirmed path-like output metadata on the producer; "
+        + "; ".join(reason_bits)
+        + "."
+    )
+    return OutputContractResolution(
+        task_id=task.id,
+        producer_task_id=producer_task.id,
+        producer_capability_id=manifest.capability_id,
+        producer_operation_id=manifest.operation_id,
+        matched_output_object_types=path_object_types,
+        matched_output_fields=path_fields,
+        matched_output_affordances=path_affordances,
+        resolution_source="llm_overlap_review",
+        llm_confidence=review.confidence,
         reason=reason,
     )
 
@@ -674,6 +891,8 @@ def resolve_tasks_from_output_contracts(
     selections: list[CapabilitySelectionResult],
     registry: CapabilityRegistry,
     classification_context: dict[str, Any] | None = None,
+    llm_client=None,
+    trace: PlanningTrace | None = None,
 ) -> list[OutputContractResolution]:
     """Resolve non-executable tasks that are already satisfied by upstream outputs."""
 
@@ -706,6 +925,15 @@ def resolve_tasks_from_output_contracts(
                 producer_manifest,
                 classification_context=classification_context,
             )
+            if resolution is None and not decision.is_fit:
+                resolution = _resolve_task_from_upstream_output_with_llm(
+                    task,
+                    producer_task,
+                    producer_manifest,
+                    classification_context,
+                    llm_client,
+                    trace=trace,
+                )
             if resolution is not None:
                 resolutions.append(resolution)
                 break
@@ -909,6 +1137,7 @@ __all__ = [
     "has_hard_object_type_mismatch",
     "infer_task_domain",
     "object_types_compatible",
+    "review_output_overlap_with_llm",
     "resolve_tasks_from_output_contracts",
     "semantic_verbs_compatible",
 ]
