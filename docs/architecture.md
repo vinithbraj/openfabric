@@ -123,3 +123,10 @@ If you are implementing or debugging:
 - Output rendering can use LLM-selected display plans or a deterministic
   fallback.
 - Confirmation is a first-class pause state, not just an execution error.
+- Capability manifests now describe semantic output contracts as well as input
+  contracts.
+- Some downstream tasks can be satisfied from upstream declared outputs instead
+  of becoming extra executable DAG nodes.
+- When deterministic output-overlap matching is not enough, the runtime can ask
+  the LLM for one strict boolean overlap judgment and then validate that answer
+  deterministically before trusting it.

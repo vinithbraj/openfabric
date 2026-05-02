@@ -24,6 +24,9 @@ Each capability has a manifest that describes:
 - operation id
 - semantic verbs
 - object types
+- output object types
+- output fields
+- output affordances
 - required and optional arguments
 - output schema
 - execution backend
@@ -188,9 +191,38 @@ state.
 The runtime uses those manifest fields during:
 
 - capability fit
+- output-overlap resolution
 - DAG review context
 - safety evaluation
 - confirmation handling
+
+
+## Output-Aware Capability Contracts
+
+Capabilities are not only input contracts. They are also output contracts.
+
+That matters because the runtime can sometimes satisfy a later follow-up task
+from an earlier capability's declared outputs instead of planning a brand-new
+execution step.
+
+Example:
+
+- upstream task: save a report with `filesystem.write_file`
+- downstream ask: “give me the full path”
+
+`filesystem.write_file` declares output metadata such as:
+
+- output object types like `filesystem.path`
+- output fields like `absolute_path`
+- output affordances like `returns.absolute_path`
+
+That means the runtime can often answer the follow-up from the write result
+itself.
+
+When deterministic matching is not enough, the runtime can ask the LLM one
+strict boolean question about overlap. Even then, the runtime still requires
+that the capability already declared matching output metadata. The LLM cannot
+invent new outputs.
 
 
 ## Confirmation-Required Actions
@@ -263,6 +295,13 @@ safety, confirmation, and gateway execution all fit together.
 - bytes written
 - created/overwritten flags
 
+### Why this matters for planning
+
+Because `filesystem.write_file` declares a real output contract, the runtime
+can sometimes collapse a follow-up task like “tell me where you saved it” into
+an output-contract resolution instead of adding another executable filesystem
+task.
+
 
 ## Gateway Interaction
 
@@ -293,9 +332,11 @@ If you add a new capability, the shortest correct path is:
 3. if it is environment-facing, add the backend operation in
    `src/gateway_agent/remote_runner.py`
 4. update any needed selection hints or semantic compatibility helpers
-5. ensure argument extraction and result-shape normalization understand it
-6. add safety coverage
-7. add end-to-end tests
+5. declare meaningful output contracts if downstream tasks may need the result
+   semantically, not just structurally
+6. ensure argument extraction and result-shape normalization understand it
+7. add safety coverage
+8. add end-to-end tests
 
 If the capability mutates state, decide early:
 

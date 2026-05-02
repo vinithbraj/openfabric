@@ -51,6 +51,7 @@ structurally, for example:
 | Verb/object assignment | `input_pipeline/verb_classification.py` | assign semantic verb and known object type | constrained object vocabulary |
 | Capability selection | `input_pipeline/domain_selection.py` | judge bounded shortlist candidates | shortlist must come from registry |
 | Capability fit | `input_pipeline/capability_fit.py` | binary semantic fit judgment | canonical compatibility + hard conflicts |
+| Output overlap review | `input_pipeline/capability_fit.py` | boolean review of whether a downstream task is already satisfied by upstream declared outputs | declared output contract must still match deterministically |
 | Dataflow planning | `input_pipeline/dataflow_planning.py` | propose producer-consumer refs | strict dataflow validation |
 | Argument extraction | `input_pipeline/argument_extraction.py` | fill task-specific argument values | schema/path/type validation |
 | DAG review | `input_pipeline/planning_review.py` | advisory review of sanitized DAG metadata | advisory only, references validated |
@@ -189,6 +190,37 @@ The LLM fit signal is **binary and advisory**. Deterministic hard conflicts
 still win.
 
 
+## Output Overlap Review
+
+**Why the LLM is used**
+
+Sometimes the deterministic overlap matcher is too literal. A downstream task
+like “tell me where the saved report lives” may be semantically satisfied by an
+upstream `filesystem.write_file`, even if the task wording does not mention
+`absolute_path` or `full path` directly.
+
+**What the LLM returns**
+
+- `satisfied_from_output: true|false`
+- confidence
+- task ids that must match the reviewed pair
+
+No free-form semantic object is accepted here. The contract is deliberately
+boolean.
+
+**What the runtime checks**
+
+- the downstream task must actually depend on the upstream task
+- the downstream task must be non-mutating
+- the upstream capability must already be fit-approved
+- the upstream capability must already declare relevant output contract
+  metadata such as output object types, output fields, or output affordances
+- the runtime rejects any overlap judgment that depends on undeclared outputs
+
+This is the current sweet spot: the model can help with fuzzy semantics, but it
+cannot invent new producer outputs or bypass safety.
+
+
 ## Dataflow Planning
 
 **Why the LLM is used**
@@ -311,8 +343,10 @@ These are the current design decisions that most directly reduce LLM drift:
 1. **Known object-type vocabulary**
 2. **Runtime-owned capability shortlist**
 3. **Binary capability fit**
-4. **Schema-validated structured calls**
-5. **Deterministic canonical compatibility**
-6. **Deterministic hard safety conflicts**
+4. **Binary output-overlap review**
+5. **Schema-validated structured calls**
+6. **Declared capability output contracts**
+7. **Deterministic canonical compatibility**
+8. **Deterministic hard safety conflicts**
 
 That is the current core contract between the LLM and the runtime.

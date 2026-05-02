@@ -32,8 +32,8 @@ flowchart LR
 | --- | --- | --- | --- |
 | API layer | `src/agent_runtime/api/app.py` | HTTP endpoints, OpenAI-compatible chat, confirmation handshake | semantic planning, capability execution internals |
 | Agent runtime | `src/agent_runtime/core/orchestrator.py` | request pipeline orchestration | raw environment access |
-| Input pipeline | `src/agent_runtime/input_pipeline/` | task understanding and planning artifacts | actual execution |
-| Capability registry | `src/agent_runtime/capabilities/` | trusted capability definitions | user-facing orchestration |
+| Input pipeline | `src/agent_runtime/input_pipeline/` | task understanding, fit, and output-overlap planning artifacts | actual execution |
+| Capability registry | `src/agent_runtime/capabilities/` | trusted capability definitions and output contracts | user-facing orchestration |
 | Execution engine | `src/agent_runtime/execution/` | trusted DAG execution and result storage | high-level semantic interpretation |
 | Output pipeline | `src/agent_runtime/output_pipeline/` | result-shape normalization, display planning, rendering | execution and capability routing |
 | Observability | `src/agent_runtime/observability/` | event emission, safe formatting, Open WebUI trace layout | trusted planning decisions |
@@ -95,6 +95,7 @@ Those rules live in the stage modules, capability manifests, and safety policy.
 - verb/object assignment
 - capability selection
 - capability fit
+- output-contract overlap resolution
 - dataflow planning
 - argument extraction
 - DAG construction
@@ -119,6 +120,7 @@ validated and bounded before it becomes trusted runtime state.
 
 - define capability manifests
 - keep the trusted registry of what can be executed
+- declare what capabilities return, not just what they accept
 - separate internal, local, and gateway-backed capabilities
 
 ### Boundary
@@ -158,6 +160,9 @@ raw user prompts.
 
 The result store is about typed dataflow and retrieval, not user-facing
 rendering.
+
+It is also the place that makes output-contract reasoning practical: upstream
+results can be addressed explicitly instead of being re-invented by prompt text.
 
 
 ## Output Pipeline
@@ -223,6 +228,7 @@ decisions.
 
 - detect when a trusted plan requires approval
 - pause execution without pretending it failed
+- preserve the explicit `confirmation_required` pause state
 - store pending confirmation context
 - resume trusted execution on `approve`
 - cancel pending work on `cancel`

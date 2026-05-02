@@ -208,6 +208,8 @@ candidate set instead of inventing arbitrary capability ids.
 **Purpose**
 
 Check whether the selected capability truly fits the task.
+Also check whether a downstream task is already satisfied by an upstream
+capability's declared outputs.
 
 **Inputs**
 
@@ -221,10 +223,19 @@ Check whether the selected capability truly fits the task.
 - fit decision
 - deterministic rejection reasons when relevant
 - user-facing capability gaps when no safe fit exists
+- optional output-contract resolutions for non-executable follow-up tasks
 
 **LLM step:** Yes
 
 The LLM returns a **binary fit judgment** plus reasons.
+
+There is also an optional second LLM-assisted review for unresolved downstream
+follow-up tasks. That overlap reviewer returns only:
+
+- `satisfied_from_output: true|false`
+- confidence
+
+It is used only after deterministic overlap matching fails.
 
 **Deterministic validation after the LLM**
 
@@ -233,12 +244,17 @@ The LLM returns a **binary fit judgment** plus reasons.
 - semantic verb compatibility
 - hard safety conflicts
 - argument feasibility
+- declared output-contract compatibility for overlap resolution
+- dependency checks between downstream and upstream tasks
+- guardrails that prevent the LLM from inventing undeclared producer outputs
 
 **Failure or fallback**
 
 - malformed structured LLM output is recorded with diagnostics
 - strong deterministic compatibility can still accept a candidate even if the
   LLM response is unavailable or ambiguous
+- overlap review is ignored unless the upstream capability already declares the
+  relevant output metadata
 
 
 ## 6. Dataflow Planning
@@ -435,6 +451,8 @@ Execute trusted DAG nodes.
 
 - `ResultBundle`
 - per-node `ExecutionResult`s
+- bundle status such as `success`, `partial`, `error`, or
+  `confirmation_required`
 
 **LLM step:** No
 
@@ -450,7 +468,7 @@ Execute trusted DAG nodes.
 
 - node failures are stored in the result bundle
 - if the only reason execution cannot continue is confirmation, the bundle is
-  marked as waiting for confirmation rather than as a fake hard failure
+  marked `confirmation_required` rather than as a fake hard failure
 
 
 ## 12. Optional Failure Repair

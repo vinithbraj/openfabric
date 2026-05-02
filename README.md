@@ -30,6 +30,7 @@ The typed agent runtime can:
 - decompose prompts into typed tasks;
 - assign semantic verbs and known object types;
 - shortlist and validate capabilities;
+- reason over declared capability outputs as well as inputs;
 - build and execute a typed action DAG;
 - route environment-facing work through the gateway;
 - pause for confirmation before confirmation-gated actions;
@@ -116,6 +117,11 @@ The main modern runtime path is the OpenAI-compatible chat endpoint:
 
 Confirmation-gated actions, such as `filesystem.write_file`, pause with a
 confirmation message instead of pretending execution failed.
+
+Capabilities can also declare semantic output contracts such as returned object
+types, fields, and affordances. That lets the runtime satisfy some follow-up
+requests, such as “give me the full path,” from upstream outputs instead of
+inventing a fake extra execution step.
 
 
 ## Gateway Agent

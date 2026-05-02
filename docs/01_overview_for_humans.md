@@ -36,8 +36,10 @@ Very roughly, this is what happens:
 3. The runtime turns the request into one or more tasks.
 4. The runtime chooses a capability that can do each task.
 5. Safety rules check whether execution is allowed.
-6. The capability runs.
-7. The result is turned into a clean final answer.
+6. Sometimes the runtime notices that a later question is already answered by
+   an earlier result, so it does not create an extra action just to restate it.
+7. The capability runs.
+8. The result is turned into a clean final answer.
 
 
 ## Who Does What
@@ -66,6 +68,7 @@ It does things like:
 - restrict object types to known vocabulary
 - shortlist real registered capabilities
 - check deterministic compatibility
+- reason about declared capability outputs, not just inputs
 - build a typed action graph
 - enforce safety policy
 - pause for confirmation when required
@@ -151,6 +154,10 @@ Examples:
 - `system.memory_status`
 - `filesystem.read_file`
 - `filesystem.write_file`
+
+Capabilities also say what they return in a structured way. For example,
+`filesystem.write_file` can return the full saved path, which means the runtime
+may not need a second tool call just to answer “where did you save it?”
 
 ### DAG
 

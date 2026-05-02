@@ -5,13 +5,14 @@ This document follows one real prompt through the current runtime.
 We use this prompt:
 
 ```text
-how much free memory do i have on this system? and save the report to file named report.txt
+how much free memory do i have on this system? and save the report to file named report.txt and give me the full path to this file
 ```
 
 This is a good example because it includes:
 
 - a read-only system inspection task
 - a mutating file-write task
+- a follow-up request that may already be satisfied by the write result
 - a confirmation pause
 - gateway-backed execution
 - final rendering
@@ -46,16 +47,18 @@ The runtime validates that classification and keeps going.
 
 ## Step 3: Task Decomposition
 
-The prompt becomes two tasks:
+The prompt may decompose into three tasks:
 
 1. read the system memory report
 2. save that report to `report.txt`
+3. give me the full path to the file
 
 That matters because the runtime can now reason about:
 
 - a read task
 - a write task
-- a dependency from task 2 to task 1
+- a follow-up metadata task
+- dependencies from task 2 to task 1 and from task 3 to task 2
 
 
 ## Step 4: Verb And Object Assignment
@@ -111,6 +114,28 @@ Now each selected capability is checked again with a stronger fit step.
 - manifest supports writing content or `input_ref`
 - mutation is allowed only with confirmation
 
+### How the “full path” follow-up is handled
+
+This is where the newer output-contract logic matters.
+
+`filesystem.write_file` declares that it returns:
+
+- output object types such as `filesystem.path`
+- output fields such as `absolute_path`
+- output affordances such as `returns.absolute_path`
+
+So the runtime checks whether the downstream “give me the full path” task is
+already satisfied by task 2's declared outputs.
+
+There are two layers:
+
+1. a deterministic matcher for obvious cases like `full path` and
+   `absolute_path`
+2. an optional strict boolean LLM overlap reviewer for fuzzier phrasing, used
+   only when deterministic matching does not resolve the task
+
+If overlap is accepted, task 3 does not become an executable DAG node.
+
 If one of these had failed, the runtime would surface a capability gap instead
 of pretending the task was supported.
 
@@ -152,12 +177,16 @@ The `format` can also be inferred from the filename extension when appropriate.
 
 ## Step 9: DAG Construction
 
-The trusted DAG now contains two nodes:
+The trusted DAG contains only two executable nodes:
 
 1. node for `system.memory_status`
 2. node for `filesystem.write_file`
 
-And it contains a dependency edge from the write node back to the memory node.
+The “full path” follow-up is resolved from task 2 output metadata rather than
+becoming a third executable node.
+
+The DAG still contains the dependency edge from the write node back to the
+memory node.
 
 ```mermaid
 flowchart LR
@@ -243,6 +272,7 @@ For this flow, the user-facing answer typically includes:
 
 - the memory report table
 - a saved-file confirmation message
+- the full saved path, surfaced from the write result contract
 
 The saved-file renderer prefers the full `absolute_path` when available, so the
 assistant can show the exact file location rather than only `report.txt`.
@@ -257,6 +287,8 @@ This one prompt shows the whole design in miniature:
 
 - the LLM helps understand the request
 - the runtime constrains and validates that understanding
+- capabilities describe both inputs and outputs
+- some follow-up asks can be satisfied from declared upstream outputs
 - safety gates mutating actions behind confirmation
 - the gateway performs the real environment work
 - the output pipeline renders a clean final answer
