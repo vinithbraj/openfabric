@@ -221,6 +221,7 @@ def test_fit_prompt_is_deduped_and_json_serialized() -> None:
     assert "JSON schema:" not in prompt
     assert '"task_id": "task_1"' in prompt
     assert "'task_id': 'task_1'" not in prompt
+    assert '"output_affordances": [' in prompt
 
 
 def test_shortlist_prompt_is_deduped_and_json_serialized() -> None:
@@ -234,6 +235,9 @@ def test_shortlist_prompt_is_deduped_and_json_serialized() -> None:
                 "description": "List files.",
                 "semantic_verbs": ["read"],
                 "object_types": ["filesystem.directory"],
+                "output_object_types": ["filesystem.directory"],
+                "output_fields": ["entries"],
+                "output_affordances": ["returns.directory_listing"],
                 "required_arguments": ["path"],
                 "optional_arguments": [],
                 "risk_level": "low",
@@ -246,6 +250,7 @@ def test_shortlist_prompt_is_deduped_and_json_serialized() -> None:
     assert "JSON schema:" not in prompt
     assert '"capability_id": "filesystem.list_directory"' in prompt
     assert "'capability_id': 'filesystem.list_directory'" not in prompt
+    assert '"output_affordances": [' in prompt
 
 
 def test_structured_call_wraps_schema_validation_failure() -> None:

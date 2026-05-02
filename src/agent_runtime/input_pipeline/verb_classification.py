@@ -100,7 +100,7 @@ def _known_object_type_vocabulary(
 
     known_types = {"unknown"}
     for manifest in registry.list_manifests():
-        for object_type in manifest.object_types:
+        for object_type in [*manifest.object_types, *manifest.output_object_types]:
             canonical = canonical_object_family(object_type)
             if canonical is not None:
                 known_types.add(canonical)
@@ -141,6 +141,14 @@ def _normalize_assigned_object_type(
         if str(part).strip()
     )
     lowered_combined = combined_text.lower()
+    if "filesystem.path" in allowed and (
+        "full path" in lowered_combined
+        or "absolute path" in lowered_combined
+        or "file path" in lowered_combined
+        or "saved path" in lowered_combined
+        or "where it was saved" in lowered_combined
+    ):
+        return "filesystem.path"
     if (
         semantic_verb in {"create", "update"}
         and "filesystem.file" in allowed

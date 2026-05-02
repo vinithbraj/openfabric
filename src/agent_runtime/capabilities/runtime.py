@@ -26,6 +26,9 @@ def _manifest_record(manifest: CapabilityManifest, include_details: bool) -> dic
                 "description": manifest.description,
                 "semantic_verbs": list(manifest.semantic_verbs),
                 "object_types": list(manifest.object_types),
+                "output_object_types": list(manifest.output_object_types),
+                "output_fields": list(manifest.output_fields),
+                "output_affordances": list(manifest.output_affordances),
             }
         )
     return record

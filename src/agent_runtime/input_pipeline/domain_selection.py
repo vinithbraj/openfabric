@@ -216,6 +216,7 @@ def _build_selection_prompt(task: TaskFrame, shortlist_manifest: list[dict[str, 
             "Do not invent new capability ids or operation ids.",
             "Use only the provided shortlisted candidates.",
             "Judge semantic fit, domain fit, object-type fit, argument plausibility, and risk.",
+            "Some capabilities also declare semantic output metadata. Use that only when it clearly helps you understand what the capability produces.",
             "Task frame:",
             str(
                 {
@@ -521,6 +522,9 @@ def select_capabilities(
                 "description": manifest.description,
                 "semantic_verbs": list(manifest.semantic_verbs),
                 "object_types": list(manifest.object_types),
+                "output_object_types": list(manifest.output_object_types),
+                "output_fields": list(manifest.output_fields),
+                "output_affordances": list(manifest.output_affordances),
                 "required_arguments": list(manifest.required_arguments),
                 "optional_arguments": list(manifest.optional_arguments),
                 "risk_level": manifest.risk_level,

@@ -49,6 +49,50 @@ class SystemLLMClient:
             }
 
         if "you are decomposing a user prompt" in prompt_l:
+            if "memory_report.txt" in prompt_l and "full path" in prompt_l:
+                return {
+                    "tasks": [
+                        {
+                            "id": "task_1",
+                            "description": "Calculate how much free memory this system has.",
+                            "semantic_verb": "analyze",
+                            "object_type": "memory",
+                            "intent_confidence": 0.98,
+                            "constraints": {"human_readable": True},
+                            "dependencies": [],
+                            "raw_evidence": "calculate how much free memory this system has",
+                            "requires_confirmation": False,
+                            "risk_level": "low",
+                        },
+                        {
+                            "id": "task_2",
+                            "description": "Save the free memory information to a file named memory_report.txt.",
+                            "semantic_verb": "create",
+                            "object_type": "file",
+                            "intent_confidence": 0.96,
+                            "constraints": {},
+                            "dependencies": ["task_1"],
+                            "raw_evidence": "save it to a file named memory_report.txt",
+                            "requires_confirmation": True,
+                            "risk_level": "low",
+                        },
+                        {
+                            "id": "task_3",
+                            "description": "Give me the full path to the memory_report.txt file.",
+                            "semantic_verb": "read",
+                            "object_type": "path",
+                            "intent_confidence": 0.94,
+                            "constraints": {},
+                            "dependencies": ["task_2"],
+                            "raw_evidence": "give me the full path to this file",
+                            "requires_confirmation": False,
+                            "risk_level": "low",
+                        },
+                    ],
+                    "global_constraints": {"output_file": "memory_report.txt", "output_format": "text"},
+                    "unresolved_references": [],
+                    "assumptions": [],
+                }
             if "save the system memory report to a file named report.txt" in prompt_l or (
                 "save the report to file named report.txt" in prompt_l and "free memory" in prompt_l
             ):
@@ -185,6 +229,35 @@ class SystemLLMClient:
                 }
 
         if "you are assigning semantic verbs" in prompt_l:
+            if "memory_report.txt" in prompt_l and "full path" in prompt_l:
+                return {
+                    "assignments": [
+                        {
+                            "task_id": "task_1",
+                            "semantic_verb": "analyze",
+                            "object_type": "system.memory",
+                            "intent_confidence": 0.97,
+                            "risk_level": "low",
+                            "requires_confirmation": False,
+                        },
+                        {
+                            "task_id": "task_2",
+                            "semantic_verb": "create",
+                            "object_type": "filesystem.file",
+                            "intent_confidence": 0.95,
+                            "risk_level": "low",
+                            "requires_confirmation": True,
+                        },
+                        {
+                            "task_id": "task_3",
+                            "semantic_verb": "read",
+                            "object_type": "filesystem.path",
+                            "intent_confidence": 0.93,
+                            "risk_level": "low",
+                            "requires_confirmation": False,
+                        },
+                    ]
+                }
             if "save the system memory report to a file named report.txt" in prompt_l:
                 return {
                     "assignments": [
@@ -240,6 +313,44 @@ class SystemLLMClient:
             }
 
         if "you are selecting capability candidates" in prompt_l:
+            if "give me the full path to the memory_report.txt file" in prompt_l:
+                return {
+                    "task_id": "task_3",
+                    "evaluations": [
+                        {
+                            "capability_id": "filesystem.read_file",
+                            "operation_id": "read_file",
+                            "fits": False,
+                            "confidence": 0.95,
+                            "reason": "Reading a file is not the same as reporting the saved absolute path.",
+                            "domain_reason": "Filesystem is related, but the action is wrong.",
+                            "object_type_reason": "The task asks for path metadata, not file contents.",
+                            "argument_reason": "A path would only let the runtime open the file.",
+                            "risk_reason": "Low risk but not the right tool.",
+                            "missing_arguments_likely": [],
+                        }
+                    ],
+                    "unresolved_reason": "No shortlisted capability directly returns the saved-file path as its primary action.",
+                }
+            if "save the free memory information to a file named memory_report.txt" in prompt_l:
+                return {
+                    "task_id": "task_2",
+                    "evaluations": [
+                        {
+                            "capability_id": "filesystem.write_file",
+                            "operation_id": "write_file",
+                            "fits": True,
+                            "confidence": 0.97,
+                            "reason": "Saving a report to disk requires a workspace-bounded file write capability.",
+                            "domain_reason": "The task is about writing a file to the filesystem.",
+                            "object_type_reason": "filesystem.file matches the task object exactly.",
+                            "argument_reason": "The path can be extracted and input_ref can be wired from the upstream task.",
+                            "risk_reason": "The capability is low risk but confirmation-gated.",
+                            "missing_arguments_likely": ["path", "format"],
+                        }
+                    ],
+                    "unresolved_reason": None,
+                }
             if "save the system memory report to a file named report.txt" in prompt_l:
                 return {
                     "task_id": "task_2",
@@ -263,6 +374,10 @@ class SystemLLMClient:
                 capability_id = "runtime.describe_capabilities"
                 operation_id = "describe_capabilities"
                 reason = "The task asks for runtime capability introspection."
+            elif "calculate how much free memory this system has" in prompt_l:
+                capability_id = "system.memory_status"
+                operation_id = "memory_status"
+                reason = "The task is about memory availability."
             elif "free memory available" in prompt_l or "how much free memory do i have on this system?" in prompt_l:
                 capability_id = "system.memory_status"
                 operation_id = "memory_status"
@@ -303,6 +418,41 @@ class SystemLLMClient:
             }
 
         if "you are assessing whether a selected capability truly fits a task" in prompt_l:
+            if "task_3" in prompt:
+                candidate_id = "filesystem.read_file"
+                operation_id = "read_file"
+                if "filesystem.write_file" in prompt:
+                    candidate_id = "filesystem.write_file"
+                    operation_id = "write_file"
+                elif "filesystem.search_files" in prompt:
+                    candidate_id = "filesystem.search_files"
+                    operation_id = "search_files"
+                elif "shell.pwd" in prompt:
+                    candidate_id = "shell.pwd"
+                    operation_id = "pwd"
+                elif "filesystem.list_directory" in prompt:
+                    candidate_id = "filesystem.list_directory"
+                    operation_id = "list_directory"
+                return {
+                    "task_id": "task_3",
+                    "candidate_capability_id": candidate_id,
+                    "candidate_operation_id": operation_id,
+                    "fits": False,
+                    "confidence": 0.95,
+                    "primary_failure_mode": "semantic_mismatch",
+                    "semantic_reason": "The task asks for the saved file path, not the file contents.",
+                    "domain_reason": "Filesystem is related, but reading the file is not the same as reporting its path.",
+                    "object_type_reason": "The task object is filesystem.path, while the candidate returns file content.",
+                    "argument_reason": "A path argument alone would only enable reading the file.",
+                    "risk_reason": "Low risk but semantically wrong.",
+                    "better_capability_id": None,
+                    "missing_capability_description": "A direct path-reporting capability is not necessary when the upstream write result already exposes the absolute path.",
+                    "suggested_domain": "filesystem",
+                    "suggested_object_type": "filesystem.path",
+                    "requires_clarification": False,
+                    "clarification_question": None,
+                    "missing_arguments_likely": [],
+                }
             if "filesystem.write_file" in prompt:
                 return {
                     "task_id": "task_2",
@@ -421,11 +571,12 @@ class SystemLLMClient:
 
         if "you are extracting typed arguments" in prompt_l:
             if "filesystem.write_file" in prompt:
+                path = "memory_report.txt" if "memory_report.txt" in prompt_l else "report.txt"
                 return {
                     "task_id": "task_2",
                     "capability_id": "filesystem.write_file",
                     "operation_id": "write_file",
-                    "arguments": {"path": "report.txt", "format": "text"},
+                    "arguments": {"path": path, "format": "text"},
                     "missing_required_arguments": [],
                     "assumptions": [],
                     "confidence": 0.95,
@@ -493,6 +644,25 @@ class SystemLLMClient:
             }
 
         if "you are selecting a safe display plan" in prompt_l:
+            if "memory_report.txt" in prompt_l and "full path" in prompt_l:
+                return {
+                    "display_type": "multi_section",
+                    "title": "System Memory Report",
+                    "sections": [
+                        {
+                            "title": "System Memory Report",
+                            "display_type": "table",
+                            "source_node_id": "node::task_1",
+                        },
+                        {
+                            "title": "Saved File",
+                            "display_type": "plain_text",
+                            "source_node_id": "node::task_2",
+                        },
+                    ],
+                    "constraints": {},
+                    "redaction_policy": "standard",
+                }
             if "save the system memory report to a file named report.txt" in prompt_l:
                 return {
                     "display_type": "multi_section",
@@ -654,3 +824,26 @@ def test_memory_prompt_and_save_report_writes_file_after_confirmation(tmp_path: 
     selected = {item["task_id"]: item["capability_id"] for item in runtime.last_plan_summary["selected_capabilities"]}
     assert selected["task_1"] == "system.memory_status"
     assert selected["task_2"] == "filesystem.write_file"
+
+
+def test_memory_prompt_save_and_return_full_path_uses_write_output_contract(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+
+    response = runtime.handle_request(
+        "calculate how much free memory this system has and then save it to a file named memory_report.txt and give me the full path to this file.",
+        {"workspace_root": str(tmp_path), "confirmation": True},
+    )
+
+    report_path = tmp_path / "memory_report.txt"
+    assert report_path.exists()
+    assert str(report_path.resolve()) in response
+    assert runtime.last_plan_summary is not None
+    selected = {item["task_id"]: item["capability_id"] for item in runtime.last_plan_summary["selected_capabilities"]}
+    assert selected["task_1"] == "system.memory_status"
+    assert selected["task_2"] == "filesystem.write_file"
+    assert "task_3" not in selected
+    assert runtime.last_planning_trace is not None
+    resolutions = runtime.last_planning_trace.metadata.get("output_contract_resolutions", [])
+    assert resolutions
+    assert resolutions[0]["task_id"] == "task_3"
+    assert any("returns.absolute_path" in prompt for prompt in runtime.llm_client.prompts)

@@ -12,7 +12,10 @@ from agent_runtime.execution.engine import ExecutionEngine
 from agent_runtime.execution.failure_repair import attempt_failure_repair
 from agent_runtime.execution.safety import evaluate_dag_safety
 from agent_runtime.input_pipeline.argument_extraction import extract_arguments
-from agent_runtime.input_pipeline.capability_fit import assess_capability_fit
+from agent_runtime.input_pipeline.capability_fit import (
+    assess_capability_fit,
+    resolve_tasks_from_output_contracts,
+)
 from agent_runtime.input_pipeline.dataflow_planning import plan_dataflow
 from agent_runtime.input_pipeline.dag_builder import build_action_dag
 from agent_runtime.input_pipeline.decomposition import classify_prompt, decompose_prompt
@@ -714,8 +717,27 @@ class AgentRuntime:
                 self.llm_client,
                 trace=trace,
             )
+            output_contract_resolutions = resolve_tasks_from_output_contracts(
+                typed_tasks,
+                fit_decisions,
+                selections,
+                self.registry,
+                classification_context,
+            )
+            resolved_output_task_ids = {item.task_id for item in output_contract_resolutions}
+            if output_contract_resolutions:
+                trace.metadata["output_contract_resolutions"] = [
+                    item.model_dump(mode="json") for item in output_contract_resolutions
+                ]
+                decomposition.global_constraints["resolved_output_contracts"] = [
+                    item.model_dump(mode="json") for item in output_contract_resolutions
+                ]
+                for task_id in resolved_output_task_ids:
+                    trace.capability_gaps_by_task.pop(task_id, None)
             fit_by_task = {decision.task_id: decision for decision in fit_decisions}
             for decision in fit_decisions:
+                if decision.task_id in resolved_output_task_ids:
+                    continue
                 if decision.is_fit:
                     llm_raw_preview = (
                         decision.llm_diagnostics.raw_response_preview
@@ -815,6 +837,26 @@ class AgentRuntime:
                             "normalized_manifest_object_types": decision.normalized_manifest_object_types,
                         },
                     )
+            for resolution in output_contract_resolutions:
+                observability.info(
+                    STAGE_CAPABILITY_FIT,
+                    EVENT_VALIDATION_ACCEPTED,
+                    "Task satisfied from upstream output",
+                    "A downstream task was satisfied by metadata already returned from an upstream capability.",
+                    details={
+                        "task_id": resolution.task_id,
+                        "producer_task_id": resolution.producer_task_id,
+                        "producer_capability_id": resolution.producer_capability_id,
+                        "producer_operation_id": resolution.producer_operation_id,
+                        "matched_output_object_types": resolution.matched_output_object_types,
+                        "matched_output_fields": resolution.matched_output_fields,
+                        "matched_output_affordances": resolution.matched_output_affordances,
+                        "reason": resolution.reason,
+                    },
+                )
+            capability_gaps = [
+                gap for gap in capability_gaps if gap.task_id not in resolved_output_task_ids
+            ]
             for gap in capability_gaps:
                 observability.warning(
                     STAGE_CAPABILITY_FIT,
@@ -851,11 +893,17 @@ class AgentRuntime:
                 },
             )
 
-            fit_tasks = [task for task in typed_tasks if fit_by_task.get(task.id, None) is None or fit_by_task[task.id].is_fit]
+            fit_tasks = [
+                task
+                for task in typed_tasks
+                if task.id not in resolved_output_task_ids
+                and (fit_by_task.get(task.id, None) is None or fit_by_task[task.id].is_fit)
+            ]
             fit_selections = [
                 selection
                 for selection in selections
-                if fit_by_task.get(selection.task_id, None) is None or fit_by_task[selection.task_id].is_fit
+                if selection.task_id not in resolved_output_task_ids
+                and (fit_by_task.get(selection.task_id, None) is None or fit_by_task[selection.task_id].is_fit)
             ]
             if not fit_tasks:
                 message = self._render_capability_gaps(capability_gaps)

@@ -212,12 +212,15 @@ def test_select_markdown_render_capability() -> None:
 
 
 def test_select_write_file_capability() -> None:
+    client = _client()
     task = _task("task-write-report", "save the report to report.txt", "create", "filesystem.file")
 
-    results = select_capabilities([task], _registry(), _client())
+    results = select_capabilities([task], _registry(), client)
 
     assert results[0].selected is not None
     assert results[0].selected.capability_id == "filesystem.write_file"
+    assert "output_affordances" in client.last_prompt
+    assert "returns.absolute_path" in client.last_prompt
 
 
 def test_unknown_task_becomes_unresolved() -> None:

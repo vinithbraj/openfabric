@@ -16,6 +16,7 @@ from agent_runtime.core.semantic_compatibility import (
     canonical_semantic_verb,
     domains_compatible as canonical_domains_compatible,
     has_hard_cross_domain_conflict,
+    normalize_token,
     object_types_compatible as canonical_object_types_compatible,
     semantic_verbs_compatible as canonical_semantic_verbs_compatible,
 )
@@ -92,6 +93,21 @@ class CapabilityGapDescription(BaseModel):
     suggested_capability_id: str | None = None
     user_facing_message: str
     confidence: float = Field(ge=0.0, le=1.0)
+
+
+class OutputContractResolution(BaseModel):
+    """Trusted resolution showing a task is already satisfied by upstream output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    producer_task_id: str
+    producer_capability_id: str
+    producer_operation_id: str
+    matched_output_object_types: list[str] = Field(default_factory=list)
+    matched_output_fields: list[str] = Field(default_factory=list)
+    matched_output_affordances: list[str] = Field(default_factory=list)
+    reason: str
 
 def infer_task_domain(task: TaskFrame, classification_context: dict[str, Any] | None = None) -> str | None:
     """Infer the canonical task domain from constraints, object type, and likely domains."""
@@ -226,6 +242,9 @@ def _fit_prompt(
             "description": manifest.description,
             "semantic_verbs": manifest.semantic_verbs,
             "object_types": manifest.object_types,
+            "output_object_types": manifest.output_object_types,
+            "output_fields": manifest.output_fields,
+            "output_affordances": manifest.output_affordances,
             "required_arguments": manifest.required_arguments,
             "optional_arguments": manifest.optional_arguments,
             "risk_level": manifest.risk_level,
@@ -248,6 +267,7 @@ def _fit_prompt(
             "Do not invent status labels outside the schema.",
             "Do not accept a candidate merely because it shares a generic verb like read, search, or show.",
             "Consider semantic meaning, domain, object type, required arguments, and risk.",
+            "Declared output metadata may help explain what a capability produces, but do not treat output fields as a license to ignore core semantic mismatches.",
             "If a domain label appears to be a synonym, explain that.",
             "If a different capability would fit better, name it if present.",
             "Payload:",
@@ -509,6 +529,189 @@ def _gap_from_task(
     )
 
 
+def _normalized_output_object_types(manifest: CapabilityManifest) -> list[str]:
+    """Return canonical output object families for one manifest."""
+
+    return [
+        family
+        for family in (canonical_object_family(value) for value in manifest.output_object_types)
+        if family is not None
+    ]
+
+
+def _normalized_output_fields(manifest: CapabilityManifest) -> list[str]:
+    """Return normalized output field names for one manifest."""
+
+    fields: list[str] = []
+    for value in manifest.output_fields:
+        normalized = normalize_token(value)
+        if normalized is not None and normalized not in fields:
+            fields.append(normalized)
+    return fields
+
+
+def _normalized_output_affordances(manifest: CapabilityManifest) -> list[str]:
+    """Return normalized output affordance names for one manifest."""
+
+    affordances: list[str] = []
+    for value in manifest.output_affordances:
+        normalized = normalize_token(value)
+        if normalized is not None and normalized not in affordances:
+            affordances.append(normalized)
+    return affordances
+
+
+def _task_requests_absolute_path(task: TaskFrame) -> bool:
+    """Return whether a task explicitly asks for an absolute/full path."""
+
+    description = normalize_token(task.description)
+    if description is None:
+        return False
+    return "full_path" in description or "absolute_path" in description
+
+
+def _task_requests_path(task: TaskFrame) -> bool:
+    """Return whether a task asks for path-like metadata."""
+
+    description = normalize_token(task.description)
+    if description is None:
+        return False
+    return (
+        "path" in description
+        or "where_it_was_saved" in description
+        or "saved_location" in description
+        or "saved_to" in description
+    )
+
+
+def _resolve_task_from_upstream_output(
+    task: TaskFrame,
+    producer_task: TaskFrame,
+    manifest: CapabilityManifest,
+    classification_context: dict[str, Any] | None = None,
+) -> OutputContractResolution | None:
+    """Return a resolution when one upstream capability output already satisfies a task."""
+
+    if canonical_semantic_verb(task.semantic_verb) in _MUTATING_VERBS | {"execute"}:
+        return None
+
+    likely_domains = normalized_likely_domains(classification_context)
+    output_object_types = _normalized_output_object_types(manifest)
+    output_fields = _normalized_output_fields(manifest)
+    output_affordances = _normalized_output_affordances(manifest)
+
+    matched_output_object_types: list[str] = []
+    matched_output_fields: list[str] = []
+    matched_output_affordances: list[str] = []
+
+    if output_object_types and object_types_compatible(task.object_type, output_object_types, likely_domains):
+        matched_output_object_types = output_object_types
+
+    wants_absolute_path = _task_requests_absolute_path(task)
+    wants_any_path = wants_absolute_path or _task_requests_path(task)
+    if wants_absolute_path and (
+        "absolute_path" in output_fields or "returns_absolute_path" in output_affordances
+    ):
+        if "absolute_path" in output_fields:
+            matched_output_fields.append("absolute_path")
+        if "returns_absolute_path" in output_affordances:
+            matched_output_affordances.append("returns.absolute_path")
+    elif wants_any_path and (
+        "path" in output_fields
+        or "absolute_path" in output_fields
+        or "returns_relative_path" in output_affordances
+        or "returns_absolute_path" in output_affordances
+    ):
+        if "path" in output_fields:
+            matched_output_fields.append("path")
+        if "absolute_path" in output_fields:
+            matched_output_fields.append("absolute_path")
+        if "returns_relative_path" in output_affordances:
+            matched_output_affordances.append("returns.relative_path")
+        if "returns_absolute_path" in output_affordances:
+            matched_output_affordances.append("returns.absolute_path")
+
+    if not matched_output_object_types and not matched_output_fields and not matched_output_affordances:
+        return None
+
+    producer_label = f"{manifest.capability_id} via {manifest.operation_id}"
+    reason_bits: list[str] = []
+    if matched_output_object_types:
+        reason_bits.append(
+            "its declared output object types include "
+            + ", ".join(f"`{item}`" for item in matched_output_object_types)
+        )
+    if matched_output_fields:
+        reason_bits.append(
+            "it returns output fields "
+            + ", ".join(f"`{item}`" for item in matched_output_fields)
+        )
+    if matched_output_affordances:
+        reason_bits.append(
+            "it advertises output affordances "
+            + ", ".join(f"`{item}`" for item in matched_output_affordances)
+        )
+    reason = (
+        f"Task `{task.id}` can be satisfied from upstream task `{producer_task.id}` because `{producer_label}` already returns the requested metadata; "
+        + "; ".join(reason_bits)
+        + "."
+    )
+    return OutputContractResolution(
+        task_id=task.id,
+        producer_task_id=producer_task.id,
+        producer_capability_id=manifest.capability_id,
+        producer_operation_id=manifest.operation_id,
+        matched_output_object_types=matched_output_object_types,
+        matched_output_fields=matched_output_fields,
+        matched_output_affordances=matched_output_affordances,
+        reason=reason,
+    )
+
+
+def resolve_tasks_from_output_contracts(
+    tasks: list[TaskFrame],
+    fit_decisions: list[CapabilityFitDecision],
+    selections: list[CapabilitySelectionResult],
+    registry: CapabilityRegistry,
+    classification_context: dict[str, Any] | None = None,
+) -> list[OutputContractResolution]:
+    """Resolve non-executable tasks that are already satisfied by upstream outputs."""
+
+    task_by_id = {task.id: task for task in tasks}
+    decision_by_task = {decision.task_id: decision for decision in fit_decisions}
+    selection_by_task = {selection.task_id: selection for selection in selections}
+    resolutions: list[OutputContractResolution] = []
+
+    for task in tasks:
+        decision = decision_by_task.get(task.id)
+        if decision is None:
+            continue
+        if not task.dependencies:
+            continue
+        for dependency_id in task.dependencies:
+            producer_task = task_by_id.get(dependency_id)
+            producer_decision = decision_by_task.get(dependency_id)
+            producer_selection = selection_by_task.get(dependency_id)
+            if producer_task is None or producer_decision is None or not producer_decision.is_fit:
+                continue
+            if producer_selection is None or producer_selection.selected is None:
+                continue
+            try:
+                producer_manifest = registry.get(producer_selection.selected.capability_id).manifest
+            except CapabilityNotFoundError:
+                continue
+            resolution = _resolve_task_from_upstream_output(
+                task,
+                producer_task,
+                producer_manifest,
+                classification_context=classification_context,
+            )
+            if resolution is not None:
+                resolutions.append(resolution)
+                break
+    return resolutions
+
+
 def assess_capability_fit(
     tasks: list[TaskFrame],
     selections: list[CapabilitySelectionResult],
@@ -697,6 +900,7 @@ __all__ = [
     "CapabilityFitProposal",
     "CapabilityFitStatus",
     "CapabilityGapDescription",
+    "OutputContractResolution",
     "assess_capability_fit",
     "assess_capability_fit_with_llm",
     "domains_compatible",
@@ -705,5 +909,6 @@ __all__ = [
     "has_hard_object_type_mismatch",
     "infer_task_domain",
     "object_types_compatible",
+    "resolve_tasks_from_output_contracts",
     "semantic_verbs_compatible",
 ]

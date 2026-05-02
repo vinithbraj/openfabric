@@ -33,6 +33,8 @@ def test_canonical_object_family_aliases() -> None:
     assert canonical_object_family("uptime") == "system.uptime"
     assert canonical_object_family("folder") == "filesystem.directory"
     assert canonical_object_family("file") == "filesystem.file"
+    assert canonical_object_family("full_path") == "filesystem.path"
+    assert canonical_object_family("absolute_path") == "filesystem.path"
     assert canonical_object_family("repo") == "git.repository"
     assert canonical_object_family("csv") == "table.csv"
 
@@ -59,6 +61,7 @@ def test_object_types_compatible_aliases() -> None:
     assert object_types_compatible("memory", ["memory", "ram", "swap"])
     assert object_types_compatible("system.memory", ["system.resources"])
     assert object_types_compatible("folder", ["filesystem.directory"])
+    assert object_types_compatible("full_path", ["filesystem.path"])
     assert object_types_compatible("repo", ["git.repository"])
     assert object_types_compatible("csv", ["table.csv", "table"])
     assert object_types_compatible("database", ["sql.database"])

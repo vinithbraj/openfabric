@@ -7,6 +7,7 @@ from agent_runtime.core.types import CapabilityRef, TaskFrame, UserRequest
 from agent_runtime.input_pipeline.argument_extraction import extract_arguments
 from agent_runtime.input_pipeline.capability_fit import (
     assess_capability_fit,
+    resolve_tasks_from_output_contracts,
 )
 from agent_runtime.input_pipeline.dag_builder import build_action_dag
 from agent_runtime.input_pipeline.decomposition import DecompositionResult
@@ -479,3 +480,117 @@ def test_trace_records_rejected_candidates_if_trace_exists() -> None:
     fit_entries = [entry for entry in trace.entries if entry.stage == "capability_fit"]
     assert fit_entries
     assert fit_entries[0].rejection_reasons
+
+
+def test_output_contract_resolution_satisfies_full_path_follow_up() -> None:
+    registry = build_default_registry()
+    task_memory = _task(
+        "task_1",
+        "Calculate how much free memory this system has.",
+        "analyze",
+        "system.memory",
+    )
+    task_write = _task(
+        "task_2",
+        "Save the free memory information to a file named memory_report.txt.",
+        "create",
+        "filesystem.file",
+    )
+    task_write.dependencies = ["task_1"]
+    task_path = _task(
+        "task_3",
+        "Give me the full path to the memory_report.txt file.",
+        "read",
+        "filesystem.path",
+    )
+    task_path.dependencies = ["task_2"]
+
+    selection_memory = _selection("task_1", "system.memory_status", "memory_status")
+    selection_write = _selection("task_2", "filesystem.write_file", "write_file")
+    selection_path = _selection("task_3", "filesystem.read_file", "read_file")
+
+    client = FitLLMClient(
+        {
+            "Calculate how much free memory this system has.": {
+                "task_id": "task_1",
+                "candidate_capability_id": "system.memory_status",
+                "candidate_operation_id": "memory_status",
+                "fits": True,
+                "confidence": 0.97,
+                "primary_failure_mode": None,
+                "semantic_reason": "The task asks for free memory.",
+                "domain_reason": "System metrics belong to the system domain.",
+                "object_type_reason": "system.memory matches directly.",
+                "argument_reason": "No required arguments are missing.",
+                "risk_reason": "Read-only and low risk.",
+                "suggested_domain": "system",
+                "suggested_object_type": "system.memory",
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            "Save the free memory information to a file named memory_report.txt.": {
+                "task_id": "task_2",
+                "candidate_capability_id": "filesystem.write_file",
+                "candidate_operation_id": "write_file",
+                "fits": True,
+                "confidence": 0.97,
+                "primary_failure_mode": None,
+                "semantic_reason": "The task asks to save a report to disk.",
+                "domain_reason": "Writing to a file belongs to the filesystem domain.",
+                "object_type_reason": "filesystem.file matches directly.",
+                "argument_reason": "The path and format can be extracted.",
+                "risk_reason": "Confirmation-gated but otherwise safe.",
+                "suggested_domain": "filesystem",
+                "suggested_object_type": "filesystem.file",
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            "Give me the full path to the memory_report.txt file.": {
+                "task_id": "task_3",
+                "candidate_capability_id": "filesystem.read_file",
+                "candidate_operation_id": "read_file",
+                "fits": False,
+                "confidence": 0.95,
+                "primary_failure_mode": "semantic_mismatch",
+                "semantic_reason": "Reading a file is not the same as reporting where it was saved.",
+                "domain_reason": "Filesystem is related, but the action is different.",
+                "object_type_reason": "The task asks for path metadata, not file content.",
+                "argument_reason": "A path alone would only read the file if it already existed.",
+                "risk_reason": "Low risk but not the right capability.",
+                "suggested_domain": "filesystem",
+                "suggested_object_type": "filesystem.path",
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+        }
+    )
+
+    decisions, gaps = assess_capability_fit(
+        [task_memory, task_write, task_path],
+        [selection_memory, selection_write, selection_path],
+        registry,
+        _classification_context(
+            "calculate free memory, save it, and give me the full path",
+            ["system", "filesystem"],
+        ),
+        client,
+    )
+
+    resolutions = resolve_tasks_from_output_contracts(
+        [task_memory, task_write, task_path],
+        decisions,
+        [selection_memory, selection_write, selection_path],
+        registry,
+        _classification_context(
+            "calculate free memory, save it, and give me the full path",
+            ["system", "filesystem"],
+        ),
+    )
+
+    assert any(gap.task_id == "task_3" for gap in gaps)
+    assert len(resolutions) == 1
+    resolution = resolutions[0]
+    assert resolution.task_id == "task_3"
+    assert resolution.producer_task_id == "task_2"
+    assert "absolute_path" in resolution.matched_output_fields
+    assert "returns.absolute_path" in resolution.matched_output_affordances

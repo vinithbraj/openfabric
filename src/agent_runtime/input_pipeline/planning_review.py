@@ -32,6 +32,7 @@ def _sanitized_dag_metadata(dag: ActionDAG) -> dict[str, Any]:
         "dag_id": dag.dag_id,
         "node_count": len(dag.nodes),
         "requires_confirmation": dag.requires_confirmation,
+        "global_constraints": dict(dag.global_constraints),
         "edges": list(dag.edges),
         "nodes": [
             {
@@ -78,6 +79,9 @@ def _build_capability_summaries(
                         "description": capability.manifest.description,
                         "semantic_verbs": list(capability.manifest.semantic_verbs),
                         "object_types": list(capability.manifest.object_types),
+                        "output_object_types": list(capability.manifest.output_object_types),
+                        "output_fields": list(capability.manifest.output_fields),
+                        "output_affordances": list(capability.manifest.output_affordances),
                         "required_arguments": list(capability.manifest.required_arguments),
                         "optional_arguments": list(capability.manifest.optional_arguments),
                     }
